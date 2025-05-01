@@ -12,6 +12,7 @@ import numpy as np
 from collections import namedtuple
 from model import run_circuit
 import optax
+import matplotlib.pyplot as plt
 
 
 def unpack(x, bit_n=8):
@@ -72,28 +73,27 @@ def binary_cross_entropy(y_pred, y_true):
 
 
 @jax.jit
-def bit_accuracy(y_pred, y_true):
+def compute_accuracy(y_pred, y_true):
     """
-    Calculate the accuracy of bit predictions.
+    Compute the accuracy of predicted bits compared to true bits.
 
-    This measures the fraction of bits that match exactly between
-    predictions and targets after rounding predictions to 0 or 1.
+    Accuracy is defined as the proportion of bits that are correctly predicted.
+    Predictions are rounded to the nearest integer (0 or 1).
 
     Args:
         y_pred: Predicted outputs (probabilities in [0,1])
         y_true: Target outputs (typically 0 or 1)
 
     Returns:
-        Accuracy as a value between 0.0 and 1.0
+        Accuracy value (scalar, between 0 and 1)
     """
-    # Round predictions to binary values
-    y_pred_binary = jp.round(y_pred)
-
-    # Count matches
-    matches = jp.equal(y_pred_binary, y_true)
-
-    # Calculate accuracy (average number of correct bits)
-    return jp.mean(matches)
+    # Round predictions to nearest binary value
+    y_pred_rounded = jp.round(y_pred)
+    # Check element-wise equality
+    correct_predictions = jp.equal(y_pred_rounded, y_true)
+    # Compute mean accuracy
+    accuracy = jp.mean(correct_predictions)
+    return accuracy
 
 
 # Define loss functions for both types (L4 and BCE)
@@ -102,21 +102,23 @@ def loss_f_l4(logits, wires, x, y0):
     act = run_circuit(logits, wires, x)
     y = act[-1]
     res = y - y0
-    accuracy = bit_accuracy(y, y0)
-    return res2loss(res), dict(act=act, accuracy=accuracy)
+    loss = res2loss(res)
+    accuracy = compute_accuracy(y, y0)
+    return loss, dict(act=act, accuracy=accuracy)
 
 
 def loss_f_bce(logits, wires, x, y0):
     """BCE loss function variant (for JIT compilation)"""
     act = run_circuit(logits, wires, x)
     y = act[-1]
-    accuracy = bit_accuracy(y, y0)
-    return binary_cross_entropy(y, y0), dict(act=act, accuracy=accuracy)
+    loss = binary_cross_entropy(y, y0)
+    accuracy = compute_accuracy(y, y0)
+    return loss, dict(act=act, accuracy=accuracy)
 
 
 # Pre-compile gradient functions for both loss types
-grad_loss_f_l4 = jax.jit(jax.value_and_grad(loss_f_l4, has_aux=False))
-grad_loss_f_bce = jax.jit(jax.value_and_grad(loss_f_bce, has_aux=False))
+grad_loss_f_l4 = jax.jit(jax.value_and_grad(loss_f_l4, has_aux=True))
+grad_loss_f_bce = jax.jit(jax.value_and_grad(loss_f_bce, has_aux=True))
 
 
 # Function dispatcher for loss computation (not used in training loop)
@@ -172,49 +174,88 @@ def train_step(state, opt, wires, x, y0, loss_type="l4"):
 
     # Use pre-compiled gradient function based on loss type
     if loss_type == "bce":
-        loss, grad = grad_loss_f_bce(logits, wires, x, y0)
+        (loss, aux), grad = grad_loss_f_bce(logits, wires, x, y0)
     else:  # Default to L4 norm
-        loss, grad = grad_loss_f_l4(logits, wires, x, y0)
+        (loss, aux), grad = grad_loss_f_l4(logits, wires, x, y0)
 
     # Update parameters (without JIT since optimizer is a function)
     new_logits, new_opt_state = update_params(grad, opt_state, opt, logits)
 
+    # Extract accuracy from auxiliary data
+    accuracy = aux["accuracy"]
+
     # Return loss, accuracy, and new state
-    return loss, TrainState(new_logits, new_opt_state)
+    return loss, accuracy, TrainState(new_logits, new_opt_state)
 
 
-def evaluate_circuit(logits, wires, x, y0):
+def evaluate_and_visualize(logits, wires, x, y0, title_prefix=""):
     """
-    Evaluate circuit performance without training.
+    Evaluate the circuit, calculate accuracy, and visualize the results.
+
+    Runs the circuit in 'hard' mode, compares outputs to targets,
+    and plots the predicted output, target output, and errors in a vertical layout.
 
     Args:
-        logits: Circuit parameters
-        wires: Wiring configuration
-        x: Input data
-        y0: Target outputs
-
-    Returns:
-        Dictionary containing:
-        - predictions: Raw outputs from the circuit
-        - binary_predictions: Rounded binary outputs
-        - accuracy: Proportion of correctly predicted bits
-        - loss_l4: L4 norm loss
-        - loss_bce: Binary cross-entropy loss
+        logits: List of logits for each layer (trained parameters).
+        wires: List of wire connection patterns for the circuit.
+        x: Input data tensor.
+        y0: Target output data tensor.
+        title_prefix: Optional string to prepend to the plot title.
     """
-    # Run the circuit
-    acts = run_circuit(logits, wires, x)
+    # 1. Run the circuit in hard mode to get binary predictions
+    acts = run_circuit(logits, wires, x, hard=True)
     y_pred = acts[-1]
 
-    # Calculate metrics
-    y_pred_binary = jp.round(y_pred)
-    accuracy = bit_accuracy(y_pred, y0)
-    loss_l4 = res2loss(y_pred - y0)
-    loss_bce = binary_cross_entropy(y_pred, y0)
+    # 2. Calculate accuracy
+    accuracy = compute_accuracy(y_pred, y0)
 
-    return {
-        "predictions": y_pred,
-        "binary_predictions": y_pred_binary,
-        "accuracy": accuracy,
-        "loss_l4": loss_l4,
-        "loss_bce": loss_bce,
-    }
+    # 3. Calculate the difference map (errors)
+    # Errors will be 1 where prediction != target, 0 otherwise
+    errors = jp.not_equal(y_pred, y0).astype(jp.float32)
+
+    # Ensure data is on CPU and converted to NumPy for plotting
+    y_pred_np = np.array(y_pred)
+    y0_np = np.array(y0)
+    errors_np = np.array(errors)
+
+    # 4. Visualization - Vertical Layout
+    fig, axes = plt.subplots(
+        3, 1, figsize=(20, 6), constrained_layout=True
+    )  # 3 rows, 1 column
+    cmap = "viridis"  # Or 'gray' or any other binary cmap
+
+    # Plot Predicted Output
+    axes[0].imshow(
+        y_pred_np.T, cmap=cmap, interpolation="nearest", vmin=0, vmax=1, aspect="auto"
+    )
+    axes[0].set_title("Predicted Output")
+    axes[0].set_xlabel("Batch Index")
+    axes[0].set_ylabel("Output Bit Index")
+
+    # Plot Target Output
+    axes[1].imshow(
+        y0_np.T, cmap=cmap, interpolation="nearest", vmin=0, vmax=1, aspect="auto"
+    )
+    axes[1].set_title("Target Output")
+    axes[1].set_xlabel("Batch Index")
+    axes[1].set_ylabel("Output Bit Index")
+
+    # Plot Errors (highlighting incorrect bits)
+    cmap_errors = plt.cm.colors.ListedColormap(["lightgray", "red"])
+    axes[2].imshow(
+        errors_np.T,
+        cmap=cmap_errors,
+        interpolation="nearest",
+        vmin=0,
+        vmax=1,
+        aspect="auto",
+    )
+    axes[2].set_title("Errors (Incorrect Bits)")
+    axes[2].set_xlabel("Batch Index")
+    axes[2].set_ylabel("Output Bit Index")
+
+    # Add overall title with accuracy
+    fig.suptitle(f"{title_prefix}Evaluation - Accuracy: {accuracy:.4f}", fontsize=16)
+
+    # Adjust layout
+    plt.show()
