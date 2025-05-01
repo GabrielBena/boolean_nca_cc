@@ -188,12 +188,11 @@ def train_step(state, opt, wires, x, y0, loss_type="l4"):
     return loss, accuracy, TrainState(new_logits, new_opt_state)
 
 
-def evaluate_and_visualize(logits, wires, x, y0, title_prefix=""):
+def evaluate_and_visualize(
+    logits, wires, x, y0, title_prefix="", hard=True, visualize=True
+):
     """
     Evaluate the circuit, calculate accuracy, and visualize the results.
-
-    Runs the circuit in 'hard' mode, compares outputs to targets,
-    and plots the predicted output, target output, and errors in a vertical layout.
 
     Args:
         logits: List of logits for each layer (trained parameters).
@@ -201,61 +200,106 @@ def evaluate_and_visualize(logits, wires, x, y0, title_prefix=""):
         x: Input data tensor.
         y0: Target output data tensor.
         title_prefix: Optional string to prepend to the plot title.
+        hard: Whether to run the circuit in hard mode (True) or soft mode (False).
+        visualize: Whether to generate and display visualization plots.
+
+    Returns:
+        Dictionary containing evaluation metrics and error information.
     """
     # 1. Run the circuit in hard mode to get binary predictions
-    acts = run_circuit(logits, wires, x, hard=True)
+    acts = run_circuit(logits, wires, x, hard=hard)
     y_pred = acts[-1]
 
     # 2. Calculate accuracy
-    accuracy = compute_accuracy(y_pred, y0)
+    y_pred_rounded = jp.round(y_pred) if not hard else y_pred
+    correct_predictions = jp.equal(y_pred_rounded, y0)
+    accuracy = jp.mean(correct_predictions)
 
     # 3. Calculate the difference map (errors)
-    # Errors will be 1 where prediction != target, 0 otherwise
-    errors = jp.not_equal(y_pred, y0).astype(jp.float32)
+    errors = jp.not_equal(y_pred_rounded, y0).astype(jp.float32)
 
-    # Ensure data is on CPU and converted to NumPy for plotting
-    y_pred_np = np.array(y_pred)
-    y0_np = np.array(y0)
-    errors_np = np.array(errors)
+    # 4. Find indices of errors
+    error_indices = jp.where(errors)
+    batch_indices = error_indices[0]
+    bit_indices = error_indices[1]
 
-    # 4. Visualization - Vertical Layout
-    fig, axes = plt.subplots(
-        3, 1, figsize=(20, 6), constrained_layout=True
-    )  # 3 rows, 1 column
-    cmap = "viridis"  # Or 'gray' or any other binary cmap
+    # 5. Create metrics dictionary
+    metrics = {
+        "accuracy": float(accuracy),
+        "error_count": int(jp.sum(errors)),
+        "total_bits": int(errors.size),
+        "error_rate": float(jp.sum(errors) / errors.size),
+        "error_locations": {
+            "batch_indices": np.array(batch_indices),
+            "bit_indices": np.array(bit_indices),
+        },
+    }
 
-    # Plot Predicted Output
-    axes[0].imshow(
-        y_pred_np.T, cmap=cmap, interpolation="nearest", vmin=0, vmax=1, aspect="auto"
-    )
-    axes[0].set_title("Predicted Output")
-    axes[0].set_xlabel("Batch Index")
-    axes[0].set_ylabel("Output Bit Index")
+    # 6. For each error, record input and predicted/expected values
+    if len(batch_indices) > 0:
+        input_values = []
+        for idx in np.array(batch_indices):
+            input_values.append(np.array(x[idx]))
 
-    # Plot Target Output
-    axes[1].imshow(
-        y0_np.T, cmap=cmap, interpolation="nearest", vmin=0, vmax=1, aspect="auto"
-    )
-    axes[1].set_title("Target Output")
-    axes[1].set_xlabel("Batch Index")
-    axes[1].set_ylabel("Output Bit Index")
+        metrics["error_details"] = {
+            "input_values": input_values,
+            "predicted_values": np.array(
+                [y_pred_rounded[i, j] for i, j in zip(batch_indices, bit_indices)]
+            ),
+            "expected_values": np.array(
+                [y0[i, j] for i, j in zip(batch_indices, bit_indices)]
+            ),
+        }
 
-    # Plot Errors (highlighting incorrect bits)
-    cmap_errors = plt.cm.colors.ListedColormap(["lightgray", "red"])
-    axes[2].imshow(
-        errors_np.T,
-        cmap=cmap_errors,
-        interpolation="nearest",
-        vmin=0,
-        vmax=1,
-        aspect="auto",
-    )
-    axes[2].set_title("Errors (Incorrect Bits)")
-    axes[2].set_xlabel("Batch Index")
-    axes[2].set_ylabel("Output Bit Index")
+    # 7. Visualization if requested
+    if visualize:
+        # Convert to NumPy for plotting
+        y_pred_np = np.array(y_pred_rounded)
+        y0_np = np.array(y0)
+        errors_np = np.array(errors)
 
-    # Add overall title with accuracy
-    fig.suptitle(f"{title_prefix}Evaluation - Accuracy: {accuracy:.4f}", fontsize=16)
+        fig, axes = plt.subplots(3, 1, figsize=(20, 6), constrained_layout=True)
+        cmap = "viridis"
 
-    # Adjust layout
-    plt.show()
+        # Plot Predicted Output
+        axes[0].imshow(
+            y_pred_np.T,
+            cmap=cmap,
+            interpolation="nearest",
+            vmin=0,
+            vmax=1,
+            aspect="auto",
+        )
+        axes[0].set_title("Predicted Output")
+        axes[0].set_xlabel("Batch Index")
+        axes[0].set_ylabel("Output Bit Index")
+
+        # Plot Target Output
+        axes[1].imshow(
+            y0_np.T, cmap=cmap, interpolation="nearest", vmin=0, vmax=1, aspect="auto"
+        )
+        axes[1].set_title("Target Output")
+        axes[1].set_xlabel("Batch Index")
+        axes[1].set_ylabel("Output Bit Index")
+
+        # Plot Errors (highlighting incorrect bits)
+        cmap_errors = plt.cm.colors.ListedColormap(["lightgray", "red"])
+        axes[2].imshow(
+            errors_np.T,
+            cmap=cmap_errors,
+            interpolation="nearest",
+            vmin=0,
+            vmax=1,
+            aspect="auto",
+        )
+        axes[2].set_title("Errors (Incorrect Bits)")
+        axes[2].set_xlabel("Batch Index")
+        axes[2].set_ylabel("Output Bit Index")
+
+        # Add overall title with accuracy
+        fig.suptitle(
+            f"{title_prefix}Evaluation - Accuracy: {accuracy:.4f}", fontsize=16
+        )
+        plt.show()
+
+    return metrics

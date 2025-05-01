@@ -12,25 +12,6 @@ import jax
 import jax.numpy as jp
 
 
-def gen_wires(key, in_n, out_n, arity, group_size):
-    """
-    Generate random wiring connections between circuit layers.
-
-    Args:
-        key: JAX random key for reproducible randomness
-        in_n: Number of input nodes
-        out_n: Number of output nodes
-        arity: Number of inputs per gate (fan-in)
-        group_size: Number of gates per group
-
-    Returns:
-        Array of shape (arity, out_n//group_size) containing input indices for each gate
-    """
-    edge_n = out_n * arity // group_size
-    n = max(in_n, edge_n)
-    return jax.random.permutation(key, n)[:edge_n].reshape(arity, -1) % in_n
-
-
 def make_nops(gate_n, arity, group_size, nop_scale=3.0):
     """
     Create logits for all possible boolean operations (lookup tables).
@@ -100,28 +81,23 @@ def run_layer(lut, inputs):
     return lut.reshape(*lut.shape[:-3] + (-1,))
 
 
-def run_circuit(logits, wires, x, hard=False):
+def gen_wires(key, in_n, out_n, arity, group_size):
     """
-    Run the entire boolean circuit with multiple layers.
+    Generate random wiring connections between circuit layers.
 
     Args:
-        logits: List of logits for each layer
-        wires: List of wire connection patterns for each layer
-        x: Input tensor
-        hard: If True, round outputs to binary values (0 or 1)
-              If False, use soft (differentiable) outputs
+        key: JAX random key for reproducible randomness
+        in_n: Number of input nodes
+        out_n: Number of output nodes
+        arity: Number of inputs per gate (fan-in)
+        group_size: Number of gates per group
 
     Returns:
-        List of activation tensors for all layers (including input)
+        Array of shape (arity, out_n//group_size) containing input indices for each gate
     """
-    acts = [x]
-    for ws, lgt in zip(wires, logits):
-        luts = jax.nn.sigmoid(lgt)
-        if hard:
-            luts = jp.round(luts)
-        x = run_layer(luts, [x[..., w] for w in ws])
-        acts.append(x)
-    return acts
+    edge_n = out_n * arity // group_size
+    n = max(in_n, edge_n)
+    return jax.random.permutation(key, n)[:edge_n].reshape(arity, -1) % in_n
 
 
 def gen_circuit(key, layer_sizes, arity=4):
@@ -146,3 +122,27 @@ def gen_circuit(key, layer_sizes, arity=4):
         all_wires.append(wires)
         all_logits.append(logits)
     return all_wires, all_logits
+
+
+def run_circuit(logits, wires, x, hard=False):
+    """
+    Run the entire boolean circuit with multiple layers.
+
+    Args:
+        logits: List of logits for each layer
+        wires: List of wire connection patterns for each layer
+        x: Input tensor
+        hard: If True, round outputs to binary values (0 or 1)
+              If False, use soft (differentiable) outputs
+
+    Returns:
+        List of activation tensors for all layers (including input)
+    """
+    acts = [x]
+    for ws, lgt in zip(wires, logits):
+        luts = jax.nn.sigmoid(lgt)
+        if hard:
+            luts = jp.round(luts)
+        x = run_layer(luts, [x[..., w] for w in ws])
+        acts.append(x)
+    return acts
