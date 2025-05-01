@@ -28,6 +28,7 @@ def unpack(x, bit_n=8):
     return jp.float32((x[..., None] >> np.r_[:bit_n]) & 1)
 
 
+@jax.jit
 def res2loss(res):
     """
     Compute loss from residuals using L4 norm.
@@ -43,6 +44,7 @@ def res2loss(res):
     return jp.square(jp.square(res)).sum()
 
 
+@jax.jit
 def binary_cross_entropy(y_pred, y_true):
     """
     Compute binary cross-entropy loss.
@@ -57,16 +59,67 @@ def binary_cross_entropy(y_pred, y_true):
     Returns:
         Loss value (scalar)
     """
-    # Clip values to avoid log(0) issues
-    eps = 1e-7
-    y_pred = jp.clip(y_pred, eps, 1.0 - eps)
+    # Using JAX's built-in logistic loss which is optimized and numerically stable
+    # For binary classification, this is equivalent to binary cross-entropy
+    return jp.sum(
+        optax.sigmoid_binary_cross_entropy(
+            logits=jp.log(
+                jp.clip(y_pred, 1e-7, 1.0) / jp.clip(1.0 - y_pred, 1e-7, 1.0)
+            ),
+            labels=y_true,
+        )
+    )
 
-    # Standard binary cross-entropy formula
-    bce = -(y_true * jp.log(y_pred) + (1.0 - y_true) * jp.log(1.0 - y_pred))
 
-    return bce.sum()
+@jax.jit
+def bit_accuracy(y_pred, y_true):
+    """
+    Calculate the accuracy of bit predictions.
+
+    This measures the fraction of bits that match exactly between
+    predictions and targets after rounding predictions to 0 or 1.
+
+    Args:
+        y_pred: Predicted outputs (probabilities in [0,1])
+        y_true: Target outputs (typically 0 or 1)
+
+    Returns:
+        Accuracy as a value between 0.0 and 1.0
+    """
+    # Round predictions to binary values
+    y_pred_binary = jp.round(y_pred)
+
+    # Count matches
+    matches = jp.equal(y_pred_binary, y_true)
+
+    # Calculate accuracy (average number of correct bits)
+    return jp.mean(matches)
 
 
+# Define loss functions for both types (L4 and BCE)
+def loss_f_l4(logits, wires, x, y0):
+    """L4 loss function variant (for JIT compilation)"""
+    act = run_circuit(logits, wires, x)
+    y = act[-1]
+    res = y - y0
+    accuracy = bit_accuracy(y, y0)
+    return res2loss(res), dict(act=act, accuracy=accuracy)
+
+
+def loss_f_bce(logits, wires, x, y0):
+    """BCE loss function variant (for JIT compilation)"""
+    act = run_circuit(logits, wires, x)
+    y = act[-1]
+    accuracy = bit_accuracy(y, y0)
+    return binary_cross_entropy(y, y0), dict(act=act, accuracy=accuracy)
+
+
+# Pre-compile gradient functions for both loss types
+grad_loss_f_l4 = jax.jit(jax.value_and_grad(loss_f_l4, has_aux=False))
+grad_loss_f_bce = jax.jit(jax.value_and_grad(loss_f_bce, has_aux=False))
+
+
+# Function dispatcher for loss computation (not used in training loop)
 def loss_f(logits, wires, x, y0, loss_type="l4"):
     """
     Compute loss for a circuit given input and target output.
@@ -80,47 +133,24 @@ def loss_f(logits, wires, x, y0, loss_type="l4"):
 
     Returns:
         Tuple of (loss_value, auxiliary_dict) where auxiliary_dict contains
-        intermediate activations
+        intermediate activations and accuracy
     """
-    # Run the circuit to get all activations
-    act = run_circuit(logits, wires, x)
-    # Extract final layer output
-    y = act[-1]
-
-    # Compute loss based on selected loss type
     if loss_type == "bce":
-        loss = binary_cross_entropy(y, y0)
+        return loss_f_bce(logits, wires, x, y0)
     else:  # Default to L4 norm
-        res = y - y0
-        loss = res2loss(res)
+        return loss_f_l4(logits, wires, x, y0)
 
-    # Return loss and auxiliary information
-    return loss, dict(act=act)
-
-
-# JIT-compile the gradient computation function for efficiency
-def create_grad_loss_f(loss_type="l4"):
-    """
-    Create a JIT-compiled gradient function for the specified loss type.
-
-    Args:
-        loss_type: Type of loss to use ('l4' or 'bce')
-
-    Returns:
-        JIT-compiled value_and_grad function
-    """
-
-    def loss_fn(logits, wires, x, y0):
-        return loss_f(logits, wires, x, y0, loss_type)
-
-    return jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
-
-
-# Default gradient function with L4 loss
-grad_loss_f = create_grad_loss_f("l4")
 
 # Define a named tuple for training state to improve code clarity
 TrainState = namedtuple("TrainState", "params opt_state")
+
+
+# Remove JIT from this function since it has a non-tensor argument (opt)
+def update_params(grad, opt_state, opt, logits):
+    """Parameter update function"""
+    upd, new_opt_state = opt.update(grad, opt_state, logits)
+    new_logits = optax.apply_updates(logits, upd)
+    return new_logits, new_opt_state
 
 
 def train_step(state, opt, wires, x, y0, loss_type="l4"):
@@ -136,21 +166,55 @@ def train_step(state, opt, wires, x, y0, loss_type="l4"):
         loss_type: Type of loss to use ('l4' or 'bce')
 
     Returns:
-        Tuple of (loss_value, new_state) with updated parameters
+        Tuple of (loss_value, accuracy, new_state) with updated parameters
     """
     logits, opt_state = state
 
-    # Get appropriate gradient function for the loss type
-    grad_fn = grad_loss_f if loss_type == "l4" else create_grad_loss_f(loss_type)
+    # Use pre-compiled gradient function based on loss type
+    if loss_type == "bce":
+        loss, grad = grad_loss_f_bce(logits, wires, x, y0)
+    else:  # Default to L4 norm
+        loss, grad = grad_loss_f_l4(logits, wires, x, y0)
 
-    # Compute loss and gradients
-    (loss, aux), grad = grad_fn(logits, wires, x, y0)
+    # Update parameters (without JIT since optimizer is a function)
+    new_logits, new_opt_state = update_params(grad, opt_state, opt, logits)
 
-    # Compute parameter updates using optimizer
-    upd, opt_state = opt.update(grad, opt_state, logits)
+    # Return loss, accuracy, and new state
+    return loss, TrainState(new_logits, new_opt_state)
 
-    # Apply updates to parameters
-    logits = optax.apply_updates(logits, upd)
 
-    # Return loss and new state
-    return loss, TrainState(logits, opt_state)
+def evaluate_circuit(logits, wires, x, y0):
+    """
+    Evaluate circuit performance without training.
+
+    Args:
+        logits: Circuit parameters
+        wires: Wiring configuration
+        x: Input data
+        y0: Target outputs
+
+    Returns:
+        Dictionary containing:
+        - predictions: Raw outputs from the circuit
+        - binary_predictions: Rounded binary outputs
+        - accuracy: Proportion of correctly predicted bits
+        - loss_l4: L4 norm loss
+        - loss_bce: Binary cross-entropy loss
+    """
+    # Run the circuit
+    acts = run_circuit(logits, wires, x)
+    y_pred = acts[-1]
+
+    # Calculate metrics
+    y_pred_binary = jp.round(y_pred)
+    accuracy = bit_accuracy(y_pred, y0)
+    loss_l4 = res2loss(y_pred - y0)
+    loss_bce = binary_cross_entropy(y_pred, y0)
+
+    return {
+        "predictions": y_pred,
+        "binary_predictions": y_pred_binary,
+        "accuracy": accuracy,
+        "loss_l4": loss_l4,
+        "loss_bce": loss_bce,
+    }
