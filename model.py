@@ -114,7 +114,8 @@ def gen_circuit(key, layer_sizes, arity=4):
     """
     in_n = layer_sizes[0][0]
     all_wires, all_logits = [], []
-    for out_n, group_size in layer_sizes:
+    for out_n, group_size in layer_sizes[1:]:
+        print(f"in_n: {in_n}, out_n: {out_n}, group_size: {group_size}")
         wires = gen_wires(key, in_n, out_n, arity, group_size)
         logits = make_nops(out_n, arity, group_size)
         _, key = jax.random.split(key)
