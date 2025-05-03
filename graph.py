@@ -621,11 +621,11 @@ def train_gnn(
     edge_mlp_features: List[int] = [64, 32],
     learning_rate: float = 1e-3,
     epochs: int = 100,
-    batch_size: int = 64,
     n_message_steps: int = 100,
     key: int = 0,
     weight_decay: float = 1e-4,
     meta_learning: bool = False,
+    meta_batch_size: int = 64,
 ):
     """
     Meta-train the GNN to optimize circuit parameters for random wirings.
@@ -655,6 +655,9 @@ def train_gnn(
 
     # Get dimensions from layer sizes
     input_n = layer_sizes[0][0]
+
+    if not meta_learning:
+        meta_batch_size = 1
 
     # 1. Initialize GNN
     rng, init_key = jax.random.split(rng)
@@ -687,7 +690,7 @@ def train_gnn(
 
         def loss_fn(gnn_model: CircuitGNN, rng: jax.random.PRNGKey):
             # Sample new random circuit wiring for this step
-            rng_wires, rng_logits = jax.random.split(rng)
+            rng_wires, _ = jax.random.split(rng)
             wires, logits = gen_circuit(rng_wires, layer_sizes, arity=arity)
 
             # Store original shapes for reconstruction
@@ -719,7 +722,7 @@ def train_gnn(
             return loss, (hard_loss, accuracy, hard_accuracy)
 
         def mean_batch_loss_fn(gnn, rng):
-            batch_rng = jax.random.split(rng, batch_size)
+            batch_rng = jax.random.split(rng, meta_batch_size)
             batch_loss_fn = nnx.vmap(loss_fn, in_axes=(None, 0))
             losses, aux = batch_loss_fn(gnn, rng=batch_rng)
             return jp.mean(losses), jax.tree.map(lambda x: jp.mean(x, axis=0), aux)
