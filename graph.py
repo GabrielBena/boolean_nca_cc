@@ -14,7 +14,7 @@ from tqdm.auto import tqdm
 NodeType = Dict[str, jp.ndarray]
 # Example: {'layer': jp.array([...]), 'group': jp.array([...]), 'gate_id': jp.array([...]), 'logits': jp.array([...])}
 # Input nodes might have different features, e.g., only layer and gate_id, logits might be None or zero-padded.
-EdgeType = None  # No edge features for now
+EdgeType = jp.ndarray
 
 
 # Define an MLP using nnx for updates
@@ -676,7 +676,7 @@ def train_gnn(
     )
 
     # 3. Define meta-training step function
-    @partial(nnx.jit, static_argnames=("layer_sizes", "n_message_steps"))
+    # @partial(nnx.jit, static_argnames=("layer_sizes", "n_message_steps"))
     def meta_train_step(
         gnn: CircuitGNN,
         optimizer: nnx.Optimizer,
@@ -735,6 +735,9 @@ def train_gnn(
         # Update GNN parameters
         optimizer.update(grads)
 
+        if jax.tree.reduce(lambda x, y: x and y, jax.tree.map(lambda g: (g == 0).all(), grads)) :
+            print("WARNING: Gradients are all zero")
+
         return loss, aux
 
     # 4. Training loop
@@ -758,19 +761,16 @@ def train_gnn(
         x_batch = x_data[idx]
         y_batch = y_data[idx]
 
-        def meta_train_step_wrapper(key):
-            return meta_train_step(
-                gnn,
-                optimizer,
-                x_batch,
-                y_batch,
-                key,
-                tuple(layer_sizes),
-                n_message_steps,
-            )
-
         # Perform meta-training step
-        loss, (hard_loss, accuracy, hard_accuracy) = meta_train_step_wrapper(epoch_key)
+        loss, (hard_loss, accuracy, hard_accuracy) = meta_train_step(
+            gnn,
+            optimizer,
+            x_batch,
+            y_batch,
+            epoch_key,
+            tuple(layer_sizes),
+            n_message_steps,
+        )
 
         # Record metrics
         losses.append(loss)
@@ -960,77 +960,66 @@ def compare_gnn_vs_backprop(
         "hard_accuracy": [],
     }
 
-    # Define loss function for optimization
-    def loss_fn(logits_list):
-        acts = run_circuit(logits_list, test_wires, x_data)
-        pred = acts[-1]
-        loss = jp.mean((pred - y_data) ** 4)
-        return loss
-
-    # Initialize optimizer
-    optimizer = optax.adam(bp_learning_rate)
+    # Import the training logic
+    from training import TrainState, train_step
 
     # Make a copy of the initial logits for backpropagation
     bp_logits = [logit.copy() for logit in test_logits]
-
-    # Initialize optimizer state
+    
+    # Create optimizer
+    optimizer = optax.adam(bp_learning_rate)
     opt_state = optimizer.init(bp_logits)
-
+    
+    # Create initial training state
+    state = TrainState(bp_logits, opt_state)
+    
     # Evaluate initial circuit (step 0)
-    initial_acts = run_circuit(bp_logits, test_wires, x_data)
-    initial_pred = initial_acts[-1]
-    initial_hard_acts = run_circuit(bp_logits, test_wires, x_data, hard=True)
-    initial_hard_pred = initial_hard_acts[-1]
-
-    soft_loss = jp.mean((initial_pred - y_data) ** 2)
-    hard_loss = jp.mean((initial_hard_pred - y_data) ** 2)
-    soft_accuracy = jp.mean(jp.round(initial_pred) == y_data)
-    hard_accuracy = jp.mean(jp.round(initial_hard_pred) == y_data)
-
+    loss, aux, state = train_step(
+        state=state,
+        opt=optimizer,
+        wires=test_wires,
+        x=x_data,
+        y0=y_data,
+        loss_type="l4",  # Using L4 loss
+        do_train=False   # Just evaluation, no parameter update
+    )
+    
     # Record initial metrics
     bp_metrics["step"].append(0)
-    bp_metrics["soft_loss"].append(float(soft_loss))
-    bp_metrics["hard_loss"].append(float(hard_loss))
-    bp_metrics["soft_accuracy"].append(float(soft_accuracy))
-    bp_metrics["hard_accuracy"].append(float(hard_accuracy))
+    bp_metrics["soft_loss"].append(float(loss))
+    bp_metrics["hard_loss"].append(float(aux["hard_loss"]))
+    bp_metrics["soft_accuracy"].append(float(aux["accuracy"]))
+    bp_metrics["hard_accuracy"].append(float(aux["hard_accuracy"]))
 
     # Create tqdm progress bar for backpropagation
     pbar = tqdm(range(1, backprop_steps + 1), desc="Running backprop")
 
-    # Run backpropagation optimization
+    # Run backpropagation optimization using the train_step function
     for step in pbar:
-        # Compute loss and gradients
-        loss_value, grads = jax.value_and_grad(loss_fn)(bp_logits)
-
-        # Update parameters
-        updates, opt_state = optimizer.update(grads, opt_state)
-        bp_logits = jax.tree.map(lambda p, u: p + u, bp_logits, updates)
-
-        # Evaluate circuit with current logits
-        acts = run_circuit(bp_logits, test_wires, x_data)
-        pred = acts[-1]
-        hard_acts = run_circuit(bp_logits, test_wires, x_data, hard=True)
-        hard_pred = hard_acts[-1]
-
-        # Calculate metrics
-        soft_loss = jp.mean((pred - y_data) ** 2)
-        hard_loss = jp.mean((hard_pred - y_data) ** 2)
-        soft_accuracy = jp.mean(jp.round(pred) == y_data)
-        hard_accuracy = jp.mean(jp.round(hard_pred) == y_data)
-
+        # Perform a training step
+        loss, aux, state = train_step(
+            state=state,
+            opt=optimizer,
+            wires=test_wires,
+            x=x_data,
+            y0=y_data,
+            loss_type="l4",  # Using L4 loss
+            do_train=True    # Actually update parameters
+        )
+        
         # Record metrics
         bp_metrics["step"].append(step)
-        bp_metrics["soft_loss"].append(float(soft_loss))
-        bp_metrics["hard_loss"].append(float(hard_loss))
-        bp_metrics["soft_accuracy"].append(float(soft_accuracy))
-        bp_metrics["hard_accuracy"].append(float(hard_accuracy))
+        bp_metrics["soft_loss"].append(float(loss))
+        bp_metrics["hard_loss"].append(float(aux["hard_loss"]))
+        bp_metrics["soft_accuracy"].append(float(aux["accuracy"]))
+        bp_metrics["hard_accuracy"].append(float(aux["hard_accuracy"]))
 
         # Update progress bar
         pbar.set_postfix(
             {
-                "Loss": f"{soft_loss:.4f}",
-                "Accuracy": f"{soft_accuracy:.4f}",
-                "Hard Acc": f"{hard_accuracy:.4f}",
+                "Loss": f"{loss:.4f}",
+                "Accuracy": f"{aux['accuracy']:.4f}",
+                "Hard Acc": f"{aux['hard_accuracy']:.4f}",
             }
         )
 
@@ -1112,12 +1101,6 @@ def compare_gnn_vs_backprop(
     plt.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig("gnn_vs_backprop.png")
-    plt.show()
+    plt.savefig("gnn_vs_backprop_comparison.png", dpi=150)
 
-    return {
-        "gnn_metrics": gnn_metrics,
-        "bp_metrics": bp_metrics,
-        "test_wires": test_wires,
-        "test_logits": test_logits,
-    }
+    return {"gnn": gnn_metrics, "backprop": bp_metrics}
