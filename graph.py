@@ -41,6 +41,8 @@ def build_graph(
     input_n: int,
     arity: int,
     hidden_dim: int,
+    bidirectional_edges: bool = True,
+    verbose: bool = False,
 ) -> jraph.GraphsTuple:
     """
     Constructs a jraph.GraphsTuple representation of the boolean circuit.
@@ -52,15 +54,19 @@ def build_graph(
         input_n: Number of input nodes/bits for the first layer (layer 0) - only used for wire indexing.
         arity: The fan-in for each gate.
         hidden_dim: Dimension of hidden features for nodes.
+        bidirectional_edges: If True, create edges in both forward and backward directions.
 
     Returns:
         A jraph.GraphsTuple representing the circuit.
     """
     all_nodes_features_list = []
-    all_senders = []
-    all_receivers = []
+    all_forward_senders = []
+    all_forward_receivers = []
     current_global_node_idx = 0
     layer_start_indices = []  # We'll store the start index of each layer
+
+    if verbose:
+        print(f"USING BIDIRECTIONAL EDGES: {bidirectional_edges}")
 
     # Process layers (no separate input nodes)
     for layer_idx, (layer_logits, layer_wires) in enumerate(zip(logits, wires)):
@@ -89,7 +95,7 @@ def build_graph(
         }
         all_nodes_features_list.append(layer_nodes)
 
-        # Create edges (if not the first layer)
+        # Create forward edges (if not the first layer)
         if layer_idx > 0:
             # Receivers are the gates in the *current* layer
             current_layer_receivers = jp.repeat(layer_global_indices, arity)
@@ -104,8 +110,8 @@ def build_graph(
             tiled_senders = jp.tile(global_senders_for_layer.T, (1, group_size))
             current_layer_senders = tiled_senders.reshape(-1)  # Flatten
 
-            all_senders.append(current_layer_senders)
-            all_receivers.append(current_layer_receivers)
+            all_forward_senders.append(current_layer_senders)
+            all_forward_receivers.append(current_layer_receivers)
         elif layer_idx == 0:
             # For the first layer, we don't have senders from a previous layer in the graph
             # The inputs are external, so we don't create edges for them
@@ -119,8 +125,8 @@ def build_graph(
         return jraph.GraphsTuple(
             nodes={},
             edges=None,
-            senders=jp.array([]),
-            receivers=jp.array([]),
+            senders=jp.array([], dtype=jp.int32),
+            receivers=jp.array([], dtype=jp.int32),
             n_node=jp.array([0]),
             n_edge=jp.array([0]),
             globals=None,
@@ -131,9 +137,21 @@ def build_graph(
         lambda *xs: jp.concatenate(xs, axis=0), *all_nodes_features_list
     )
 
-    if all_senders:
-        senders = jp.concatenate(all_senders)
-        receivers = jp.concatenate(all_receivers)
+    if all_forward_senders:
+        forward_senders = jp.concatenate(all_forward_senders)
+        forward_receivers = jp.concatenate(all_forward_receivers)
+
+        if bidirectional_edges:
+            # Create backward edges by swapping senders and receivers
+            backward_senders = forward_receivers
+            backward_receivers = forward_senders
+            # Combine forward and backward edges
+            senders = jp.concatenate([forward_senders, backward_senders])
+            receivers = jp.concatenate([forward_receivers, backward_receivers])
+        else:
+            # Use only forward edges
+            senders = forward_senders
+            receivers = forward_receivers
     else:
         senders = jp.array([], dtype=jp.int32)
         receivers = jp.array([], dtype=jp.int32)
@@ -196,15 +214,27 @@ class NodeUpdateModule(nnx.Module):
         # Output needs to contain updated logits and updated hidden features
         mlp_output_size = logit_dim + hidden_dim
 
-        # Define MLP architecture
+        # Define MLP architecture with BatchNorm
         mlp_features = [mlp_input_size, *node_mlp_features, mlp_output_size]
-        self.mlp = nnx.Sequential(
-            *[
-                layer
-                for features in zip(mlp_features[:-1], mlp_features[1:])
-                for layer in [nnx.Linear(*features, rngs=rngs), jax.nn.relu]
-            ][:-1]  # Remove the last relu
-        )
+        mlp_layers = []
+        for i, (in_f, out_f) in enumerate(zip(mlp_features[:-1], mlp_features[1:])):
+            # Special initialization for the final layer
+            if i == len(mlp_features) - 2:
+                # Initialize final layer weights and biases to zero for "do nothing" start
+                final_linear = nnx.Linear(
+                    in_f, out_f, 
+                    kernel_init=jax.nn.initializers.zeros,
+                    bias_init=jax.nn.initializers.zeros,
+                    rngs=rngs
+                )
+                mlp_layers.append(final_linear)
+            else:
+                mlp_layers.append(nnx.Linear(in_f, out_f, rngs=rngs))
+                # Add BatchNorm and ReLU 
+                mlp_layers.append(nnx.BatchNorm(out_f, use_running_average=True, momentum=0.9, epsilon=1e-5, rngs=rngs))
+                mlp_layers.append(jax.nn.relu)
+
+        self.mlp = nnx.Sequential(*mlp_layers)
 
     def __call__(
         self,
@@ -213,7 +243,7 @@ class NodeUpdateModule(nnx.Module):
         received_attributes: jp.ndarray,
         globals_,
     ):
-        """Update node features using an MLP."""
+        """Update node features using a residual MLP."""
         # Extract current node features
         current_logits = nodes["logits"]  # Shape: (num_nodes, 2**arity)
         current_hidden = nodes["hidden"]  # Shape: (num_nodes, hidden_dim)
@@ -234,12 +264,16 @@ class NodeUpdateModule(nnx.Module):
             # Input = current_features only
             mlp_input = current_node_combined_features
 
-        # Apply MLP to get combined updated features
-        updated_combined_features = self.mlp(mlp_input)
+        # Apply MLP to get the delta (change) in features
+        delta_combined_features = self.mlp(mlp_input)
 
-        # Split the output into updated logits and hidden features
-        updated_logits = updated_combined_features[..., :logit_dim]
-        updated_hidden = updated_combined_features[..., logit_dim:]
+        # Split the delta into logit and hidden components
+        delta_logits = delta_combined_features[..., :logit_dim]
+        delta_hidden = delta_combined_features[..., logit_dim:]
+
+        # Apply residual update
+        updated_logits = current_logits + delta_logits
+        updated_hidden = current_hidden + delta_hidden
 
         # Update only the 'logits' and 'hidden' fields, preserving others
         new_node_features = {k: v for k, v in nodes.items()}
@@ -262,17 +296,22 @@ class EdgeUpdateModule(nnx.Module):
         self.hidden_dim = hidden_dim
         self.arity = arity
         self.edge_mlp_features = edge_mlp_features
-        mlp_input_size = 2**arity + hidden_dim
-        mlp_output_size = 2**arity + hidden_dim
+        logit_dim = 2**arity # Added logit_dim for clarity
+        mlp_input_size = logit_dim + hidden_dim
+        mlp_output_size = logit_dim + hidden_dim
         mlp_features = [mlp_input_size, *edge_mlp_features, mlp_output_size]
 
-        self.edge_mlp = nnx.Sequential(
-            *[
-                layer
-                for features in zip(mlp_features[:-1], mlp_features[1:])
-                for layer in [nnx.Linear(*features, rngs=rngs), jax.nn.relu]
-            ][:-1]  # Remove the last relu
-        )
+        # Define Edge MLP architecture with BatchNorm
+        edge_mlp_layers = []
+        for i, (in_f, out_f) in enumerate(zip(mlp_features[:-1], mlp_features[1:])):
+            edge_mlp_layers.append(nnx.Linear(in_f, out_f, rngs=rngs))
+            # Add BatchNorm and ReLU except for the last layer
+            if i < len(mlp_features) - 2:
+                # BatchNorm needs the number of output features from the linear layer
+                edge_mlp_layers.append(nnx.BatchNorm(out_f, use_running_average=True, momentum=0.9, epsilon=1e-5, rngs=rngs))
+                edge_mlp_layers.append(jax.nn.relu)
+
+        self.edge_mlp = nnx.Sequential(*edge_mlp_layers)
 
     def __call__(
         self,
@@ -626,6 +665,7 @@ def train_gnn(
     weight_decay: float = 1e-4,
     meta_learning: bool = False,
     meta_batch_size: int = 64,
+    check_gradients: bool = False,
 ):
     """
     Meta-train the GNN to optimize circuit parameters for random wirings.
@@ -676,7 +716,7 @@ def train_gnn(
     )
 
     # 3. Define meta-training step function
-    # @partial(nnx.jit, static_argnames=("layer_sizes", "n_message_steps"))
+    @partial(nnx.jit, static_argnames=("layer_sizes", "n_message_steps"))
     def meta_train_step(
         gnn: CircuitGNN,
         optimizer: nnx.Optimizer,
@@ -735,8 +775,10 @@ def train_gnn(
         # Update GNN parameters
         optimizer.update(grads)
 
-        if jax.tree.reduce(lambda x, y: x and y, jax.tree.map(lambda g: (g == 0).all(), grads)) :
-            print("WARNING: Gradients are all zero")
+        # if check_gradients and jax.tree.reduce(
+        #     lambda x, y: x and y, jax.tree.map(lambda g: (g == 0).all(), grads)
+        # ):
+        #     print("WARNING: Gradients are all zero")
 
         return loss, aux
 
@@ -965,14 +1007,14 @@ def compare_gnn_vs_backprop(
 
     # Make a copy of the initial logits for backpropagation
     bp_logits = [logit.copy() for logit in test_logits]
-    
+
     # Create optimizer
     optimizer = optax.adam(bp_learning_rate)
     opt_state = optimizer.init(bp_logits)
-    
+
     # Create initial training state
     state = TrainState(bp_logits, opt_state)
-    
+
     # Evaluate initial circuit (step 0)
     loss, aux, state = train_step(
         state=state,
@@ -981,9 +1023,9 @@ def compare_gnn_vs_backprop(
         x=x_data,
         y0=y_data,
         loss_type="l4",  # Using L4 loss
-        do_train=False   # Just evaluation, no parameter update
+        do_train=False,  # Just evaluation, no parameter update
     )
-    
+
     # Record initial metrics
     bp_metrics["step"].append(0)
     bp_metrics["soft_loss"].append(float(loss))
@@ -1004,9 +1046,9 @@ def compare_gnn_vs_backprop(
             x=x_data,
             y0=y_data,
             loss_type="l4",  # Using L4 loss
-            do_train=True    # Actually update parameters
+            do_train=True,  # Actually update parameters
         )
-        
+
         # Record metrics
         bp_metrics["step"].append(step)
         bp_metrics["soft_loss"].append(float(loss))
