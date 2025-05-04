@@ -796,6 +796,8 @@ def train_gnn(
     init_gnn: CircuitGNN = None,
     init_optimizer: nnx.Optimizer = None,
     initial_metrics: Dict = None,
+    lr_scheduler: str = "constant",  # Options: "constant", "exponential", "cosine", "linear_warmup"
+    lr_scheduler_params: Dict = None,
 ):
     """
     Meta-train the GNN to optimize circuit parameters for random wirings.
@@ -816,6 +818,8 @@ def train_gnn(
         n_message_steps: Number of message passing steps per training step
         key: Random seed
         weight_decay: Weight decay for optimizer
+        lr_scheduler: Type of learning rate scheduler to use
+        lr_scheduler_params: Parameters for the selected scheduler
         init_gnn: Optional pre-trained GNN model to continue training from
         init_optimizer: Optional pre-trained optimizer to continue training from
         initial_metrics: Optional dictionary of metrics from previous training
@@ -839,12 +843,14 @@ def train_gnn(
         accuracies = []
         hard_losses = []
         hard_accuracies = []
+        learning_rates = []  # Track learning rates
     else:
         # Continue from previous metrics
         losses = list(initial_metrics.get("losses", []))
         accuracies = list(initial_metrics.get("accuracies", []))
         hard_losses = list(initial_metrics.get("hard_losses", []))
         hard_accuracies = list(initial_metrics.get("hard_accuracies", []))
+        learning_rates = list(initial_metrics.get("learning_rates", []))
 
     # 1. Initialize or reuse GNN
     if init_gnn is None:
@@ -862,12 +868,90 @@ def train_gnn(
         # Use the provided GNN
         gnn = init_gnn
 
-    # 2. Create optimizer with weight decay or reuse existing optimizer
+    # 2. Create optimizer with learning rate schedule and weight decay or reuse existing optimizer
     if init_optimizer is None:
+        # Set default scheduler parameters if none provided
+        if lr_scheduler_params is None:
+            lr_scheduler_params = {}
+
+        # Create learning rate schedule based on specified type
+        if lr_scheduler == "constant":
+            # Constant learning rate (default behavior)
+            lr_schedule = learning_rate
+        elif lr_scheduler == "exponential":
+            # Exponential decay: lr * decay_rate^(step / decay_steps)
+            decay_rate = lr_scheduler_params.get("decay_rate", 0.9)
+            decay_steps = lr_scheduler_params.get("decay_steps", epochs // 10)
+            lr_schedule = optax.exponential_decay(
+                init_value=learning_rate,
+                transition_steps=decay_steps,
+                decay_rate=decay_rate,
+            )
+        elif lr_scheduler == "cosine":
+            # Cosine decay schedule
+            decay_steps = lr_scheduler_params.get("decay_steps", epochs)
+            alpha = lr_scheduler_params.get(
+                "alpha", 0.0
+            )  # Final value as a fraction of initial
+            lr_schedule = optax.cosine_decay_schedule(
+                init_value=learning_rate,
+                decay_steps=decay_steps,
+                alpha=alpha,
+            )
+        elif lr_scheduler == "linear_warmup":
+            # Linear warmup followed by constant or another schedule
+            warmup_steps = lr_scheduler_params.get("warmup_steps", epochs // 10)
+            post_warmup_lr = lr_scheduler_params.get("post_warmup_lr", learning_rate)
+
+            # Optional subsequent decay after warmup
+            decay_type = lr_scheduler_params.get("decay_type", "constant")
+            decay_steps = lr_scheduler_params.get("decay_steps", epochs - warmup_steps)
+            decay_rate = lr_scheduler_params.get("decay_rate", 0.9)
+            alpha = lr_scheduler_params.get("alpha", 0.0)
+
+            # Create warmup schedule
+            warmup_schedule = optax.linear_schedule(
+                init_value=0.0,
+                end_value=post_warmup_lr,
+                transition_steps=warmup_steps,
+            )
+
+            # Create post-warmup schedule based on decay_type
+            if decay_type == "constant":
+                post_warmup_schedule = post_warmup_lr
+            elif decay_type == "exponential":
+                post_warmup_schedule = optax.exponential_decay(
+                    init_value=post_warmup_lr,
+                    transition_steps=decay_steps // 10,
+                    decay_rate=decay_rate,
+                )
+            elif decay_type == "cosine":
+                post_warmup_schedule = optax.cosine_decay_schedule(
+                    init_value=post_warmup_lr,
+                    decay_steps=decay_steps,
+                    alpha=alpha,
+                )
+            else:
+                post_warmup_schedule = post_warmup_lr
+
+            # Combine warmup with post-warmup schedule
+            lr_schedule = optax.join_schedules(
+                schedules=[warmup_schedule, post_warmup_schedule],
+                boundaries=[warmup_steps],
+            )
+        else:
+            # Default to constant learning rate if unknown scheduler type
+            print(
+                f"Warning: Unknown scheduler type '{lr_scheduler}'. Using constant learning rate."
+            )
+            lr_schedule = learning_rate
+
+        # Create optimizer with the schedule and weight decay
         optimizer = nnx.Optimizer(
-            gnn, optax.adamw(learning_rate=learning_rate, weight_decay=weight_decay)
+            gnn, optax.adamw(learning_rate=lr_schedule, weight_decay=weight_decay)
         )
     else:
+        # Use the provided optimizer
         optimizer = init_optimizer
 
     # 3. Define meta-training step function
@@ -930,11 +1014,6 @@ def train_gnn(
         # Update GNN parameters
         optimizer.update(grads)
 
-        # if check_gradients and jax.tree.reduce(
-        #     lambda x, y: x and y, jax.tree.map(lambda g: (g == 0).all(), grads)
-        # ):
-        #     print("WARNING: Gradients are all zero")
-
         return loss, aux
 
     # 4. Training loop
@@ -964,11 +1043,27 @@ def train_gnn(
             n_message_steps,
         )
 
+        # Get current learning rate (for schedules)
+        if hasattr(optimizer.tx, "learning_rate"):
+            # Try to extract from optax optimizer
+            try:
+                if hasattr(optimizer.tx.learning_rate, "update"):
+                    # For schedulers that implement update method
+                    current_lr = optimizer.tx.learning_rate(epoch)
+                else:
+                    # For constant learning rates
+                    current_lr = optimizer.tx.learning_rate
+            except:
+                current_lr = learning_rate  # Fallback to initial value
+        else:
+            current_lr = learning_rate  # Fallback to initial value
+
         # Record metrics
         losses.append(float(loss))
         hard_losses.append(float(hard_loss))
         accuracies.append(float(accuracy))
         hard_accuracies.append(float(hard_accuracy))
+        learning_rates.append(float(current_lr))
 
         # Update progress bar with current metrics
         pbar.set_postfix(
@@ -976,6 +1071,7 @@ def train_gnn(
                 "Loss": f"{loss:.4f}",
                 "Accuracy": f"{accuracy:.4f}",
                 "Hard Acc": f"{hard_accuracy:.4f}",
+                "LR": f"{current_lr:.6f}",
             }
         )
 
@@ -987,6 +1083,7 @@ def train_gnn(
         "hard_losses": hard_losses,
         "accuracies": accuracies,
         "hard_accuracies": hard_accuracies,
+        "learning_rates": learning_rates,
     }
 
 
