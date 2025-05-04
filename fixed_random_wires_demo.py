@@ -188,6 +188,8 @@ class Demo:
         # Display textures
         self.input_texture = None
         self.output_texture = None
+        self.ground_truth_texture = None
+        self.ground_truth_img = None
         
         # Visualization settings
         self.use_simple_viz = False
@@ -321,6 +323,9 @@ class Demo:
         self.trainstep_i = 0
         self.loss_log = np.zeros(max_trainstep_n, np.float32)
         self.hard_log = np.zeros(max_trainstep_n, np.float32)
+        
+        # Update ground truth visualization whenever task changes
+        self.update_ground_truth_visualization()
         
     def update_input_visualization(self):
         """Update input visualization based on current input_x"""
@@ -456,6 +461,9 @@ class Demo:
             oimg = zoom(oimg, zoom_factor)
             self.outputs_img = np.uint8(oimg.clip(0, 1) * 255)
             
+            # Create ground truth visualization
+            self.update_ground_truth_visualization()
+            
             # Update textures for display
             self.update_textures()
 
@@ -500,12 +508,22 @@ class Demo:
             except Exception as recovery_error:
                 print(f"Failed to recover: {recovery_error}")
                 
+    def update_ground_truth_visualization(self):
+        """Create visualization for ground truth (expected output)"""
+        # Create ground truth visualization
+        gt_img = self.y0.T
+        zoom_factor = max(4, int(8 // self.output_n * 2))  # Same as for output
+        gt_img = np.dstack([gt_img] * 3)  # Convert to 3-channel
+        gt_img = zoom(gt_img, zoom_factor)
+        self.ground_truth_img = np.uint8(gt_img.clip(0, 1) * 255)
+        
     def update_textures(self):
         # We'll create textures each frame for simplicity
         # In a real application, you might want to cache these
         dummy_texture = imgui.get_io().fonts.tex_id
         self.input_texture = (dummy_texture, self.inputs_img.shape[1], self.inputs_img.shape[0])
         self.output_texture = (dummy_texture, self.outputs_img.shape[1], self.outputs_img.shape[0])
+        self.ground_truth_texture = (dummy_texture, self.ground_truth_img.shape[1], self.ground_truth_img.shape[0])
 
     def draw_gate_lut(self, x, y, logit):
         x0, y0 = x - 20, y - 20 - 36
@@ -848,11 +866,26 @@ class Demo:
             imgui.separator_text("Inputs")
             self.draw_lut("inputs", self.inputs_img, self.input_texture)
 
-            H = imgui.get_content_region_avail().y - 100
+            H = imgui.get_content_region_avail().y - 320  # Adjust height to make room for both output and ground truth
             self.draw_circuit(H=H)
 
-            imgui.separator_text("Outputs")
+            imgui.separator_text("Outputs vs Ground Truth")
+            
+            # Create columns for side-by-side display
+            imgui.columns(2, "output_columns")
+            
+            # Output column
+            imgui.text("Current Output")
             self.draw_lut("outputs", self.outputs_img, self.output_texture)
+            
+            # Ground truth column
+            imgui.next_column()
+            imgui.text("Expected Output (Ground Truth)")
+            if hasattr(self, 'ground_truth_img') and self.ground_truth_img is not None:
+                self.draw_lut("ground_truth", self.ground_truth_img, self.ground_truth_texture)
+            
+            # End columns
+            imgui.columns(1)
 
             imgui.end_child()
             imgui.same_line()
