@@ -32,6 +32,41 @@ class MLP(nnx.Module):
         return x
 
 
+# --- Positional Encoding ---
+
+
+def get_positional_encoding(indices: jp.ndarray, dim: int, max_val: float = 10000.0):
+    """
+    Generates sinusoidal positional encodings.
+
+    Args:
+        indices: 1D JAX array of integer positions (e.g., layer indices, node indices).
+        dim: The dimension of the positional encoding vector (must be even).
+        max_val: Maximum value for the denominator in the frequency calculation.
+
+    Returns:
+        JAX array of shape (len(indices), dim) containing the positional encodings.
+    """
+    if dim % 2 != 0:
+        raise ValueError(f"Positional encoding dimension must be even, got {dim}")
+
+    # Ensure indices are float for calculations
+    positions = indices.astype(jp.float32)[:, None]  # Shape: (num_indices, 1)
+
+    # Calculate the division term for frequencies
+    # div_term shape: (dim // 2,)
+    div_term = jp.exp(jp.arange(0, dim, 2, dtype=jp.float32) * -(jp.log(max_val) / dim))
+
+    # Initialize PE matrix
+    pe = jp.zeros((indices.shape[0], dim), dtype=jp.float32)
+
+    # Calculate sin and cos components
+    pe = pe.at[:, 0::2].set(jp.sin(positions * div_term))
+    pe = pe.at[:, 1::2].set(jp.cos(positions * div_term))
+
+    return pe
+
+
 # --- Graph Building ---
 
 
@@ -94,6 +129,25 @@ def build_graph(
             ),  # Initialize hidden features
         }
         all_nodes_features_list.append(layer_nodes)
+
+        # --- Add Positional Encodings ---
+        # Layer PE (using layer_idx)
+        # Use a reasonable max_layers, e.g., 100, or calculate dynamically if needed
+        max_layers = len(logits)  # Number of gate layers
+        layer_indices = jp.full(num_gates_in_layer, layer_idx, dtype=jp.int32)
+        layer_pe = get_positional_encoding(
+            layer_indices, hidden_dim, max_val=max_layers + 1
+        )  # Add 1 for safety
+
+        # Intra-Layer PE (using index within the layer)
+        intra_layer_indices = jp.arange(num_gates_in_layer, dtype=jp.int32)
+        intra_layer_pe = get_positional_encoding(
+            intra_layer_indices, hidden_dim, max_val=num_gates_in_layer + 1
+        )  # Max val is layer size
+
+        layer_nodes["layer_pe"] = layer_pe
+        layer_nodes["intra_layer_pe"] = intra_layer_pe
+        # --- End Positional Encodings ---
 
         # Create forward edges (if not the first layer)
         if layer_idx > 0:
@@ -201,11 +255,14 @@ class NodeUpdateModule(nnx.Module):
         self.hidden_dim = hidden_dim
         self.message_passing = message_passing
         logit_dim = 2**arity
+        pe_dim = hidden_dim  # Dimension for each PE type
 
         # --- Calculate MLP input size ---
-        current_features_size = logit_dim + hidden_dim
+        # Logits, Hidden, Layer PE, Intra-Layer PE
+        current_features_size = logit_dim + hidden_dim + pe_dim + pe_dim
         if message_passing:
             # Aggregated messages will also have logit_dim + hidden_dim
+            # Edge MLP output doesn't include PEs, just logits+hidden derived features
             aggregated_message_size = logit_dim + hidden_dim
             mlp_input_size = current_features_size + aggregated_message_size
         else:
@@ -213,6 +270,29 @@ class NodeUpdateModule(nnx.Module):
 
         # Output needs to contain updated logits and updated hidden features
         mlp_output_size = logit_dim + hidden_dim
+
+        # Add feature normalization layers
+        self.logits_norm = nnx.BatchNorm(
+            logit_dim, use_running_average=True, momentum=0.9, epsilon=1e-5, rngs=rngs
+        )
+        self.hidden_norm = nnx.BatchNorm(
+            hidden_dim, use_running_average=True, momentum=0.9, epsilon=1e-5, rngs=rngs
+        )
+        # Add BatchNorm for PEs
+        self.layer_pe_norm = nnx.BatchNorm(
+            pe_dim, use_running_average=True, momentum=0.9, epsilon=1e-5, rngs=rngs
+        )
+        self.intra_layer_pe_norm = nnx.BatchNorm(
+            pe_dim, use_running_average=True, momentum=0.9, epsilon=1e-5, rngs=rngs
+        )
+        if message_passing:
+            self.message_norm = nnx.BatchNorm(
+                aggregated_message_size,
+                use_running_average=True,
+                momentum=0.9,
+                epsilon=1e-5,
+                rngs=rngs,
+            )
 
         # Define MLP architecture with BatchNorm
         mlp_features = [mlp_input_size, *node_mlp_features, mlp_output_size]
@@ -222,16 +302,25 @@ class NodeUpdateModule(nnx.Module):
             if i == len(mlp_features) - 2:
                 # Initialize final layer weights and biases to zero for "do nothing" start
                 final_linear = nnx.Linear(
-                    in_f, out_f, 
+                    in_f,
+                    out_f,
                     kernel_init=jax.nn.initializers.zeros,
                     bias_init=jax.nn.initializers.zeros,
-                    rngs=rngs
+                    rngs=rngs,
                 )
                 mlp_layers.append(final_linear)
             else:
                 mlp_layers.append(nnx.Linear(in_f, out_f, rngs=rngs))
-                # Add BatchNorm and ReLU 
-                mlp_layers.append(nnx.BatchNorm(out_f, use_running_average=True, momentum=0.9, epsilon=1e-5, rngs=rngs))
+                # Add BatchNorm and ReLU
+                mlp_layers.append(
+                    nnx.BatchNorm(
+                        out_f,
+                        use_running_average=True,
+                        momentum=0.9,
+                        epsilon=1e-5,
+                        rngs=rngs,
+                    )
+                )
                 mlp_layers.append(jax.nn.relu)
 
         self.mlp = nnx.Sequential(*mlp_layers)
@@ -247,18 +336,34 @@ class NodeUpdateModule(nnx.Module):
         # Extract current node features
         current_logits = nodes["logits"]  # Shape: (num_nodes, 2**arity)
         current_hidden = nodes["hidden"]  # Shape: (num_nodes, hidden_dim)
+        current_layer_pe = nodes["layer_pe"]  # Shape: (num_nodes, pe_dim)
+        current_intra_layer_pe = nodes["intra_layer_pe"]  # Shape: (num_nodes, pe_dim)
         logit_dim = 2**self.arity
 
-        # Combine current features
+        # Normalize input features
+        normalized_logits = self.logits_norm(current_logits)
+        normalized_hidden = self.hidden_norm(current_hidden)
+        normalized_layer_pe = self.layer_pe_norm(current_layer_pe)
+        normalized_intra_layer_pe = self.intra_layer_pe_norm(current_intra_layer_pe)
+
+        # Combine normalized features (Logits, Hidden, Layer PE, Intra-Layer PE)
         current_node_combined_features = jp.concatenate(
-            [current_logits, current_hidden], axis=-1
+            [
+                normalized_logits,
+                normalized_hidden,
+                normalized_layer_pe,
+                normalized_intra_layer_pe,
+            ],
+            axis=-1,
         )
 
         # Determine inputs based on message passing flag
         if self.message_passing and sent_attributes is not None:
-            # Input = current_features + aggregated_messages
+            # Normalize messages
+            normalized_messages = self.message_norm(sent_attributes)
+            # Input = current_features + normalized_messages
             mlp_input = jp.concatenate(
-                [current_node_combined_features, sent_attributes], axis=-1
+                [current_node_combined_features, normalized_messages], axis=-1
             )
         else:
             # Input = current_features only
@@ -271,7 +376,7 @@ class NodeUpdateModule(nnx.Module):
         delta_logits = delta_combined_features[..., :logit_dim]
         delta_hidden = delta_combined_features[..., logit_dim:]
 
-        # Apply residual update
+        # Apply residual update with raw deltas
         updated_logits = current_logits + delta_logits
         updated_hidden = current_hidden + delta_hidden
 
@@ -296,8 +401,12 @@ class EdgeUpdateModule(nnx.Module):
         self.hidden_dim = hidden_dim
         self.arity = arity
         self.edge_mlp_features = edge_mlp_features
-        logit_dim = 2**arity # Added logit_dim for clarity
-        mlp_input_size = logit_dim + hidden_dim
+        logit_dim = 2**arity  # Added logit_dim for clarity
+        pe_dim = hidden_dim  # Dimension for each PE type
+
+        # Input to edge MLP: Sender's Logits, Hidden, Layer PE, Intra-Layer PE
+        mlp_input_size = logit_dim + hidden_dim + pe_dim + pe_dim
+        # Output of edge MLP: Features used for aggregation (Logits + Hidden dimensions)
         mlp_output_size = logit_dim + hidden_dim
         mlp_features = [mlp_input_size, *edge_mlp_features, mlp_output_size]
 
@@ -308,7 +417,15 @@ class EdgeUpdateModule(nnx.Module):
             # Add BatchNorm and ReLU except for the last layer
             if i < len(mlp_features) - 2:
                 # BatchNorm needs the number of output features from the linear layer
-                edge_mlp_layers.append(nnx.BatchNorm(out_f, use_running_average=True, momentum=0.9, epsilon=1e-5, rngs=rngs))
+                edge_mlp_layers.append(
+                    nnx.BatchNorm(
+                        out_f,
+                        use_running_average=True,
+                        momentum=0.9,
+                        epsilon=1e-5,
+                        rngs=rngs,
+                    )
+                )
                 edge_mlp_layers.append(jax.nn.relu)
 
         self.edge_mlp = nnx.Sequential(*edge_mlp_layers)
@@ -321,11 +438,21 @@ class EdgeUpdateModule(nnx.Module):
         globals_,
     ):
         """Generate messages to be sent along edges."""
-        # Pass sender's logits and hidden features as messages
+        # Pass sender's logits, hidden features, and PEs as input to edge MLP
         sender_logits = sender_node_features["logits"]
         sender_hidden = sender_node_features["hidden"]
-        message = jp.concatenate([sender_logits, sender_hidden], axis=-1)
-        message = self.edge_mlp(message)
+        sender_layer_pe = sender_node_features["layer_pe"]
+        sender_intra_layer_pe = sender_node_features["intra_layer_pe"]
+
+        # Concatenate sender features for the MLP
+        sender_combined_features = jp.concatenate(
+            [sender_logits, sender_hidden, sender_layer_pe, sender_intra_layer_pe],
+            axis=-1,
+        )
+
+        # Apply edge MLP to generate the message
+        # message shape: (num_edges, logit_dim + hidden_dim)
+        message = self.edge_mlp(sender_combined_features)
         return message  # Shape: (num_edges, 2**arity + hidden_dim)
 
 
@@ -666,6 +793,9 @@ def train_gnn(
     meta_learning: bool = False,
     meta_batch_size: int = 64,
     check_gradients: bool = False,
+    init_gnn: CircuitGNN = None,
+    init_optimizer: nnx.Optimizer = None,
+    initial_metrics: Dict = None,
 ):
     """
     Meta-train the GNN to optimize circuit parameters for random wirings.
@@ -686,6 +816,9 @@ def train_gnn(
         n_message_steps: Number of message passing steps per training step
         key: Random seed
         weight_decay: Weight decay for optimizer
+        init_gnn: Optional pre-trained GNN model to continue training from
+        init_optimizer: Optional pre-trained optimizer to continue training from
+        initial_metrics: Optional dictionary of metrics from previous training
 
     Returns:
         Trained GNN model and training metrics
@@ -699,21 +832,43 @@ def train_gnn(
     if not meta_learning:
         meta_batch_size = 1
 
-    # 1. Initialize GNN
-    rng, init_key = jax.random.split(rng)
-    gnn = CircuitGNN(
-        node_mlp_features=node_mlp_features,
-        edge_mlp_features=edge_mlp_features,
-        hidden_dim=hidden_dim,
-        arity=arity,
-        message_passing=message_passing,
-        rngs=nnx.Rngs(params=init_key),
-    )
+    # Initialize metrics storage
+    if initial_metrics is None:
+        # Start with empty lists
+        losses = []
+        accuracies = []
+        hard_losses = []
+        hard_accuracies = []
+    else:
+        # Continue from previous metrics
+        losses = list(initial_metrics.get("losses", []))
+        accuracies = list(initial_metrics.get("accuracies", []))
+        hard_losses = list(initial_metrics.get("hard_losses", []))
+        hard_accuracies = list(initial_metrics.get("hard_accuracies", []))
 
-    # 2. Create optimizer with weight decay
-    optimizer = nnx.Optimizer(
-        gnn, optax.adamw(learning_rate=learning_rate, weight_decay=weight_decay)
-    )
+    # 1. Initialize or reuse GNN
+    if init_gnn is None:
+        # Create a new GNN
+        rng, init_key = jax.random.split(rng)
+        gnn = CircuitGNN(
+            node_mlp_features=node_mlp_features,
+            edge_mlp_features=edge_mlp_features,
+            hidden_dim=hidden_dim,
+            arity=arity,
+            message_passing=message_passing,
+            rngs=nnx.Rngs(params=init_key),
+        )
+    else:
+        # Use the provided GNN
+        gnn = init_gnn
+
+    # 2. Create optimizer with weight decay or reuse existing optimizer
+    if init_optimizer is None:
+        optimizer = nnx.Optimizer(
+            gnn, optax.adamw(learning_rate=learning_rate, weight_decay=weight_decay)
+        )
+    else:
+        optimizer = init_optimizer
 
     # 3. Define meta-training step function
     @partial(nnx.jit, static_argnames=("layer_sizes", "n_message_steps"))
@@ -783,11 +938,6 @@ def train_gnn(
         return loss, aux
 
     # 4. Training loop
-    losses = []
-    accuracies = []
-    hard_losses = []
-    hard_accuracies = []
-
     # Create a tqdm progress bar
     pbar = tqdm(range(epochs), desc="Training GNN")
 
@@ -815,10 +965,10 @@ def train_gnn(
         )
 
         # Record metrics
-        losses.append(loss)
-        hard_losses.append(hard_loss)
-        accuracies.append(accuracy)
-        hard_accuracies.append(hard_accuracy)
+        losses.append(float(loss))
+        hard_losses.append(float(hard_loss))
+        accuracies.append(float(accuracy))
+        hard_accuracies.append(float(hard_accuracy))
 
         # Update progress bar with current metrics
         pbar.set_postfix(
@@ -832,6 +982,7 @@ def train_gnn(
     # 5. Return the trained GNN model and metrics
     return {
         "gnn": gnn,
+        "optimizer": optimizer,
         "losses": losses,
         "hard_losses": hard_losses,
         "accuracies": accuracies,
@@ -1146,3 +1297,510 @@ def compare_gnn_vs_backprop(
     plt.savefig("gnn_vs_backprop_comparison.png", dpi=150)
 
     return {"gnn": gnn_metrics, "backprop": bp_metrics}
+
+
+# --- Visualization Functions ---
+
+
+def visualize_circuit_graph(
+    graph: jraph.GraphsTuple,
+    figsize=(10, 8),
+    node_size=80,
+    layer_spacing=1.5,
+    node_color_feature="layer",
+    node_feature_type=None,
+    feature_reduction="mean",
+    pca_components=3,
+    show_labels=False,
+    cmap="viridis",
+    edge_alpha=0.3,
+    title=None,
+):
+    """
+    Visualize a circuit graph in a clean, minimal style.
+
+    Args:
+        graph: jraph.GraphsTuple representation of the circuit
+        figsize: Figure size as (width, height)
+        node_size: Size of nodes in the visualization
+        layer_spacing: Vertical spacing between layers
+        node_color_feature: Node feature to use for coloring:
+            - 'layer': Color by layer index
+            - 'group': Color by group assignment
+            - 'node_features': Color by node feature values (requires node_feature_type)
+        node_feature_type: Type of node features to use for coloring (when node_color_feature='node_features'):
+            - 'logits': Use the logits tensor
+            - 'hidden': Use the hidden state tensor
+        feature_reduction: Method to reduce high-dimensional features to RGB colors:
+            - 'mean': Use mean across feature dimensions (single color)
+            - 'sum': Use sum across feature dimensions (single color)
+            - 'rgb': Use first 3 channels as RGB values
+            - 'pca': Use PCA projection to 3D (requires sklearn)
+        pca_components: Number of PCA components to use (default=3 for RGB)
+        show_labels: Whether to show node IDs as labels
+        cmap: Colormap to use for node colors (for single-channel coloring)
+        edge_alpha: Transparency of edges
+        title: Optional title for the plot
+
+    Returns:
+        fig, ax: The matplotlib figure and axis objects
+    """
+    try:
+        import networkx as nx
+        import matplotlib.pyplot as plt
+        from matplotlib.cm import get_cmap
+        import numpy as np
+    except ImportError:
+        print("Error: This function requires networkx and matplotlib. Install with:")
+        print("pip install networkx matplotlib")
+        return None, None
+
+    # Check if feature reduction is 'pca' and try to import sklearn
+    if feature_reduction == "pca":
+        try:
+            from sklearn.decomposition import PCA
+        except ImportError:
+            print("Error: PCA reduction requires scikit-learn. Install with:")
+            print("pip install scikit-learn")
+            print("Falling back to 'mean' reduction...")
+            feature_reduction = "mean"
+
+    # Convert GraphsTuple to NetworkX graph
+    G = nx.DiGraph()
+
+    # Get total number of nodes and edges
+    n_nodes = graph.n_node[0]
+    n_edges = graph.n_edge[0]
+
+    # Add nodes with attributes
+    for i in range(n_nodes):
+        # Extract node features
+        layer = int(graph.nodes["layer"][i])
+        gate_id = int(graph.nodes["gate_id"][i])
+        group = int(graph.nodes["group"][i])
+
+        # Add node features for coloring if needed
+        node_attrs = {"layer": layer, "gate_id": gate_id, "group": group}
+
+        if node_color_feature == "node_features" and node_feature_type:
+            # Add specific node features for advanced coloring
+            if node_feature_type == "logits" and "logits" in graph.nodes:
+                node_attrs["feature_values"] = np.array(graph.nodes["logits"][i])
+            elif node_feature_type == "hidden" and "hidden" in graph.nodes:
+                node_attrs["feature_values"] = np.array(graph.nodes["hidden"][i])
+
+        # Add node with attributes
+        G.add_node(i, **node_attrs)
+
+    # Add edges
+    for i in range(n_edges):
+        sender = int(graph.senders[i])
+        receiver = int(graph.receivers[i])
+        G.add_edge(sender, receiver)
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Determine node positions by layer (hierarchical layout)
+    pos = {}
+    layers = {}
+
+    # Group nodes by layer
+    for node, data in G.nodes(data=True):
+        layer = data["layer"]
+        if layer not in layers:
+            layers[layer] = []
+        layers[layer].append(node)
+
+    # Set y-coordinate based on layer
+    max_layer = max(layers.keys())
+    for layer, nodes in layers.items():
+        # Sort nodes within layer by group for cleaner visualization
+        nodes.sort(key=lambda n: G.nodes[n]["group"])
+
+        # Calculate y-coordinate (invert so layer 0 is at the top)
+        y = (max_layer - layer) * layer_spacing
+
+        # Distribute nodes horizontally
+        num_nodes = len(nodes)
+        for i, node in enumerate(nodes):
+            x = (i - num_nodes / 2) / (num_nodes * 0.5) if num_nodes > 1 else 0
+            pos[node] = (x, y)
+
+    # Determine node colors
+    if node_color_feature == "layer":
+        color_values = [G.nodes[n]["layer"] for n in G.nodes()]
+        node_colors = color_values
+        vmin, vmax = 0, max_layer
+        colorbar_label = "Layer"
+        use_colormap = True
+
+    elif node_color_feature == "group":
+        color_values = [G.nodes[n]["group"] for n in G.nodes()]
+        node_colors = color_values
+        vmin, vmax = 0, max(color_values)
+        colorbar_label = "Group"
+        use_colormap = True
+
+    elif node_color_feature == "node_features" and node_feature_type:
+        # Check if all nodes have feature_values
+        if not all("feature_values" in G.nodes[n] for n in G.nodes()):
+            print(
+                f"Warning: Not all nodes have {node_feature_type} features. Using default coloring."
+            )
+            node_colors = "skyblue"
+            use_colormap = False
+            vmin, vmax = None, None
+        else:
+            # Get feature values for all nodes
+            feature_arrays = [G.nodes[n]["feature_values"] for n in G.nodes()]
+
+            # Apply the requested feature reduction
+            if feature_reduction == "mean":
+                # Take mean of each feature array
+                color_values = [np.mean(arr) for arr in feature_arrays]
+                node_colors = color_values
+                vmin, vmax = min(color_values), max(color_values)
+                colorbar_label = f"Mean {node_feature_type}"
+                use_colormap = True
+
+            elif feature_reduction == "sum":
+                # Take sum of each feature array
+                color_values = [np.sum(arr) for arr in feature_arrays]
+                node_colors = color_values
+                vmin, vmax = min(color_values), max(color_values)
+                colorbar_label = f"Sum {node_feature_type}"
+                use_colormap = True
+
+            elif feature_reduction == "rgb":
+                # Use first 3 values as RGB
+                # Make sure all arrays have at least 3 values
+                if all(len(arr) >= 3 for arr in feature_arrays):
+                    # Normalize each dimension to [0, 1]
+                    rgb_arrays = []
+                    for arr in feature_arrays:
+                        # Only take first 3 dimensions
+                        rgb = arr[:3]
+                        # Apply sigmoid to values for better visualization
+                        rgb = 1.0 / (1.0 + np.exp(-rgb))
+                        rgb_arrays.append(rgb)
+
+                    node_colors = rgb_arrays
+                    use_colormap = False
+                    vmin, vmax = None, None
+                    colorbar_label = None
+                else:
+                    print(
+                        "Warning: Some feature arrays don't have 3+ dimensions for RGB. Using mean reduction."
+                    )
+                    color_values = [np.mean(arr) for arr in feature_arrays]
+                    node_colors = color_values
+                    vmin, vmax = min(color_values), max(color_values)
+                    colorbar_label = f"Mean {node_feature_type}"
+                    use_colormap = True
+
+            elif feature_reduction == "pca":
+                # Make sure we have enough samples for PCA
+                if len(feature_arrays) >= 3:
+                    # Stack arrays for PCA
+                    feature_matrix = np.stack(feature_arrays)
+                    # Apply PCA
+                    pca = PCA(n_components=min(pca_components, feature_matrix.shape[1]))
+                    # Normalize feature matrix before PCA
+                    feature_matrix = (
+                        feature_matrix - np.mean(feature_matrix, axis=0)
+                    ) / (np.std(feature_matrix, axis=0) + 1e-8)
+                    pca_result = pca.fit_transform(feature_matrix)
+
+                    if pca_components == 1:
+                        # Use single component with colormap
+                        node_colors = pca_result.flatten()
+                        vmin, vmax = min(node_colors), max(node_colors)
+                        colorbar_label = f"PCA of {node_feature_type}"
+                        use_colormap = True
+                    else:
+                        # For 3+ components, use first 3 for RGB
+                        rgb_pca = pca_result[:, :3]
+                        # Normalize to [0, 1] for RGB
+                        for col in range(rgb_pca.shape[1]):
+                            col_min, col_max = (
+                                rgb_pca[:, col].min(),
+                                rgb_pca[:, col].max(),
+                            )
+                            if col_max > col_min:  # Avoid division by zero
+                                rgb_pca[:, col] = (rgb_pca[:, col] - col_min) / (
+                                    col_max - col_min
+                                )
+
+                        node_colors = rgb_pca
+                        use_colormap = False
+                        vmin, vmax = None, None
+                        colorbar_label = None
+                else:
+                    print("Warning: Not enough nodes for PCA. Using mean reduction.")
+                    color_values = [np.mean(arr) for arr in feature_arrays]
+                    node_colors = color_values
+                    vmin, vmax = min(color_values), max(color_values)
+                    colorbar_label = f"Mean {node_feature_type}"
+                    use_colormap = True
+            else:
+                # Invalid reduction method
+                print(
+                    f"Warning: Unknown feature reduction method '{feature_reduction}'. Using default coloring."
+                )
+                node_colors = "skyblue"
+                use_colormap = False
+                vmin, vmax = None, None
+                colorbar_label = None
+    else:
+        # Default color if no feature specified
+        node_colors = "skyblue"
+        use_colormap = False
+        vmin, vmax = None, None
+        colorbar_label = None
+
+    # Draw the graph
+    if use_colormap:
+        nodes = nx.draw_networkx_nodes(
+            G,
+            pos,
+            node_size=node_size,
+            node_color=node_colors,
+            cmap=get_cmap(cmap),
+            vmin=vmin,
+            vmax=vmax,
+            ax=ax,
+        )
+    else:
+        nodes = nx.draw_networkx_nodes(
+            G, pos, node_size=node_size, node_color=node_colors, ax=ax
+        )
+
+    edges = nx.draw_networkx_edges(
+        G,
+        pos,
+        alpha=edge_alpha,
+        edge_color="gray",
+        arrows=True,
+        arrowsize=10,
+        width=0.5,
+        ax=ax,
+    )
+
+    if show_labels:
+        labels = {n: str(G.nodes[n]["gate_id"]) for n in G.nodes()}
+        nx.draw_networkx_labels(G, pos, labels=labels, font_size=8, ax=ax)
+
+    # Add colorbar if coloring by a feature with a colormap
+    if use_colormap and vmin is not None and vmax is not None:
+        sm = plt.cm.ScalarMappable(
+            cmap=get_cmap(cmap), norm=plt.Normalize(vmin=vmin, vmax=vmax)
+        )
+        sm.set_array([])
+        cbar = plt.colorbar(sm, ax=ax, shrink=0.8, pad=0.05)
+        if colorbar_label:
+            cbar.set_label(colorbar_label)
+
+    # Set title if provided
+    if title:
+        ax.set_title(title)
+    else:
+        # Create descriptive title if none provided
+        if node_color_feature == "node_features" and node_feature_type:
+            auto_title = f"Circuit Graph (colored by {node_feature_type} using {feature_reduction})"
+            ax.set_title(auto_title)
+        elif node_color_feature in ["layer", "group"]:
+            ax.set_title(f"Circuit Graph (colored by {node_color_feature})")
+        else:
+            ax.set_title("Circuit Graph")
+
+    # Remove axes
+    ax.set_axis_off()
+
+    plt.tight_layout()
+    return fig, ax
+
+
+def save_circuit_animation(
+    gnn: CircuitGNN,
+    graph: jraph.GraphsTuple,
+    num_steps: int = 10,
+    output_file: str = "circuit_evolution.gif",
+    fps: int = 2,
+    figsize=(10, 8),
+    node_size=80,
+    node_color_feature="layer",
+    show_labels=False,
+):
+    """
+    Create an animation of graph evolution over GNN message passing steps.
+
+    Args:
+        gnn: The CircuitGNN model
+        graph: Initial GraphsTuple
+        num_steps: Number of steps to animate
+        output_file: Output filename (gif or mp4)
+        fps: Frames per second in the animation
+        figsize: Figure size as (width, height)
+        node_size: Size of nodes in visualization
+        node_color_feature: Node feature to use for coloring
+        show_labels: Whether to show node labels
+
+    Returns:
+        Path to saved animation file
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.animation as animation
+        import networkx as nx
+    except ImportError:
+        print("Error: Animation requires matplotlib and networkx. Install with:")
+        print("pip install matplotlib networkx")
+        return None
+
+    # Create figure and axis for animation
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Create a list to store graph states
+    graph_states = [graph]
+
+    # Generate all graph states in advance
+    for step in range(1, num_steps + 1):
+        # Apply message passing steps
+        current_graph = run_gnn_scan(gnn, graph, step)
+        graph_states.append(current_graph)
+
+    # Create a common color scale for all frames
+    all_layers = []
+    for g in graph_states:
+        all_layers.extend(g.nodes["layer"])
+    vmin, vmax = 0, int(max(all_layers))
+
+    # Function to convert GraphsTuple to NetworkX graph
+    def graph_tuple_to_nx(g):
+        G = nx.DiGraph()
+        n_nodes = g.n_node[0]
+        n_edges = g.n_edge[0]
+
+        # Add nodes with attributes
+        for i in range(n_nodes):
+            layer = int(g.nodes["layer"][i])
+            gate_id = int(g.nodes["gate_id"][i])
+            group = int(g.nodes["group"][i])
+            G.add_node(i, layer=layer, gate_id=gate_id, group=group)
+
+        # Add edges
+        for i in range(n_edges):
+            sender = int(g.senders[i])
+            receiver = int(g.receivers[i])
+            G.add_edge(sender, receiver)
+
+        return G
+
+    # Create positions once based on the initial graph structure
+    G_init = graph_tuple_to_nx(graph)
+
+    # Group nodes by layer
+    layers = {}
+    for node, data in G_init.nodes(data=True):
+        layer = data["layer"]
+        if layer not in layers:
+            layers[layer] = []
+        layers[layer].append(node)
+
+    # Compute node positions (hierarchical layout)
+    pos = {}
+    max_layer = max(layers.keys())
+    layer_spacing_val = 1.5
+
+    for layer, nodes in layers.items():
+        # Sort nodes within layer by group for cleaner visualization
+        nodes.sort(key=lambda n: G_init.nodes[n]["group"])
+
+        # Calculate y-coordinate (invert so layer 0 is at the top)
+        y = (max_layer - layer) * layer_spacing_val
+
+        # Distribute nodes horizontally
+        num_nodes = len(nodes)
+        for i, node in enumerate(nodes):
+            x = (i - num_nodes / 2) / (num_nodes * 0.5) if num_nodes > 1 else 0
+            pos[node] = (x, y)
+
+    # Function to draw a frame
+    def draw_frame(i):
+        ax.clear()
+
+        current_graph = graph_states[i]
+        G = graph_tuple_to_nx(current_graph)
+
+        # Determine node colors
+        if node_color_feature == "layer":
+            color_values = [G.nodes[n]["layer"] for n in G.nodes()]
+        elif node_color_feature == "group":
+            color_values = [G.nodes[n]["group"] for n in G.nodes()]
+        else:
+            color_values = "skyblue"
+
+        # Draw the graph
+        nx.draw_networkx_nodes(
+            G,
+            pos,
+            node_size=node_size,
+            node_color=color_values,
+            cmap="viridis",
+            vmin=vmin,
+            vmax=vmax,
+            ax=ax,
+        )
+
+        nx.draw_networkx_edges(
+            G,
+            pos,
+            alpha=0.3,
+            edge_color="gray",
+            arrows=True,
+            arrowsize=10,
+            width=0.5,
+            ax=ax,
+        )
+
+        if show_labels:
+            labels = {n: str(G.nodes[n]["gate_id"]) for n in G.nodes()}
+            nx.draw_networkx_labels(G, pos, labels=labels, font_size=8, ax=ax)
+
+        # Add colorbar only once (first frame)
+        if i == 0 and node_color_feature in ["layer", "group"]:
+            sm = plt.cm.ScalarMappable(
+                cmap="viridis", norm=plt.Normalize(vmin=vmin, vmax=vmax)
+            )
+            sm.set_array([])
+            # cbar = plt.colorbar(sm, ax=ax, shrink=0.8, pad=0.05)
+            # cbar.set_label(f"{node_color_feature.capitalize()}")
+
+        # Set title
+        if i == 0:
+            ax.set_title("Initial Circuit")
+        else:
+            ax.set_title(f"After {i} Message Passing Steps")
+
+        # Remove axes
+        ax.set_axis_off()
+
+        return (ax,)
+
+    # Create animation
+    ani = animation.FuncAnimation(
+        fig,
+        draw_frame,
+        frames=len(graph_states),
+        interval=1000 / fps,  # milliseconds
+        blit=False,
+    )
+
+    # Save animation
+    writer = "pillow" if output_file.endswith(".gif") else None
+    ani.save(output_file, writer=writer, fps=fps)
+
+    plt.close(fig)
+    print(f"Animation saved to {output_file}")
+    return output_file
