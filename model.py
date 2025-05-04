@@ -100,6 +100,34 @@ def gen_wires(key, in_n, out_n, arity, group_size):
     return jax.random.permutation(key, n)[:edge_n].reshape(arity, -1) % in_n
 
 
+def gen_wires_with_noise(key, in_n, out_n, arity, group_size, local_noise=None):
+    """
+    Generate random wiring connections between circuit layers with optional locality bias.
+    
+    When local_noise is provided, wiring tends to connect nearby gates, with the noise 
+    parameter controlling how strictly local the connections are.
+
+    Args:
+        key: JAX random key for reproducible randomness
+        in_n: Number of input nodes
+        out_n: Number of output nodes
+        arity: Number of inputs per gate (fan-in)
+        group_size: Number of gates per group
+        local_noise: Amount of noise to add to local connections (None for purely random)
+
+    Returns:
+        Array of shape (arity, out_n//group_size) containing input indices for each gate
+    """
+    edge_n = out_n * arity // group_size
+    if in_n != edge_n or local_noise is None:
+        n = max(in_n, edge_n)
+        return jax.random.permutation(key, n)[:edge_n].reshape(arity, -1) % in_n
+    i = (
+        jp.arange(edge_n) + jax.random.normal(key, shape=(edge_n,)) * local_noise
+    ).argsort()
+    return i.reshape(-1, arity).T
+
+
 def gen_circuit(key, layer_sizes, arity=4, verbose=False):
     """
     Generate a complete circuit with random wiring and initial operations.
@@ -126,7 +154,7 @@ def gen_circuit(key, layer_sizes, arity=4, verbose=False):
     return all_wires, all_logits
 
 
-def run_circuit(logits, wires, x, hard=False):
+def run_circuit(logits, wires, x, gate_mask=None, hard=False):
     """
     Run the entire boolean circuit with multiple layers.
 
@@ -134,17 +162,62 @@ def run_circuit(logits, wires, x, hard=False):
         logits: List of logits for each layer
         wires: List of wire connection patterns for each layer
         x: Input tensor
+        gate_mask: Optional mask to enable/disable gates (1.0 for enabled, 0.0 for disabled)
         hard: If True, round outputs to binary values (0 or 1)
               If False, use soft (differentiable) outputs
 
     Returns:
         List of activation tensors for all layers (including input)
     """
+    # Handle case where gate_mask is not provided
+    if gate_mask is None:
+        gate_mask = [jp.ones_like(x)]
+        for lgt in logits:
+            gate_mask.append(jp.ones(lgt.shape[0] * lgt.shape[1]))
+    
+    # Apply input mask
+    x = x * gate_mask[0]
     acts = [x]
-    for ws, lgt in zip(wires, logits):
+    
+    for ws, lgt, mask in zip(wires, logits, gate_mask[1:]):
         luts = jax.nn.sigmoid(lgt)
         if hard:
             luts = jp.round(luts)
-        x = run_layer(luts, [x[..., w] for w in ws])
+        x = run_layer(luts, [x[..., w] for w in ws]) * mask
         acts.append(x)
     return acts
+
+
+################## boolear circuit definition ##################
+
+def generate_layer_sizes(input_n, output_n, arity, layer_n=2):
+    """
+    Generate layer sizes for the boolean circuit with proper dimensioning.
+    Ensures the last hidden layer properly connects to the output layer.
+    
+    Args:
+        input_n: Number of input bits
+        output_n: Number of output bits
+        arity: Number of inputs per gate
+        layer_n: Number of hidden layers
+    
+    Returns:
+        A tuple of (gate_n, group_size) pairs for each layer
+    """
+    # Base width for hidden layers
+    layer_width = input_n * arity * 2
+    
+    # Calculate the required size for the last hidden layer
+    # to match the output layer's input requirements
+    last_hidden_width = output_n * arity
+    last_hidden_group = arity // 2 if arity > 1 else 1
+    
+    # Generate layer sizes
+    layer_sizes = (
+        [(input_n, 1)]  # Input layer
+        + [(layer_width, arity)] * (layer_n - 1)  # Hidden layers
+        + [(last_hidden_width, last_hidden_group)]  # Last hidden layer
+        + [(output_n, 1)]  # Output layer
+    )
+    
+    return layer_sizes

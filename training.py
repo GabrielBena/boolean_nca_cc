@@ -30,7 +30,7 @@ def unpack(x, bit_n=8):
     return jp.float32((x[..., None] >> np.r_[:bit_n]) & 1)
 
 
-# @jax.jit
+@jax.jit
 def res2loss(res, power=4):
     """
     Compute loss from residuals using L4 norm.
@@ -46,7 +46,7 @@ def res2loss(res, power=4):
     return jp.sum(jp.power(jp.abs(res), power))
 
 
-# @jax.jit
+@jax.jit
 def binary_cross_entropy(y_pred, y_true):
     """
     Compute binary cross-entropy loss.
@@ -73,7 +73,7 @@ def binary_cross_entropy(y_pred, y_true):
     )
 
 
-# @jax.jit
+@jax.jit
 def compute_accuracy(y_pred, y_true):
     """
     Compute the accuracy of predicted bits compared to true bits.

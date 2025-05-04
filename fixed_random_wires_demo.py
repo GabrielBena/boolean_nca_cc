@@ -4,7 +4,6 @@
 # This version avoids immvision and uses direct imgui image display
 
 import time
-from functools import partial
 import numpy as np
 import jax
 import jax.numpy as jp
@@ -12,6 +11,13 @@ import optax
 import PIL.Image, PIL.ImageDraw
 import IPython
 import ctypes
+from functools import partial
+
+# Import modules for boolean circuits
+from model import make_nops, run_layer, gen_wires, run_circuit, generate_layer_sizes
+from training import unpack, res2loss, loss_f, grad_loss_f_l4, grad_loss_f_bce, train_step, TrainState
+import graph  # Optional graph-based circuit optimization
+import tasks  # Import the tasks module
 
 from imgui_bundle import (
     implot,
@@ -22,20 +28,9 @@ from imgui_bundle import (
     hello_imgui,
 )
 
-
-################## boolear circuit definition ##################
-
-input_n, output_n = 8, 8
-case_n = 1 << input_n
-arity, layer_width, layer_n = 4, 64, 5
-layer_sizes = (
-    [(input_n, 1)]
-    + [(layer_width, arity)] * (layer_n - 1)
-    + [(layer_width // 2, arity // 2), (output_n, 1)]
-)
-
-
-def gen_wires(key, in_n, out_n, arity, group_size, local_noise=None):
+# Extend gen_wires in model.py to support local_noise
+def gen_wires_with_noise(key, in_n, out_n, arity, group_size, local_noise=None):
+    """Extended version of gen_wires that supports local_noise parameter"""
     edge_n = out_n * arity // group_size
     if in_n != edge_n or local_noise is None:
         n = max(in_n, edge_n)
@@ -45,43 +40,17 @@ def gen_wires(key, in_n, out_n, arity, group_size, local_noise=None):
     ).argsort()
     return i.reshape(-1, arity).T
 
-
-def make_nops(gate_n, arity, group_size, nop_scale=3.0):
-    I = jp.arange(1 << arity)
-    bits = (I >> I[:arity, None]) & 1
-    luts = bits[jp.arange(gate_n) % arity]
-    logits = (2.0 * luts - 1.0) * nop_scale
-    return logits.reshape(gate_n // group_size, group_size, -1)
-
-
-@jax.jit
-def run_layer(lut, inputs):
-    # lut:[group_n, group_size, 1<<arity], [arity, ... , group_n]
-    for x in inputs:
-        x = x[..., None, None]
-        lut = (1.0 - x) * lut[..., ::2] + x * lut[..., 1::2]
-    # [..., group_n, group_size, 1]
-    return lut.reshape(*lut.shape[:-3] + (-1,))
-
-
-def run_circuit(logits, wires, gate_mask, x, hard=False):
-    x = x * gate_mask[0]
-    acts = [x]
-    for ws, lgt, mask in zip(wires, logits, gate_mask[1:]):
-        luts = jax.nn.sigmoid(lgt)
-        if hard:
-            luts = jp.round(luts)
-        x = run_layer(luts, [x[..., w] for w in ws]) * mask
-        acts.append(x)
-    return acts
-
-
 def res2loss(res):
     return jp.square(jp.square(res)).sum()
 
+# Use the modified run_circuit that accepts gate_mask
+def run_circuit_gui(logits, wires, gate_mask, x, hard=False):
+    """Run circuit with gate masking for GUI use"""
+    return run_circuit(logits, wires, x, gate_mask=gate_mask, hard=hard)
 
-def loss_f(logits, wires, gate_mask, x, y0):
-    run_f = partial(run_circuit, logits, wires, gate_mask, x)
+def loss_f_gui(logits, wires, gate_mask, x, y0):
+    """Modified loss function that uses gate masking"""
+    run_f = partial(run_circuit_gui, logits, wires, gate_mask, x)
     act = run_f()
     loss = res2loss(act[-1] - y0)
     hard_act = run_f(hard=True)
@@ -91,8 +60,7 @@ def loss_f(logits, wires, gate_mask, x, y0):
         act=act, err_mask=err_mask, hard_loss=hard_loss, hard_act=hard_act
     )
 
-
-grad_loss_f = jax.jit(jax.value_and_grad(loss_f, has_aux=True))
+grad_loss_f_gui = jax.jit(jax.value_and_grad(loss_f_gui, has_aux=True))
 
 
 ################## circuit gate and wire use analysis ##################
@@ -175,153 +143,363 @@ max_trainstep_n = 1000
 
 class Demo:
     def __init__(self):
+        # Circuit configuration
+        self.input_n = 4
+        self.output_n = 4
+        self.arity = 2
+        self.layer_n = 2
+        
+        # Update case_n based on input_n
+        self.case_n = 1 << self.input_n
+        
+        # Generate initial layer sizes
+        self.layer_sizes = generate_layer_sizes(self.input_n, self.output_n, self.arity, self.layer_n)
+        
+        # Circuit initialization
         self.logits0 = []
-        for gate_n, group_size in layer_sizes[1:]:
-            self.logits0.append(make_nops(gate_n, arity, group_size))
+        for gate_n, group_size in self.layer_sizes[1:]:
+            self.logits0.append(make_nops(gate_n, self.arity, group_size))
         self.logits = self.logits0
         print("param_n:", sum(l.size for l in self.logits0))
+        
+        # Wiring configuration
         self.wires_key = jax.random.PRNGKey(42)
         self.local_noise = 0.0
         self.shuffle_wires()
         self.reset_gate_mask()
 
-        x = jp.arange(case_n)
-        self.input_x = unpack(x)
+        # Input data
+        x = jp.arange(self.case_n)
+        self.input_x = unpack(x, bit_n=self.input_n)
+        
         # Create a proper image format for display - convert to 3-channel uint8
         inp_img = self.input_x.T
+        
+        # Ensure consistent visualization with different input sizes
+        # Use a more moderate zoom factor to avoid overly large displays
+        zoom_factor = max(4, int(8 // self.input_n * 2))  # Reduced scaling factor
         inp_img = np.dstack([inp_img] * 3)  # Convert to 3-channel
-        inp_img = zoom(inp_img, 4)
+        inp_img = zoom(inp_img, zoom_factor)
         self.inputs_img = np.uint8(inp_img.clip(0, 1) * 255)  # Convert to uint8
-        print(f"Input image shape: {self.inputs_img.shape}, dtype: {self.inputs_img.dtype}")
+        
+        print(f"Input image shape: {self.inputs_img.shape}, dtype: {self.inputs_img.dtype}, zoom_factor: {zoom_factor}")
         self.active_case_i = 123
 
-        # Create simple texture
+        # Display textures
         self.input_texture = None
         self.output_texture = None
         
-        # Use simple visualization for better performance
-        self.use_simple_viz = True
+        # Visualization settings
+        self.use_simple_viz = False
         
         # Plot settings
         self.max_loss_value = 10.0  # Maximum loss value to display
         self.min_loss_value = 1e-6  # Minimum loss value (for log scale)
         self.auto_scale_plot = True
 
-        self.tasks = dict(
-            copy=x,
-            gray=x ^ (x >> 1),
-            add4=(x & 0xF) + (x >> 4),
-            mul4=(x & 0xF) * (x >> 4),
-            popcount=np.bitwise_count(x),
-            text=x,
-            noise=x,
-        )
-        self.task_names = list(self.tasks)
-        self.task_idx = self.task_names.index("mul4")
-        self.task_text = "All you need are ones  and zeros  and backpropagation"
+        # Task definitions using the tasks module
+        self.available_tasks = list(tasks.TASKS.keys()) + ["text", "noise"]
+        self.task_idx = self.available_tasks.index("binary_multiply") if "binary_multiply" in self.available_tasks else 0
+        self.task_text = "All you need are ones and zeros and backpropagation"
         self.noise_p = 0.5
         self.sample_noise()
         self.update_task()
 
+        # Training setup
         self.wd_log10 = -1
-        self.opt_state = self.get_opt().init(self.logits)
         self.loss_log = np.zeros(max_trainstep_n, np.float32)
         self.hard_log = np.zeros(max_trainstep_n, np.float32)
         self.trainstep_i = 0
         self.is_training = True
+        
+        # Optimization method (backprop/GNN)
+        self.optimization_methods = ["Backprop", "GNN"]
+        self.optimization_method_idx = 0  # Default to Backprop
+        
+        # Initialize optimizers
+        self.init_optimizers()
+        
+        # GNN setup (initialized on demand)
+        self.gnn = None
+        self.gnn_hidden_dim = 16
+        self.gnn_message_steps = 5
+        self.gnn_node_mlp_features = [64, 32]
+        self.gnn_edge_mlp_features = [64, 32]
+        self.gnn_enable_message_passing = True
+
+    def init_optimizers(self):
+        """Initialize or reinitialize optimization methods"""
+        # Backprop optimizer
+        self.bp_optimizer = optax.adamw(2.0, 0.8, 0.8, weight_decay=10**self.wd_log10)
+        self.opt_state = self.bp_optimizer.init(self.logits)
+        
+        # GNN optimizer will be initialized on demand when selected
 
     def get_opt(self):
         return optax.adamw(2.0, 0.8, 0.8, weight_decay=10**self.wd_log10)
 
     def reset_gate_mask(self):
-        self.gate_mask = [np.ones(gate_n) for gate_n, _ in layer_sizes]
+        self.gate_mask = [np.ones(gate_n) for gate_n, _ in self.layer_sizes]
         self.wire_masks = [np.ones_like(w, np.bool_) for w in self.wires]
 
     def mask_unused_gates(self):
         gate_masks, self.wire_masks = calc_gate_use_masks(
-            input_n, self.wires, self.logits
+            self.input_n, self.wires, self.logits
         )
         for i in range(len(gate_masks)):
             self.gate_mask[i] = np.array(self.gate_mask[i] * gate_masks[i])
 
     def shuffle_wires(self):
-        in_n = input_n
+        in_n = self.input_n
         self.wires = []
         key = self.wires_key
-        for gate_n, group_size in layer_sizes[1:]:
+        for gate_n, group_size in self.layer_sizes[1:]:
             key, k1 = jax.random.split(key)
             local_noise = self.local_noise if self.local_noise > 0.0 else None
-            ws = gen_wires(k1, in_n, gate_n, arity, group_size, local_noise)
+            ws = gen_wires_with_noise(k1, in_n, gate_n, self.arity, group_size, local_noise)
             self.wires.append(ws)
             in_n = gate_n
+        
+        # Reset GNN when wires change
+        self.gnn = None
 
     def sample_noise(self):
-        self.noise = np.random.rand(case_n, input_n)
+        self.noise = np.random.rand(self.case_n, self.input_n)
 
     def update_task(self):
-        task_name = self.task_names[self.task_idx]
+        """Update the current task using the tasks module where possible"""
+        task_name = self.available_tasks[self.task_idx]
+        
         if task_name == "text":
-            im = PIL.Image.new("L", (case_n, input_n))
+            # Text-based task (special case)
+            im = PIL.Image.new("L", (self.case_n, self.output_n))
             draw = PIL.ImageDraw.Draw(im)
             draw.text((2, -2), self.task_text, fill=255)
             self.y0 = jp.float32(np.array(im) > 100).T
+            
+            # Default input is just counting
+            x = jp.arange(self.case_n)
+            self.input_x = unpack(x, bit_n=self.input_n)
+            
         elif task_name == "noise":
+            # Noise-based task (special case)
+            if self.noise.shape != (self.case_n, self.input_n):
+                self.sample_noise()
             self.y0 = jp.float32(self.noise < self.noise_p)
+            
+            # Default input is just counting
+            x = jp.arange(self.case_n)
+            self.input_x = unpack(x, bit_n=self.input_n)
+            
         else:
-            self.y0 = jp.float32(unpack(self.tasks[task_name]))
+            # Use the tasks module for standard tasks
+            try:
+                # Get both input and expected output from the task
+                self.input_x, self.y0 = tasks.get_task_data(
+                    task_name, 
+                    self.case_n, 
+                    input_bits=self.input_n, 
+                    output_bits=self.output_n
+                )
+                
+                # Update input visualization
+                self.update_input_visualization()
+                
+            except Exception as e:
+                print(f"Error loading task '{task_name}': {e}")
+                # Fallback to simple copy task
+                x = jp.arange(self.case_n)
+                self.input_x = unpack(x, bit_n=self.input_n)
+                max_output_value = (1 << self.output_n) - 1
+                clipped_output = np.minimum(x, max_output_value)
+                self.y0 = jp.float32(unpack(clipped_output, bit_n=self.output_n))
+                
+                # Update input visualization
+                self.update_input_visualization()
+        
+        # Reset training progress when task changes
+        self.trainstep_i = 0
+        self.loss_log = np.zeros(max_trainstep_n, np.float32)
+        self.hard_log = np.zeros(max_trainstep_n, np.float32)
+        
+    def update_input_visualization(self):
+        """Update input visualization based on current input_x"""
+        inp_img = self.input_x.T
+        zoom_factor = max(4, int(8 // self.input_n * 2))  # Reduced scaling factor
+        inp_img = np.dstack([inp_img] * 3)  # Convert to 3-channel
+        inp_img = zoom(inp_img, zoom_factor)
+        self.inputs_img = np.uint8(inp_img.clip(0, 1) * 255)  # Convert to uint8
+
+    def initialize_gnn(self):
+        """Initialize GNN optimizer if needed"""
+        if self.gnn is None:
+            print("Initializing GNN...")
+            # Initialize GNN using current circuit configuration
+            key = jax.random.PRNGKey(42)  # Fixed seed for reproducibility
+            try:
+                self.gnn, _, _ = graph.test_gnn(
+                    self.logits,
+                    self.wires,
+                    self.input_n,
+                    arity=self.arity,
+                    hidden_dim=self.gnn_hidden_dim,
+                    message_passing=self.gnn_enable_message_passing,
+                    steps=1  # Just initialize
+                )
+                print("GNN initialized successfully")
+            except Exception as e:
+                print(f"Error initializing GNN: {e}")
+                # Fallback to backprop
+                self.optimization_method_idx = 0
+                
+    def update_circuit_backprop(self):
+        """Update circuit using backpropagation"""
+        try:
+            (loss, aux), grad = grad_loss_f_gui(
+                self.logits, self.wires, self.gate_mask, self.input_x, self.y0
+            )
+            if self.is_training:
+                upd, self.opt_state = self.bp_optimizer.update(
+                    grad, self.opt_state, self.logits
+                )
+                self.logits = optax.apply_updates(self.logits, upd)
+
+            self.act = aux["act"]
+            self.err_mask = aux["err_mask"]  # Store error mask for visualization
+            return loss, aux["hard_loss"]
+        except Exception as e:
+            print(f"Error in backprop update: {e}")
+            # Return fallback values to avoid crashing
+            self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
+            self.err_mask = np.ones((self.case_n, self.output_n), bool)
+            return self.max_loss_value, self.max_loss_value
+        
+    def update_circuit_gnn(self):
+        """Update circuit using GNN"""
+        try:
+            # Ensure GNN is initialized
+            self.initialize_gnn()
+            
+            # Run GNN for specified number of steps
+            try:
+                # Store original logit shapes for reconstruction
+                logits_original_shapes = [logit.shape for logit in self.logits]
+                
+                # Create graph from current circuit
+                circuit_graph = graph.build_graph(
+                    self.logits, self.wires, self.input_n, self.arity, self.gnn_hidden_dim
+                )
+                
+                # Run GNN for specified number of steps
+                updated_graph = graph.run_gnn_scan(
+                    self.gnn, circuit_graph, self.gnn_message_steps
+                )
+                
+                # Extract updated logits if training is enabled
+                if self.is_training:
+                    self.logits = graph.extract_logits_from_graph(
+                        updated_graph, logits_original_shapes
+                    )
+                    
+                # Run circuit with updated logits
+                self.act = run_circuit_gui(
+                    self.logits, self.wires, self.gate_mask, self.input_x
+                )
+                hard_act = run_circuit_gui(
+                    self.logits, self.wires, self.gate_mask, self.input_x, hard=True
+                )
+                
+                # Generate error mask for visualization
+                self.err_mask = hard_act[-1] != self.y0
+                
+                # Calculate loss
+                loss = res2loss(self.act[-1] - self.y0)
+                hard_loss = res2loss(hard_act[-1] - self.y0)
+                
+                return loss, hard_loss
+                
+            except Exception as e:
+                print(f"Error in GNN update: {e}")
+                # Fallback to backprop
+                self.optimization_method_idx = 0
+                return self.update_circuit_backprop()
+                
+        except Exception as e:
+            print(f"Critical error in GNN update: {e}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
+            
+            # Return fallback values to avoid crashing
+            self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
+            self.err_mask = np.ones((self.case_n, self.output_n), bool)
+            return self.max_loss_value, self.max_loss_value
 
     def update_circuit(self):
-        (loss, aux), grad = grad_loss_f(
-            self.logits, self.wires, self.gate_mask, self.input_x, self.y0
-        )
-        if self.is_training:
-            upd, self.opt_state = self.get_opt().update(
-                grad, self.opt_state, self.logits
-            )
-            self.logits = optax.apply_updates(self.logits, upd)
-
-        self.act = aux["act"]
-        oimg = self.act[-1].T
-        oimg = np.dstack([oimg] * 3)
-        m = aux["err_mask"].T[..., None] * 0.5
-
-        oimg = oimg * (1.0 - m) + m * np.float32([1, 0, 0])
-        oimg = zoom(oimg, 4)
-
-        self.outputs_img = np.uint8(oimg.clip(0, 1) * 255)
-        
-        # Update textures for display
-        self.update_textures()
-
-        # Ensure loss values are valid and bounded
-        loss_value = float(loss)
-        hard_loss = float(aux["hard_loss"])
-        
-        # Check for NaN or infinity
-        if np.isnan(loss_value) or np.isinf(loss_value):
-            loss_value = self.max_loss_value
-            print(f"Warning: Invalid loss value detected, clamping to {self.max_loss_value}")
-        
-        if np.isnan(hard_loss) or np.isinf(hard_loss):
-            hard_loss = self.max_loss_value
-            print(f"Warning: Invalid hard_loss value detected, clamping to {self.max_loss_value}")
+        """Update circuit using selected optimization method"""
+        try:
+            # Choose optimization method
+            if self.optimization_methods[self.optimization_method_idx] == "Backprop":
+                loss, hard_loss = self.update_circuit_backprop()
+            else:  # GNN
+                loss, hard_loss = self.update_circuit_gnn()
             
-        # Update max loss value if auto-scaling is enabled
-        if self.auto_scale_plot:
-            if loss_value > self.max_loss_value:
-                self.max_loss_value = min(loss_value * 1.5, 1e6)  # Reasonable upper bound
+            # Extract output activations and visualize
+            oimg = self.act[-1].T
+            oimg = np.dstack([oimg] * 3)
+            
+            # Apply error mask for visualization (both methods set self.err_mask)
+            m = self.err_mask.T[..., None] * 0.5
+            oimg = oimg * (1.0 - m) + m * np.float32([1, 0, 0])
+            
+            # Use same zoom factor as for input, but more moderate
+            zoom_factor = max(4, int(8 // self.output_n * 2))  # Reduced scaling factor
+            oimg = zoom(oimg, zoom_factor)
+            self.outputs_img = np.uint8(oimg.clip(0, 1) * 255)
+            
+            # Update textures for display
+            self.update_textures()
+
+            # Ensure loss values are valid and bounded
+            loss_value = float(loss)
+            hard_loss_value = float(hard_loss)
+            
+            # Check for NaN or infinity
+            if np.isnan(loss_value) or np.isinf(loss_value):
+                loss_value = self.max_loss_value
+                print(f"Warning: Invalid loss value detected, clamping to {self.max_loss_value}")
+            
+            if np.isnan(hard_loss_value) or np.isinf(hard_loss_value):
+                hard_loss_value = self.max_loss_value
+                print(f"Warning: Invalid hard_loss value detected, clamping to {self.max_loss_value}")
                 
-            if hard_loss > self.max_loss_value:
-                self.max_loss_value = min(hard_loss * 1.5, 1e6)
+            # Update max loss value if auto-scaling is enabled
+            if self.auto_scale_plot:
+                if loss_value > self.max_loss_value:
+                    self.max_loss_value = min(loss_value * 1.5, 1e6)  # Reasonable upper bound
+                    
+                if hard_loss_value > self.max_loss_value:
+                    self.max_loss_value = min(hard_loss_value * 1.5, 1e6)
 
-        # Store the bounded values
-        i = self.trainstep_i % len(self.loss_log)
-        self.loss_log[i] = max(min(loss_value, self.max_loss_value), self.min_loss_value)
-        self.hard_log[i] = max(min(hard_loss, self.max_loss_value), self.min_loss_value)
-        
-        if self.is_training:
-            self.trainstep_i += 1
+            # Store the bounded values
+            i = self.trainstep_i % len(self.loss_log)
+            self.loss_log[i] = max(min(loss_value, self.max_loss_value), self.min_loss_value)
+            self.hard_log[i] = max(min(hard_loss_value, self.max_loss_value), self.min_loss_value)
             
+            if self.is_training:
+                self.trainstep_i += 1
+                
+        except Exception as e:
+            print(f"Error in update_circuit: {e}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
+            
+            # Try to recover by regenerating the circuit completely
+            print("Attempting to recover by regenerating circuit...")
+            try:
+                self.regenerate_circuit()
+            except Exception as recovery_error:
+                print(f"Failed to recover: {recovery_error}")
+                
     def update_textures(self):
         # We'll create textures each frame for simplicity
         # In a real application, you might want to cache these
@@ -347,13 +525,13 @@ class Demo:
         base_x += pad
 
         dl = imgui.get_window_draw_list()
-        h = (H - d) / (len(layer_sizes) - 1)
+        h = (H - d) / (len(self.layer_sizes) - 1)
         prev_gate_x = None
         prev_y = 0
         prev_act = None
         case = self.active_case_i
         hover_gate = None
-        for li, (gate_n, group_size) in enumerate(layer_sizes):
+        for li, (gate_n, group_size) in enumerate(self.layer_sizes):
             group_n = gate_n // group_size
             span_x = W / group_n
             group_w = min(d * group_size, span_x - 6)
@@ -397,7 +575,7 @@ class Demo:
                 masks = self.wire_masks[li - 1].T
                 src_x = prev_gate_x[wires]
                 dst_x = (
-                    group_x + (np.arange(arity) + 0.5) / arity * group_w - group_w / 2
+                    group_x + (np.arange(self.arity) + 0.5) / self.arity * group_w - group_w / 2
                 )
                 my = (prev_y + y) / 2
                 for x0, x1, si, m in zip(
@@ -433,7 +611,26 @@ class Demo:
             # Create a simple colored rectangle instead of using texture
             dl = imgui.get_window_draw_list()
             p0 = imgui.get_cursor_screen_pos()
-            aspect = height / width
+            
+            # Calculate proper aspect ratio based on the actual input/output data dimensions
+            if name == "inputs":
+                # For inputs, maintain the natural bit_n / 2^bit_n ratio
+                # This accounts for the fact that width scales exponentially (2^n) while height scales linearly (n)
+                natural_aspect = self.input_n / (2**self.input_n)
+                reference_aspect = 8.0 / (2**8)  # Aspect ratio of 8-bit display
+                # Scale to be similar to 8-bit display but with correct proportions
+                aspect = natural_aspect * (reference_aspect / natural_aspect) * 3.0
+            else:  # outputs
+                # For outputs, do the same calculation
+                natural_aspect = self.output_n / (2**self.output_n)
+                reference_aspect = 8.0 / (2**8)  # Aspect ratio of 8-bit display
+                aspect = natural_aspect * (reference_aspect / natural_aspect) * 3.0
+            
+            # Maintain proper aspect ratio within reasonable bounds
+            min_aspect = 0.02   # Minimum height to width ratio
+            max_aspect = 0.3    # Maximum height to width ratio
+            aspect = max(min_aspect, min(aspect, max_aspect))
+            
             disp_w = view_w
             disp_h = disp_w * aspect
             p1 = (p0[0] + disp_w, p0[1] + disp_h)
@@ -443,8 +640,8 @@ class Demo:
             
             if self.use_simple_viz:
                 # Very simple visualization - just show active case
-                case_width = disp_w / case_n
-                for i in range(case_n):
+                case_width = disp_w / self.case_n
+                for i in range(self.case_n):
                     # Draw a simple line for each case
                     x_pos = p0[0] + i * case_width
                     is_active = (i == self.active_case_i)
@@ -541,7 +738,7 @@ class Demo:
                             )
             
             # Add cursor showing active case
-            x = p0[0] + (disp_w * (self.active_case_i + 0.5) / case_n)
+            x = p0[0] + (disp_w * (self.active_case_i + 0.5) / self.case_n)
             dl.add_line((x, p0[1]), (x, p1[1]), 0x8000FF00, 2.0)
             
             # Add border
@@ -553,11 +750,11 @@ class Demo:
             if imgui.is_item_hovered() and imgui.is_mouse_clicked(0):
                 mx = imgui.get_io().mouse_pos.x - p0[0]
                 mx_ratio = mx / disp_w
-                self.active_case_i = int(mx_ratio * case_n)
+                self.active_case_i = int(mx_ratio * self.case_n)
                 if self.active_case_i < 0:
                     self.active_case_i = 0
-                if self.active_case_i >= case_n:
-                    self.active_case_i = case_n - 1
+                if self.active_case_i >= self.case_n:
+                    self.active_case_i = self.case_n - 1
             
             # Skip some space
             imgui.dummy((0, disp_h))
@@ -566,6 +763,60 @@ class Demo:
             imgui.text(f"Error drawing {name}: {e}")
             import traceback
             print(f"Error in draw_lut: {traceback.format_exc()}")
+
+    def regenerate_circuit(self):
+        """Completely regenerate the circuit with current parameters"""
+        print(f"Regenerating circuit: input_n={self.input_n}, output_n={self.output_n}, arity={self.arity}, layer_n={self.layer_n}")
+        
+        # Update derived values
+        self.case_n = 1 << self.input_n
+        
+        # Ensure active case is valid for new case_n
+        self.active_case_i = min(self.active_case_i, self.case_n - 1)
+        
+        # Generate new layer sizes
+        self.layer_sizes = generate_layer_sizes(self.input_n, self.output_n, self.arity, self.layer_n)
+        print(f"New layer sizes: {self.layer_sizes}")
+        
+        # Reinitialize circuit
+        self.logits0 = []
+        for gate_n, group_size in self.layer_sizes[1:]:
+            self.logits0.append(make_nops(gate_n, self.arity, group_size))
+        self.logits = self.logits0
+        
+        # Reset gate masks
+        self.reset_gate_mask()
+        
+        # Regenerate wires with new key to ensure fresh connections
+        self.wires_key = jax.random.PRNGKey(42)  # Fixed seed for reproducibility
+        self.shuffle_wires()
+        
+        # Update input/output data
+        x = jp.arange(self.case_n)
+        self.input_x = unpack(x, bit_n=self.input_n)
+        self.update_input_visualization()
+        
+        # Reset noise if needed
+        self.sample_noise()
+        
+        # Reset optimizer state
+        self.init_optimizers()
+        
+        # Reset GNN if it was being used
+        self.gnn = None
+        
+        # Reset training progress
+        self.trainstep_i = 0
+        self.loss_log = np.zeros(max_trainstep_n, np.float32)
+        self.hard_log = np.zeros(max_trainstep_n, np.float32)
+        
+        # Update task for new input/output dimensions
+        self.update_task()
+        
+        # Run circuit once to initialize activations
+        self.update_circuit()
+        
+        print(f"Circuit regenerated with {sum(l.size for l in self.logits0)} parameters")
 
     def gui(self):
         try:
@@ -633,16 +884,45 @@ class Demo:
                 self.min_loss_value = 1e-6
                 print("Plot bounds reset to default values")
                 
-            imgui.separator()
+            imgui.separator_text("Optimization")
 
+            # Optimization method selection
+            opt_changed, self.optimization_method_idx = imgui.combo(
+                "Method", self.optimization_method_idx, self.optimization_methods
+            )
+            if opt_changed:
+                print(f"Switching to {self.optimization_methods[self.optimization_method_idx]} optimization")
+                # Initialize GNN if needed when switching to it
+                if self.optimization_methods[self.optimization_method_idx] == "GNN":
+                    self.initialize_gnn()
+            
+            # GNN parameters (only shown when GNN is selected)
+            if self.optimization_methods[self.optimization_method_idx] == "GNN":
+                imgui.text("GNN Parameters:")
+                _, self.gnn_message_steps = imgui.slider_int(
+                    "Message Steps", self.gnn_message_steps, 1, 20
+                )
+                _, self.gnn_hidden_dim = imgui.slider_int(
+                    "Hidden Dim", self.gnn_hidden_dim, 4, 64
+                )
+                _, self.gnn_enable_message_passing = imgui.checkbox(
+                    "Enable Message Passing", self.gnn_enable_message_passing
+                )
+                if imgui.button("Reinitialize GNN"):
+                    self.gnn = None
+                    self.initialize_gnn()
+            
+            # Training controls (common to both methods)
             _, self.is_training = imgui.checkbox("is_training", self.is_training)
             if imgui.button("reset gates"):
                 self.logits = self.logits0
                 self.trainstep_i = 0
             if imgui.button("reset gates + opt"):
                 self.logits = self.logits0
-                self.opt_state = self.get_opt().init(self.logits)
+                self.init_optimizers()
                 self.trainstep_i = 0
+                # Reset GNN as well
+                self.gnn = None
             if imgui.button("shuffle wires"):
                 self.wires_key, key = jax.random.split(self.wires_key)
                 self.shuffle_wires()
@@ -653,7 +933,10 @@ class Demo:
             if local_noise_changed:
                 self.shuffle_wires()
 
-            _, self.wd_log10 = imgui.slider_float("wd_log10", self.wd_log10, -3, 0.0)
+            # Weight decay (only affects backprop)
+            wd_changed, self.wd_log10 = imgui.slider_float("wd_log10", self.wd_log10, -3, 0.0)
+            if wd_changed and self.optimization_method_idx == 0:  # Only reinitialize for backprop
+                self.init_optimizers()
 
             imgui.separator_text("Masks")
             if imgui.button("reset gate mask"):
@@ -665,12 +948,31 @@ class Demo:
 
             imgui.separator_text("Task")
             task_changed, self.task_idx = imgui.combo(
-                "task", self.task_idx, self.task_names
+                "task", self.task_idx, self.available_tasks
             )
             if task_changed:
                 self.update_task()
                 self.trainstep_i = 0
-            task_name = self.task_names[self.task_idx]
+            
+            task_name = self.available_tasks[self.task_idx]
+            
+            # Display task description
+            task_descriptions = {
+                "binary_multiply": "Multiply lower and upper halves of input",
+                "and": "Bitwise AND between halves of input",
+                "xor": "Bitwise XOR between halves of input",
+                "add": "Add lower and upper halves of input",
+                "parity": "Compute parity (odd/even number of bits)",
+                "reverse": "Reverse the bits in the input",
+                "text": "Learn a text pattern as binary image",
+                "noise": "Learn a random noise pattern"
+            }
+            
+            # Show task description if available
+            if task_name in task_descriptions:
+                imgui.text_wrapped(f"Description: {task_descriptions[task_name]}")
+            
+            # Show task-specific controls
             if task_name == "text":
                 text_changed, self.task_text = imgui.input_text("text", self.task_text)
                 if text_changed:
@@ -681,10 +983,98 @@ class Demo:
                 )
                 if noise_changed:
                     self.update_task()
+                    
+            # Show circuit information
+            imgui.spacing()
+            actual_params = sum(l.size for l in self.logits0)
+            imgui.text(f"Circuit parameters: {actual_params}")
+
+            imgui.separator_text("Circuit Architecture")
+            
+            # Add UI controls for circuit architecture parameters
+            circuit_changed = False
+            
+            # Store original values to detect changes
+            orig_input_n = self.input_n
+            orig_output_n = self.output_n
+            orig_arity = self.arity
+            orig_layer_n = self.layer_n
+            
+            # Input bits slider
+            _, new_input_n = imgui.slider_int("Input Bits", self.input_n, 2, 8)
+            if new_input_n != self.input_n:
+                self.input_n = new_input_n
+                circuit_changed = True
+                
+            # Output bits slider
+            _, new_output_n = imgui.slider_int("Output Bits", self.output_n, 2, 8)
+            if new_output_n != self.output_n:
+                self.output_n = new_output_n
+                circuit_changed = True
+                
+            # Gate arity slider
+            _, new_arity = imgui.slider_int("Gate Arity", self.arity, 2, 4)
+            if new_arity != self.arity:
+                self.arity = new_arity
+                circuit_changed = True
+                
+            # Hidden layers slider
+            _, new_layer_n = imgui.slider_int("Hidden Layers", self.layer_n, 1, 4)
+            if new_layer_n != self.layer_n:
+                self.layer_n = new_layer_n
+                circuit_changed = True
+                
+            # If any parameter changed, regenerate the entire circuit
+            if circuit_changed:
+                # Print what changed for debugging
+                changes = []
+                if orig_input_n != self.input_n:
+                    changes.append(f"input_n: {orig_input_n} → {self.input_n}")
+                if orig_output_n != self.output_n:
+                    changes.append(f"output_n: {orig_output_n} → {self.output_n}")
+                if orig_arity != self.arity:
+                    changes.append(f"arity: {orig_arity} → {self.arity}")
+                if orig_layer_n != self.layer_n:
+                    changes.append(f"layer_n: {orig_layer_n} → {self.layer_n}")
+                    
+                print(f"Circuit parameters changed: {', '.join(changes)}")
+                
+                try:
+                    # Full regeneration of the circuit
+                    self.regenerate_circuit()
+                except Exception as e:
+                    print(f"Error regenerating circuit: {e}")
+                    import traceback
+                    print(f"Traceback: {traceback.format_exc()}")
+                    
+                    # Revert to original values on error
+                    self.input_n = orig_input_n
+                    self.output_n = orig_output_n
+                    self.arity = orig_arity
+                    self.layer_n = orig_layer_n
+                    print("Reverted to original parameters due to error")
+                
+            # Manual regenerate button
+            if imgui.button("Regenerate Circuit"):
+                try:
+                    self.regenerate_circuit()
+                except Exception as e:
+                    print(f"Error regenerating circuit: {e}")
+                    import traceback
+                    print(f"Traceback: {traceback.format_exc()}")
+                
+            # Display current architecture summary
+            imgui.text(f"Total parameters: {sum(l.size for l in self.logits0)}")
+            imgui.text(f"Layer structure:")
+            for i, (gate_n, group_size) in enumerate(self.layer_sizes):
+                layer_type = "Input" if i == 0 else "Output" if i == len(self.layer_sizes) - 1 else "Hidden"
+                imgui.text(f"  {layer_type}: {gate_n} gates, group {group_size}")
 
             imgui.end_child()
         except Exception as e:
             print(f"Exception in gui: {e}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
 
 
 if __name__ == "__main__":
