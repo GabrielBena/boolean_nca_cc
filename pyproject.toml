@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "boolean_nca_cc"
+version = "0.1.0"
+description = "Optimizing boolean circuits using graph neural networks"
+readme = "README.md"
+authors = [
+    {name = "Boolean NCA Team", email = "author@example.com"}
+]
+license = {text = "MIT"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/yourusername/boolean_nca_cc"
+"Bug Tracker" = "https://github.com/yourusername/boolean_nca_cc/issues"
+"Documentation" = "https://github.com/yourusername/boolean_nca_cc#readme"
+
+[tool.setuptools]
+packages = ["boolean_nca_cc"]
+
+[tool.setuptools.package-data]
+boolean_nca_cc = ["py.typed"]
+
+[tool.black]
+line-length = 88
+target-version = ["py38"]
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+[[tool.mypy.overrides]]
+module = ["jax.*", "jraph.*", "flax.*", "optax.*", "tqdm.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+addopts = "--cov=boolean_nca_cc" 

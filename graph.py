@@ -347,6 +347,7 @@ class NodeUpdateModule(nnx.Module):
         # --- Calculate MLP input size ---
         # Logits, Hidden, Layer PE, Intra-Layer PE
         current_features_size = logit_dim + hidden_dim + pe_dim + pe_dim
+        print("NODE MLP INPUT SIZE", current_features_size)
         if message_passing:
             # Aggregated messages will also have logit_dim + hidden_dim
             # Edge MLP output doesn't include PEs, just logits+hidden derived features
@@ -443,6 +444,7 @@ class NodeUpdateModule(nnx.Module):
             ],
             axis=-1,
         )
+        # print("CURRENT NODE COMBINED FEATURES", current_node_combined_features.shape)
 
         # Determine inputs based on message passing flag
         if self.message_passing and sent_attributes is not None:
@@ -496,7 +498,7 @@ class EdgeUpdateModule(nnx.Module):
         # Output of edge MLP: Features used for aggregation (Logits + Hidden dimensions)
         mlp_output_size = logit_dim + hidden_dim
         mlp_features = [mlp_input_size, *edge_mlp_features, mlp_output_size]
-
+        print("EDGE MLP INPUT SIZE", mlp_input_size)
         # Define Edge MLP architecture with BatchNorm
         edge_mlp_layers = []
         for i, (in_f, out_f) in enumerate(zip(mlp_features[:-1], mlp_features[1:])):
@@ -536,7 +538,7 @@ class EdgeUpdateModule(nnx.Module):
             [sender_logits, sender_hidden, sender_layer_pe, sender_intra_layer_pe],
             axis=-1,
         )
-
+        # print("SENDER COMBINED FEATURES", sender_combined_features.shape)
         # Apply edge MLP to generate the message
         # message shape: (num_edges, logit_dim + hidden_dim)
         message = self.edge_mlp(sender_combined_features)
