@@ -18,6 +18,11 @@ from boolean_nca_cc.models.self_attention import (
     run_self_attention_scan,
 )
 from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
+from boolean_nca_cc.circuits.training import (
+    res2loss,
+    binary_cross_entropy,
+    compute_accuracy,
+)
 from boolean_nca_cc.circuits.model import gen_circuit, run_circuit
 
 
@@ -43,6 +48,7 @@ def train_self_attention(
     initial_metrics: Optional[Dict] = None,
     lr_scheduler: str = "constant",
     lr_scheduler_params: Optional[Dict] = None,
+    loss_type: str = "l4",
 ):
     """
     Train a self-attention model to optimize boolean circuit parameters.
@@ -69,6 +75,7 @@ def train_self_attention(
         initial_metrics: Optional dictionary of metrics from previous training
         lr_scheduler: Learning rate scheduler type. Default: "constant".
         lr_scheduler_params: Dictionary of parameters for the scheduler.
+        loss_type: Type of loss to use ('l4' for L4 norm or 'bce' for binary cross-entropy).
 
     Returns:
         Dictionary with trained model and training metrics
@@ -169,7 +176,7 @@ def train_self_attention(
         optimizer = init_optimizer
 
     # Define meta-training step function
-    @partial(nnx.jit, static_argnames=("layer_sizes", "n_attention_steps"))
+    @partial(nnx.jit, static_argnames=("layer_sizes", "n_attention_steps", "loss_type"))
     def meta_train_step(
         model: CircuitSelfAttention,
         optimizer: nnx.Optimizer,
@@ -178,6 +185,7 @@ def train_self_attention(
         rng: jax.random.PRNGKey,
         layer_sizes: List[Tuple[int, int]],
         n_attention_steps: int,
+        loss_type: str,
     ):
         """
         Single meta-training step with randomly sampled circuit wirings.
@@ -190,14 +198,17 @@ def train_self_attention(
             rng: Random key
             layer_sizes: Circuit layer sizes
             n_attention_steps: Number of self-attention steps
+            loss_type: Type of loss function to use
 
         Returns:
             Tuple of (loss, (hard_loss, accuracy, hard_accuracy))
         """
 
         # Internal loss function for a single circuit
-        @nnx.jit
-        def loss_fn(attn_model: CircuitSelfAttention, rng: jax.random.PRNGKey):
+        @partial(nnx.jit, static_argnames=("loss_type",))
+        def loss_fn(
+            attn_model: CircuitSelfAttention, rng: jax.random.PRNGKey, loss_type: str
+        ):
             # Sample new random circuit wiring
             rng_wires, rng_attn = jax.random.split(rng)
             wires, logits = gen_circuit(rng_wires, layer_sizes, arity=arity)
@@ -226,29 +237,36 @@ def train_self_attention(
             all_hard_acts = run_circuit(updated_logits, wires, x, hard=True)
             y_hard_pred = all_hard_acts[-1]
 
-            # Compute loss and accuracy
-            loss = jp.mean((y_pred - y_target) ** 4)
-            hard_loss = jp.mean((y_hard_pred - y_target) ** 4)
-            accuracy = jp.mean(jp.round(y_pred) == y_target)
-            hard_accuracy = jp.mean(jp.round(y_hard_pred) == y_target)
+            # Compute loss and accuracy based on loss_type
+            if loss_type == "bce":
+                loss = binary_cross_entropy(y_pred, y_target)
+                hard_loss = binary_cross_entropy(y_hard_pred, y_target)
+            else:  # Default to L4
+                res = y_pred - y_target
+                hard_res = y_hard_pred - y_target
+                loss = res2loss(res)
+                hard_loss = res2loss(hard_res)
+
+            accuracy = compute_accuracy(y_pred, y_target)
+            hard_accuracy = compute_accuracy(y_hard_pred, y_target)
 
             return loss, (hard_loss, accuracy, hard_accuracy)
 
         # For meta-learning, average over multiple random circuits
-        @nnx.jit
-        def mean_batch_loss_fn(model, rng):
+        @partial(nnx.jit, static_argnames=("loss_type",))
+        def mean_batch_loss_fn(model, rng, loss_type: str):
             # Create batch of random keys
             batch_rng = jax.random.split(rng, meta_batch_size)
             # Use vmap to vectorize loss function over the random keys
-            batch_loss_fn = nnx.vmap(loss_fn, in_axes=(None, 0))
+            batch_loss_fn = nnx.vmap(loss_fn, in_axes=(None, 0, None))
             # Compute losses for each random circuit
-            losses, aux = batch_loss_fn(model, rng=batch_rng)
+            losses, aux = batch_loss_fn(model, rng=batch_rng, loss_type=loss_type)
             # Average losses and metrics
             return jp.mean(losses), jax.tree.map(lambda x: jp.mean(x, axis=0), aux)
 
         # Compute loss and gradients
         (loss, aux), grads = nnx.value_and_grad(mean_batch_loss_fn, has_aux=True)(
-            model, rng=rng
+            model, rng=rng, loss_type=loss_type
         )
 
         # Update model parameters
@@ -272,7 +290,7 @@ def train_self_attention(
         x_batch = x_data[idx]
         y_batch = y_data[idx]
 
-        # Perform training step
+        # Perform training step, passing loss_type
         loss, (hard_loss, accuracy, hard_accuracy) = meta_train_step(
             model,
             optimizer,
@@ -281,6 +299,7 @@ def train_self_attention(
             epoch_key,
             tuple(layer_sizes),
             n_attention_steps,
+            loss_type=loss_type,
         )
 
         # Record metrics

@@ -1,7 +1,7 @@
 """
 Graph Neural Network implementation for boolean circuits.
 
-This module provides the main GNN model for evolving boolean circuits 
+This module provides the main GNN model for evolving boolean circuits
 through message passing.
 """
 
@@ -15,15 +15,16 @@ from functools import partial
 from boolean_nca_cc.models.node_update import NodeUpdateModule
 from boolean_nca_cc.models.edge_update import EdgeUpdateModule
 from boolean_nca_cc.models.aggregation import aggregate_sum, AttentionAggregation
+from boolean_nca_cc.training.train_loop import get_loss_from_graph
 
 
 class CircuitGNN(nnx.Module):
     """
     Graph Neural Network for evolving boolean circuits.
-    
+
     Implements message passing on a graph representation of a boolean circuit.
     """
-    
+
     def __init__(
         self,
         node_mlp_features: List[int] = [64, 32],
@@ -37,7 +38,7 @@ class CircuitGNN(nnx.Module):
     ):
         """
         Initialize the Circuit GNN.
-        
+
         Args:
             node_mlp_features: Hidden layer sizes for the node MLP
             edge_mlp_features: Hidden layer sizes for the edge MLP
@@ -81,10 +82,10 @@ class CircuitGNN(nnx.Module):
     def __call__(self, graph: jraph.GraphsTuple) -> jraph.GraphsTuple:
         """
         Apply one step of GNN message passing.
-        
+
         Args:
             graph: Input graph structure with node and edge features
-            
+
         Returns:
             Updated graph after one step of message passing
         """
@@ -126,12 +127,12 @@ def run_gnn_scan(
 ) -> jraph.GraphsTuple:
     """
     Apply the GNN message passing iteratively for multiple steps using jax.lax.scan.
-    
+
     Args:
         gnn: The CircuitGNN model
         graph: The initial graph
         num_steps: Number of message passing steps to perform
-        
+
     Returns:
         Updated graph after num_steps of message passing
     """
@@ -154,4 +155,4 @@ def run_gnn_scan(
     # Run the scan
     final_graph, _ = jax.lax.scan(scan_body, graph, None, length=num_steps)
 
-    return final_graph 
+    return final_graph

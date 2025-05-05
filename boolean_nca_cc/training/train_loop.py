@@ -15,32 +15,70 @@ from tqdm.auto import tqdm
 
 from boolean_nca_cc.models import CircuitGNN, run_gnn_scan
 from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
-from boolean_nca_cc.training.train_step import train_step_gnn
+from boolean_nca_cc.circuits.training import (
+    res2loss,
+    binary_cross_entropy,
+    compute_accuracy,
+)
 from boolean_nca_cc.circuits.model import gen_circuit, run_circuit
 
 
+def get_loss_from_graph(logits, wires, x, y_target, loss_type: str):
+    # --- Calculate initial loss for graph globals --- START
+    acts = run_circuit(logits, wires, x)
+    pred = acts[-1]
+    acts_hard = run_circuit(logits, wires, x, hard=True)
+    pred_hard = acts_hard[-1]
+
+    if loss_type == "bce":
+        loss = binary_cross_entropy(pred, y_target)
+        hard_loss = binary_cross_entropy(pred_hard, y_target)
+    elif loss_type == "l4":
+        res = pred - y_target
+        hard_res = pred_hard - y_target
+        loss = res2loss(res, power=4)
+        hard_loss = res2loss(hard_res, power=4)
+    elif loss_type == "l2":
+        res = pred - y_target
+        hard_res = pred_hard - y_target
+        loss = res2loss(res, power=2)
+        hard_loss = res2loss(hard_res, power=2)
+    else:
+        raise ValueError(f"Unknown loss_type: {loss_type}")
+    # --- Calculate initial loss for graph globals --- END
+
+    return loss, (hard_loss, pred, pred_hard)
+
+
 def train_gnn(
-    layer_sizes: List[Tuple[int, int]],
+    # Data parameters
     x_data: jp.ndarray,
     y_data: jp.ndarray,
+    layer_sizes: List[Tuple[int, int]],
+    # Model architecture parameters
     arity: int = 2,
     hidden_dim: int = 16,
     message_passing: bool = True,
     node_mlp_features: List[int] = [64, 32],
     edge_mlp_features: List[int] = [64, 32],
     use_attention: bool = False,
+    # Training hyperparameters
     learning_rate: float = 1e-3,
+    weight_decay: float = 1e-4,
     epochs: int = 100,
     n_message_steps: int = 100,
-    key: int = 0,
-    weight_decay: float = 1e-4,
+    loss_type: str = "l4",  # Options: 'l4' or 'bce'
+    # Meta-learning parameters
     meta_learning: bool = False,
     meta_batch_size: int = 64,
+    # Learning rate scheduling
+    lr_scheduler: str = "constant",  # Options: "constant", "exponential", "cosine", "linear_warmup"
+    lr_scheduler_params: Dict = None,
+    # Initialization parameters
+    key: int = 0,
     init_gnn: CircuitGNN = None,
     init_optimizer: nnx.Optimizer = None,
     initial_metrics: Dict = None,
-    lr_scheduler: str = "constant",  # Options: "constant", "exponential", "cosine", "linear_warmup"
-    lr_scheduler_params: Dict = None,
 ):
     """
     Train a GNN to optimize boolean circuit parameters.
@@ -67,7 +105,7 @@ def train_gnn(
         initial_metrics: Optional dictionary of metrics from previous training
         lr_scheduler: Learning rate scheduler type. Default: "constant".
         lr_scheduler_params: Dictionary of parameters for the scheduler.
-
+        loss_type: Type of loss to use ('l4' for L4 norm or 'bce' for binary cross-entropy).
     Returns:
         Dictionary with trained GNN model and training metrics
     """
@@ -76,10 +114,6 @@ def train_gnn(
 
     # Get dimension from layer sizes
     input_n = layer_sizes[0][0]
-
-    # Use regular batch size if not meta-learning
-    if not meta_learning:
-        meta_batch_size = 1
 
     # Initialize metrics storage
     if initial_metrics is None:
@@ -162,7 +196,15 @@ def train_gnn(
         optimizer = init_optimizer
 
     # Define meta-training step function
-    @partial(nnx.jit, static_argnames=("layer_sizes", "n_message_steps"))
+    @partial(
+        nnx.jit,
+        static_argnames=(
+            "layer_sizes",
+            "n_message_steps",
+            "loss_type",
+            "meta_learning",
+        ),
+    )
     def meta_train_step(
         gnn: CircuitGNN,
         optimizer: nnx.Optimizer,
@@ -171,6 +213,8 @@ def train_gnn(
         rng: jax.random.PRNGKey,
         layer_sizes: List[Tuple[int, int]],
         n_message_steps: int,
+        loss_type: str,  # Pass loss_type
+        meta_learning: bool,
     ):
         """
         Single meta-training step with randomly sampled circuit wirings.
@@ -183,59 +227,94 @@ def train_gnn(
             rng: Random key
             layer_sizes: Circuit layer sizes
             n_message_steps: Number of message passing steps
+            loss_type: Type of loss function to use
 
         Returns:
             Tuple of (loss, (hard_loss, accuracy, hard_accuracy))
         """
 
         # Internal loss function for a single circuit
-        def loss_fn(gnn_model: CircuitGNN, rng: jax.random.PRNGKey):
+        @partial(nnx.jit, static_argnames=("loss_type", "meta_learning"))
+        def loss_fn(
+            gnn_model: CircuitGNN,
+            rng: jax.random.PRNGKey,
+            loss_type: str,
+            meta_learning: bool,
+        ):
             # Sample new random circuit wiring
             rng_wires, _ = jax.random.split(rng)
+
             wires, logits = gen_circuit(rng_wires, layer_sizes, arity=arity)
 
             # Store original shapes for reconstruction
             logits_original_shapes = [logit.shape for logit in logits]
 
-            # Build graph from the random circuit
-            graph = build_graph(logits, wires, input_n, arity, hidden_dim)
+            # Build graph from the random circuit, passing the initial loss
+            initial_loss, _ = get_loss_from_graph(logits, wires, x, y_target, loss_type)
+            graph = build_graph(
+                logits, wires, input_n, arity, hidden_dim, loss_value=initial_loss
+            )
 
             # Run GNN for n_message_steps to optimize the circuit
-            updated_graph = run_gnn_scan(gnn_model, graph, n_message_steps)
 
-            # Extract updated logits and run the circuit
-            updated_logits = extract_logits_from_graph(
-                updated_graph, logits_original_shapes
+            # all_graphs = []
+            # all_losses = []
+
+            # not using scan is much faster for now (weird) ?
+            # graph = run_gnn_scan(gnn_model, graph, n_message_steps)
+
+            for n in range(n_message_steps):
+                graph = gnn_model(graph)
+                # Extract updated logits and run the circuit
+                updated_logits = extract_logits_from_graph(
+                    graph, logits_original_shapes
+                )
+                loss, (hard_loss, y_pred, y_hard_pred) = get_loss_from_graph(
+                    updated_logits, wires, x, y_target, loss_type
+                )
+
+                # Update the loss value for the graph
+                graph = graph._replace(globals=loss)
+                # all_losses.append(loss)
+
+            # # Extract updated logits and run the circuit
+            # updated_logits = extract_logits_from_graph(graph, logits_original_shapes)
+            # loss, (hard_loss, y_pred, y_hard_pred) = get_loss_from_graph(
+            #     updated_logits, wires, x, y_target, loss_type
+            # )
+
+            accuracy = compute_accuracy(y_pred, y_target)
+            hard_accuracy = compute_accuracy(y_hard_pred, y_target)
+
+            return loss, (
+                hard_loss,
+                accuracy,
+                hard_accuracy,
+                # all_losses,
             )
-            all_acts = run_circuit(updated_logits, wires, x)
-            y_pred = all_acts[-1]
-
-            # Also measure hard circuit accuracy
-            all_hard_acts = run_circuit(updated_logits, wires, x, hard=True)
-            y_hard_pred = all_hard_acts[-1]
-
-            # Compute loss and accuracy
-            loss = jp.mean((y_pred - y_target) ** 4)
-            hard_loss = jp.mean((y_hard_pred - y_target) ** 4)
-            accuracy = jp.mean(jp.round(y_pred) == y_target)
-            hard_accuracy = jp.mean(jp.round(y_hard_pred) == y_target)
-
-            return loss, (hard_loss, accuracy, hard_accuracy)
 
         # For meta-learning, average over multiple random circuits
-        def mean_batch_loss_fn(gnn, rng):
+        @partial(nnx.jit, static_argnames=("loss_type", "meta_learning"))
+        def mean_batch_loss_fn(gnn, rng, loss_type: str, meta_learning: bool):
             # Create batch of random keys
-            batch_rng = jax.random.split(rng, meta_batch_size)
+            if meta_learning:
+                batch_rng = jax.random.split(rng, meta_batch_size)
+            else:
+                batch_rng = jp.full((meta_batch_size,), rng)
             # Use vmap to vectorize loss function over the random keys
-            batch_loss_fn = nnx.vmap(loss_fn, in_axes=(None, 0))
+            # Pass loss_type to the vmapped function
+            batch_loss_fn = nnx.vmap(loss_fn, in_axes=(None, 0, None, None))
             # Compute losses for each random circuit
-            losses, aux = batch_loss_fn(gnn, rng=batch_rng)
+            losses, aux = batch_loss_fn(
+                gnn, rng=batch_rng, loss_type=loss_type, meta_learning=meta_learning
+            )
             # Average losses and metrics
-            return jp.mean(losses), jax.tree.map(lambda x: jp.mean(x, axis=0), aux)
+            return jp.mean(losses), jax.tree.map(lambda x: jp.stack(x, axis=0), aux)
 
         # Compute loss and gradients
+        # Pass loss_type to mean_batch_loss_fn
         (loss, aux), grads = nnx.value_and_grad(mean_batch_loss_fn, has_aux=True)(
-            gnn, rng=rng
+            gnn, rng=rng, loss_type=loss_type, meta_learning=meta_learning
         )
 
         # Update GNN parameters
@@ -259,8 +338,8 @@ def train_gnn(
         x_batch = x_data[idx]
         y_batch = y_data[idx]
 
-        # Perform training step
-        loss, (hard_loss, accuracy, hard_accuracy) = meta_train_step(
+        # Perform training step, passing loss_type
+        loss, aux_stack = meta_train_step(
             gnn,
             optimizer,
             x_batch,
@@ -268,6 +347,12 @@ def train_gnn(
             epoch_key,
             tuple(layer_sizes),
             n_message_steps,
+            loss_type=loss_type,  # Pass loss_type here
+            meta_learning=meta_learning,
+        )
+
+        hard_loss, accuracy, hard_accuracy = jax.tree.map(
+            lambda x: jp.mean(x, axis=0), aux_stack
         )
 
         # Record metrics
@@ -275,7 +360,7 @@ def train_gnn(
         hard_losses.append(float(hard_loss))
         accuracies.append(float(accuracy))
         hard_accuracies.append(float(hard_accuracy))
-
+        # all_losses.append(all_losses)
         # Update progress bar with current metrics
         pbar.set_postfix(
             {
@@ -287,10 +372,12 @@ def train_gnn(
 
     # Return the trained GNN model and metrics
     return {
-        "gnn": gnn,
-        "optimizer": optimizer,
+        "gnn": nnx.state(gnn),
+        "optimizer": nnx.state(optimizer),
         "losses": losses,
         "hard_losses": hard_losses,
         "accuracies": accuracies,
         "hard_accuracies": hard_accuracies,
+        # "all_losses": all_losses,
+        # "all_graphs": all_graphs,
     }

@@ -20,17 +20,20 @@ def build_graph(
     arity: int,
     hidden_dim: int,
     bidirectional_edges: bool = True,
+    loss_value: jp.ndarray | None = None,
 ) -> jraph.GraphsTuple:
     """
-    Construct a jraph.GraphsTuple representation of a boolean circuit.
+    Construct a jraph.GraphsTuple representation of a boolean circuit, including input nodes.
 
     Args:
         logits: List of logit tensors per layer. Shape [(group_n, group_size, 2^arity), ...]
         wires: List of wire connection patterns per layer. Shape [(arity, edges_in_layer), ...]
+                The first element wires[0] connects input nodes to the first gate layer.
         input_n: Number of input nodes/bits for the first layer
         arity: Fan-in for each gate
         hidden_dim: Dimension of hidden features for nodes
         bidirectional_edges: If True, create edges in both forward and backward directions
+        loss_value: Optional scalar value representing the current loss of the circuit.
 
     Returns:
         A jraph.GraphsTuple representing the circuit
@@ -40,15 +43,44 @@ def build_graph(
     all_forward_receivers = []
     current_global_node_idx = 0
     layer_start_indices = []  # Store the start index of each layer
+    pe_dim = hidden_dim  # Dimension for positional encodings
+    max_layers = len(logits) + 1  # +1 for the input layer
 
-    # Process layers
-    for layer_idx, (layer_logits, layer_wires) in enumerate(zip(logits, wires)):
+    # --- Input Layer Nodes ---
+    layer_start_indices.append(current_global_node_idx)
+    input_layer_indices = jp.arange(input_n)
+    input_layer_pe = get_positional_encoding(
+        jp.zeros(input_n, dtype=jp.int32), pe_dim, max_val=max_layers
+    )
+    input_intra_layer_pe = get_positional_encoding(
+        input_layer_indices, pe_dim, max_val=input_n + 1
+    )
+    input_nodes = {
+        "layer": jp.zeros(input_n, dtype=jp.int32),  # Input layer is layer 0
+        "group": jp.zeros(input_n, dtype=jp.int32),  # No groups for inputs
+        "gate_id": input_layer_indices,
+        "logits": jp.zeros(
+            (input_n, 2**arity), dtype=jp.float32
+        ),  # Inputs have no logits
+        "hidden": jp.zeros((input_n, hidden_dim), dtype=jp.float32),
+        "layer_pe": input_layer_pe,
+        "intra_layer_pe": input_intra_layer_pe,
+    }
+    all_nodes_features_list.append(input_nodes)
+    current_global_node_idx += input_n
+    # --- End Input Layer ---
+
+    # Process gate layers (starting from layer 1)
+    for layer_idx_gates, (layer_logits, layer_wires) in enumerate(zip(logits, wires)):
+        layer_idx_graph = (
+            layer_idx_gates + 1
+        )  # Graph layer index starts from 1 for gates
         # layer_logits: (group_n, group_size, 2^arity)
-        # layer_wires: (arity, group_n) -> connects previous inputs to this layer
+        # layer_wires: (arity, group_n) -> connects previous layer's nodes to this layer
         group_n, group_size, logit_dim = layer_logits.shape
         num_gates_in_layer = group_n * group_size
 
-        # Store the starting index for this layer
+        # Store the starting index for this gate layer
         layer_start_indices.append(current_global_node_idx)
 
         # Node features for this layer
@@ -56,7 +88,7 @@ def build_graph(
             current_global_node_idx, current_global_node_idx + num_gates_in_layer
         )
         layer_nodes = {
-            "layer": jp.full(num_gates_in_layer, layer_idx, dtype=jp.int32),
+            "layer": jp.full(num_gates_in_layer, layer_idx_graph, dtype=jp.int32),
             "group": jp.repeat(jp.arange(group_n), group_size),
             "gate_id": layer_global_indices,
             "logits": layer_logits.reshape(num_gates_in_layer, logit_dim),
@@ -64,43 +96,38 @@ def build_graph(
         }
 
         # Add Positional Encodings
-        # Layer PE (using layer index)
-        max_layers = len(logits)
-        layer_indices = jp.full(num_gates_in_layer, layer_idx, dtype=jp.int32)
-        layer_pe = get_positional_encoding(
-            layer_indices, hidden_dim, max_val=max_layers + 1
-        )
-
-        # Intra-Layer PE (using position within the layer)
+        layer_indices_pe = jp.full(num_gates_in_layer, layer_idx_graph, dtype=jp.int32)
+        layer_pe = get_positional_encoding(layer_indices_pe, pe_dim, max_val=max_layers)
         intra_layer_indices = jp.arange(num_gates_in_layer, dtype=jp.int32)
         intra_layer_pe = get_positional_encoding(
-            intra_layer_indices, hidden_dim, max_val=num_gates_in_layer + 1
+            intra_layer_indices, pe_dim, max_val=num_gates_in_layer + 1
         )
-
         layer_nodes["layer_pe"] = layer_pe
         layer_nodes["intra_layer_pe"] = intra_layer_pe
 
         all_nodes_features_list.append(layer_nodes)
 
-        # Create forward edges (if not the first layer)
-        if layer_idx > 0:
-            # Receivers are the gates in the current layer
-            current_layer_receivers = jp.repeat(layer_global_indices, arity)
+        # Create forward edges
+        # Receivers are the gates in the current layer
+        current_layer_receivers = jp.repeat(layer_global_indices, arity)
 
-            # Senders are gates from the previous layer
-            previous_layer_start_idx = layer_start_indices[layer_idx - 1]
-            global_senders_for_layer = previous_layer_start_idx + layer_wires
-            tiled_senders = jp.tile(global_senders_for_layer.T, (1, group_size))
-            current_layer_senders = tiled_senders.reshape(-1)  # Flatten
+        # Senders are nodes from the previous layer (could be inputs or gates)
+        previous_layer_start_idx = layer_start_indices[layer_idx_graph - 1]
+        # layer_wires connects the *output* of the previous layer to the *input* of the current layer gates.
+        # Indices in layer_wires are relative to the start of the previous layer.
+        global_senders_for_layer = previous_layer_start_idx + layer_wires
+        tiled_senders = jp.tile(global_senders_for_layer.T, (1, group_size))
+        current_layer_senders = tiled_senders.reshape(-1)  # Flatten
 
-            all_forward_senders.append(current_layer_senders)
-            all_forward_receivers.append(current_layer_receivers)
+        all_forward_senders.append(current_layer_senders)
+        all_forward_receivers.append(current_layer_receivers)
 
         # Update global index for the next layer
         current_global_node_idx += num_gates_in_layer
 
     # Consolidate Nodes and Edges
     if not all_nodes_features_list:
+        # Handle empty circuit case
         return jraph.GraphsTuple(
             nodes={},
             edges=None,
@@ -108,10 +135,13 @@ def build_graph(
             receivers=jp.array([], dtype=jp.int32),
             n_node=jp.array([0]),
             n_edge=jp.array([0]),
-            globals=None,
+            globals=loss_value
+            if loss_value is not None
+            else jp.zeros((), dtype=jp.float32),
         )
 
     # Combine node features from all layers
+    # Need to handle potentially missing 'logits' in input layer if we decide not to add zeros
     all_nodes = jax.tree.map(
         lambda *xs: jp.concatenate(xs, axis=0), *all_nodes_features_list
     )
@@ -139,6 +169,12 @@ def build_graph(
     n_node = current_global_node_idx
     n_edge = len(senders)
 
+    # Ensure globals is not None
+    if loss_value is None:
+        globals_val = jp.zeros((), dtype=jp.float32)  # Default global feature if None
+    else:
+        globals_val = loss_value
+
     # Create and return the GraphsTuple
     graph = jraph.GraphsTuple(
         nodes=all_nodes,
@@ -147,7 +183,62 @@ def build_graph(
         receivers=receivers.astype(jp.int32),
         n_node=jp.array([n_node]),
         n_edge=jp.array([n_edge]),
-        globals=None,  # No global features
+        globals=globals_val,
     )
 
     return graph
+
+
+def extract_logits_from_graph(
+    graph: jraph.GraphsTuple, original_shapes: List[Tuple[int, ...]]
+) -> List[jp.ndarray]:
+    """
+    Extract the list of logit tensors from the graph's node features,
+    respecting the original shapes and skipping input nodes.
+
+    Args:
+        graph: The GraphsTuple containing updated node features.
+        original_shapes: A list of the original shapes of the logit tensors
+                         for each gate layer (excluding the input layer).
+
+    Returns:
+        A list of updated logit tensors, matching the structure of the original input.
+    """
+    updated_logits_list = []
+    start_idx = 0
+
+    # Determine the number of input nodes from the graph if possible,
+    # otherwise, rely on the length difference between nodes['layer'] and original_shapes
+    # A more robust way might be needed if graph structure isn't guaranteed.
+    num_nodes = graph.nodes["layer"].shape[0]
+    num_gate_layers = len(original_shapes)
+
+    # Estimate number of input nodes. Assumes layer 0 is input.
+    input_nodes_mask = graph.nodes["layer"] == 0
+    num_input_nodes = jp.sum(input_nodes_mask).item()  # Get scalar value
+
+    current_node_idx = num_input_nodes  # Start extracting after input nodes
+
+    for shape in original_shapes:
+        # Calculate the number of nodes (gates) in this layer
+        num_layer_nodes = jp.prod(
+            jp.array(shape[:-1])
+        )  # product of group_n * group_size
+        logit_dim = shape[-1]  # 2**arity
+
+        # Ensure we don't exceed total nodes
+        end_idx = current_node_idx + num_layer_nodes
+        if end_idx > num_nodes:
+            raise ValueError("Mismatch between original shapes and graph nodes.")
+
+        # Extract logits for the current layer's nodes
+        layer_logits_flat = graph.nodes["logits"][current_node_idx:end_idx]
+
+        # Reshape to the original layer shape
+        layer_logits = layer_logits_flat.reshape(shape)
+        updated_logits_list.append(layer_logits)
+
+        # Move to the next layer's starting index
+        current_node_idx = end_idx
+
+    return updated_logits_list

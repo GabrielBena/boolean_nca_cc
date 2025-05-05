@@ -50,15 +50,18 @@ class NodeUpdateModule(nnx.Module):
         # Calculate MLP input size
         # Current features: Logits, Hidden, Layer PE, Intra-Layer PE
         current_features_size = self.logit_dim + hidden_dim + pe_dim + pe_dim
+        global_feature_size = 1  # Assuming globals_ is a scalar loss value
 
         if message_passing:
             # If using message passing, include aggregated messages
             # Edge message contains logits + hidden derived features
             aggregated_message_size = self.logit_dim + hidden_dim
             mlp_input_size = current_features_size + aggregated_message_size
+            mlp_input_size += global_feature_size  # Add global feature size
         else:
             # Without message passing, only use current node features
             mlp_input_size = current_features_size
+            mlp_input_size += global_feature_size  # Add global feature size
 
         # Output needs to contain updated logits and hidden features
         mlp_output_size = self.logit_dim + hidden_dim
@@ -136,7 +139,7 @@ class NodeUpdateModule(nnx.Module):
             nodes: Current node features
             sent_attributes: Aggregated messages from incoming edges
             received_attributes: Features of received messages (unused)
-            globals_: Global features (unused)
+            globals_: Global features (e.g., scalar loss value)
 
         Returns:
             Updated node features
@@ -164,6 +167,12 @@ class NodeUpdateModule(nnx.Module):
             axis=-1,
         )
 
+        # Broadcast global feature to match the number of nodes
+        num_nodes = list(nodes.values())[0].shape[0]
+        broadcasted_globals = jp.repeat(
+            jp.reshape(globals_, (1, -1)), num_nodes, axis=0
+        )
+
         # Determine inputs based on message passing flag
         if self.message_passing and sent_attributes is not None:
             # Normalize messages
@@ -172,9 +181,15 @@ class NodeUpdateModule(nnx.Module):
             mlp_input = jp.concatenate(
                 [current_node_combined_features, normalized_messages], axis=-1
             )
+            mlp_input = jp.concatenate(
+                [mlp_input, broadcasted_globals], axis=-1
+            )  # Add globals
         else:
             # Input = current_features only
             mlp_input = current_node_combined_features
+            mlp_input = jp.concatenate(
+                [mlp_input, broadcasted_globals], axis=-1
+            )  # Add globals
 
         # Apply MLP to get the delta (change) in features
         delta_combined_features = self.mlp(mlp_input)
@@ -183,9 +198,18 @@ class NodeUpdateModule(nnx.Module):
         delta_logits = delta_combined_features[..., : self.logit_dim]
         delta_hidden = delta_combined_features[..., self.logit_dim :]
 
-        # Apply residual update
-        updated_logits = current_logits + delta_logits
-        updated_hidden = current_hidden + delta_hidden
+        # Apply residual update only to non-input nodes (layer > 0)
+        is_gate_node = nodes["layer"] > 0
+        # Ensure mask matches feature dimensions for broadcasting
+        is_gate_node_logits_mask = is_gate_node[:, None]
+        is_gate_node_hidden_mask = is_gate_node[:, None]
+
+        updated_logits = jp.where(
+            is_gate_node_logits_mask, current_logits + delta_logits, current_logits
+        )
+        updated_hidden = jp.where(
+            is_gate_node_hidden_mask, current_hidden + delta_hidden, current_hidden
+        )
 
         # Update only the 'logits' and 'hidden' fields, preserving others
         new_node_features = {k: v for k, v in nodes.items()}
