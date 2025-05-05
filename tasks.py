@@ -74,6 +74,30 @@ def custom_task(func, case_n, input_bits=8, output_bits=8):
     return unpack(x, input_bits), unpack(y, output_bits)
 
 
+def copy(case_n, input_bits=8, output_bits=8):
+    """Simple identity function - output equals input"""
+    x = jp.arange(case_n)
+    return unpack(x, input_bits), unpack(x, output_bits)
+
+
+def gray_code(case_n, input_bits=8, output_bits=8):
+    """Convert to Gray code (each number differs from its neighbors by 1 bit)"""
+    x = jp.arange(case_n)
+    y = x ^ (x >> 1)
+    return unpack(x, input_bits), unpack(y, output_bits)
+
+
+def popcount(case_n, input_bits=8, output_bits=None):
+    """Count the number of 1 bits in the input"""
+    if output_bits is None:
+        # Number of bits needed to represent the count (log2 of input_bits, rounded up)
+        output_bits = (input_bits.bit_length() - 1) + 1
+        
+    x = jp.arange(case_n)
+    y = jp.sum(unpack(x, input_bits), axis=-1)  # Sum the bits to get the count
+    return unpack(x, input_bits), unpack(y, output_bits)
+
+
 # Task lookup dictionary
 TASKS = {
     "binary_multiply": binary_multiply,
@@ -82,6 +106,9 @@ TASKS = {
     "add": binary_add,
     "parity": parity,
     "reverse": reverse_bits,
+    "copy": copy,
+    "gray": gray_code,
+    "popcount": popcount,
 }
 
 

@@ -241,8 +241,11 @@ class Demo:
         return optax.adamw(2.0, 0.8, 0.8, weight_decay=10**self.wd_log10)
 
     def reset_gate_mask(self):
+        """Reset all gate masks to active"""
+        # Ensure we have the right number of masks
         self.gate_mask = [np.ones(gate_n) for gate_n, _ in self.layer_sizes]
         self.wire_masks = [np.ones_like(w, np.bool_) for w in self.wires]
+        print(f"Reset gate mask: {len(self.gate_mask)} gate masks, {len(self.wire_masks)} wire masks")
 
     def mask_unused_gates(self):
         gate_masks, self.wire_masks = calc_gate_use_masks(
@@ -549,6 +552,17 @@ class Demo:
         prev_act = None
         case = self.active_case_i
         hover_gate = None
+        
+        # Ensure activations exist
+        if not hasattr(self, 'act') or len(self.act) != len(self.layer_sizes):
+            print("Warning: Activations not initialized properly, creating empty activations")
+            self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
+            
+        # Ensure wire_masks has the right length
+        if len(self.wire_masks) != len(self.wires):
+            print(f"Warning: wire_masks length mismatch. Expected {len(self.wires)}, got {len(self.wire_masks)}")
+            self.wire_masks = [np.ones_like(w, np.bool_) for w in self.wires]
+            
         for li, (gate_n, group_size) in enumerate(self.layer_sizes):
             group_n = gate_n // group_size
             span_x = W / group_n
@@ -558,9 +572,16 @@ class Demo:
             gate_ofs = (np.arange(group_size) - group_size / 2 + 0.5) * gate_w
             gate_x = (group_x + gate_ofs).ravel()
             y = base_y + li * h + d / 2
-            act = np.array(self.act[li][case])
+            
+            # Ensure we don't go out of bounds on activations
+            if li < len(self.act):
+                act = np.array(self.act[li][case])
+            else:
+                print(f"Warning: Missing activation for layer {li}")
+                act = np.zeros(gate_n)
+                
             for i, x in enumerate(gate_x):
-                a = int(act[i] * 0xA0)
+                a = int(act[i] * 0xA0) if i < len(act) else 0
                 col = 0xFF202020 + (a << 8)
                 p0, p1 = (x - gate_w / 2, y - d / 2), (x + gate_w / 2, y + d / 2)
                 dl.add_rect_filled(p0, p1, col, 4)
@@ -577,7 +598,7 @@ class Demo:
                             self.gate_mask[li][i] = 1.0 - self.gate_mask[li][i]
                         else:
                             self.active_case_i = self.active_case_i ^ (1 << i)
-                if self.gate_mask[li][i] == 0.0:
+                if li < len(self.gate_mask) and i < len(self.gate_mask[li]) and self.gate_mask[li][i] == 0.0:
                     dl.add_rect_filled(p0, p1, 0xA00000FF, 4)
 
             for x in group_x[:, 0]:
@@ -588,7 +609,7 @@ class Demo:
                     4,
                 )
 
-            if li > 0:
+            if li > 0 and prev_gate_x is not None and li - 1 < len(self.wires) and li - 1 < len(self.wire_masks):
                 wires = self.wires[li - 1].T
                 masks = self.wire_masks[li - 1].T
                 src_x = prev_gate_x[wires]
@@ -601,7 +622,7 @@ class Demo:
                 ):
                     if not m:
                         continue
-                    a = int(prev_act[si] * 0x60)
+                    a = int(prev_act[si] * 0x60) if si < len(prev_act) else 0
                     col = 0xFF404040 + (a << 8)
                     dl.add_bezier_cubic(
                         (x0, prev_y + d / 2),
@@ -809,6 +830,9 @@ class Demo:
         self.wires_key = jax.random.PRNGKey(42)  # Fixed seed for reproducibility
         self.shuffle_wires()
         
+        # Initialize empty activations to ensure proper dimensions
+        self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
+        
         # Update input/output data
         x = jp.arange(self.case_n)
         self.input_x = unpack(x, bit_n=self.input_n)
@@ -828,11 +852,18 @@ class Demo:
         self.loss_log = np.zeros(max_trainstep_n, np.float32)
         self.hard_log = np.zeros(max_trainstep_n, np.float32)
         
+        # Create an empty error mask of appropriate size
+        self.err_mask = np.zeros((self.case_n, self.output_n), bool)
+        
         # Update task for new input/output dimensions
         self.update_task()
         
         # Run circuit once to initialize activations
-        self.update_circuit()
+        try:
+            self.update_circuit()
+        except Exception as e:
+            print(f"Warning: Initial update_circuit failed: {e}")
+            print("Continuing with default activations")
         
         print(f"Circuit regenerated with {sum(l.size for l in self.logits0)} parameters")
 
