@@ -239,6 +239,93 @@ def aggregate_edges_for_nodes_fn(
     return jraph.segment_sum(messages, indices, num_segments)
 
 
+class AttentionAggregation(nnx.Module):
+    """
+    Minimal, clean implementation of attention-based message aggregation.
+    """
+
+    def __init__(self, feature_dim: int, num_heads: int = 4, *, rngs: nnx.Rngs):
+        self.feature_dim = feature_dim
+        self.num_heads = num_heads
+        self.head_dim = feature_dim // num_heads
+
+        # Simple projections
+        self.key_proj = nnx.Linear(feature_dim, feature_dim, rngs=rngs)
+        self.value_proj = nnx.Linear(feature_dim, feature_dim, rngs=rngs)
+        # Single projection for all nodes to create queries
+        self.query_proj = nnx.Linear(feature_dim, feature_dim, rngs=rngs)
+        # Final output projection
+        self.output_proj = nnx.Linear(feature_dim, feature_dim, rngs=rngs)
+
+    def __call__(
+        self,
+        messages: jp.ndarray,
+        receivers: jp.ndarray,
+        num_segments: int,
+    ):
+        """
+        Simple attention-based message aggregation.
+        """
+        # Handle empty case
+        if messages.shape[0] == 0:
+            return jp.zeros((num_segments, self.feature_dim))
+
+        # Project messages to keys and values
+        keys = self.key_proj(messages)  # [num_edges, feature_dim]
+        values = self.value_proj(messages)  # [num_edges, feature_dim]
+
+        # Get unique receiver nodes (first aggregate messages per receiver)
+        summed_messages = jraph.segment_sum(
+            messages, receivers, num_segments
+        )  # [num_nodes, feature_dim]
+
+        # Generate queries for each node
+        queries = self.query_proj(summed_messages)  # [num_nodes, feature_dim]
+
+        # Get corresponding query for each message
+        message_queries = queries[receivers]  # [num_edges, feature_dim]
+
+        # Simple dot-product attention
+        # Compute attention scores - shape: [num_edges]
+        attention_scores = jp.sum(message_queries * keys, axis=-1) / jp.sqrt(
+            self.feature_dim
+        )
+
+        # For each receiver, we need to normalize scores with softmax
+        # Compute max per receiver for numerical stability
+        max_scores = jraph.segment_max(
+            attention_scores, receivers, num_segments
+        )  # [num_nodes]
+        edge_max_scores = max_scores[receivers]  # [num_edges]
+
+        # Compute exp(score - max_score)
+        exp_scores = jp.exp(attention_scores - edge_max_scores)  # [num_edges]
+
+        # Sum exp scores per receiver
+        sum_exp_scores = jraph.segment_sum(
+            exp_scores, receivers, num_segments
+        )  # [num_nodes]
+        edge_sum_exp_scores = sum_exp_scores[receivers]  # [num_edges]
+
+        # Compute softmax weights
+        attention_weights = exp_scores / (edge_sum_exp_scores + 1e-8)  # [num_edges]
+
+        # Weight values by attention weights
+        weighted_values = (
+            values * attention_weights[:, None]
+        )  # [num_edges, feature_dim]
+
+        # Aggregate weighted values per receiver
+        aggregated_values = jraph.segment_sum(
+            weighted_values, receivers, num_segments
+        )  # [num_nodes, feature_dim]
+
+        # Final projection
+        output = self.output_proj(aggregated_values)  # [num_nodes, feature_dim]
+
+        return output
+
+
 # Replace the update_node_fn with a NodeUpdateModule
 # Update function of an NCA
 class NodeUpdateModule(nnx.Module):
@@ -469,6 +556,7 @@ class CircuitGNN(nnx.Module):
         hidden_dim: int = 16,
         arity: int = 2,
         message_passing: bool = False,
+        use_attention: bool = False,
         *,
         rngs: nnx.Rngs,
     ):
@@ -493,7 +581,15 @@ class CircuitGNN(nnx.Module):
         )
 
         # Store the aggregation function
-        self.aggregate_fn = aggregate_edges_for_nodes_fn
+        if use_attention:
+            logit_dim = 2**arity
+            self.aggregate_fn = AttentionAggregation(
+                feature_dim=hidden_dim + logit_dim,
+                num_heads=4,
+                rngs=rngs,
+            )
+        else:
+            self.aggregate_fn = aggregate_edges_for_nodes_fn
 
     def __call__(self, graph: jraph.GraphsTuple) -> jraph.GraphsTuple:
         """Applies one step of GNN message passing manually."""
@@ -785,6 +881,7 @@ def train_gnn(
     message_passing: bool = True,
     node_mlp_features: List[int] = [64, 32],
     edge_mlp_features: List[int] = [64, 32],
+    use_attention: bool = False,
     learning_rate: float = 1e-3,
     epochs: int = 100,
     n_message_steps: int = 100,
@@ -862,6 +959,7 @@ def train_gnn(
             hidden_dim=hidden_dim,
             arity=arity,
             message_passing=message_passing,
+            use_attention=use_attention,
             rngs=nnx.Rngs(params=init_key),
         )
     else:
