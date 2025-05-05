@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jp
 import numpy as np
 from collections import namedtuple
-from model import run_circuit
+from boolean_nca_cc.circuits.model import run_circuit
 import optax
 import matplotlib.pyplot as plt
 from functools import partial

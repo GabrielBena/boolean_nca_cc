@@ -115,11 +115,3 @@ The GNN optimizes circuits through message passing:
 The package supports two training modes:
 - **Direct optimization**: Train a GNN to optimize a specific circuit
 - **Meta-learning**: Train a GNN to optimize any circuit of a given architecture
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit pull requests or open issues to improve the package.
-
-## License
-
-[MIT License](LICENSE)

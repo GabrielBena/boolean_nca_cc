@@ -14,7 +14,7 @@ from functools import partial
 
 from boolean_nca_cc.models import CircuitGNN, run_gnn_scan
 from boolean_nca_cc.utils import extract_logits_from_graph
-from model import run_circuit
+from boolean_nca_cc.circuits.model import run_circuit
 
 
 @partial(nnx.jit, static_argnames=("logits_original_shapes", "n_message_steps"))
@@ -30,7 +30,7 @@ def train_step_gnn(
 ):
     """
     Perform a single training step for the GNN-based circuit optimizer.
-    
+
     Args:
         gnn: CircuitGNN model
         optimizer: nnx Optimizer instance
@@ -40,10 +40,11 @@ def train_step_gnn(
         y_target: Target output tensor
         logits_original_shapes: List of (group_n, group_size, 2^arity) shapes for each layer
         n_message_steps: Number of message passing steps to run
-        
+
     Returns:
         Tuple of (loss, (hard_loss, accuracy, hard_accuracy, updated_logits, updated_graph), gradients)
     """
+
     # Define loss function for the model
     def loss_fn(gnn_model: CircuitGNN):
         # Run message passing for n steps
@@ -57,7 +58,7 @@ def train_step_gnn(
         # Run the circuit with updated logits (soft evaluation)
         all_acts = run_circuit(updated_logits, wires, x)
         y_pred = all_acts[-1]
-        
+
         # Run with hard (rounded) values for evaluation
         all_hard_acts = run_circuit(updated_logits, wires, x, hard=True)
         y_hard_pred = all_hard_acts[-1]
@@ -67,7 +68,7 @@ def train_step_gnn(
         hard_loss = jp.mean((y_hard_pred - y_target) ** 4)
         accuracy = jp.mean(jp.round(y_pred) == y_target)
         hard_accuracy = jp.mean(jp.round(y_hard_pred) == y_target)
-        
+
         return loss, (hard_loss, accuracy, hard_accuracy, updated_logits, updated_graph)
 
     # Compute loss and gradients
@@ -77,4 +78,4 @@ def train_step_gnn(
     optimizer.update(grads)
 
     # Return loss, auxiliary outputs, and gradients
-    return loss, aux, grads 
+    return loss, aux, grads

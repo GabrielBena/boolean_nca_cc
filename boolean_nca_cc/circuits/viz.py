@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.collections as collections  # Add this import for PatchCollection
 
-from model import run_circuit
+from boolean_nca_cc.circuits.model import run_circuit
 
 
 def visualize_network(wires, layer_sizes, title="Network Architecture"):

@@ -18,8 +18,7 @@ from boolean_nca_cc.models.self_attention import (
     run_self_attention_scan,
 )
 from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
-from boolean_nca_cc.training.attn_train_step import train_step_attn
-from model import gen_circuit, run_circuit
+from boolean_nca_cc.circuits.model import gen_circuit, run_circuit
 
 
 def train_self_attention(
@@ -39,11 +38,11 @@ def train_self_attention(
     dropout_rate: float = 0.0,
     meta_learning: bool = False,
     meta_batch_size: int = 64,
-    init_model: CircuitSelfAttention = None,
-    init_optimizer: nnx.Optimizer = None,
-    initial_metrics: Dict = None,
+    init_model: Optional[CircuitSelfAttention] = None,
+    init_optimizer: Optional[nnx.Optimizer] = None,
+    initial_metrics: Optional[Dict] = None,
     lr_scheduler: str = "constant",
-    lr_scheduler_params: Dict = None,
+    lr_scheduler_params: Optional[Dict] = None,
 ):
     """
     Train a self-attention model to optimize boolean circuit parameters.
@@ -62,7 +61,7 @@ def train_self_attention(
         n_attention_steps: Number of self-attention steps per epoch
         key: Random seed
         weight_decay: Weight decay for optimizer
-        dropout_rate: Dropout rate for attention
+        dropout_rate: Dropout rate for attention (currently unused, model is deterministic)
         meta_learning: Whether to use meta-learning (train on new random circuits each step)
         meta_batch_size: Batch size for meta-learning
         init_model: Optional pre-trained self-attention model to continue training
@@ -102,7 +101,12 @@ def train_self_attention(
     if init_model is None:
         # Create a new self-attention model
         rng, init_key = jax.random.split(rng)
+
+        # Calculate total number of nodes in the circuit
+        total_nodes = sum(n_nodes * group_size for n_nodes, group_size in layer_sizes)
+
         model = CircuitSelfAttention(
+            n_node=total_nodes,  # Pass the total number of nodes
             hidden_dim=hidden_dim,
             arity=arity,
             num_heads=num_heads,
@@ -174,7 +178,6 @@ def train_self_attention(
         rng: jax.random.PRNGKey,
         layer_sizes: List[Tuple[int, int]],
         n_attention_steps: int,
-        deterministic: bool = True,
     ):
         """
         Single meta-training step with randomly sampled circuit wirings.
@@ -187,16 +190,16 @@ def train_self_attention(
             rng: Random key
             layer_sizes: Circuit layer sizes
             n_attention_steps: Number of self-attention steps
-            deterministic: If False, apply dropout
 
         Returns:
             Tuple of (loss, (hard_loss, accuracy, hard_accuracy))
         """
 
         # Internal loss function for a single circuit
+        @nnx.jit
         def loss_fn(attn_model: CircuitSelfAttention, rng: jax.random.PRNGKey):
             # Sample new random circuit wiring
-            rng_wires, rng_dropout = jax.random.split(rng)
+            rng_wires, rng_attn = jax.random.split(rng)
             wires, logits = gen_circuit(rng_wires, layer_sizes, arity=arity)
 
             # Store original shapes for reconstruction
@@ -205,18 +208,11 @@ def train_self_attention(
             # Build graph from the random circuit
             graph = build_graph(logits, wires, input_n, arity, hidden_dim)
 
-            # Setup dropout rng
-            step_rngs = None
-            if not deterministic:
-                step_rngs = nnx.Rngs(dropout=rng_dropout)
-
             # Run self-attention for n_attention_steps to optimize the circuit
             updated_graph = run_self_attention_scan(
                 attn_model,
                 graph,
                 n_attention_steps,
-                deterministic=deterministic,
-                rngs=step_rngs,
             )
 
             # Extract updated logits and run the circuit
@@ -239,6 +235,7 @@ def train_self_attention(
             return loss, (hard_loss, accuracy, hard_accuracy)
 
         # For meta-learning, average over multiple random circuits
+        @nnx.jit
         def mean_batch_loss_fn(model, rng):
             # Create batch of random keys
             batch_rng = jax.random.split(rng, meta_batch_size)
@@ -275,9 +272,6 @@ def train_self_attention(
         x_batch = x_data[idx]
         y_batch = y_data[idx]
 
-        # Determine whether to use dropout
-        deterministic = dropout_rate == 0.0
-
         # Perform training step
         loss, (hard_loss, accuracy, hard_accuracy) = meta_train_step(
             model,
@@ -287,7 +281,6 @@ def train_self_attention(
             epoch_key,
             tuple(layer_sizes),
             n_attention_steps,
-            deterministic=deterministic,
         )
 
         # Record metrics

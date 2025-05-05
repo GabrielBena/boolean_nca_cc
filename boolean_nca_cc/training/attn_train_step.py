@@ -17,7 +17,7 @@ from boolean_nca_cc.models.self_attention import (
     run_self_attention_scan,
 )
 from boolean_nca_cc.utils import extract_logits_from_graph
-from model import run_circuit
+from boolean_nca_cc.circuits.model import run_circuit
 
 
 @partial(nnx.jit, static_argnames=("logits_original_shapes", "n_attention_steps"))

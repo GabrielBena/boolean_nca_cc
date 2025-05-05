@@ -16,7 +16,7 @@ from tqdm.auto import tqdm
 from boolean_nca_cc.models import CircuitGNN, run_gnn_scan
 from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
 from boolean_nca_cc.training.train_step import train_step_gnn
-from model import gen_circuit, run_circuit
+from boolean_nca_cc.circuits.model import gen_circuit, run_circuit
 
 
 def train_gnn(

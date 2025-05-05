@@ -10,6 +10,12 @@ The package is organized into the following submodules:
 - training: Training and evaluation functions
 """
 
+from boolean_nca_cc.circuits.model import (
+    generate_layer_sizes,
+    gen_circuit,
+    run_circuit,
+    run_layer,
+)
 from boolean_nca_cc.models import CircuitGNN, run_gnn_scan
 from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
 from boolean_nca_cc.training import train_gnn, train_step_gnn, evaluate_gnn_stepwise
@@ -17,19 +23,21 @@ from boolean_nca_cc.training import train_gnn, train_step_gnn, evaluate_gnn_step
 __version__ = "0.1.0"
 
 __all__ = [
+    # Circuits
+    "generate_layer_sizes",
+    "gen_circuit",
+    "run_circuit",
+    "run_layer",
     # Models
     "CircuitGNN",
     "run_gnn_scan",
-    
     # Utils
     "build_graph",
     "extract_logits_from_graph",
-    
     # Training
     "train_gnn",
     "train_step_gnn",
     "evaluate_gnn_stepwise",
-    
     # Version
     "__version__",
 ]

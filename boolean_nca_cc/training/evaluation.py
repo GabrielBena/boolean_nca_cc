@@ -12,7 +12,7 @@ from typing import List, Dict, Tuple
 
 from boolean_nca_cc.models import CircuitGNN, run_gnn_scan
 from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
-from model import run_circuit
+from boolean_nca_cc.circuits.model import run_circuit
 
 
 def evaluate_gnn_stepwise(
@@ -29,7 +29,7 @@ def evaluate_gnn_stepwise(
     """
     Evaluate GNN performance by running message passing steps one by one
     and collecting metrics at each step.
-    
+
     Args:
         gnn: Trained CircuitGNN model
         wires: List of wire connection patterns
@@ -40,7 +40,7 @@ def evaluate_gnn_stepwise(
         arity: Number of inputs per gate
         hidden_dim: Dimension of hidden features
         n_message_steps: Maximum number of message passing steps to run
-        
+
     Returns:
         Dictionary with metrics collected at each step
     """
@@ -116,4 +116,4 @@ def evaluate_gnn_stepwise(
             }
         )
 
-    return step_metrics 
+    return step_metrics

@@ -14,19 +14,25 @@ import ctypes
 from functools import partial
 
 # Import modules for boolean circuits
-from model import make_nops, run_layer, gen_wires, run_circuit, generate_layer_sizes
-from training import unpack, res2loss, loss_f, grad_loss_f_l4, grad_loss_f_bce, train_step, TrainState
-import graph  # Optional graph-based circuit optimization
+from boolean_nca_cc.circuits.model import (
+    make_nops,
+    run_circuit,
+    generate_layer_sizes,
+)
+from boolean_nca_cc.training import (
+    unpack,
+    res2loss,
+)
+import graph_old  # Optional graph-based circuit optimization
 import tasks  # Import the tasks module
 
 from imgui_bundle import (
     implot,
-    imgui_knobs,
     imgui,
     immapp,
-    imgui_ctx,
     hello_imgui,
 )
+
 
 # Extend gen_wires in model.py to support local_noise
 def gen_wires_with_noise(key, in_n, out_n, arity, group_size, local_noise=None):
@@ -40,13 +46,16 @@ def gen_wires_with_noise(key, in_n, out_n, arity, group_size, local_noise=None):
     ).argsort()
     return i.reshape(-1, arity).T
 
+
 def res2loss(res):
     return jp.square(jp.square(res)).sum()
+
 
 # Use the modified run_circuit that accepts gate_mask
 def run_circuit_gui(logits, wires, gate_mask, x, hard=False):
     """Run circuit with gate masking for GUI use"""
     return run_circuit(logits, wires, x, gate_mask=gate_mask, hard=hard)
+
 
 def loss_f_gui(logits, wires, gate_mask, x, y0):
     """Modified loss function that uses gate masking"""
@@ -59,6 +68,7 @@ def loss_f_gui(logits, wires, gate_mask, x, y0):
     return loss, dict(
         act=act, err_mask=err_mask, hard_loss=hard_loss, hard_act=hard_act
     )
+
 
 grad_loss_f_gui = jax.jit(jax.value_and_grad(loss_f_gui, has_aux=True))
 
@@ -128,13 +138,13 @@ def create_texture_from_array(img_array):
         rgba[:, :, 0:3] = img_array
         rgba[:, :, 3] = 255
         img_array = rgba
-    
+
     # Make a flat RGBA array
     flat_img = img_array.ravel().view(np.uint8)
-    
+
     # Create texture ID using ImGui
     texture_id = imgui.get_io().fonts.tex_id
-    
+
     return texture_id, img_array.shape[1], img_array.shape[0]
 
 
@@ -148,20 +158,22 @@ class Demo:
         self.output_n = 4
         self.arity = 2
         self.layer_n = 2
-        
+
         # Update case_n based on input_n
         self.case_n = 1 << self.input_n
-        
+
         # Generate initial layer sizes
-        self.layer_sizes = generate_layer_sizes(self.input_n, self.output_n, self.arity, self.layer_n)
-        
+        self.layer_sizes = generate_layer_sizes(
+            self.input_n, self.output_n, self.arity, self.layer_n
+        )
+
         # Circuit initialization
         self.logits0 = []
         for gate_n, group_size in self.layer_sizes[1:]:
             self.logits0.append(make_nops(gate_n, self.arity, group_size))
         self.logits = self.logits0
         print("param_n:", sum(l.size for l in self.logits0))
-        
+
         # Wiring configuration
         self.wires_key = jax.random.PRNGKey(42)
         self.local_noise = 0.0
@@ -171,18 +183,20 @@ class Demo:
         # Input data
         x = jp.arange(self.case_n)
         self.input_x = unpack(x, bit_n=self.input_n)
-        
+
         # Create a proper image format for display - convert to 3-channel uint8
         inp_img = self.input_x.T
-        
+
         # Ensure consistent visualization with different input sizes
         # Use a more moderate zoom factor to avoid overly large displays
         zoom_factor = max(4, int(8 // self.input_n * 2))  # Reduced scaling factor
         inp_img = np.dstack([inp_img] * 3)  # Convert to 3-channel
         inp_img = zoom(inp_img, zoom_factor)
         self.inputs_img = np.uint8(inp_img.clip(0, 1) * 255)  # Convert to uint8
-        
-        print(f"Input image shape: {self.inputs_img.shape}, dtype: {self.inputs_img.dtype}, zoom_factor: {zoom_factor}")
+
+        print(
+            f"Input image shape: {self.inputs_img.shape}, dtype: {self.inputs_img.dtype}, zoom_factor: {zoom_factor}"
+        )
         self.active_case_i = 123
 
         # Display textures
@@ -190,10 +204,10 @@ class Demo:
         self.output_texture = None
         self.ground_truth_texture = None
         self.ground_truth_img = None
-        
+
         # Visualization settings
         self.use_simple_viz = False
-        
+
         # Plot settings
         self.max_loss_value = 10.0  # Maximum loss value to display
         self.min_loss_value = 1e-6  # Minimum loss value (for log scale)
@@ -201,7 +215,11 @@ class Demo:
 
         # Task definitions using the tasks module
         self.available_tasks = list(tasks.TASKS.keys()) + ["text", "noise"]
-        self.task_idx = self.available_tasks.index("binary_multiply") if "binary_multiply" in self.available_tasks else 0
+        self.task_idx = (
+            self.available_tasks.index("binary_multiply")
+            if "binary_multiply" in self.available_tasks
+            else 0
+        )
         self.task_text = "All you need are ones and zeros and backpropagation"
         self.noise_p = 0.5
         self.sample_noise()
@@ -213,14 +231,14 @@ class Demo:
         self.hard_log = np.zeros(max_trainstep_n, np.float32)
         self.trainstep_i = 0
         self.is_training = True
-        
+
         # Optimization method (backprop/GNN)
         self.optimization_methods = ["Backprop", "GNN"]
         self.optimization_method_idx = 0  # Default to Backprop
-        
+
         # Initialize optimizers
         self.init_optimizers()
-        
+
         # GNN setup (initialized on demand)
         self.gnn = None
         self.gnn_hidden_dim = 16
@@ -234,7 +252,7 @@ class Demo:
         # Backprop optimizer
         self.bp_optimizer = optax.adamw(2.0, 0.8, 0.8, weight_decay=10**self.wd_log10)
         self.opt_state = self.bp_optimizer.init(self.logits)
-        
+
         # GNN optimizer will be initialized on demand when selected
 
     def get_opt(self):
@@ -245,7 +263,9 @@ class Demo:
         # Ensure we have the right number of masks
         self.gate_mask = [np.ones(gate_n) for gate_n, _ in self.layer_sizes]
         self.wire_masks = [np.ones_like(w, np.bool_) for w in self.wires]
-        print(f"Reset gate mask: {len(self.gate_mask)} gate masks, {len(self.wire_masks)} wire masks")
+        print(
+            f"Reset gate mask: {len(self.gate_mask)} gate masks, {len(self.wire_masks)} wire masks"
+        )
 
     def mask_unused_gates(self):
         gate_masks, self.wire_masks = calc_gate_use_masks(
@@ -261,10 +281,12 @@ class Demo:
         for gate_n, group_size in self.layer_sizes[1:]:
             key, k1 = jax.random.split(key)
             local_noise = self.local_noise if self.local_noise > 0.0 else None
-            ws = gen_wires_with_noise(k1, in_n, gate_n, self.arity, group_size, local_noise)
+            ws = gen_wires_with_noise(
+                k1, in_n, gate_n, self.arity, group_size, local_noise
+            )
             self.wires.append(ws)
             in_n = gate_n
-        
+
         # Reset GNN when wires change
         self.gnn = None
 
@@ -274,42 +296,42 @@ class Demo:
     def update_task(self):
         """Update the current task using the tasks module where possible"""
         task_name = self.available_tasks[self.task_idx]
-        
+
         if task_name == "text":
             # Text-based task (special case)
             im = PIL.Image.new("L", (self.case_n, self.output_n))
             draw = PIL.ImageDraw.Draw(im)
             draw.text((2, -2), self.task_text, fill=255)
             self.y0 = jp.float32(np.array(im) > 100).T
-            
+
             # Default input is just counting
             x = jp.arange(self.case_n)
             self.input_x = unpack(x, bit_n=self.input_n)
-            
+
         elif task_name == "noise":
             # Noise-based task (special case)
             if self.noise.shape != (self.case_n, self.input_n):
                 self.sample_noise()
             self.y0 = jp.float32(self.noise < self.noise_p)
-            
+
             # Default input is just counting
             x = jp.arange(self.case_n)
             self.input_x = unpack(x, bit_n=self.input_n)
-            
+
         else:
             # Use the tasks module for standard tasks
             try:
                 # Get both input and expected output from the task
                 self.input_x, self.y0 = tasks.get_task_data(
-                    task_name, 
-                    self.case_n, 
-                    input_bits=self.input_n, 
-                    output_bits=self.output_n
+                    task_name,
+                    self.case_n,
+                    input_bits=self.input_n,
+                    output_bits=self.output_n,
                 )
-                
+
                 # Update input visualization
                 self.update_input_visualization()
-                
+
             except Exception as e:
                 print(f"Error loading task '{task_name}': {e}")
                 # Fallback to simple copy task
@@ -318,18 +340,18 @@ class Demo:
                 max_output_value = (1 << self.output_n) - 1
                 clipped_output = np.minimum(x, max_output_value)
                 self.y0 = jp.float32(unpack(clipped_output, bit_n=self.output_n))
-                
+
                 # Update input visualization
                 self.update_input_visualization()
-        
+
         # Reset training progress when task changes
         self.trainstep_i = 0
         self.loss_log = np.zeros(max_trainstep_n, np.float32)
         self.hard_log = np.zeros(max_trainstep_n, np.float32)
-        
+
         # Update ground truth visualization whenever task changes
         self.update_ground_truth_visualization()
-        
+
     def update_input_visualization(self):
         """Update input visualization based on current input_x"""
         inp_img = self.input_x.T
@@ -345,21 +367,21 @@ class Demo:
             # Initialize GNN using current circuit configuration
             key = jax.random.PRNGKey(42)  # Fixed seed for reproducibility
             try:
-                self.gnn, _, _ = graph.test_gnn(
+                self.gnn, _, _ = graph_old.test_gnn(
                     self.logits,
                     self.wires,
                     self.input_n,
                     arity=self.arity,
                     hidden_dim=self.gnn_hidden_dim,
                     message_passing=self.gnn_enable_message_passing,
-                    steps=1  # Just initialize
+                    steps=1,  # Just initialize
                 )
                 print("GNN initialized successfully")
             except Exception as e:
                 print(f"Error initializing GNN: {e}")
                 # Fallback to backprop
                 self.optimization_method_idx = 0
-                
+
     def update_circuit_backprop(self):
         """Update circuit using backpropagation"""
         try:
@@ -381,34 +403,38 @@ class Demo:
             self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
             self.err_mask = np.ones((self.case_n, self.output_n), bool)
             return self.max_loss_value, self.max_loss_value
-        
+
     def update_circuit_gnn(self):
         """Update circuit using GNN"""
         try:
             # Ensure GNN is initialized
             self.initialize_gnn()
-            
+
             # Run GNN for specified number of steps
             try:
                 # Store original logit shapes for reconstruction
                 logits_original_shapes = [logit.shape for logit in self.logits]
-                
+
                 # Create graph from current circuit
-                circuit_graph = graph.build_graph(
-                    self.logits, self.wires, self.input_n, self.arity, self.gnn_hidden_dim
+                circuit_graph = graph_old.build_graph(
+                    self.logits,
+                    self.wires,
+                    self.input_n,
+                    self.arity,
+                    self.gnn_hidden_dim,
                 )
-                
+
                 # Run GNN for specified number of steps
-                updated_graph = graph.run_gnn_scan(
+                updated_graph = graph_old.run_gnn_scan(
                     self.gnn, circuit_graph, self.gnn_message_steps
                 )
-                
+
                 # Extract updated logits if training is enabled
                 if self.is_training:
-                    self.logits = graph.extract_logits_from_graph(
+                    self.logits = graph_old.extract_logits_from_graph(
                         updated_graph, logits_original_shapes
                     )
-                    
+
                 # Run circuit with updated logits
                 self.act = run_circuit_gui(
                     self.logits, self.wires, self.gate_mask, self.input_x
@@ -416,27 +442,28 @@ class Demo:
                 hard_act = run_circuit_gui(
                     self.logits, self.wires, self.gate_mask, self.input_x, hard=True
                 )
-                
+
                 # Generate error mask for visualization
                 self.err_mask = hard_act[-1] != self.y0
-                
+
                 # Calculate loss
                 loss = res2loss(self.act[-1] - self.y0)
                 hard_loss = res2loss(hard_act[-1] - self.y0)
-                
+
                 return loss, hard_loss
-                
+
             except Exception as e:
                 print(f"Error in GNN update: {e}")
                 # Fallback to backprop
                 self.optimization_method_idx = 0
                 return self.update_circuit_backprop()
-                
+
         except Exception as e:
             print(f"Critical error in GNN update: {e}")
             import traceback
+
             print(f"Traceback: {traceback.format_exc()}")
-            
+
             # Return fallback values to avoid crashing
             self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
             self.err_mask = np.ones((self.case_n, self.output_n), bool)
@@ -450,67 +477,78 @@ class Demo:
                 loss, hard_loss = self.update_circuit_backprop()
             else:  # GNN
                 loss, hard_loss = self.update_circuit_gnn()
-            
+
             # Extract output activations and visualize
             oimg = self.act[-1].T
             oimg = np.dstack([oimg] * 3)
-            
+
             # Apply error mask for visualization (both methods set self.err_mask)
             m = self.err_mask.T[..., None] * 0.5
             oimg = oimg * (1.0 - m) + m * np.float32([1, 0, 0])
-            
+
             # Use same zoom factor as for input, but more moderate
             zoom_factor = max(4, int(8 // self.output_n * 2))  # Reduced scaling factor
             oimg = zoom(oimg, zoom_factor)
             self.outputs_img = np.uint8(oimg.clip(0, 1) * 255)
-            
+
             # Create ground truth visualization
             self.update_ground_truth_visualization()
-            
+
             # Update textures for display
             self.update_textures()
 
             # Ensure loss values are valid and bounded
             loss_value = float(loss)
             hard_loss_value = float(hard_loss)
-            
+
             # Check for NaN or infinity
             if np.isnan(loss_value) or np.isinf(loss_value):
                 loss_value = self.max_loss_value
-                print(f"Warning: Invalid loss value detected, clamping to {self.max_loss_value}")
-            
+                print(
+                    f"Warning: Invalid loss value detected, clamping to {self.max_loss_value}"
+                )
+
             if np.isnan(hard_loss_value) or np.isinf(hard_loss_value):
                 hard_loss_value = self.max_loss_value
-                print(f"Warning: Invalid hard_loss value detected, clamping to {self.max_loss_value}")
-                
+                print(
+                    f"Warning: Invalid hard_loss value detected, clamping to {self.max_loss_value}"
+                )
+
             # Update max loss value if auto-scaling is enabled
             if self.auto_scale_plot:
                 if loss_value > self.max_loss_value:
-                    self.max_loss_value = min(loss_value * 1.5, 1e6)  # Reasonable upper bound
-                    
+                    self.max_loss_value = min(
+                        loss_value * 1.5, 1e6
+                    )  # Reasonable upper bound
+
                 if hard_loss_value > self.max_loss_value:
                     self.max_loss_value = min(hard_loss_value * 1.5, 1e6)
 
             # Store the bounded values
             i = self.trainstep_i % len(self.loss_log)
-            self.loss_log[i] = max(min(loss_value, self.max_loss_value), self.min_loss_value)
-            self.hard_log[i] = max(min(hard_loss_value, self.max_loss_value), self.min_loss_value)
-            
+            self.loss_log[i] = max(
+                min(loss_value, self.max_loss_value), self.min_loss_value
+            )
+            self.hard_log[i] = max(
+                min(hard_loss_value, self.max_loss_value), self.min_loss_value
+            )
+
             if self.is_training:
                 self.trainstep_i += 1
-                
+
         except Exception as e:
             print(f"Error in update_circuit: {e}")
             import traceback
+
             print(f"Traceback: {traceback.format_exc()}")
-            
+
             # Try to recover by regenerating the circuit completely
             print("Attempting to recover by regenerating circuit...")
             try:
                 self.regenerate_circuit()
             except Exception as recovery_error:
                 print(f"Failed to recover: {recovery_error}")
-                
+
     def update_ground_truth_visualization(self):
         """Create visualization for ground truth (expected output)"""
         # Create ground truth visualization
@@ -519,14 +557,26 @@ class Demo:
         gt_img = np.dstack([gt_img] * 3)  # Convert to 3-channel
         gt_img = zoom(gt_img, zoom_factor)
         self.ground_truth_img = np.uint8(gt_img.clip(0, 1) * 255)
-        
+
     def update_textures(self):
         # We'll create textures each frame for simplicity
         # In a real application, you might want to cache these
         dummy_texture = imgui.get_io().fonts.tex_id
-        self.input_texture = (dummy_texture, self.inputs_img.shape[1], self.inputs_img.shape[0])
-        self.output_texture = (dummy_texture, self.outputs_img.shape[1], self.outputs_img.shape[0])
-        self.ground_truth_texture = (dummy_texture, self.ground_truth_img.shape[1], self.ground_truth_img.shape[0])
+        self.input_texture = (
+            dummy_texture,
+            self.inputs_img.shape[1],
+            self.inputs_img.shape[0],
+        )
+        self.output_texture = (
+            dummy_texture,
+            self.outputs_img.shape[1],
+            self.outputs_img.shape[0],
+        )
+        self.ground_truth_texture = (
+            dummy_texture,
+            self.ground_truth_img.shape[1],
+            self.ground_truth_img.shape[0],
+        )
 
     def draw_gate_lut(self, x, y, logit):
         x0, y0 = x - 20, y - 20 - 36
@@ -552,17 +602,21 @@ class Demo:
         prev_act = None
         case = self.active_case_i
         hover_gate = None
-        
+
         # Ensure activations exist
-        if not hasattr(self, 'act') or len(self.act) != len(self.layer_sizes):
-            print("Warning: Activations not initialized properly, creating empty activations")
+        if not hasattr(self, "act") or len(self.act) != len(self.layer_sizes):
+            print(
+                "Warning: Activations not initialized properly, creating empty activations"
+            )
             self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
-            
+
         # Ensure wire_masks has the right length
         if len(self.wire_masks) != len(self.wires):
-            print(f"Warning: wire_masks length mismatch. Expected {len(self.wires)}, got {len(self.wire_masks)}")
+            print(
+                f"Warning: wire_masks length mismatch. Expected {len(self.wires)}, got {len(self.wire_masks)}"
+            )
             self.wire_masks = [np.ones_like(w, np.bool_) for w in self.wires]
-            
+
         for li, (gate_n, group_size) in enumerate(self.layer_sizes):
             group_n = gate_n // group_size
             span_x = W / group_n
@@ -572,14 +626,14 @@ class Demo:
             gate_ofs = (np.arange(group_size) - group_size / 2 + 0.5) * gate_w
             gate_x = (group_x + gate_ofs).ravel()
             y = base_y + li * h + d / 2
-            
+
             # Ensure we don't go out of bounds on activations
             if li < len(self.act):
                 act = np.array(self.act[li][case])
             else:
                 print(f"Warning: Missing activation for layer {li}")
                 act = np.zeros(gate_n)
-                
+
             for i, x in enumerate(gate_x):
                 a = int(act[i] * 0xA0) if i < len(act) else 0
                 col = 0xFF202020 + (a << 8)
@@ -598,7 +652,11 @@ class Demo:
                             self.gate_mask[li][i] = 1.0 - self.gate_mask[li][i]
                         else:
                             self.active_case_i = self.active_case_i ^ (1 << i)
-                if li < len(self.gate_mask) and i < len(self.gate_mask[li]) and self.gate_mask[li][i] == 0.0:
+                if (
+                    li < len(self.gate_mask)
+                    and i < len(self.gate_mask[li])
+                    and self.gate_mask[li][i] == 0.0
+                ):
                     dl.add_rect_filled(p0, p1, 0xA00000FF, 4)
 
             for x in group_x[:, 0]:
@@ -609,12 +667,19 @@ class Demo:
                     4,
                 )
 
-            if li > 0 and prev_gate_x is not None and li - 1 < len(self.wires) and li - 1 < len(self.wire_masks):
+            if (
+                li > 0
+                and prev_gate_x is not None
+                and li - 1 < len(self.wires)
+                and li - 1 < len(self.wire_masks)
+            ):
                 wires = self.wires[li - 1].T
                 masks = self.wire_masks[li - 1].T
                 src_x = prev_gate_x[wires]
                 dst_x = (
-                    group_x + (np.arange(self.arity) + 0.5) / self.arity * group_w - group_w / 2
+                    group_x
+                    + (np.arange(self.arity) + 0.5) / self.arity * group_w
+                    - group_w / 2
                 )
                 my = (prev_y + y) / 2
                 for x0, x1, si, m in zip(
@@ -643,14 +708,14 @@ class Demo:
         try:
             view_w = imgui.get_content_region_avail().x
             img_h, img_w = img.shape[:2]
-            
+
             # Draw the image directly using ImGui
             texture_id, width, height = tex_id
-            
+
             # Create a simple colored rectangle instead of using texture
             dl = imgui.get_window_draw_list()
             p0 = imgui.get_cursor_screen_pos()
-            
+
             # Calculate proper aspect ratio based on the actual input/output data dimensions
             if name == "inputs":
                 # For inputs, maintain the natural bit_n / 2^bit_n ratio
@@ -664,27 +729,27 @@ class Demo:
                 natural_aspect = self.output_n / (2**self.output_n)
                 reference_aspect = 8.0 / (2**8)  # Aspect ratio of 8-bit display
                 aspect = natural_aspect * (reference_aspect / natural_aspect) * 3.0
-            
+
             # Maintain proper aspect ratio within reasonable bounds
-            min_aspect = 0.02   # Minimum height to width ratio
-            max_aspect = 0.3    # Maximum height to width ratio
+            min_aspect = 0.02  # Minimum height to width ratio
+            max_aspect = 0.3  # Maximum height to width ratio
             aspect = max(min_aspect, min(aspect, max_aspect))
-            
+
             disp_w = view_w
             disp_h = disp_w * aspect
             p1 = (p0[0] + disp_w, p0[1] + disp_h)
-            
+
             # Draw a background
             dl.add_rect_filled(p0, p1, 0xFF333333, 4.0)
-            
+
             if self.use_simple_viz:
                 # Very simple visualization - just show active case
                 case_width = disp_w / self.case_n
                 for i in range(self.case_n):
                     # Draw a simple line for each case
                     x_pos = p0[0] + i * case_width
-                    is_active = (i == self.active_case_i)
-                    
+                    is_active = i == self.active_case_i
+
                     # Sample color from the middle row of the image
                     middle_y = img_h // 2
                     if len(img.shape) == 3 and img.shape[2] >= 3:
@@ -696,38 +761,37 @@ class Demo:
                         # Grayscale
                         v = int(img[middle_y, i % img_w]) & 0xFF
                         color = 0xFF000000 | (v << 16) | (v << 8) | v
-                    
+
                     # Draw a vertical line for this case
                     dl.add_line(
-                        (x_pos, p0[1]), 
-                        (x_pos, p1[1]), 
-                        color,
-                        2.0 if is_active else 1.0
+                        (x_pos, p0[1]), (x_pos, p1[1]), color, 2.0 if is_active else 1.0
                     )
-                    
+
                     # Highlight active case
                     if is_active:
                         dl.add_rect(
-                            (x_pos - case_width/2, p0[1]),
-                            (x_pos + case_width/2, p1[1]),
+                            (x_pos - case_width / 2, p0[1]),
+                            (x_pos + case_width / 2, p1[1]),
                             0x8000FF00,
                             0.0,
-                            thickness=2.0
+                            thickness=2.0,
                         )
             else:
                 # Calculate block size
                 block_w = disp_w / img_w
                 block_h = disp_h / img_h
-                
+
                 # Only draw rectangles at a reasonable resolution to avoid performance issues
                 # If the image is too large, we'll sample it
-                max_display_blocks = 64  # Maximum number of blocks to display for performance
-                
+                max_display_blocks = (
+                    64  # Maximum number of blocks to display for performance
+                )
+
                 if img_w > max_display_blocks or img_h > max_display_blocks:
                     # Sample the image to reduce drawing complexity
                     x_step = max(1, img_w // max_display_blocks)
                     y_step = max(1, img_h // max_display_blocks)
-                    
+
                     for y in range(0, img_h, y_step):
                         for x in range(0, img_w, x_step):
                             # Calculate display rectangle
@@ -735,7 +799,7 @@ class Demo:
                             py = p0[1] + (y / img_h) * disp_h
                             px_end = p0[0] + ((x + x_step) / img_w) * disp_w
                             py_end = p0[1] + ((y + y_step) / img_h) * disp_h
-                            
+
                             # Get color from image and convert to ImGui color format (RGBA)
                             if len(img.shape) == 3 and img.shape[2] >= 3:
                                 r, g, b = [int(v) for v in img[y, x, 0:3]]
@@ -746,19 +810,15 @@ class Demo:
                                 # Grayscale
                                 v = int(img[y, x]) & 0xFF  # Ensure it's in range 0-255
                                 color = 0xFF000000 | (v << 16) | (v << 8) | v
-                            
-                            dl.add_rect_filled(
-                                (px, py), 
-                                (px_end, py_end), 
-                                color
-                            )
+
+                            dl.add_rect_filled((px, py), (px_end, py_end), color)
                 else:
                     # Draw at full resolution
                     for y in range(img_h):
                         for x in range(img_w):
                             px = p0[0] + x * block_w
                             py = p0[1] + y * block_h
-                            
+
                             # Get color from image and convert to ImGui color format (RGBA)
                             if len(img.shape) == 3 and img.shape[2] >= 3:
                                 r, g, b = [int(v) for v in img[y, x, 0:3]]
@@ -769,23 +829,21 @@ class Demo:
                                 # Grayscale
                                 v = int(img[y, x]) & 0xFF  # Ensure it's in range 0-255
                                 color = 0xFF000000 | (v << 16) | (v << 8) | v
-                            
+
                             dl.add_rect_filled(
-                                (px, py), 
-                                (px + block_w, py + block_h), 
-                                color
+                                (px, py), (px + block_w, py + block_h), color
                             )
-            
+
             # Add cursor showing active case
             x = p0[0] + (disp_w * (self.active_case_i + 0.5) / self.case_n)
             dl.add_line((x, p0[1]), (x, p1[1]), 0x8000FF00, 2.0)
-            
+
             # Add border
             dl.add_rect(p0, p1, 0xFFFFFFFF, 4.0)
-            
+
             # Make area clickable to change active case
             imgui.invisible_button(f"{name}_area", (disp_w, disp_h))
-            
+
             if imgui.is_item_hovered() and imgui.is_mouse_clicked(0):
                 mx = imgui.get_io().mouse_pos.x - p0[0]
                 mx_ratio = mx / disp_w
@@ -794,78 +852,85 @@ class Demo:
                     self.active_case_i = 0
                 if self.active_case_i >= self.case_n:
                     self.active_case_i = self.case_n - 1
-            
+
             # Skip some space
             imgui.dummy((0, disp_h))
-            
+
         except Exception as e:
             imgui.text(f"Error drawing {name}: {e}")
             import traceback
+
             print(f"Error in draw_lut: {traceback.format_exc()}")
 
     def regenerate_circuit(self):
         """Completely regenerate the circuit with current parameters"""
-        print(f"Regenerating circuit: input_n={self.input_n}, output_n={self.output_n}, arity={self.arity}, layer_n={self.layer_n}")
-        
+        print(
+            f"Regenerating circuit: input_n={self.input_n}, output_n={self.output_n}, arity={self.arity}, layer_n={self.layer_n}"
+        )
+
         # Update derived values
         self.case_n = 1 << self.input_n
-        
+
         # Ensure active case is valid for new case_n
         self.active_case_i = min(self.active_case_i, self.case_n - 1)
-        
+
         # Generate new layer sizes
-        self.layer_sizes = generate_layer_sizes(self.input_n, self.output_n, self.arity, self.layer_n)
+        self.layer_sizes = generate_layer_sizes(
+            self.input_n, self.output_n, self.arity, self.layer_n
+        )
         print(f"New layer sizes: {self.layer_sizes}")
-        
+
         # Reinitialize circuit
         self.logits0 = []
         for gate_n, group_size in self.layer_sizes[1:]:
             self.logits0.append(make_nops(gate_n, self.arity, group_size))
         self.logits = self.logits0
-        
+
         # Reset gate masks
         self.reset_gate_mask()
-        
+
         # Regenerate wires with new key to ensure fresh connections
         self.wires_key = jax.random.PRNGKey(42)  # Fixed seed for reproducibility
         self.shuffle_wires()
-        
+
         # Initialize empty activations to ensure proper dimensions
         self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
-        
+
         # Update input/output data
         x = jp.arange(self.case_n)
         self.input_x = unpack(x, bit_n=self.input_n)
         self.update_input_visualization()
-        
+
         # Reset noise if needed
         self.sample_noise()
-        
+
         # Reset optimizer state
         self.init_optimizers()
-        
+
         # Reset GNN if it was being used
         self.gnn = None
-        
+
         # Reset training progress
         self.trainstep_i = 0
         self.loss_log = np.zeros(max_trainstep_n, np.float32)
         self.hard_log = np.zeros(max_trainstep_n, np.float32)
-        
+
         # Create an empty error mask of appropriate size
         self.err_mask = np.zeros((self.case_n, self.output_n), bool)
-        
+
         # Update task for new input/output dimensions
         self.update_task()
-        
+
         # Run circuit once to initialize activations
         try:
             self.update_circuit()
         except Exception as e:
             print(f"Warning: Initial update_circuit failed: {e}")
             print("Continuing with default activations")
-        
-        print(f"Circuit regenerated with {sum(l.size for l in self.logits0)} parameters")
+
+        print(
+            f"Circuit regenerated with {sum(l.size for l in self.logits0)} parameters"
+        )
 
     def gui(self):
         try:
@@ -878,16 +943,25 @@ class Demo:
 
             if implot.begin_plot("Train logs", (-1, 200)):
                 implot.setup_legend(implot.Location_.north_east.value)
-                implot.setup_axis_scale(implot.ImAxis_.y1.value, implot.Scale_.log10.value)
-                
+                implot.setup_axis_scale(
+                    implot.ImAxis_.y1.value, implot.Scale_.log10.value
+                )
+
                 # Set axis limits
-                implot.setup_axes("Step", "Loss", implot.AxisFlags_.auto_fit.value, implot.AxisFlags_.auto_fit.value)
-                implot.setup_axis_limits(implot.ImAxis_.y1.value, self.min_loss_value, self.max_loss_value)
-                
+                implot.setup_axes(
+                    "Step",
+                    "Loss",
+                    implot.AxisFlags_.auto_fit.value,
+                    implot.AxisFlags_.auto_fit.value,
+                )
+                implot.setup_axis_limits(
+                    implot.ImAxis_.y1.value, self.min_loss_value, self.max_loss_value
+                )
+
                 # Plot bounded loss values
                 implot.plot_line("loss", self.loss_log)
                 implot.plot_line("hard_loss", self.hard_log)
-                
+
                 # Show current position
                 implot.drag_line_x(
                     1, self.trainstep_i % len(self.loss_log), (0.8, 0, 0, 0.5)
@@ -897,24 +971,28 @@ class Demo:
             imgui.separator_text("Inputs")
             self.draw_lut("inputs", self.inputs_img, self.input_texture)
 
-            H = imgui.get_content_region_avail().y - 320  # Adjust height to make room for both output and ground truth
+            H = (
+                imgui.get_content_region_avail().y - 320
+            )  # Adjust height to make room for both output and ground truth
             self.draw_circuit(H=H)
 
             imgui.separator_text("Outputs vs Ground Truth")
-            
+
             # Create columns for side-by-side display
             imgui.columns(2, "output_columns")
-            
+
             # Output column
             imgui.text("Current Output")
             self.draw_lut("outputs", self.outputs_img, self.output_texture)
-            
+
             # Ground truth column
             imgui.next_column()
             imgui.text("Expected Output (Ground Truth)")
-            if hasattr(self, 'ground_truth_img') and self.ground_truth_img is not None:
-                self.draw_lut("ground_truth", self.ground_truth_img, self.ground_truth_texture)
-            
+            if hasattr(self, "ground_truth_img") and self.ground_truth_img is not None:
+                self.draw_lut(
+                    "ground_truth", self.ground_truth_img, self.ground_truth_texture
+                )
+
             # End columns
             imgui.columns(1)
 
@@ -925,29 +1003,49 @@ class Demo:
 
             if imgui.button("python REPL"):
                 IPython.embed()
-                
+
             # Visualization mode toggle
-            changed, self.use_simple_viz = imgui.checkbox("Simple visualization", self.use_simple_viz)
+            changed, self.use_simple_viz = imgui.checkbox(
+                "Simple visualization", self.use_simple_viz
+            )
             if changed:
-                print(f"Visualization mode: {'Simple' if self.use_simple_viz else 'Detailed'}")
-            
+                print(
+                    f"Visualization mode: {'Simple' if self.use_simple_viz else 'Detailed'}"
+                )
+
             # Plot settings
             imgui.separator_text("Plot Settings")
-            _, self.auto_scale_plot = imgui.checkbox("Auto-scale plot", self.auto_scale_plot)
-            
+            _, self.auto_scale_plot = imgui.checkbox(
+                "Auto-scale plot", self.auto_scale_plot
+            )
+
             if not self.auto_scale_plot:
-                _, self.max_loss_value = imgui.slider_float("Max loss", self.max_loss_value, 0.001, 100.0, "%.3f", imgui.SliderFlags_.logarithmic.value)
-                _, self.min_loss_value = imgui.slider_float("Min loss", self.min_loss_value, 1e-6, 0.1, "%.6f", imgui.SliderFlags_.logarithmic.value)
-                
+                _, self.max_loss_value = imgui.slider_float(
+                    "Max loss",
+                    self.max_loss_value,
+                    0.001,
+                    100.0,
+                    "%.3f",
+                    imgui.SliderFlags_.logarithmic.value,
+                )
+                _, self.min_loss_value = imgui.slider_float(
+                    "Min loss",
+                    self.min_loss_value,
+                    1e-6,
+                    0.1,
+                    "%.6f",
+                    imgui.SliderFlags_.logarithmic.value,
+                )
+
                 # Ensure min < max
                 if self.min_loss_value >= self.max_loss_value:
                     self.min_loss_value = self.max_loss_value / 10.0
-            
+
             if imgui.button("Reset Plot Bounds"):
                 self.max_loss_value = 10.0
                 self.min_loss_value = 1e-6
                 print("Plot bounds reset to default values")
-                
+
             imgui.separator_text("Optimization")
 
             # Optimization method selection
@@ -955,11 +1053,13 @@ class Demo:
                 "Method", self.optimization_method_idx, self.optimization_methods
             )
             if opt_changed:
-                print(f"Switching to {self.optimization_methods[self.optimization_method_idx]} optimization")
+                print(
+                    f"Switching to {self.optimization_methods[self.optimization_method_idx]} optimization"
+                )
                 # Initialize GNN if needed when switching to it
                 if self.optimization_methods[self.optimization_method_idx] == "GNN":
                     self.initialize_gnn()
-            
+
             # GNN parameters (only shown when GNN is selected)
             if self.optimization_methods[self.optimization_method_idx] == "GNN":
                 imgui.text("GNN Parameters:")
@@ -975,7 +1075,7 @@ class Demo:
                 if imgui.button("Reinitialize GNN"):
                     self.gnn = None
                     self.initialize_gnn()
-            
+
             # Training controls (common to both methods)
             _, self.is_training = imgui.checkbox("is_training", self.is_training)
             if imgui.button("reset gates"):
@@ -998,8 +1098,12 @@ class Demo:
                 self.shuffle_wires()
 
             # Weight decay (only affects backprop)
-            wd_changed, self.wd_log10 = imgui.slider_float("wd_log10", self.wd_log10, -3, 0.0)
-            if wd_changed and self.optimization_method_idx == 0:  # Only reinitialize for backprop
+            wd_changed, self.wd_log10 = imgui.slider_float(
+                "wd_log10", self.wd_log10, -3, 0.0
+            )
+            if (
+                wd_changed and self.optimization_method_idx == 0
+            ):  # Only reinitialize for backprop
                 self.init_optimizers()
 
             imgui.separator_text("Masks")
@@ -1017,9 +1121,9 @@ class Demo:
             if task_changed:
                 self.update_task()
                 self.trainstep_i = 0
-            
+
             task_name = self.available_tasks[self.task_idx]
-            
+
             # Display task description
             task_descriptions = {
                 "binary_multiply": "Multiply lower and upper halves of input",
@@ -1029,13 +1133,13 @@ class Demo:
                 "parity": "Compute parity (odd/even number of bits)",
                 "reverse": "Reverse the bits in the input",
                 "text": "Learn a text pattern as binary image",
-                "noise": "Learn a random noise pattern"
+                "noise": "Learn a random noise pattern",
             }
-            
+
             # Show task description if available
             if task_name in task_descriptions:
                 imgui.text_wrapped(f"Description: {task_descriptions[task_name]}")
-            
+
             # Show task-specific controls
             if task_name == "text":
                 text_changed, self.task_text = imgui.input_text("text", self.task_text)
@@ -1047,47 +1151,47 @@ class Demo:
                 )
                 if noise_changed:
                     self.update_task()
-                    
+
             # Show circuit information
             imgui.spacing()
             actual_params = sum(l.size for l in self.logits0)
             imgui.text(f"Circuit parameters: {actual_params}")
 
             imgui.separator_text("Circuit Architecture")
-            
+
             # Add UI controls for circuit architecture parameters
             circuit_changed = False
-            
+
             # Store original values to detect changes
             orig_input_n = self.input_n
             orig_output_n = self.output_n
             orig_arity = self.arity
             orig_layer_n = self.layer_n
-            
+
             # Input bits slider
             _, new_input_n = imgui.slider_int("Input Bits", self.input_n, 2, 8)
             if new_input_n != self.input_n:
                 self.input_n = new_input_n
                 circuit_changed = True
-                
+
             # Output bits slider
             _, new_output_n = imgui.slider_int("Output Bits", self.output_n, 2, 8)
             if new_output_n != self.output_n:
                 self.output_n = new_output_n
                 circuit_changed = True
-                
+
             # Gate arity slider
             _, new_arity = imgui.slider_int("Gate Arity", self.arity, 2, 4)
             if new_arity != self.arity:
                 self.arity = new_arity
                 circuit_changed = True
-                
+
             # Hidden layers slider
             _, new_layer_n = imgui.slider_int("Hidden Layers", self.layer_n, 1, 4)
             if new_layer_n != self.layer_n:
                 self.layer_n = new_layer_n
                 circuit_changed = True
-                
+
             # If any parameter changed, regenerate the entire circuit
             if circuit_changed:
                 # Print what changed for debugging
@@ -1100,24 +1204,25 @@ class Demo:
                     changes.append(f"arity: {orig_arity} → {self.arity}")
                 if orig_layer_n != self.layer_n:
                     changes.append(f"layer_n: {orig_layer_n} → {self.layer_n}")
-                    
+
                 print(f"Circuit parameters changed: {', '.join(changes)}")
-                
+
                 try:
                     # Full regeneration of the circuit
                     self.regenerate_circuit()
                 except Exception as e:
                     print(f"Error regenerating circuit: {e}")
                     import traceback
+
                     print(f"Traceback: {traceback.format_exc()}")
-                    
+
                     # Revert to original values on error
                     self.input_n = orig_input_n
                     self.output_n = orig_output_n
                     self.arity = orig_arity
                     self.layer_n = orig_layer_n
                     print("Reverted to original parameters due to error")
-                
+
             # Manual regenerate button
             if imgui.button("Regenerate Circuit"):
                 try:
@@ -1125,19 +1230,27 @@ class Demo:
                 except Exception as e:
                     print(f"Error regenerating circuit: {e}")
                     import traceback
+
                     print(f"Traceback: {traceback.format_exc()}")
-                
+
             # Display current architecture summary
             imgui.text(f"Total parameters: {sum(l.size for l in self.logits0)}")
             imgui.text(f"Layer structure:")
             for i, (gate_n, group_size) in enumerate(self.layer_sizes):
-                layer_type = "Input" if i == 0 else "Output" if i == len(self.layer_sizes) - 1 else "Hidden"
+                layer_type = (
+                    "Input"
+                    if i == 0
+                    else "Output"
+                    if i == len(self.layer_sizes) - 1
+                    else "Hidden"
+                )
                 imgui.text(f"  {layer_type}: {gate_n} gates, group {group_size}")
 
             imgui.end_child()
         except Exception as e:
             print(f"Exception in gui: {e}")
             import traceback
+
             print(f"Traceback: {traceback.format_exc()}")
 
 
@@ -1157,4 +1270,4 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"Error running app: {e}")
     except Exception as e:
-        print(f"Error initializing demo: {e}") 
+        print(f"Error initializing demo: {e}")

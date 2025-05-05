@@ -41,6 +41,7 @@ class SelfAttentionLayer(nnx.Module):
         self.num_heads = num_heads
         self.head_dim = feature_dim // num_heads
         self.dropout_rate = dropout_rate
+        self.deterministic = True
 
         # Use MultiHeadAttention from nnx directly
         self.attention = nnx.MultiHeadAttention(
@@ -48,6 +49,7 @@ class SelfAttentionLayer(nnx.Module):
             in_features=feature_dim,
             dropout_rate=dropout_rate,
             decode=False,
+            deterministic=True,
             rngs=rngs,
         )
 
@@ -58,8 +60,6 @@ class SelfAttentionLayer(nnx.Module):
         self,
         x: jp.ndarray,
         attention_mask: Optional[jp.ndarray] = None,
-        deterministic: bool = True,
-        rngs: Optional[nnx.Rngs] = None,
     ) -> jp.ndarray:
         """
         Apply masked self-attention.
@@ -69,8 +69,6 @@ class SelfAttentionLayer(nnx.Module):
             attention_mask: Optional mask tensor of shape [batch_size, 1, seq_len, seq_len]
                           where True indicates attention is allowed, and False means
                           attention is masked out
-            deterministic: If False, apply dropout
-            rngs: Random number generators for dropout
 
         Returns:
             Output tensor after self-attention of shape [batch_size, seq_len, feature_dim]
@@ -82,8 +80,7 @@ class SelfAttentionLayer(nnx.Module):
         output = self.attention(
             inputs_q=normed_x,  # Self-attention: query=key=value
             mask=attention_mask,
-            deterministic=deterministic,
-            rngs=rngs,
+            deterministic=True,
             decode=False,
         )
 
@@ -115,6 +112,8 @@ class SelfAttentionBlock(nnx.Module):
             dropout_rate: Dropout rate
             rngs: Random number generators
         """
+        self.deterministic = True
+
         # Self-attention layer
         self.attention = SelfAttentionLayer(
             feature_dim=feature_dim,
@@ -135,8 +134,6 @@ class SelfAttentionBlock(nnx.Module):
         self,
         x: jp.ndarray,
         attention_mask: Optional[jp.ndarray] = None,
-        deterministic: bool = True,
-        rngs: Optional[nnx.Rngs] = None,
     ) -> jp.ndarray:
         """
         Apply self-attention block.
@@ -144,8 +141,6 @@ class SelfAttentionBlock(nnx.Module):
         Args:
             x: Input tensor
             attention_mask: Optional attention mask
-            deterministic: If False, apply dropout
-            rngs: Random number generators
 
         Returns:
             Output tensor after self-attention and feed-forward network
@@ -154,8 +149,6 @@ class SelfAttentionBlock(nnx.Module):
         attn_output = self.attention(
             x,
             attention_mask=attention_mask,
-            deterministic=deterministic,
-            rngs=rngs,
         )
 
         # Apply feed-forward network with residual connection
@@ -173,13 +166,13 @@ class CircuitSelfAttention(nnx.Module):
 
     def __init__(
         self,
+        n_node: int,
         hidden_dim: int = 16,
         arity: int = 2,
         num_heads: int = 4,
         num_layers: int = 3,
         mlp_dim: int = 64,
         dropout_rate: float = 0.0,
-        example_graph: jraph.GraphsTuple = None,
         *,
         rngs: nnx.Rngs,
     ):
@@ -187,6 +180,7 @@ class CircuitSelfAttention(nnx.Module):
         Initialize the circuit self-attention model.
 
         Args:
+            n_node: Fixed number of nodes in the circuit
             hidden_dim: Dimension of hidden features
             arity: Number of inputs per gate in the boolean circuit
             num_heads: Number of attention heads
@@ -195,11 +189,13 @@ class CircuitSelfAttention(nnx.Module):
             dropout_rate: Dropout rate
             rngs: Random number generators
         """
+        self.n_node = int(n_node)
         self.arity = arity
         self.hidden_dim = hidden_dim
         self.logit_dim = 2**arity
         self.dropout_rate = dropout_rate
         self.num_heads = num_heads
+        self.deterministic = True
 
         # Compute the total feature dimension (logits + hidden + positional encodings)
         feature_dim = self.logit_dim + hidden_dim * 3  # logits + hidden + 2 PE's
@@ -220,14 +216,20 @@ class CircuitSelfAttention(nnx.Module):
         ]
 
         # Output projections for both logits and hidden features
-        self.logit_proj = nnx.Linear(hidden_dim * 4, self.logit_dim, rngs=rngs)
-        self.hidden_proj = nnx.Linear(hidden_dim * 4, hidden_dim, rngs=rngs)
+        self.logit_proj = nnx.Linear(
+            hidden_dim * 4,
+            self.logit_dim,
+            kernel_init=nnx.initializers.zeros,
+            rngs=rngs,
+        )
+        self.hidden_proj = nnx.Linear(
+            hidden_dim * 4, hidden_dim, kernel_init=nnx.initializers.zeros, rngs=rngs
+        )
 
     def _create_attention_mask(
         self,
         senders: jp.ndarray,
         receivers: jp.ndarray,
-        n_node: int,
         bidirectional: bool = True,
     ) -> jp.ndarray:
         """
@@ -236,14 +238,13 @@ class CircuitSelfAttention(nnx.Module):
         Args:
             senders: Array of sender node indices
             receivers: Array of receiver node indices
-            n_node: Total number of nodes
             bidirectional: If True, create a symmetric mask
 
         Returns:
             Boolean attention mask of shape [batch_size, 1, seq_len, seq_len]
         """
         # Create a mask where edges exist in the graph
-        mask = jp.zeros((n_node, n_node), dtype=jp.bool_)
+        mask = jp.zeros((self.n_node, self.n_node), dtype=jp.bool_)
 
         if len(senders) > 0:
             # Set mask[receiver, sender] = True for all edges
@@ -254,7 +255,7 @@ class CircuitSelfAttention(nnx.Module):
                 mask = mask.at[senders, receivers].set(True)
 
         # Add self-connections (diagonal of True)
-        mask = mask | jp.eye(n_node, dtype=jp.bool_)
+        mask = mask | jp.eye(self.n_node, dtype=jp.bool_)
 
         # Add batch dimension and singleton head dimension [batch_size, 1, seq_len, seq_len]
         # This format matches the MultiHeadAttention mask format
@@ -284,24 +285,20 @@ class CircuitSelfAttention(nnx.Module):
     def __call__(
         self,
         graph: jraph.GraphsTuple,
-        deterministic: bool = True,
-        rngs: Optional[nnx.Rngs] = None,
+        attention_mask: Optional[jp.ndarray] = None,
     ) -> jraph.GraphsTuple:
         """
         Apply self-attention to update circuit parameters.
 
         Args:
             graph: Input graph structure with node and edge features
-            deterministic: If False, apply dropout
-            rngs: Random number generators
+            attention_mask: Optional pre-computed attention mask.
+                          If None, it will be computed from the graph.
 
         Returns:
             Updated graph after self-attention
         """
         nodes, edges, receivers, senders, globals_, n_node, n_edge = graph
-
-        # Convert n_node from array to scalar
-        n_node_scalar = n_node[0]
 
         # Extract and concatenate node features
         features = self._extract_features(nodes)
@@ -309,10 +306,11 @@ class CircuitSelfAttention(nnx.Module):
         # Add batch dimension [1, n_node, feature_dim]
         features = features[None, ...]
 
-        # Create attention mask based on circuit wiring
-        attention_mask = self._create_attention_mask(
-            senders, receivers, n_node_scalar, bidirectional=True
-        )
+        # Create attention mask if not provided
+        if attention_mask is None:
+            attention_mask = self._create_attention_mask(
+                senders, receivers, bidirectional=True
+            )
 
         # Project features to the attention dimension
         x = self.feature_proj(features)
@@ -322,13 +320,18 @@ class CircuitSelfAttention(nnx.Module):
             x = layer(
                 x,
                 attention_mask=attention_mask,
-                deterministic=deterministic,
-                rngs=rngs,
             )
 
         # Project to logit and hidden state updates
         logit_updates = self.logit_proj(x)
         hidden_updates = self.hidden_proj(x)
+
+        print(
+            logit_updates.shape,
+            logit_updates.mean(),
+            logit_updates.min(),
+            logit_updates.max(),
+        )
 
         # Remove batch dimension
         logit_updates = logit_updates[0]
@@ -345,13 +348,11 @@ class CircuitSelfAttention(nnx.Module):
         return graph._replace(nodes=updated_nodes)
 
 
-@partial(nnx.jit, static_argnames=("num_steps",))
+@partial(nnx.jit, static_argnames=("num_steps"))
 def run_self_attention_scan(
     model: CircuitSelfAttention,
     graph: jraph.GraphsTuple,
     num_steps: int,
-    deterministic: bool = True,
-    rngs: Optional[nnx.Rngs] = None,
 ) -> jraph.GraphsTuple:
     """
     Apply the self-attention iteratively for multiple steps using jax.lax.scan.
@@ -360,20 +361,19 @@ def run_self_attention_scan(
         model: The CircuitSelfAttention model
         graph: The initial graph
         num_steps: Number of attention steps to perform
-        deterministic: If False, apply dropout
-        rngs: Random number generators
 
     Returns:
         Updated graph after num_steps of self-attention
     """
+    # --- Compute the mask *once* before the scan ---
+    attention_mask = model._create_attention_mask(
+        graph.senders, graph.receivers, bidirectional=True
+    )
+    # ---------------------------------------------
 
     def scan_body(carry_graph, _):
-        # Apply one step of self-attention
-        updated_graph = model(
-            carry_graph,
-            deterministic=deterministic,
-            rngs=rngs,
-        )
+        # Apply one step of GNN message passing
+        updated_graph = model(carry_graph, attention_mask=attention_mask)
         return updated_graph, None
 
     # Run the scan
