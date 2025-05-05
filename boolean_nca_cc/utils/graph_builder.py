@@ -23,7 +23,7 @@ def build_graph(
 ) -> jraph.GraphsTuple:
     """
     Construct a jraph.GraphsTuple representation of a boolean circuit.
-    
+
     Args:
         logits: List of logit tensors per layer. Shape [(group_n, group_size, 2^arity), ...]
         wires: List of wire connection patterns per layer. Shape [(arity, edges_in_layer), ...]
@@ -31,7 +31,7 @@ def build_graph(
         arity: Fan-in for each gate
         hidden_dim: Dimension of hidden features for nodes
         bidirectional_edges: If True, create edges in both forward and backward directions
-        
+
     Returns:
         A jraph.GraphsTuple representing the circuit
     """
@@ -62,7 +62,7 @@ def build_graph(
             "logits": layer_logits.reshape(num_gates_in_layer, logit_dim),
             "hidden": jp.zeros((num_gates_in_layer, hidden_dim), dtype=jp.float32),
         }
-        
+
         # Add Positional Encodings
         # Layer PE (using layer index)
         max_layers = len(logits)
@@ -149,5 +149,5 @@ def build_graph(
         n_edge=jp.array([n_edge]),
         globals=None,  # No global features
     )
-    
-    return graph 
+
+    return graph
