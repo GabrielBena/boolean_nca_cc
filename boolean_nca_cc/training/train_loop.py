@@ -9,7 +9,8 @@ import jax
 import jax.numpy as jp
 import optax
 from flax import nnx
-from typing import List, Tuple, Dict
+import jraph
+from typing import List, Tuple, Dict, Any
 from functools import partial
 from tqdm.auto import tqdm
 
@@ -21,6 +22,10 @@ from boolean_nca_cc.circuits.train import (
     compute_accuracy,
 )
 from boolean_nca_cc.circuits.model import gen_circuit, run_circuit
+from boolean_nca_cc.training.pool import GraphPool, initialize_graph_pool
+
+# Type alias for PyTree
+PyTree = Any
 
 
 def get_loss_from_graph(logits, wires, x, y_target, loss_type: str):
@@ -71,6 +76,11 @@ def train_gnn(
     # Meta-learning parameters
     meta_learning: bool = False,
     meta_batch_size: int = 64,
+    # Pool parameters
+    use_pool: bool = False,
+    pool_size: int = 1024,
+    reset_pool_fraction: float = 0.05,
+    reset_pool_interval: int = 10,
     # Learning rate scheduling
     lr_scheduler: str = "constant",  # Options: "constant", "exponential", "cosine", "linear_warmup"
     lr_scheduler_params: Dict = None,
@@ -78,6 +88,7 @@ def train_gnn(
     key: int = 0,
     init_gnn: CircuitGNN = None,
     init_optimizer: nnx.Optimizer = None,
+    init_pool: GraphPool = None,
     initial_metrics: Dict = None,
     # Curriculum parameters
     message_steps_schedule: Dict = None,
@@ -102,8 +113,13 @@ def train_gnn(
         weight_decay: Weight decay for optimizer
         meta_learning: Whether to use meta-learning (train on new random circuits each step)
         meta_batch_size: Batch size for meta-learning
+        use_pool: Whether to use graph pool for training instead of generating new circuits
+        pool_size: Size of the graph pool if use_pool is True
+        reset_pool_fraction: Fraction of pool to reset periodically
+        reset_pool_interval: Number of epochs between pool resets
         init_gnn: Optional pre-trained GNN model to continue training
         init_optimizer: Optional pre-trained optimizer to continue training
+        init_pool: Optional pre-initialized GraphPool to continue training with
         initial_metrics: Optional dictionary of metrics from previous training
         lr_scheduler: Learning rate scheduler type. Default: "constant".
         lr_scheduler_params: Dictionary of parameters for the scheduler.
@@ -197,7 +213,147 @@ def train_gnn(
         # Use the provided optimizer
         optimizer = init_optimizer
 
-    # Define meta-training step function
+    # Initialize Graph Pool for training if using pool
+    if use_pool:
+        if init_pool is None:
+            rng, pool_key = jax.random.split(rng)
+            # Initialize a fresh pool
+            circuit_pool = initialize_graph_pool(
+                rng=pool_key,
+                layer_sizes=layer_sizes,
+                pool_size=pool_size,
+                input_n=input_n,
+                arity=arity,
+                hidden_dim=hidden_dim,
+                loss_value=0.0,  # Initial loss will be calculated properly in first step
+            )
+        else:
+            # Use the provided pool
+            circuit_pool = init_pool
+
+    # Function to run a circuit and calculate loss
+    # @partial(nnx.jit, static_argnames=("loss_type",))
+    def get_loss_from_wires_logits(logits, wires, x, y_target, loss_type: str):
+        # Run circuit and calculate loss
+        acts = run_circuit(logits, wires, x)
+        pred = acts[-1]
+        acts_hard = run_circuit(logits, wires, x, hard=True)
+        pred_hard = acts_hard[-1]
+
+        if loss_type == "bce":
+            loss = binary_cross_entropy(pred, y_target)
+            hard_loss = binary_cross_entropy(pred_hard, y_target)
+        elif loss_type == "l4":
+            res = pred - y_target
+            hard_res = pred_hard - y_target
+            loss = res2loss(res, power=4)
+            hard_loss = res2loss(hard_res, power=4)
+        elif loss_type == "l2":
+            res = pred - y_target
+            hard_res = pred_hard - y_target
+            loss = res2loss(res, power=2)
+            hard_loss = res2loss(hard_res, power=2)
+        else:
+            raise ValueError(f"Unknown loss_type: {loss_type}")
+
+        accuracy = compute_accuracy(pred, y_target)
+        hard_accuracy = compute_accuracy(pred_hard, y_target)
+
+        return loss, (hard_loss, pred, pred_hard, accuracy, hard_accuracy)
+
+    # Define pool-based training step
+    @partial(
+        nnx.jit,
+        static_argnames=(
+            "n_message_steps",
+            "loss_type",
+        ),
+    )
+    def pool_train_step(
+        gnn: CircuitGNN,
+        optimizer: nnx.Optimizer,
+        pool: GraphPool,
+        idxs: jp.ndarray,
+        graphs: jraph.GraphsTuple,
+        wires: PyTree,
+        logits: PyTree,
+        x: jp.ndarray,
+        y_target: jp.ndarray,
+        n_message_steps: int,
+        loss_type: str,
+    ):
+        """
+        Single training step using graphs from the pool.
+
+        Args:
+            gnn: CircuitGNN model
+            optimizer: nnx Optimizer
+            pool: GraphPool containing all circuits
+            idxs: Indices of sampled graphs in the pool
+            graphs: Batch of graphs from the pool
+            wires: Corresponding wires for the graphs
+            logits: Corresponding logits for the graphs
+            x: Input data
+            y_target: Target output data
+            n_message_steps: Number of message passing steps
+            loss_type: Type of loss function to use
+
+        Returns:
+            Tuple of (loss, auxiliary outputs, updated pool)
+        """
+
+        # Define loss function
+        def loss_fn(gnn_model, graph, logits, wires):
+            # Store original shapes for reconstruction
+            logits_original_shapes = [logit.shape for logit in logits]
+
+            # Calculate initial loss and update graphs
+            initial_loss, _ = get_loss_from_wires_logits(
+                logits, wires, x, y_target, loss_type
+            )
+            updated_graph = graph._replace(globals=initial_loss)
+
+            # Run GNN for n_message_steps to optimize the circuit
+            for _ in range(n_message_steps):
+                updated_graph = gnn_model(updated_graph)
+
+            # Extract updated logits and run the circuit
+            updated_logits = extract_logits_from_graph(
+                updated_graph, logits_original_shapes
+            )
+            loss, aux = get_loss_from_wires_logits(
+                updated_logits, wires, x, y_target, loss_type
+            )
+
+            # Final update with the computed loss
+            final_graph = updated_graph._replace(globals=loss)
+
+            return loss, (aux, final_graph, updated_logits)
+
+        def batch_loss_fn(gnn, graphs, logits, wires):
+            loss, (aux, updated_graphs, updated_logits) = nnx.vmap(
+                loss_fn, in_axes=(None, 0, 0, 0)
+            )(gnn, graphs, logits, wires)
+            return jp.mean(loss), (
+                jax.tree.map(lambda x: jp.mean(x, axis=0), aux),
+                updated_graphs,
+                updated_logits,
+            )
+
+        # Compute loss and gradients
+        (loss, (aux, updated_graphs, updated_logits)), grads = nnx.value_and_grad(
+            batch_loss_fn, has_aux=True
+        )(gnn, graphs, logits, wires)
+
+        # Update GNN parameters
+        optimizer.update(grads)
+
+        # Update pool with the updated graphs and logits (wires stay the same)
+        updated_pool = pool.update(idxs, updated_graphs, batch_of_logits=updated_logits)
+
+        return loss, aux, updated_pool
+
+    # Define meta-training step function (classic approach generating new circuits)
     @partial(
         nnx.jit,
         static_argnames=(
@@ -257,13 +413,6 @@ def train_gnn(
             )
 
             # Run GNN for n_message_steps to optimize the circuit
-
-            # all_graphs = []
-            # all_losses = []
-
-            # not using scan is much faster for now (weird) ?
-            # graph = run_gnn_scan(gnn_model, graph, n_message_steps)
-
             for _ in range(n_message_steps):
                 graph = gnn_model(graph)
                 # Extract updated logits and run the circuit
@@ -276,7 +425,6 @@ def train_gnn(
 
                 # Update the loss value for the graph
                 graph = graph._replace(globals=loss)
-                # all_losses.append(loss)
 
             accuracy = compute_accuracy(y_pred, y_target)
             hard_accuracy = compute_accuracy(y_hard_pred, y_target)
@@ -285,7 +433,6 @@ def train_gnn(
                 hard_loss,
                 accuracy,
                 hard_accuracy,
-                # all_losses,
             )
 
         # For meta-learning, average over multiple random circuits
@@ -367,10 +514,7 @@ def train_gnn(
     # Training loop
     for epoch in pbar:
         # Each epoch uses a different random key
-        if meta_learning:
-            rng, epoch_key = jax.random.split(rng)
-        else:
-            epoch_key = rng
+        rng, epoch_key = jax.random.split(rng)
 
         # Get current message steps from schedule if provided
         current_message_steps = (
@@ -379,36 +523,96 @@ def train_gnn(
             else int(message_steps_schedule[epoch])
         )
 
-        # print(f"Current message steps: {current_message_steps}")
+        if use_pool:
+            # Pool-based training
+            # Sample a batch from the pool
+            rng, sample_key = jax.random.split(rng)
+            idxs, graphs, wires, logits = circuit_pool.sample(
+                sample_key, meta_batch_size
+            )
 
-        # Select a random subset of data for this epoch
-        idx = jax.random.permutation(epoch_key, len(x_data))
-        x_batch = x_data[idx]
-        y_batch = y_data[idx]
+            # Select a random subset of data for this epoch
+            rng, data_key = jax.random.split(rng)
+            idx = jax.random.permutation(data_key, len(x_data))
+            x_batch = x_data[idx][:meta_batch_size]
+            y_batch = y_data[idx][:meta_batch_size]
 
-        # Perform training step, passing loss_type
-        loss, aux_stack = meta_train_step(
-            gnn,
-            optimizer,
-            x_batch,
-            y_batch,
-            epoch_key,
-            tuple(layer_sizes),
-            current_message_steps,
-            loss_type=loss_type,  # Pass loss_type here
-            meta_learning=meta_learning,
-        )
+            # Perform pool training step
+            (
+                loss,
+                (hard_loss, y_pred, y_hard_pred, accuracy, hard_accuracy),
+                circuit_pool,
+            ) = pool_train_step(
+                gnn,
+                optimizer,
+                circuit_pool,
+                idxs,
+                graphs,
+                wires,
+                logits,
+                x_batch,
+                y_batch,
+                current_message_steps,
+                loss_type=loss_type,
+            )
 
-        hard_loss, accuracy, hard_accuracy = jax.tree.map(
-            lambda x: jp.mean(x, axis=0), aux_stack
-        )
+            # Reset a fraction of the pool periodically
+            if (
+                epoch > 0
+                and reset_pool_interval is not None
+                and epoch % reset_pool_interval == 0
+            ):
+                rng, reset_key, fresh_key = jax.random.split(rng, 3)
+
+                # Generate fresh circuits for resetting
+                fresh_pool = initialize_graph_pool(
+                    rng=fresh_key,
+                    layer_sizes=layer_sizes,
+                    pool_size=pool_size,  # Use same size as circuit_pool
+                    input_n=input_n,
+                    arity=arity,
+                    hidden_dim=hidden_dim,
+                )
+
+                # Reset a fraction of the pool
+                circuit_pool = circuit_pool.reset_fraction(
+                    reset_key,
+                    reset_pool_fraction,
+                    fresh_pool.graphs,
+                    fresh_pool.wires,
+                    fresh_pool.logits,
+                )
+
+        else:
+            # Classic meta-learning approach
+            # Select a random subset of data for this epoch
+            idx = jax.random.permutation(epoch_key, len(x_data))
+            x_batch = x_data[idx]
+            y_batch = y_data[idx]
+
+            # Perform meta-learning training step
+            loss, aux_stack = meta_train_step(
+                gnn,
+                optimizer,
+                x_batch,
+                y_batch,
+                epoch_key,
+                tuple(layer_sizes),
+                current_message_steps,
+                loss_type=loss_type,
+                meta_learning=meta_learning,
+            )
+
+            hard_loss, accuracy, hard_accuracy = jax.tree.map(
+                lambda x: jp.mean(x, axis=0), aux_stack
+            )
 
         # Record metrics
         losses.append(float(loss))
         hard_losses.append(float(hard_loss))
         accuracies.append(float(accuracy))
         hard_accuracies.append(float(hard_accuracy))
-        # all_losses.append(all_losses)
+
         # Update progress bar with current metrics
         pbar.set_postfix(
             {
@@ -420,13 +624,17 @@ def train_gnn(
         )
 
     # Return the trained GNN model and metrics
-    return {
+    result = {
         "gnn": nnx.state(gnn),
         "optimizer": nnx.state(optimizer),
         "losses": losses,
         "hard_losses": hard_losses,
         "accuracies": accuracies,
         "hard_accuracies": hard_accuracies,
-        # "all_losses": all_losses,
-        # "all_graphs": all_graphs,
     }
+
+    # Add pool to result if used
+    if use_pool:
+        result["pool"] = circuit_pool
+
+    return result

@@ -77,6 +77,7 @@ def evaluate_gnn_stepwise(
         "hard_loss": [],
         "soft_accuracy": [],
         "hard_accuracy": [],
+        "logits_mean": [],
     }
 
     # Record initial metrics
@@ -85,7 +86,7 @@ def evaluate_gnn_stepwise(
     step_metrics["hard_loss"].append(float(initial_hard_loss))
     step_metrics["soft_accuracy"].append(float(initial_accuracy))
     step_metrics["hard_accuracy"].append(float(initial_hard_accuracy))
-
+    step_metrics["logits_mean"].append(float(graph.nodes["logits"].mean()))
     # Create progress bar for evaluation
     pbar = tqdm(range(1, n_message_steps + 1), desc="Evaluating GNN steps")
 
@@ -112,7 +113,7 @@ def evaluate_gnn_stepwise(
         step_metrics["hard_loss"].append(float(hard_loss))
         step_metrics["soft_accuracy"].append(float(accuracy))
         step_metrics["hard_accuracy"].append(float(hard_accuracy))
-
+        step_metrics["logits_mean"].append(float(graph.nodes["logits"].mean()))
         # Update loss value for graph
         graph = graph._replace(globals=loss)
 

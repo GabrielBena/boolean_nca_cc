@@ -16,12 +16,12 @@ def extract_logits_from_graph(
 ) -> List[jp.ndarray]:
     """
     Extract logit tensors from a graph's node features in a JIT-compatible way.
-    
+
     Args:
         graph: GraphsTuple containing node features (including flattened 'logits')
         logits_original_shapes: List of original (group_n, group_size, 2^arity) shapes
                                 for each layer
-                                
+
     Returns:
         List of logit tensors, reshaped to their original shapes
     """
@@ -58,4 +58,4 @@ def extract_logits_from_graph(
         layer_logits = layer_logits_flat.reshape(group_n, group_size, logit_dim)
         extracted_logits_list.append(layer_logits)
 
-    return extracted_logits_list 
+    return extracted_logits_list
