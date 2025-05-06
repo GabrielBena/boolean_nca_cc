@@ -18,7 +18,7 @@ from boolean_nca_cc.models.self_attention import (
     run_self_attention_scan,
 )
 from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
-from boolean_nca_cc.circuits.training import (
+from boolean_nca_cc.circuits.train import (
     res2loss,
     binary_cross_entropy,
     compute_accuracy,

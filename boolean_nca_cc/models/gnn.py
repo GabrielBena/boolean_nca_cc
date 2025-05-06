@@ -15,7 +15,6 @@ from functools import partial
 from boolean_nca_cc.models.node_update import NodeUpdateModule
 from boolean_nca_cc.models.edge_update import EdgeUpdateModule
 from boolean_nca_cc.models.aggregation import aggregate_sum, AttentionAggregation
-from boolean_nca_cc.training.train_loop import get_loss_from_graph
 
 
 class CircuitGNN(nnx.Module):
