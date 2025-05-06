@@ -79,6 +79,8 @@ def train_gnn(
     init_gnn: CircuitGNN = None,
     init_optimizer: nnx.Optimizer = None,
     initial_metrics: Dict = None,
+    # Curriculum parameters
+    message_steps_schedule: Dict = None,
 ):
     """
     Train a GNN to optimize boolean circuit parameters.
@@ -234,12 +236,11 @@ def train_gnn(
         """
 
         # Internal loss function for a single circuit
-        @partial(nnx.jit, static_argnames=("loss_type", "meta_learning"))
+        @partial(nnx.jit, static_argnames=("loss_type"))
         def loss_fn(
             gnn_model: CircuitGNN,
             rng: jax.random.PRNGKey,
             loss_type: str,
-            meta_learning: bool,
         ):
             # Sample new random circuit wiring
             rng_wires, _ = jax.random.split(rng)
@@ -263,7 +264,7 @@ def train_gnn(
             # not using scan is much faster for now (weird) ?
             # graph = run_gnn_scan(gnn_model, graph, n_message_steps)
 
-            for n in range(n_message_steps):
+            for _ in range(n_message_steps):
                 graph = gnn_model(graph)
                 # Extract updated logits and run the circuit
                 updated_logits = extract_logits_from_graph(
@@ -276,12 +277,6 @@ def train_gnn(
                 # Update the loss value for the graph
                 graph = graph._replace(globals=loss)
                 # all_losses.append(loss)
-
-            # # Extract updated logits and run the circuit
-            # updated_logits = extract_logits_from_graph(graph, logits_original_shapes)
-            # loss, (hard_loss, y_pred, y_hard_pred) = get_loss_from_graph(
-            #     updated_logits, wires, x, y_target, loss_type
-            # )
 
             accuracy = compute_accuracy(y_pred, y_target)
             hard_accuracy = compute_accuracy(y_hard_pred, y_target)
@@ -303,11 +298,9 @@ def train_gnn(
                 batch_rng = jp.full((meta_batch_size,), rng)
             # Use vmap to vectorize loss function over the random keys
             # Pass loss_type to the vmapped function
-            batch_loss_fn = nnx.vmap(loss_fn, in_axes=(None, 0, None, None))
+            batch_loss_fn = nnx.vmap(loss_fn, in_axes=(None, 0, None))
             # Compute losses for each random circuit
-            losses, aux = batch_loss_fn(
-                gnn, rng=batch_rng, loss_type=loss_type, meta_learning=meta_learning
-            )
+            losses, aux = batch_loss_fn(gnn, rng=batch_rng, loss_type=loss_type)
             # Average losses and metrics
             return jp.mean(losses), jax.tree.map(lambda x: jp.stack(x, axis=0), aux)
 
@@ -322,6 +315,52 @@ def train_gnn(
 
         return loss, aux
 
+    if message_steps_schedule is not None:
+        schedule_type = message_steps_schedule.get("schedule_type", "staircase")
+        schedule_params = message_steps_schedule.get("schedule_params", {})
+
+        if schedule_type == "linear":
+            message_steps_schedule = jax.numpy.linspace(
+                schedule_params.get("start", 1),
+                schedule_params.get("end", n_message_steps),
+                epochs,
+            )
+        elif schedule_type == "exponential":
+            start = jax.numpy.log(schedule_params.get("start", 1))
+            end = jax.numpy.log(schedule_params.get("end", n_message_steps))
+            message_steps_schedule = jax.numpy.exp(
+                jax.numpy.linspace(start, end, epochs)
+            )
+        elif schedule_type == "staircase":
+            # Create a schedule with minimal discrete steps to reduce recompilations
+            num_steps = schedule_params.get("num_steps", 4)  # Default to 4 steps
+            start = schedule_params.get("start", 1)
+            end = schedule_params.get("end", n_message_steps)
+            # Calculate step sizes to distribute evenly across epochs
+            step_sizes = jp.linspace(start, end, num_steps)
+            # Create array of indices for each step
+            step_indices = jp.linspace(
+                0, epochs - 1, num_steps, dtype=jp.int32, endpoint=False
+            )
+
+            # Calculate the length of each segment
+            segment_lengths = jp.diff(
+                jp.concatenate([step_indices, jp.array([epochs])])
+            )
+
+            # Create the schedule by repeating each step value for its segment length
+            schedule = jp.repeat(jp.round(step_sizes).astype(jp.int32), segment_lengths)
+
+            # Ensure the schedule has exactly 'epochs' elements by padding or truncating
+            padding = jp.full(epochs - len(schedule), schedule[-1])
+            schedule = jp.concatenate([schedule, padding])[:epochs]
+
+            message_steps_schedule = schedule
+        else:
+            raise ValueError(f"Unknown schedule_type: {schedule_type}")
+
+        print(f"Message steps schedule: {message_steps_schedule}")
+
     # Create progress bar for training
     pbar = tqdm(range(epochs), desc="Training GNN")
 
@@ -332,6 +371,15 @@ def train_gnn(
             rng, epoch_key = jax.random.split(rng)
         else:
             epoch_key = rng
+
+        # Get current message steps from schedule if provided
+        current_message_steps = (
+            n_message_steps
+            if message_steps_schedule is None
+            else int(message_steps_schedule[epoch])
+        )
+
+        # print(f"Current message steps: {current_message_steps}")
 
         # Select a random subset of data for this epoch
         idx = jax.random.permutation(epoch_key, len(x_data))
@@ -346,7 +394,7 @@ def train_gnn(
             y_batch,
             epoch_key,
             tuple(layer_sizes),
-            n_message_steps,
+            current_message_steps,
             loss_type=loss_type,  # Pass loss_type here
             meta_learning=meta_learning,
         )
@@ -367,6 +415,7 @@ def train_gnn(
                 "Loss": f"{loss:.4f}",
                 "Accuracy": f"{accuracy:.4f}",
                 "Hard Acc": f"{hard_accuracy:.4f}",
+                "Message Steps": f"{current_message_steps}",
             }
         )
 

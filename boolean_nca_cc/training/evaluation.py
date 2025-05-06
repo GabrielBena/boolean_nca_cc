@@ -93,7 +93,7 @@ def evaluate_gnn_stepwise(
     for step in pbar:
         # Apply one step of GNN message passing
         graph = gnn(graph)
-        print(graph.nodes["logits"].mean())
+        # print(graph.nodes["logits"].mean())
 
         # Extract current logits
         current_logits = extract_logits_from_graph(graph, logits_original_shapes)
