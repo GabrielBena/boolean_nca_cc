@@ -68,7 +68,7 @@ def get_circuit_connectivity(topology_type: str) -> Tuple[jp.ndarray, jp.ndarray
     return senders, receivers, output_lut_local_idx
 
 # --- Boolean Circuit Evaluation for Fixed Topologies ---
-@jax.jit
+@partial(jax.jit, static_argnames=("topology_type", "hard"))
 def evaluate_fixed_circuit(
     topology_type: str,
     lut_logits_list: List[jp.ndarray], # List of 3 logit arrays, each shape (1,1, 2**ARITY)
@@ -171,7 +171,7 @@ def extract_final_lut_logits(
 # --- Main Demo Class ---
 class FixedCircuitGNNDemo:
     def __init__(self):
-        self.rng_key_seq = nnx.RngKeySeq(42) # For nnx modules
+        self.rng_key = jax.random.key(42) # For nnx modules
 
         self.current_topology = "cascade"
         self.target_task_name = "parity" # Default task
@@ -185,7 +185,7 @@ class FixedCircuitGNNDemo:
             arity=ARITY,
             message_passing=True,
             use_attention=False,
-            rngs=nnx.Rngs(params=next(self.rng_key_seq))
+            rngs=nnx.Rngs(params=jax.random.key(43)) # Use a new key
         )
         self.optimizer = nnx.Optimizer(self.gnn_model, optax.adamw(learning_rate=LEARNING_RATE))
 
@@ -228,37 +228,40 @@ class FixedCircuitGNNDemo:
             self.y_task_target = self.y_task_target_original[:, :OUTPUT_N]
 
 
-    @partial(nnx.jit, static_argnames=("self", "static_topology_type", "static_gnn_steps"))
+    @staticmethod # Make it a static method
+    @partial(nnx.jit, static_argnames=("static_topology_type", "static_gnn_steps", "is_training_static", "single_lut_shape_val"))
     def _compiled_gnn_update_and_eval(
-        self,
+        # No 'self'
+        gnn_model_arg: CircuitGNN,                 # Explicitly pass GNN model
+        single_lut_shape_val: Tuple,             # Explicitly pass single_lut_shape, now static
         initial_lut_logits_list_jax: List[jp.ndarray],
         x_task_data_jax: jp.ndarray,
         y_task_target_jax: jp.ndarray,
         static_topology_type: str,
-        static_gnn_steps: int
+        static_gnn_steps: int,
+        is_training_static: bool
     ):
         # This function is JIT-compiled and contains the core GNN update and circuit evaluation.
-        # The GNN model state is implicitly handled by nnx when this is called from a method
-        # of the class instance that owns the GNN.
 
-        def loss_fn_for_grad(model_state: CircuitGNN): # model_state is what nnx.value_and_grad expects
+        def loss_fn_for_grad(model_state: CircuitGNN, current_single_lut_shape: Tuple):
+            # model_state is what nnx.value_and_grad expects as the first arg for differentiation
             # 1. Build graph
-            # Estimate initial loss for graph globals (can be simple)
             temp_eval_output = evaluate_fixed_circuit(static_topology_type, initial_lut_logits_list_jax, x_task_data_jax, hard=False)
             initial_circuit_loss = binary_cross_entropy(temp_eval_output, y_task_target_jax)
 
             gnn_graph = build_fixed_topology_graph(
                 static_topology_type,
                 initial_lut_logits_list_jax,
-                GNN_HIDDEN_DIM,
+                GNN_HIDDEN_DIM, # GNN_HIDDEN_DIM is a global constant
                 current_circuit_loss=initial_circuit_loss
             )
 
             # 2. Run GNN
+            # model_state here is gnn_model_arg
             updated_gnn_graph = run_gnn_scan(model_state, gnn_graph, static_gnn_steps)
 
             # 3. Extract LUTs
-            final_lut_logits_list = extract_final_lut_logits(updated_gnn_graph, self.single_lut_shape)
+            final_lut_logits_list = extract_final_lut_logits(updated_gnn_graph, current_single_lut_shape)
 
             # 4. Evaluate Circuit (soft for loss, hard for accuracy)
             circuit_output_soft = evaluate_fixed_circuit(static_topology_type, final_lut_logits_list, x_task_data_jax, hard=False)
@@ -271,16 +274,14 @@ class FixedCircuitGNNDemo:
             return task_loss, (accuracy, circuit_output_hard, final_lut_logits_list)
 
         # If training, compute gradients and apply updates
-        if self.is_training: # This instance variable access makes the outer method not fully JITable if is_training changes behavior inside loss_fn
-                            # It's better to pass is_training as a static arg if its value determines the computation graph for grad.
-                            # For now, assuming grad is always computed, and update is conditional outside.
-            (loss, aux_data), grads = nnx.value_and_grad(loss_fn_for_grad, has_aux=True)(self.gnn_model)
-            self.optimizer.update(grads) # Updates self.gnn_model
+        if is_training_static:
+            # Differentiate wrt the first argument (model_state, which is gnn_model_arg)
+            (loss, aux_data), grads = nnx.value_and_grad(loss_fn_for_grad, argnums=0, has_aux=True)(gnn_model_arg, single_lut_shape_val)
         else: # Evaluation only
-            loss, aux_data = loss_fn_for_grad(self.gnn_model) # No grad calculation
-            grads = None # No grads
+            loss, aux_data = loss_fn_for_grad(gnn_model_arg, single_lut_shape_val)
+            grads = None
 
-        return loss, aux_data, grads # grads will be None if not training, or actual grads
+        return loss, aux_data, grads
 
 
     def run_one_training_or_evaluation_step(self):
@@ -289,41 +290,28 @@ class FixedCircuitGNNDemo:
         x_task_jax = jp.array(self.x_task_data)
         y_task_jax = jp.array(self.y_task_target)
 
-        # The JIT-compiled function is called here.
-        # self.is_training is accessed *outside* the JITed function to decide on optimizer step.
-        # However, if is_training were to change the *structure* of loss_fn_for_grad,
-        # it would need to be a static argument. Here, it mainly gates the optimizer.update call.
+        # Call the static JIT-compiled function
+        loss_val, aux_data, grads = FixedCircuitGNNDemo._compiled_gnn_update_and_eval(
+            self.gnn_model,                         # Pass GNN model instance
+            self.single_lut_shape,                  # Pass single_lut_shape
+            initial_lut_logits_list_jax=initial_luts_jax,
+            x_task_data_jax=x_task_jax,
+            y_task_target_jax=y_task_jax,
+            static_topology_type=self.current_topology,
+            static_gnn_steps=GNN_MESSAGE_PASSING_STEPS,
+            is_training_static=self.is_training
+        )
 
-        # To make the JIT effective, the _compiled_gnn_update_and_eval needs to be pure regarding training mode for grad.
-        # A common pattern is to compute grads always, but only apply them if training.
-        # Let's refine the _compiled_gnn_update_and_eval to always compute grads, then apply outside.
-
-        # Re-designing the call slightly:
-        def grad_loss_fn(model_state: CircuitGNN):
-            # This is identical to loss_fn_for_grad above
-            temp_eval_output = evaluate_fixed_circuit(self.current_topology, initial_luts_jax, x_task_jax, hard=False)
-            initial_circuit_loss = binary_cross_entropy(temp_eval_output, y_task_jax)
-            gnn_graph = build_fixed_topology_graph(self.current_topology, initial_luts_jax, GNN_HIDDEN_DIM, current_circuit_loss=initial_circuit_loss)
-            updated_gnn_graph = run_gnn_scan(model_state, gnn_graph, GNN_MESSAGE_PASSING_STEPS)
-            final_lut_logits_list = extract_final_lut_logits(updated_gnn_graph, self.single_lut_shape)
-            circuit_output_soft = evaluate_fixed_circuit(self.current_topology, final_lut_logits_list, x_task_jax, hard=False)
-            circuit_output_hard = evaluate_fixed_circuit(self.current_topology, final_lut_logits_list, x_task_jax, hard=True)
-            task_loss = binary_cross_entropy(circuit_output_soft, y_task_jax)
-            accuracy = compute_accuracy(circuit_output_hard, y_task_jax)
-            return task_loss, (accuracy, circuit_output_hard, final_lut_logits_list)
-
-        if self.is_training:
-            (loss_val, aux_data), grads = nnx.value_and_grad(grad_loss_fn, has_aux=True)(self.gnn_model)
-            self.optimizer.update(grads)
+        if self.is_training and grads is not None:
+            self.optimizer.update(grads) # Apply updates using the grads from the compiled function
             self.train_step_count += 1
-        else: # Evaluation
-            loss_val, aux_data = grad_loss_fn(self.gnn_model) # No grad calculation needed for optimizer
+        # If not training, or if grads were None, no update is applied.
 
         acc_val, circ_out_hard_jax, fin_luts_jax = aux_data
 
         self.current_loss = float(loss_val)
         self.current_accuracy = float(acc_val)
-        if self.is_training: # Only log if it was a training step
+        if self.is_training: # Only log if it was a training step where updates were applied
           self.losses.append(self.current_loss)
           self.accuracies.append(self.current_accuracy)
 

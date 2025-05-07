@@ -49,8 +49,10 @@ def binary_add(case_n, input_bits=8, output_bits=None):
     return unpack(x, input_bits), unpack(y, output_bits)
 
 
-def parity(case_n, input_bits=8):
+def parity(case_n, input_bits=8, output_bits=None):
     """Compute parity (number of 1 bits is odd/even)"""
+    if output_bits is not None and output_bits != 1:
+        raise ValueError("Parity task is defined to have only 1 output bit.")
     x = jp.arange(case_n)
     y = x
     for i in range(1, input_bits):
