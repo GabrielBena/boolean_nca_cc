@@ -57,3 +57,4 @@ venv.bak/
 *.jpg
 *.jpeg
 *.pdf
+gnn_results.pkl
