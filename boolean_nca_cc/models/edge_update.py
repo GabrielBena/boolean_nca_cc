@@ -18,10 +18,10 @@ EdgeType = jp.ndarray
 class EdgeUpdateModule(nnx.Module):
     """
     Edge update module for GNN message passing.
-    
+
     Generates messages to be sent along edges from sender nodes to receiver nodes.
     """
-    
+
     def __init__(
         self,
         edge_mlp_features: List[int],
@@ -32,7 +32,7 @@ class EdgeUpdateModule(nnx.Module):
     ):
         """
         Initialize the edge update module.
-        
+
         Args:
             edge_mlp_features: Hidden layer sizes for the edge MLP
             hidden_dim: Dimension of hidden features
@@ -57,10 +57,8 @@ class EdgeUpdateModule(nnx.Module):
             # Add BatchNorm and ReLU except for the last layer
             if i < len(mlp_features) - 2:
                 edge_mlp_layers.append(
-                    nnx.BatchNorm(
-                        out_f,
-                        use_running_average=True,
-                        momentum=0.9,
+                    nnx.LayerNorm(
+                        num_features=out_f,
                         epsilon=1e-5,
                         rngs=rngs,
                     )
@@ -78,13 +76,13 @@ class EdgeUpdateModule(nnx.Module):
     ):
         """
         Generate messages to be sent along edges.
-        
+
         Args:
             edge_features: Features of the edge (if any)
             sender_node_features: Features of the sender node
             receiver_node_features: Features of the receiver node (unused)
-            globals_: Global features (unused)
-            
+            globals_: Global features [loss, update_steps]
+
         Returns:
             Message features to be sent along the edge [num_edges, logit_dim + hidden_dim]
         """
@@ -102,4 +100,4 @@ class EdgeUpdateModule(nnx.Module):
 
         # Apply edge MLP to generate the message
         message = self.edge_mlp(sender_combined_features)
-        return message  # Shape: [num_edges, logit_dim + hidden_dim] 
+        return message  # Shape: [num_edges, logit_dim + hidden_dim]

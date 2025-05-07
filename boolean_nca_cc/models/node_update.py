@@ -50,7 +50,7 @@ class NodeUpdateModule(nnx.Module):
         # Calculate MLP input size
         # Current features: Logits, Hidden, Layer PE, Intra-Layer PE
         current_features_size = self.logit_dim + hidden_dim + pe_dim + pe_dim
-        global_feature_size = 1  # Assuming globals_ is a scalar loss value
+        global_feature_size = 2  # Assuming globals_ is [loss, update_steps]
 
         if message_passing:
             # If using message passing, include aggregated messages
@@ -67,28 +67,30 @@ class NodeUpdateModule(nnx.Module):
         mlp_output_size = self.logit_dim + hidden_dim
 
         # Add feature normalization layers
-        self.logits_norm = nnx.BatchNorm(
+        self.logits_norm = nnx.LayerNorm(
             self.logit_dim,
-            use_running_average=True,
-            momentum=0.9,
             epsilon=1e-5,
             rngs=rngs,
         )
-        self.hidden_norm = nnx.BatchNorm(
-            hidden_dim, use_running_average=True, momentum=0.9, epsilon=1e-5, rngs=rngs
+        self.hidden_norm = nnx.LayerNorm(
+            hidden_dim,
+            epsilon=1e-5,
+            rngs=rngs,
         )
-        self.layer_pe_norm = nnx.BatchNorm(
-            pe_dim, use_running_average=True, momentum=0.9, epsilon=1e-5, rngs=rngs
+        self.layer_pe_norm = nnx.LayerNorm(
+            pe_dim,
+            epsilon=1e-5,
+            rngs=rngs,
         )
-        self.intra_layer_pe_norm = nnx.BatchNorm(
-            pe_dim, use_running_average=True, momentum=0.9, epsilon=1e-5, rngs=rngs
+        self.intra_layer_pe_norm = nnx.LayerNorm(
+            pe_dim,
+            epsilon=1e-5,
+            rngs=rngs,
         )
 
         if message_passing:
-            self.message_norm = nnx.BatchNorm(
+            self.message_norm = nnx.LayerNorm(
                 aggregated_message_size,
-                use_running_average=True,
-                momentum=0.9,
                 epsilon=1e-5,
                 rngs=rngs,
             )
@@ -113,10 +115,8 @@ class NodeUpdateModule(nnx.Module):
                 mlp_layers.append(nnx.Linear(in_f, out_f, rngs=rngs))
                 # Add BatchNorm and ReLU
                 mlp_layers.append(
-                    nnx.BatchNorm(
+                    nnx.LayerNorm(
                         out_f,
-                        use_running_average=True,
-                        momentum=0.9,
                         epsilon=1e-5,
                         rngs=rngs,
                     )
@@ -139,7 +139,7 @@ class NodeUpdateModule(nnx.Module):
             nodes: Current node features
             sent_attributes: Aggregated messages from incoming edges
             received_attributes: Features of received messages (unused)
-            globals_: Global features (e.g., scalar loss value)
+            globals_: Global features [loss, update_steps]
 
         Returns:
             Updated node features
@@ -169,6 +169,8 @@ class NodeUpdateModule(nnx.Module):
 
         # Broadcast global feature to match the number of nodes
         num_nodes = list(nodes.values())[0].shape[0]
+
+        # Globals are [loss, update_steps], both are used for the optimization
         broadcasted_globals = jp.repeat(
             jp.reshape(globals_, (1, -1)), num_nodes, axis=0
         )

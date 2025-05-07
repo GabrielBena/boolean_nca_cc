@@ -103,8 +103,8 @@ def gen_wires(key, in_n, out_n, arity, group_size):
 def gen_wires_with_noise(key, in_n, out_n, arity, group_size, local_noise=None):
     """
     Generate random wiring connections between circuit layers with optional locality bias.
-    
-    When local_noise is provided, wiring tends to connect nearby gates, with the noise 
+
+    When local_noise is provided, wiring tends to connect nearby gates, with the noise
     parameter controlling how strictly local the connections are.
 
     Args:
@@ -174,11 +174,11 @@ def run_circuit(logits, wires, x, gate_mask=None, hard=False):
         gate_mask = [jp.ones_like(x)]
         for lgt in logits:
             gate_mask.append(jp.ones(lgt.shape[0] * lgt.shape[1]))
-    
+
     # Apply input mask
     x = x * gate_mask[0]
     acts = [x]
-    
+
     for ws, lgt, mask in zip(wires, logits, gate_mask[1:]):
         luts = jax.nn.sigmoid(lgt)
         if hard:
@@ -190,28 +190,29 @@ def run_circuit(logits, wires, x, gate_mask=None, hard=False):
 
 ################## boolear circuit definition ##################
 
+
 def generate_layer_sizes(input_n, output_n, arity, layer_n=2):
     """
     Generate layer sizes for the boolean circuit with proper dimensioning.
     Ensures the last hidden layer properly connects to the output layer.
-    
+
     Args:
         input_n: Number of input bits
         output_n: Number of output bits
         arity: Number of inputs per gate
         layer_n: Number of hidden layers
-    
+
     Returns:
         A tuple of (gate_n, group_size) pairs for each layer
     """
     # Base width for hidden layers
     layer_width = input_n * arity * 2
-    
+
     # Calculate the required size for the last hidden layer
     # to match the output layer's input requirements
     last_hidden_width = output_n * arity
     last_hidden_group = arity // 2 if arity > 1 else 1
-    
+
     # Generate layer sizes
     layer_sizes = (
         [(input_n, 1)]  # Input layer
@@ -219,5 +220,5 @@ def generate_layer_sizes(input_n, output_n, arity, layer_n=2):
         + [(last_hidden_width, last_hidden_group)]  # Last hidden layer
         + [(output_n, 1)]  # Output layer
     )
-    
+
     return layer_sizes

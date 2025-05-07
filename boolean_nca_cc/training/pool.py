@@ -20,69 +20,6 @@ from boolean_nca_cc.utils.extraction import extract_logits_from_graph
 PyTree = Any
 
 
-class CircuitPool(struct.PyTreeNode):
-    """
-    Pool class for boolean circuit NCA.
-
-    Stores a collection of circuits (wires, logits, graphs) and allows
-    sampling batches with partial resets between training steps.
-    """
-
-    size: int = struct.field(pytree_node=False)
-    data: PyTree  # Contains wires, logits, and possibly graphs
-
-    @classmethod
-    def create(cls, data: PyTree) -> "CircuitPool":
-        """
-        Create a new CircuitPool instance.
-
-        Args:
-            data: Initial data to store in the pool. Should contain at minimum
-                 wires and logits, and possibly other circuit-related data.
-
-        Returns:
-            A new CircuitPool instance.
-        """
-        # Get size from first leaf in the data
-        size = jax.tree.leaves(data)[0].shape[0]
-        return cls(size=size, data=data)
-
-    @jax.jit
-    def update(self, idxs: Array, batch: PyTree) -> "CircuitPool":
-        """
-        Update circuits in the pool at the specified indices.
-
-        Args:
-            idxs: The indices at which to update the circuits.
-            batch: The batch of circuits to update at the specified indices.
-
-        Returns:
-            A new CircuitPool instance with the updated circuits.
-        """
-        data = jax.tree.map(
-            lambda data_leaf, batch_leaf: data_leaf.at[idxs].set(batch_leaf),
-            self.data,
-            batch,
-        )
-        return self.replace(data=data)
-
-    @partial(jax.jit, static_argnames=("batch_size",))
-    def sample(self, key: Array, batch_size: int) -> Tuple[Array, PyTree]:
-        """
-        Sample a batch of circuits from the pool.
-
-        Args:
-            key: A random key.
-            batch_size: The size of the batch to sample.
-
-        Returns:
-            A tuple containing the batch indices in the pool and the batch of circuits.
-        """
-        idxs = jax.random.choice(key, self.size, shape=(batch_size,))
-        batch = jax.tree.map(lambda leaf: leaf[idxs], self.data)
-        return idxs, batch
-
-
 class GraphPool(struct.PyTreeNode):
     """
     Pool class for graph-based circuit NCA.
@@ -293,7 +230,24 @@ class GraphPool(struct.PyTreeNode):
 
         return idxs, sampled_graphs, sampled_wires, sampled_logits
 
-    # @jax.jit
+    # Method to get average update steps of graphs in the pool
+    def get_average_update_steps(self) -> float:
+        """Get the average number of update steps across all graphs in the pool."""
+        if self.graphs.globals is None:
+            return 0.0
+        # Extract update_steps from the globals (second element in each graph's globals)
+        update_steps = self.graphs.globals[..., 1]
+        return float(jp.mean(update_steps))
+
+    # Method to get average update steps of a subset of graphs (for reset reporting)
+    def get_average_update_steps_for_indices(self, indices: Array) -> float:
+        """Get the average number of update steps for specified graph indices."""
+        if self.graphs.globals is None:
+            return 0.0
+        # Extract update_steps for the selected indices
+        update_steps = self.graphs.globals[indices, 1]
+        return float(jp.mean(update_steps))
+
     def reset_fraction(
         self,
         key: Array,
@@ -301,7 +255,12 @@ class GraphPool(struct.PyTreeNode):
         new_graphs: jraph.GraphsTuple,
         new_wires: PyTree = None,
         new_logits: PyTree = None,
-    ) -> "GraphPool":
+        reset_strategy: str = "uniform",  # Options: "uniform", "steps_biased", "loss_biased", or "combined"
+        combined_weights: Tuple[float, float] = (
+            0.5,
+            0.5,
+        ),  # Weights for [loss, steps] in combined strategy
+    ) -> Tuple["GraphPool", float]:
         """
         Reset a random fraction of the pool with fresh graphs.
 
@@ -311,30 +270,122 @@ class GraphPool(struct.PyTreeNode):
             new_graphs: Fresh graphs to use for reset
             new_wires: Fresh wires to use for reset
             new_logits: Fresh logits to use for reset
+            reset_strategy: Strategy for selecting graphs to reset:
+                            "uniform" - uniform random selection
+                            "steps_biased" - bias by update steps (more steps = higher probability)
+                            "loss_biased" - bias by loss value (higher loss = higher probability)
+                            "combined" - combine both loss and update steps for selection
+            combined_weights: Tuple of weights (loss_weight, steps_weight) for the combined strategy
 
         Returns:
-            Updated pool with reset elements
+            Updated pool with reset elements and the average update steps of reset graphs
         """
         # Calculate number of elements to reset
         num_reset = jp.maximum(1, jp.round(fraction * self.size).astype(jp.int32))
 
-        # Select elements to reset (prioritize those that haven't been reset recently)
-        if self.reset_counter is not None:
-            # Add random noise to counter to break ties
-            counter_with_noise = (
-                self.reset_counter
-                + jax.random.uniform(key, shape=self.reset_counter.shape) * 0.1
-            )
-            # Select indices with highest reset counter (oldest elements)
-            reset_idxs = jp.argsort(counter_with_noise)[-num_reset:]
-        else:
-            # If no counter, just choose random elements
+        # Split the key for different random operations
+        key1, key2 = jax.random.split(key)
+
+        # Select elements to reset based on the reset strategy
+        if reset_strategy == "uniform":
             reset_idxs = jax.random.choice(
-                key, self.size, shape=(num_reset,), replace=False
+                key1, self.size, shape=(num_reset,), replace=False
+            )
+        elif reset_strategy == "steps_biased":
+            # Selection biased by update steps
+            if self.graphs.globals is None:
+                # Fallback to uniform selection if no update steps
+                reset_idxs = jax.random.choice(
+                    key1, self.size, shape=(num_reset,), replace=False
+                )
+            else:
+                # Extract update steps for each graph
+                update_steps = self.graphs.globals[..., 1]
+
+                # Create probabilities proportional to update steps
+                # Add small constant to prevent zero probabilities and normalize
+                probs = update_steps + 1.0  # Add 1 to avoid zeros
+                probs = probs / jp.sum(probs)  # Normalize to sum to 1
+
+                # Sample indices based on these probabilities
+                reset_idxs = jax.random.choice(
+                    key1, self.size, shape=(num_reset,), replace=False, p=probs
+                )
+        elif reset_strategy == "loss_biased":
+            # Selection biased by loss value (higher loss = higher probability of reset)
+            if self.graphs.globals is None:
+                # Fallback to uniform selection if no loss values
+                reset_idxs = jax.random.choice(
+                    key1, self.size, shape=(num_reset,), replace=False
+                )
+            else:
+                # Extract loss values for each graph
+                loss_values = self.graphs.globals[..., 0]
+
+                # Create probabilities proportional to loss values
+                # Add small constant to prevent zero probabilities and normalize
+                probs = loss_values + 1e-6  # Add small epsilon to avoid zeros
+
+                # Clip extreme values for numerical stability
+                probs = jp.clip(probs, 0.0, 100.0)
+
+                # Normalize to sum to 1
+                probs = probs / jp.sum(probs)
+
+                # Sample indices based on these probabilities
+                reset_idxs = jax.random.choice(
+                    key1, self.size, shape=(num_reset,), replace=False, p=probs
+                )
+        elif reset_strategy == "combined":
+            # Combine both loss values and update steps for selection
+            if self.graphs.globals is None:
+                # Fallback to uniform selection if no globals
+                reset_idxs = jax.random.choice(
+                    key1, self.size, shape=(num_reset,), replace=False
+                )
+            else:
+                # Extract loss values and update steps
+                loss_values = self.graphs.globals[..., 0]
+                update_steps = self.graphs.globals[..., 1]
+
+                # Get weights for the combined score
+                loss_weight, steps_weight = combined_weights
+
+                # Compute normalized scores for both factors
+                # For loss: higher is worse, so higher probability
+                loss_scores = (loss_values - jp.min(loss_values)) / (
+                    jp.max(loss_values) - jp.min(loss_values) + 1e-6
+                )
+
+                # For steps: more steps means older circuit, so higher probability
+                step_scores = (update_steps - jp.min(update_steps)) / (
+                    jp.max(update_steps) - jp.min(update_steps) + 1e-6
+                )
+
+                # Combine the two scores with configured weights
+                combined_scores = loss_weight * loss_scores + steps_weight * step_scores
+
+                # Add small constant for numerical stability
+                probs = combined_scores + 1e-6
+
+                # Normalize to sum to 1
+                probs = probs / jp.sum(probs)
+
+                # Sample indices based on combined probabilities
+                reset_idxs = jax.random.choice(
+                    key1, self.size, shape=(num_reset,), replace=False, p=probs
+                )
+        else:
+            raise ValueError(
+                f"Unknown reset_strategy: {reset_strategy}. "
+                f"Must be 'uniform', 'steps_biased', 'loss_biased', or 'combined'."
             )
 
+        # Calculate average update steps of graphs being reset
+        avg_steps_reset = self.get_average_update_steps_for_indices(reset_idxs)
+
         # Create key for sampling new graphs and wires
-        key_sample = jax.random.fold_in(key, 0)
+        key_sample = jax.random.fold_in(key2, 0)
 
         # Sample elements to reset from the new graphs
         sample_idxs = jax.random.choice(
@@ -362,41 +413,7 @@ class GraphPool(struct.PyTreeNode):
             new_counter = reset_pool.reset_counter + 1
             reset_pool = reset_pool.replace(reset_counter=new_counter)
 
-        return reset_pool
-
-
-def initialize_circuit_pool(
-    rng: jax.random.PRNGKey,
-    layer_sizes: List[Tuple[int, int]],
-    pool_size: int,
-    arity: int = 2,
-) -> CircuitPool:
-    """
-    Initialize a pool of random circuits.
-
-    Args:
-        rng: Random key
-        layer_sizes: Circuit layer sizes
-        pool_size: Number of circuits in the pool
-        arity: Number of inputs per gate
-
-    Returns:
-        Initialized CircuitPool
-    """
-    # Split random key for each circuit
-    rngs = jax.random.split(rng, pool_size)
-
-    # Generate circuits in parallel using vmap
-    vmap_gen_circuit = jax.vmap(lambda rng: gen_circuit(rng, layer_sizes, arity=arity))
-    all_wires, all_logits = vmap_gen_circuit(rngs)
-
-    # Create pool data
-    pool_data = {
-        "wires": all_wires,
-        "logits": all_logits,
-    }
-
-    return CircuitPool.create(pool_data)
+        return reset_pool, avg_steps_reset
 
 
 def initialize_graph_pool(
@@ -407,26 +424,48 @@ def initialize_graph_pool(
     arity: int = 2,
     hidden_dim: int = 16,
     loss_value: float = 0.0,
+    wiring_mode: str = "random",
 ) -> GraphPool:
     """
     Initialize a pool of graphs using a provided graph creation function.
 
     Args:
         rng: Random key
-        create_graph_fn: Function that takes a random key and parameters, returns a jraph.GraphsTuple
+        layer_sizes: Circuit layer sizes
         pool_size: Number of graphs in the pool
-        **graph_params: Parameters to pass to create_graph_fn
+        input_n: Number of inputs to the circuit
+        arity: Number of inputs per gate
+        hidden_dim: Dimension of hidden features
+        loss_value: Initial loss value for graph globals
+        wiring_mode: Mode for generating wirings ("random" or "fixed")
 
     Returns:
         Initialized GraphPool
     """
-    # Split random key for each graph
-    rngs = jax.random.split(rng, pool_size)
-    # generate logits and wires
-    vmap_gen_circuit = jax.vmap(lambda rng: gen_circuit(rng, layer_sizes, arity=arity))
-    all_wires, all_logits = vmap_gen_circuit(rngs)
+    # Generate circuit wirings based on wiring mode
+    if wiring_mode == "fixed":
+        # In fixed mode, generate a single wiring and repeat it
+        single_wires, single_logits = gen_circuit(rng, layer_sizes, arity=arity)
+        # print(f"INIT WITH RNG {rng}")
+
+        # Replicate the same wiring for all circuits in the pool
+        all_wires = jax.tree.map(
+            lambda leaf: jp.repeat(leaf[None, ...], pool_size, axis=0), single_wires
+        )
+        all_logits = jax.tree.map(
+            lambda leaf: jp.repeat(leaf[None, ...], pool_size, axis=0), single_logits
+        )
+    else:  # wiring_mode == "random"
+        # In random mode, generate different wirings for each circuit
+        rngs = jax.random.split(rng, pool_size)
+        vmap_gen_circuit = jax.vmap(
+            lambda rng: gen_circuit(rng, layer_sizes, arity=arity)
+        )
+        all_wires, all_logits = vmap_gen_circuit(rngs)
 
     # Generate graphs in parallel using vmap
+    # Create globals with both loss value and update steps counter (initialized to 0)
+    # The globals structure will be [loss_value, update_steps]
     vmap_build_graph = jax.vmap(
         lambda logit, wires: build_graph(
             logits=logit,
@@ -435,6 +474,7 @@ def initialize_graph_pool(
             arity=arity,
             hidden_dim=hidden_dim,
             loss_value=loss_value,
+            update_steps=0,  # Initialize update steps counter to 0
         )
     )
     graphs = vmap_build_graph(all_logits, all_wires)

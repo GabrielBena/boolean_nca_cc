@@ -73,25 +73,31 @@ def train_gnn(
     epochs: int = 100,
     n_message_steps: int = 100,
     loss_type: str = "l4",  # Options: 'l4' or 'bce'
-    # Meta-learning parameters
-    meta_learning: bool = False,
+    # Wiring mode parameters
+    wiring_mode: str = "random",  # Options: 'fixed' or 'random'
     meta_batch_size: int = 64,
     # Pool parameters
     use_pool: bool = False,
     pool_size: int = 1024,
     reset_pool_fraction: float = 0.05,
     reset_pool_interval: int = 10,
+    reset_strategy: str = "uniform",  # Options: "uniform", "steps_biased", "loss_biased", or "combined"
+    combined_weights: Tuple[float, float] = (
+        0.5,
+        0.5,
+    ),  # Weights for [loss, steps] in combined strategy
     # Learning rate scheduling
     lr_scheduler: str = "constant",  # Options: "constant", "exponential", "cosine", "linear_warmup"
     lr_scheduler_params: Dict = None,
     # Initialization parameters
     key: int = 0,
+    wiring_fixed_key: jax.random.PRNGKey = jax.random.PRNGKey(
+        42
+    ),  # Fixed key for generating wirings when wiring_mode='fixed'
     init_gnn: CircuitGNN = None,
     init_optimizer: nnx.Optimizer = None,
     init_pool: GraphPool = None,
     initial_metrics: Dict = None,
-    # Curriculum parameters
-    message_steps_schedule: Dict = None,
 ):
     """
     Train a GNN to optimize boolean circuit parameters.
@@ -109,21 +115,23 @@ def train_gnn(
         learning_rate: Learning rate for optimization
         epochs: Number of training epochs
         n_message_steps: Number of message passing steps per epoch
-        key: Random seed
-        weight_decay: Weight decay for optimizer
-        meta_learning: Whether to use meta-learning (train on new random circuits each step)
-        meta_batch_size: Batch size for meta-learning
+        loss_type: Type of loss to use ('l4' for L4 norm or 'bce' for binary cross-entropy)
+        wiring_mode: Mode for circuit wirings ('fixed' or 'random')
+        meta_batch_size: Batch size for training
         use_pool: Whether to use graph pool for training instead of generating new circuits
         pool_size: Size of the graph pool if use_pool is True
         reset_pool_fraction: Fraction of pool to reset periodically
         reset_pool_interval: Number of epochs between pool resets
+        reset_strategy: Strategy for selecting graphs to reset ("uniform", "steps_biased", "loss_biased", or "combined")
+        combined_weights: Tuple of weights (loss_weight, steps_weight) for combining factors in "combined" strategy
+        key: Random seed
+        wiring_fixed_key: Fixed key for generating wirings when wiring_mode='fixed'
         init_gnn: Optional pre-trained GNN model to continue training
         init_optimizer: Optional pre-trained optimizer to continue training
         init_pool: Optional pre-initialized GraphPool to continue training with
         initial_metrics: Optional dictionary of metrics from previous training
-        lr_scheduler: Learning rate scheduler type. Default: "constant".
-        lr_scheduler_params: Dictionary of parameters for the scheduler.
-        loss_type: Type of loss to use ('l4' for L4 norm or 'bce' for binary cross-entropy).
+        lr_scheduler: Learning rate scheduler type
+        lr_scheduler_params: Dictionary of parameters for the scheduler
     Returns:
         Dictionary with trained GNN model and training metrics
     """
@@ -140,12 +148,14 @@ def train_gnn(
         accuracies = []
         hard_losses = []
         hard_accuracies = []
+        reset_steps = []
     else:
         # Continue from previous metrics
         losses = list(initial_metrics.get("losses", []))
         accuracies = list(initial_metrics.get("accuracies", []))
         hard_losses = list(initial_metrics.get("hard_losses", []))
         hard_accuracies = list(initial_metrics.get("hard_accuracies", []))
+        reset_steps = list(initial_metrics.get("reset_steps", []))
 
     # Initialize or reuse GNN
     if init_gnn is None:
@@ -206,9 +216,12 @@ def train_gnn(
             raise ValueError(f"Unknown lr_scheduler: {lr_scheduler}")
 
         # Create a new optimizer with the schedule
-        optimizer = nnx.Optimizer(
-            gnn, optax.adamw(learning_rate=schedule, weight_decay=weight_decay)
+        opt_fn = optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.zero_nans(),
+            optax.adamw(learning_rate=schedule, weight_decay=weight_decay),
         )
+        optimizer = nnx.Optimizer(gnn, opt_fn)
     else:
         # Use the provided optimizer
         optimizer = init_optimizer
@@ -216,7 +229,10 @@ def train_gnn(
     # Initialize Graph Pool for training if using pool
     if use_pool:
         if init_pool is None:
-            rng, pool_key = jax.random.split(rng)
+            if wiring_mode != "fixed":
+                rng, pool_key = jax.random.split(rng)
+            else:
+                pool_key = wiring_fixed_key
             # Initialize a fresh pool
             circuit_pool = initialize_graph_pool(
                 rng=pool_key,
@@ -226,9 +242,11 @@ def train_gnn(
                 arity=arity,
                 hidden_dim=hidden_dim,
                 loss_value=0.0,  # Initial loss will be calculated properly in first step
+                wiring_mode=wiring_mode,
             )
         else:
             # Use the provided pool
+            print("INIT POOL IS PROVIDED")
             circuit_pool = init_pool
 
     # Function to run a circuit and calculate loss
@@ -311,10 +329,19 @@ def train_gnn(
             initial_loss, _ = get_loss_from_wires_logits(
                 logits, wires, x, y_target, loss_type
             )
-            updated_graph = graph._replace(globals=initial_loss)
+
+            # Extract the current update_steps count and increment it
+            current_update_steps = 0
+            if graph.globals is not None and graph.globals.shape[-1] > 1:
+                current_update_steps = graph.globals[..., 1]
+
+            # Update the graph with the initial loss and current update_steps
+            updated_graph = graph._replace(
+                globals=jp.array([initial_loss, current_update_steps], dtype=jp.float32)
+            )
 
             # Run GNN for n_message_steps to optimize the circuit
-            for _ in range(n_message_steps):
+            for step in range(n_message_steps):
                 updated_graph = gnn_model(updated_graph)
 
             # Extract updated logits and run the circuit
@@ -325,8 +352,11 @@ def train_gnn(
                 updated_logits, wires, x, y_target, loss_type
             )
 
-            # Final update with the computed loss
-            final_graph = updated_graph._replace(globals=loss)
+            # Final update with the computed loss and incremented update_steps
+            final_update_steps = current_update_steps + n_message_steps
+            final_graph = updated_graph._replace(
+                globals=jp.array([loss, final_update_steps], dtype=jp.float32)
+            )
 
             return loss, (aux, final_graph, updated_logits)
 
@@ -360,7 +390,7 @@ def train_gnn(
             "layer_sizes",
             "n_message_steps",
             "loss_type",
-            "meta_learning",
+            "wiring_mode",
         ),
     )
     def meta_train_step(
@@ -372,10 +402,10 @@ def train_gnn(
         layer_sizes: List[Tuple[int, int]],
         n_message_steps: int,
         loss_type: str,  # Pass loss_type
-        meta_learning: bool,
+        wiring_mode: str,
     ):
         """
-        Single meta-training step with randomly sampled circuit wirings.
+        Single meta-training step with circuit wirings based on wiring_mode.
 
         Args:
             gnn: CircuitGNN model
@@ -386,6 +416,7 @@ def train_gnn(
             layer_sizes: Circuit layer sizes
             n_message_steps: Number of message passing steps
             loss_type: Type of loss function to use
+            wiring_mode: Mode for generating wirings ("random" or "fixed")
 
         Returns:
             Tuple of (loss, (hard_loss, accuracy, hard_accuracy))
@@ -398,33 +429,58 @@ def train_gnn(
             rng: jax.random.PRNGKey,
             loss_type: str,
         ):
-            # Sample new random circuit wiring
-            rng_wires, _ = jax.random.split(rng)
-
-            wires, logits = gen_circuit(rng_wires, layer_sizes, arity=arity)
+            # Sample circuit wiring (the key will be a fixed key when wiring_mode="fixed",
+            # this is handled in mean_batch_loss_fn)
+            wires, logits = gen_circuit(rng, layer_sizes, arity=arity)
 
             # Store original shapes for reconstruction
             logits_original_shapes = [logit.shape for logit in logits]
 
             # Build graph from the random circuit, passing the initial loss
             initial_loss, _ = get_loss_from_graph(logits, wires, x, y_target, loss_type)
+            # Initialize with update_steps=0
             graph = build_graph(
-                logits, wires, input_n, arity, hidden_dim, loss_value=initial_loss
+                logits,
+                wires,
+                input_n,
+                arity,
+                hidden_dim,
+                loss_value=initial_loss,
+                update_steps=0,
             )
 
             # Run GNN for n_message_steps to optimize the circuit
-            for _ in range(n_message_steps):
+            for step in range(n_message_steps):
                 graph = gnn_model(graph)
-                # Extract updated logits and run the circuit
-                updated_logits = extract_logits_from_graph(
-                    graph, logits_original_shapes
-                )
-                loss, (hard_loss, y_pred, y_hard_pred) = get_loss_from_graph(
-                    updated_logits, wires, x, y_target, loss_type
-                )
 
-                # Update the loss value for the graph
-                graph = graph._replace(globals=loss)
+                # Update the steps counter after each update
+                if step < n_message_steps - 1:  # Skip the last step update
+                    # Extract updated logits and run the circuit
+                    updated_logits = extract_logits_from_graph(
+                        graph, logits_original_shapes
+                    )
+                    loss, (hard_loss, y_pred, y_hard_pred) = get_loss_from_graph(
+                        updated_logits, wires, x, y_target, loss_type
+                    )
+
+                    # Update the loss value and increment update_steps
+                    current_update_steps = graph.globals[..., 1]  # Current step count
+                    graph = graph._replace(
+                        globals=jp.array(
+                            [loss, current_update_steps + 1], dtype=jp.float32
+                        )
+                    )
+
+            # Final extraction of updated logits
+            updated_logits = extract_logits_from_graph(graph, logits_original_shapes)
+            loss, (hard_loss, y_pred, y_hard_pred) = get_loss_from_graph(
+                updated_logits, wires, x, y_target, loss_type
+            )
+
+            # Set the final loss
+            graph = graph._replace(
+                globals=jp.array([loss, n_message_steps], dtype=jp.float32)
+            )
 
             accuracy = compute_accuracy(y_pred, y_target)
             hard_accuracy = compute_accuracy(y_hard_pred, y_target)
@@ -436,13 +492,16 @@ def train_gnn(
             )
 
         # For meta-learning, average over multiple random circuits
-        @partial(nnx.jit, static_argnames=("loss_type", "meta_learning"))
-        def mean_batch_loss_fn(gnn, rng, loss_type: str, meta_learning: bool):
+        @partial(nnx.jit, static_argnames=("loss_type", "wiring_mode"))
+        def mean_batch_loss_fn(gnn, rng, loss_type: str, wiring_mode: str):
             # Create batch of random keys
-            if meta_learning:
+            if wiring_mode == "random":
+                # Use different random keys for each circuit in the batch
                 batch_rng = jax.random.split(rng, meta_batch_size)
-            else:
-                batch_rng = jp.full((meta_batch_size,), rng)
+            else:  # wiring_mode == "fixed"
+                # Use the same fixed key for all circuits
+                fixed_rng = jax.random.PRNGKey(wiring_fixed_key)
+                batch_rng = jp.array([fixed_rng] * meta_batch_size)
             # Use vmap to vectorize loss function over the random keys
             # Pass loss_type to the vmapped function
             batch_loss_fn = nnx.vmap(loss_fn, in_axes=(None, 0, None))
@@ -454,7 +513,7 @@ def train_gnn(
         # Compute loss and gradients
         # Pass loss_type to mean_batch_loss_fn
         (loss, aux), grads = nnx.value_and_grad(mean_batch_loss_fn, has_aux=True)(
-            gnn, rng=rng, loss_type=loss_type, meta_learning=meta_learning
+            gnn, rng=rng, loss_type=loss_type, wiring_mode=wiring_mode
         )
 
         # Update GNN parameters
@@ -462,71 +521,20 @@ def train_gnn(
 
         return loss, aux
 
-    if message_steps_schedule is not None:
-        schedule_type = message_steps_schedule.get("schedule_type", "staircase")
-        schedule_params = message_steps_schedule.get("schedule_params", {})
-
-        if schedule_type == "linear":
-            message_steps_schedule = jax.numpy.linspace(
-                schedule_params.get("start", 1),
-                schedule_params.get("end", n_message_steps),
-                epochs,
-            )
-        elif schedule_type == "exponential":
-            start = jax.numpy.log(schedule_params.get("start", 1))
-            end = jax.numpy.log(schedule_params.get("end", n_message_steps))
-            message_steps_schedule = jax.numpy.exp(
-                jax.numpy.linspace(start, end, epochs)
-            )
-        elif schedule_type == "staircase":
-            # Create a schedule with minimal discrete steps to reduce recompilations
-            num_steps = schedule_params.get("num_steps", 4)  # Default to 4 steps
-            start = schedule_params.get("start", 1)
-            end = schedule_params.get("end", n_message_steps)
-            # Calculate step sizes to distribute evenly across epochs
-            step_sizes = jp.linspace(start, end, num_steps)
-            # Create array of indices for each step
-            step_indices = jp.linspace(
-                0, epochs - 1, num_steps, dtype=jp.int32, endpoint=False
-            )
-
-            # Calculate the length of each segment
-            segment_lengths = jp.diff(
-                jp.concatenate([step_indices, jp.array([epochs])])
-            )
-
-            # Create the schedule by repeating each step value for its segment length
-            schedule = jp.repeat(jp.round(step_sizes).astype(jp.int32), segment_lengths)
-
-            # Ensure the schedule has exactly 'epochs' elements by padding or truncating
-            padding = jp.full(epochs - len(schedule), schedule[-1])
-            schedule = jp.concatenate([schedule, padding])[:epochs]
-
-            message_steps_schedule = schedule
-        else:
-            raise ValueError(f"Unknown schedule_type: {schedule_type}")
-
-        print(f"Message steps schedule: {message_steps_schedule}")
-
     # Create progress bar for training
     pbar = tqdm(range(epochs), desc="Training GNN")
+    avg_steps_reset = 0
 
+    result = {}
     # Training loop
     for epoch in pbar:
         # Each epoch uses a different random key
         rng, epoch_key = jax.random.split(rng)
 
-        # Get current message steps from schedule if provided
-        current_message_steps = (
-            n_message_steps
-            if message_steps_schedule is None
-            else int(message_steps_schedule[epoch])
-        )
-
         if use_pool:
             # Pool-based training
             # Sample a batch from the pool
-            rng, sample_key = jax.random.split(rng)
+            rng, sample_key = jax.random.split(epoch_key)
             idxs, graphs, wires, logits = circuit_pool.sample(
                 sample_key, meta_batch_size
             )
@@ -534,8 +542,8 @@ def train_gnn(
             # Select a random subset of data for this epoch
             rng, data_key = jax.random.split(rng)
             idx = jax.random.permutation(data_key, len(x_data))
-            x_batch = x_data[idx][:meta_batch_size]
-            y_batch = y_data[idx][:meta_batch_size]
+            x_batch = x_data[idx]
+            y_batch = y_data[idx]
 
             # Perform pool training step
             (
@@ -552,7 +560,7 @@ def train_gnn(
                 logits,
                 x_batch,
                 y_batch,
-                current_message_steps,
+                n_message_steps,
                 loss_type=loss_type,
             )
 
@@ -565,6 +573,10 @@ def train_gnn(
                 rng, reset_key, fresh_key = jax.random.split(rng, 3)
 
                 # Generate fresh circuits for resetting
+                if wiring_mode == "fixed":
+                    # Use the fixed key for generating wirings
+                    fresh_key = wiring_fixed_key
+
                 fresh_pool = initialize_graph_pool(
                     rng=fresh_key,
                     layer_sizes=layer_sizes,
@@ -572,15 +584,18 @@ def train_gnn(
                     input_n=input_n,
                     arity=arity,
                     hidden_dim=hidden_dim,
+                    wiring_mode=wiring_mode,
                 )
 
-                # Reset a fraction of the pool
-                circuit_pool = circuit_pool.reset_fraction(
+                # Reset a fraction of the pool and get avg steps of reset graphs
+                circuit_pool, avg_steps_reset = circuit_pool.reset_fraction(
                     reset_key,
                     reset_pool_fraction,
                     fresh_pool.graphs,
                     fresh_pool.wires,
                     fresh_pool.logits,
+                    reset_strategy=reset_strategy,
+                    combined_weights=combined_weights,
                 )
 
         else:
@@ -598,43 +613,51 @@ def train_gnn(
                 y_batch,
                 epoch_key,
                 tuple(layer_sizes),
-                current_message_steps,
+                n_message_steps,
                 loss_type=loss_type,
-                meta_learning=meta_learning,
+                wiring_mode=wiring_mode,
             )
 
             hard_loss, accuracy, hard_accuracy = jax.tree.map(
                 lambda x: jp.mean(x, axis=0), aux_stack
             )
 
-        # Record metrics
-        losses.append(float(loss))
-        hard_losses.append(float(hard_loss))
-        accuracies.append(float(accuracy))
-        hard_accuracies.append(float(hard_accuracy))
+        if jp.isnan(loss):
+            print(f"Loss is NaN at epoch {epoch}")
+            # return last stable state
+            return result
+        else:
+            # Record metrics
+            losses.append(float(loss))
+            hard_losses.append(float(hard_loss))
+            accuracies.append(float(accuracy))
+            hard_accuracies.append(float(hard_accuracy))
+            reset_steps.append(float(avg_steps_reset))
 
-        # Update progress bar with current metrics
-        pbar.set_postfix(
-            {
-                "Loss": f"{loss:.4f}",
-                "Accuracy": f"{accuracy:.4f}",
-                "Hard Acc": f"{hard_accuracy:.4f}",
-                "Message Steps": f"{current_message_steps}",
+            # Update progress bar with current metrics
+            pbar.set_postfix(
+                {
+                    "Loss": f"{loss:.4f}",
+                    "Accuracy": f"{accuracy:.4f}",
+                    "Hard Acc": f"{hard_accuracy:.4f}",
+                    "Message Steps": f"{n_message_steps}",
+                    "Reset Steps": f"{int(avg_steps_reset)}",
+                }
+            )
+
+            # Return the trained GNN model and metrics
+            result = {
+                "gnn": nnx.state(gnn),
+                "optimizer": nnx.state(optimizer),
+                "losses": losses,
+                "hard_losses": hard_losses,
+                "accuracies": accuracies,
+                "hard_accuracies": hard_accuracies,
+                "reset_steps": reset_steps,
             }
-        )
 
-    # Return the trained GNN model and metrics
-    result = {
-        "gnn": nnx.state(gnn),
-        "optimizer": nnx.state(optimizer),
-        "losses": losses,
-        "hard_losses": hard_losses,
-        "accuracies": accuracies,
-        "hard_accuracies": hard_accuracies,
-    }
-
-    # Add pool to result if used
-    if use_pool:
-        result["pool"] = circuit_pool
+            # Add pool to result if used
+            if use_pool:
+                result["pool"] = circuit_pool
 
     return result

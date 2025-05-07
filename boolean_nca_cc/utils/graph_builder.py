@@ -21,6 +21,7 @@ def build_graph(
     hidden_dim: int,
     bidirectional_edges: bool = True,
     loss_value: jp.ndarray | None = None,
+    update_steps: int = 0,
 ) -> jraph.GraphsTuple:
     """
     Construct a jraph.GraphsTuple representation of a boolean circuit, including input nodes.
@@ -34,6 +35,7 @@ def build_graph(
         hidden_dim: Dimension of hidden features for nodes
         bidirectional_edges: If True, create edges in both forward and backward directions
         loss_value: Optional scalar value representing the current loss of the circuit.
+        update_steps: Number of times this graph has been updated by the GNN.
 
     Returns:
         A jraph.GraphsTuple representing the circuit
@@ -135,9 +137,7 @@ def build_graph(
             receivers=jp.array([], dtype=jp.int32),
             n_node=jp.array([0]),
             n_edge=jp.array([0]),
-            globals=loss_value
-            if loss_value is not None
-            else jp.zeros((), dtype=jp.float32),
+            globals=jp.zeros((2,), dtype=jp.float32),
         )
 
     # Combine node features from all layers
@@ -171,9 +171,11 @@ def build_graph(
 
     # Ensure globals is not None
     if loss_value is None:
-        globals_val = jp.zeros((), dtype=jp.float32)  # Default global feature if None
+        # Default global features with loss=0 and update_steps=0
+        globals_val = jp.zeros((2,), dtype=jp.float32)
     else:
-        globals_val = loss_value
+        # Combine loss_value and update_steps into a single globals array
+        globals_val = jp.array([loss_value, float(update_steps)], dtype=jp.float32)
 
     # Create and return the GraphsTuple
     graph = jraph.GraphsTuple(
