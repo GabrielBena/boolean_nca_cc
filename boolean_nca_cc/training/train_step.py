@@ -12,14 +12,14 @@ from flax import nnx
 from typing import List, Tuple, Dict
 from functools import partial
 
-from boolean_nca_cc.models import CircuitGNN, run_gnn_scan
+from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention
 from boolean_nca_cc.utils import extract_logits_from_graph
 from boolean_nca_cc.circuits.model import run_circuit
 
 
 @partial(nnx.jit, static_argnames=("logits_original_shapes", "n_message_steps"))
-def train_step_gnn(
-    gnn: CircuitGNN,
+def train_step_model(
+    model: CircuitGNN | CircuitSelfAttention,
     optimizer: nnx.Optimizer,
     graph: jraph.GraphsTuple,
     wires: List[jp.ndarray],
@@ -46,14 +46,13 @@ def train_step_gnn(
     """
 
     # Define loss function for the model
-    def loss_fn(gnn_model: CircuitGNN):
+    def loss_fn(model: CircuitGNN | CircuitSelfAttention):
         # Run message passing for n steps
-        updated_graph = run_gnn_scan(gnn_model, graph, n_message_steps)
+        for _ in range(n_message_steps):
+            graph = model(graph)
 
         # Extract updated logits from the final graph
-        updated_logits = extract_logits_from_graph(
-            updated_graph, logits_original_shapes
-        )
+        updated_logits = extract_logits_from_graph(graph, logits_original_shapes)
 
         # Run the circuit with updated logits (soft evaluation)
         all_acts = run_circuit(updated_logits, wires, x)
@@ -69,10 +68,10 @@ def train_step_gnn(
         accuracy = jp.mean(jp.round(y_pred) == y_target)
         hard_accuracy = jp.mean(jp.round(y_hard_pred) == y_target)
 
-        return loss, (hard_loss, accuracy, hard_accuracy, updated_logits, updated_graph)
+        return loss, (hard_loss, accuracy, hard_accuracy, updated_logits, graph)
 
     # Compute loss and gradients
-    (loss, aux), grads = nnx.value_and_grad(loss_fn, has_aux=True)(gnn)
+    (loss, aux), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)
 
     # Update GNN parameters using the optimizer
     optimizer.update(grads)
