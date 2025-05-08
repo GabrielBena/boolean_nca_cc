@@ -158,7 +158,7 @@ assert any(jax.tree.leaves(jax.tree.map(lambda x: x.any(), grads))), "No grads"
 
 # %%
 # %% [code]
-SKIP_TRAIN = True # Set to False to execute the cell
+SKIP_TRAIN = False # Set to False to execute the cell
 
 if SKIP_TRAIN:
     print("Skipping training and loading pre-trained model")

@@ -655,15 +655,143 @@ def train_model(
 
         return loss, aux, updated_pool
 
-    # Setup wandb logging if enabled
-    wandb_run = _init_wandb(wandb_logging, wandb_run_config)
-    wandb_id = wandb_run.run.id if wandb_run else None
+    # Define meta-training step function (classic approach generating new circuits)
+    @partial(
+        nnx.jit,
+        static_argnames=(
+            "layer_sizes",
+            "n_message_steps",
+            "loss_type",
+            "wiring_mode",
+        ),
+    )
+    def meta_train_step(
+        model: CircuitGNN,
+        optimizer: nnx.Optimizer,
+        x: jp.ndarray,
+        y_target: jp.ndarray,
+        rng: jax.random.PRNGKey,
+        layer_sizes: List[Tuple[int, int]],
+        n_message_steps: int,
+        loss_type: str,  # Pass loss_type
+        wiring_mode: str,
+    ):
+        """
+        Single meta-training step with circuit wirings based on wiring_mode.
 
-    # Setup checkpointing directory
-    checkpoint_path = _setup_checkpoint_dir(checkpoint_dir, wandb_id)
+        Args:
+            model: CircuitGNN model
+            optimizer: nnx Optimizer
+            x: Input data
+            y_target: Target output data
+            rng: Random key
+            layer_sizes: Circuit layer sizes
+            n_message_steps: Number of message passing steps
+            loss_type: Type of loss function to use
+            wiring_mode: Mode for generating wirings ("random" or "fixed")
 
-    # Track best model
-    best_metric_value = float("-inf") if "accuracy" in best_metric else float("inf")
+        Returns:
+            Tuple of (loss, (hard_loss, accuracy, hard_accuracy))
+        """
+
+        # Internal loss function for a single circuit
+        @partial(nnx.jit, static_argnames=("loss_type"))
+        def loss_fn(
+            gnn_model: CircuitGNN,
+            rng: jax.random.PRNGKey,
+            loss_type: str,
+        ):
+            # Sample circuit wiring (the key will be a fixed key when wiring_mode="fixed",
+            # this is handled in mean_batch_loss_fn)
+            wires, logits = gen_circuit(rng, layer_sizes, arity=arity)
+
+            # Store original shapes for reconstruction
+            logits_original_shapes = [logit.shape for logit in logits]
+
+            # Build graph from the random circuit, passing the initial loss
+            initial_loss, _ = get_loss_from_graph(logits, wires, x, y_target, loss_type)
+            # Initialize with update_steps=0
+            graph = build_graph(
+                logits,
+                wires,
+                input_n,
+                arity,
+                hidden_dim,
+                loss_value=initial_loss,
+                update_steps=0,
+            )
+
+            # Run GNN for n_message_steps to optimize the circuit
+            for step in range(n_message_steps):
+                graph = gnn_model(graph)
+
+                # Update the steps counter after each update
+                if step < n_message_steps - 1:  # Skip the last step update
+                    # Extract updated logits and run the circuit
+                    updated_logits = extract_logits_from_graph(
+                        graph, logits_original_shapes
+                    )
+                    loss, (hard_loss, y_pred, y_hard_pred,_) = get_loss_from_graph(
+                        updated_logits, wires, x, y_target, loss_type
+                    )
+
+                    # Update the loss value and increment update_steps
+                    current_update_steps = graph.globals[..., 1]  # Current step count
+                    graph = graph._replace(
+                        globals=jp.array(
+                            [loss, current_update_steps + 1], dtype=jp.float32
+                        )
+                    )
+
+            # Final extraction of updated logits
+            updated_logits = extract_logits_from_graph(graph, logits_original_shapes)
+            loss, (hard_loss, y_pred, y_hard_pred,_) = get_loss_from_graph(
+                updated_logits, wires, x, y_target, loss_type
+            )
+
+            # Set the final loss
+            graph = graph._replace(
+                globals=jp.array([loss, n_message_steps], dtype=jp.float32)
+            )
+
+            accuracy = compute_accuracy(y_pred, y_target)
+            hard_accuracy = compute_accuracy(y_hard_pred, y_target)
+
+            return loss, (
+                hard_loss,
+                accuracy,
+                hard_accuracy,
+            )
+
+        # For meta-learning, average over multiple random circuits
+        @partial(nnx.jit, static_argnames=("loss_type", "wiring_mode"))
+        def mean_batch_loss_fn(model, rng, loss_type: str, wiring_mode: str):
+            # Create batch of random keys
+            if wiring_mode == "random":
+                # Use different random keys for each circuit in the batch
+                batch_rng = jax.random.split(rng, meta_batch_size)
+            else:  # wiring_mode == "fixed"
+                # Use the same fixed key for all circuits
+                fixed_rng = jax.random.PRNGKey(wiring_fixed_key)
+                batch_rng = jp.array([fixed_rng] * meta_batch_size)
+            # Use vmap to vectorize loss function over the random keys
+            # Pass loss_type to the vmapped function
+            batch_loss_fn = nnx.vmap(loss_fn, in_axes=(None, 0, None))
+            # Compute losses for each random circuit
+            losses, aux = batch_loss_fn(model, rng=batch_rng, loss_type=loss_type)
+            # Average losses and metrics
+            return jp.mean(losses), jax.tree.map(lambda x: jp.stack(x, axis=0), aux)
+
+        # Compute loss and gradients
+        # Pass loss_type to mean_batch_loss_fn
+        (loss, aux), grads = nnx.value_and_grad(mean_batch_loss_fn, has_aux=True)(
+            model, rng=rng, loss_type=loss_type, wiring_mode=wiring_mode
+        )
+
+        # Update GNN parameters
+        optimizer.update(grads)
+
+        return loss, aux
 
     # Create progress bar for training
     pbar = tqdm(range(epochs), desc="Training GNN")
