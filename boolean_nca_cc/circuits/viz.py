@@ -249,7 +249,7 @@ def evaluate_and_visualize(
         fig.suptitle(
             f"{title_prefix}Evaluation - Accuracy: {accuracy:.4f}", fontsize=16
         )
-        plt.show()
+        #plt.show()
         
     plt.savefig("nca_eval.png")
 

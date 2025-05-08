@@ -50,8 +50,8 @@ x, y0 = get_task_data(
 )
 
 
-key = jax.random.PRNGKey(42)
-wires, logitsbp = gen_circuit(key, layer_sizes, arity=arity)
+#key = jax.random.PRNGKey(42)
+#wires, logitsbp = gen_circuit(key, layer_sizes, arity=arity)
 
 
 
@@ -118,32 +118,41 @@ max_trainstep_n = 1000
 
 class Demo:
     def __init__(self):
-        self.logits0 = logitsbp
-        print("param_n:", sum(l.size for l in self.logits0))
-        self.logits = self.logits0
+        with open("gnn_results.pkl", "rb") as f:
+            gnn_results = pickle.load(f)
+        key = jax.random.PRNGKey(42)
+
         hidden_dim = 64
         hidden_features = 64
         n_message_steps = 5
-        loss, aux= loss_f_l4(logitsbp, wires, x, y0)
-        
-        self.gnn = CircuitGNN(
+            
+        gnn = CircuitGNN(
             hidden_dim=hidden_dim,
             message_passing=True,
             node_mlp_features=[hidden_features, hidden_features],
             edge_mlp_features=[hidden_features, hidden_features],
             rngs=nnx.Rngs(params=jax.random.PRNGKey(42)),
-            use_attention=True,
+            use_attention=False,
             arity=arity,
-)
+        )
+        
+        key = jax.random.PRNGKey(42)
+        self.wires, self.logits = gen_circuit(key, layer_sizes, arity=arity)
+        
+        
+        #self.logits0 = logitsbp
+        print("param_n:", sum(l.size for l in self.logits))
+       
+        
         
         self.step_metrics = evaluate_model_stepwise(
-                self.gnn,
-                wires,
-                logitsbp,
+                gnn,
+                self.wires,
+                self.logits,
                 x,
                 y0,
                 input_n,
-                n_message_steps=100,
+                n_message_steps=n_message_steps,
                 arity=arity,
                 hidden_dim=hidden_dim,
                 loss_type="l4",
@@ -186,6 +195,8 @@ class Demo:
             self.gate_mask[i] = np.array(self.gate_mask[i] * gate_masks[i])
 
     def shuffle_wires(self):
+        key = jax.random.PRNGKey(42)
+
 
         self.wires, _ = gen_circuit(key, layer_sizes, arity)
 
@@ -323,7 +334,7 @@ class Demo:
         hidden_dim = 64
         hidden_features = 64
         n_message_steps = 5
-        loss, aux= loss_f_l4(logitsbp, wires, x, y0)
+        loss, aux= loss_f_l4(self.logits, self.wires, x, y0)
         
         
         self.act = aux["act"]
@@ -335,16 +346,16 @@ class Demo:
         oimg = zoom(oimg, 4)
 
         self.outputs_img = np.uint8(oimg.clip(0, 1) * 255)
-        graph = build_graph(
-        logitsbp, wires, input_n, arity, hidden_dim=hidden_dim, loss_value=0)
+        #graph = build_graph(
+        #logitsbp, wires, input_n, arity, hidden_dim=hidden_dim, loss_value=0)
 
 
         #opt = optax.adamw(1, 0.8, 0.8, weight_decay=1e-1)
 
         #(loss, graph, aux), grad = nnx.value_and_grad(loss_fn, has_aux=True)(gnn, graph, logitsbp=logitsbp, wires=wires, n_message_steps=n_message_steps,x=x,y0=y0)
 
-        with open("gnn_results.pkl", "rb") as f:
-            gnn_results = pickle.load(f)
+        #with open("gnn_results.pkl", "rb") as f:
+        #    gnn_results = pickle.load(f)
 
         if self.is_training:
             self.step_metrics = evaluate_model_stepwise(

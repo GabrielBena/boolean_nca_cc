@@ -129,6 +129,7 @@ def evaluate_model_stepwise(
                 "Loss": f"{loss:.4f}",
                 "Accuracy": f"{accuracy:.4f}",
                 "Hard Acc": f"{hard_accuracy:.4f}",
+                "final_graph" : graph,
             }
         )
 

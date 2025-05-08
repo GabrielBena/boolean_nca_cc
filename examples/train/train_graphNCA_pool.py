@@ -152,6 +152,7 @@ def loss_fn(gnn: CircuitGNN, graph: jraph.GraphsTuple, wires: jax.Array = wires)
 
 (loss, aux), grads = nnx.value_and_grad(loss_fn, has_aux=True)(gnn, graph)
 opt.update(grads)
+(loss, aux), grads = nnx.value_and_grad(loss_fn, has_aux=True)(gnn, graph)
 assert any(jax.tree.leaves(jax.tree.map(lambda x: x.any(), grads))), "No grads"
 
 
@@ -161,7 +162,7 @@ SKIP_TRAIN = True # Set to False to execute the cell
 
 if SKIP_TRAIN:
     print("Skipping training and loading pre-trained model")
-    with open("gnn_results.pkl", "rb") as f:
+    with open("gnn_pool.pkl", "rb") as f:
         gnn_results = pickle.load(f)
 else:
     gnn_results = train_model(
@@ -202,6 +203,7 @@ else:
     except ValueError:
         print("already converted")
         pass
+
 
     with open("gnn_results.pkl", "wb") as f:
         pickle.dump(gnn_results, f)
