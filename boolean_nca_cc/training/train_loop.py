@@ -52,7 +52,7 @@ def get_loss_from_graph(logits, wires, x, y_target, loss_type: str):
         raise ValueError(f"Unknown loss_type: {loss_type}")
     # --- Calculate initial loss for graph globals --- END
 
-    return loss, (hard_loss, pred, pred_hard)
+    return loss, (hard_loss, pred, pred_hard, acts)
 
 
 def train_model(

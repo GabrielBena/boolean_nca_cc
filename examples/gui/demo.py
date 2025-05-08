@@ -1,6 +1,11 @@
 # Randomly wired boolean circuits demo.
 # author: Alexander Mordvintsev (moralex@google.com)
 # written during The CapoCaccia Workshops toward Neuromorphic Intelligence (https://capocaccia.cc/)
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
+from flax import nnx
+
 
 
 import time
@@ -11,88 +16,44 @@ import jax.numpy as jp
 import optax
 import PIL.Image, PIL.ImageDraw
 import IPython
-
 from imgui_bundle import (
     implot,
-    imgui_knobs,
     imgui,
     immapp,
-    imgui_ctx,
     immvision,
+    imgui_ctx,
     hello_imgui,
 )
 
+from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
 
-################## boolear circuit definition ##################
+
+from boolean_nca_cc import generate_layer_sizes
+from boolean_nca_cc.circuits.tasks import get_task_data
+from boolean_nca_cc.circuits.model import gen_circuit
+from boolean_nca_cc.circuits.tasks import TASKS
+from examples.utils import loss_fn
+from boolean_nca_cc.models import CircuitGNN, run_gnn_scan
+from boolean_nca_cc.circuits.train import loss_f_l4
+from boolean_nca_cc.training.evaluation import evaluate_model_stepwise
+
+import pickle
 
 input_n, output_n = 8, 8
+arity = 4
+layer_sizes = generate_layer_sizes(input_n, output_n, arity, layer_n=4)
+loss_type = "l4"
 case_n = 1 << input_n
-arity, layer_width, layer_n = 4, 64, 5
-layer_sizes = (
-    [(input_n, 1)]
-    + [(layer_width, arity)] * (layer_n - 1)
-    + [(layer_width // 2, arity // 2), (output_n, 1)]
+x = jp.arange(case_n)
+x, y0 = get_task_data(
+    "binary_multiply", case_n, input_bits=input_n, output_bits=output_n
 )
 
 
-def gen_wires(key, in_n, out_n, arity, group_size, local_noise=None):
-    edge_n = out_n * arity // group_size
-    if in_n != edge_n or local_noise is None:
-        n = max(in_n, edge_n)
-        return jax.random.permutation(key, n)[:edge_n].reshape(arity, -1) % in_n
-    i = (
-        jp.arange(edge_n) + jax.random.normal(key, shape=(edge_n,)) * local_noise
-    ).argsort()
-    return i.reshape(-1, arity).T
+key = jax.random.PRNGKey(42)
+wires, logitsbp = gen_circuit(key, layer_sizes, arity=arity)
 
 
-def make_nops(gate_n, arity, group_size, nop_scale=3.0):
-    I = jp.arange(1 << arity)
-    bits = (I >> I[:arity, None]) & 1
-    luts = bits[jp.arange(gate_n) % arity]
-    logits = (2.0 * luts - 1.0) * nop_scale
-    return logits.reshape(gate_n // group_size, group_size, -1)
-
-
-@jax.jit
-def run_layer(lut, inputs):
-    # lut:[group_n, group_size, 1<<arity], [arity, ... , group_n]
-    for x in inputs:
-        x = x[..., None, None]
-        lut = (1.0 - x) * lut[..., ::2] + x * lut[..., 1::2]
-    # [..., group_n, group_size, 1]
-    return lut.reshape(*lut.shape[:-3] + (-1,))
-
-
-def run_circuit(logits, wires, gate_mask, x, hard=False):
-    x = x * gate_mask[0]
-    acts = [x]
-    for ws, lgt, mask in zip(wires, logits, gate_mask[1:]):
-        luts = jax.nn.sigmoid(lgt)
-        if hard:
-            luts = jp.round(luts)
-        x = run_layer(luts, [x[..., w] for w in ws]) * mask
-        acts.append(x)
-    return acts
-
-
-def res2loss(res):
-    return jp.square(jp.square(res)).sum()
-
-
-def loss_f(logits, wires, gate_mask, x, y0):
-    run_f = partial(run_circuit, logits, wires, gate_mask, x)
-    act = run_f()
-    loss = res2loss(act[-1] - y0)
-    hard_act = run_f(hard=True)
-    hard_loss = res2loss(hard_act[-1] - y0)
-    err_mask = hard_act[-1] != y0
-    return loss, dict(
-        act=act, err_mask=err_mask, hard_loss=hard_loss, hard_act=hard_act
-    )
-
-
-grad_loss_f = jax.jit(jax.value_and_grad(loss_f, has_aux=True))
 
 
 ################## circuit gate and wire use analysis ##################
@@ -157,18 +118,43 @@ max_trainstep_n = 1000
 
 class Demo:
     def __init__(self):
-        self.logits0 = []
-        for gate_n, group_size in layer_sizes[1:]:
-            self.logits0.append(make_nops(gate_n, arity, group_size))
-        self.logits = self.logits0
+        self.logits0 = logitsbp
         print("param_n:", sum(l.size for l in self.logits0))
+        self.logits = self.logits0
+        hidden_dim = 64
+        hidden_features = 64
+        n_message_steps = 5
+        loss, aux= loss_f_l4(logitsbp, wires, x, y0)
+        
+        self.gnn = CircuitGNN(
+            hidden_dim=hidden_dim,
+            message_passing=True,
+            node_mlp_features=[hidden_features, hidden_features],
+            edge_mlp_features=[hidden_features, hidden_features],
+            rngs=nnx.Rngs(params=jax.random.PRNGKey(42)),
+            use_attention=True,
+            arity=arity,
+)
+        
+        self.step_metrics = evaluate_model_stepwise(
+                self.gnn,
+                wires,
+                logitsbp,
+                x,
+                y0,
+                input_n,
+                n_message_steps=100,
+                arity=arity,
+                hidden_dim=hidden_dim,
+                loss_type="l4",
+            )
+        
         self.wires_key = jax.random.PRNGKey(42)
         self.local_noise = 0.0
         self.shuffle_wires()
         self.reset_gate_mask()
 
-        x = jp.arange(case_n)
-        self.input_x = unpack(x)
+        self.input_x = x
         # Create a proper image format for display - convert to 3-channel uint8
         inp_img = self.input_x.T
         inp_img = np.dstack([inp_img] * 3)  # Convert to 3-channel
@@ -176,31 +162,17 @@ class Demo:
         self.inputs_img = np.uint8(inp_img.clip(0, 1) * 255)  # Convert to uint8
         self.active_case_i = 123
 
-        self.tasks = dict(
-            copy=x,
-            gray=x ^ (x >> 1),
-            add4=(x & 0xF) + (x >> 4),
-            mul4=(x & 0xF) * (x >> 4),
-            popcount=np.bitwise_count(x),
-            text=x,
-            noise=x,
-        )
+        self.tasks = TASKS
         self.task_names = list(self.tasks)
-        self.task_idx = self.task_names.index("mul4")
+        self.task_idx = self.task_names.index("binary_multiply")
         self.task_text = "All you need are ones  and zeros  and backpropagation"
-        self.noise_p = 0.5
+        self.noise_p = 0
         self.sample_noise()
         self.update_task()
 
         self.wd_log10 = -1
-        self.opt_state = self.get_opt().init(self.logits)
-        self.loss_log = np.zeros(max_trainstep_n, np.float32)
-        self.hard_log = np.zeros(max_trainstep_n, np.float32)
         self.trainstep_i = 0
-        self.is_training = True
-
-    def get_opt(self):
-        return optax.adamw(2.0, 0.8, 0.8, weight_decay=10**self.wd_log10)
+        self.is_training = False
 
     def reset_gate_mask(self):
         self.gate_mask = [np.ones(gate_n) for gate_n, _ in layer_sizes]
@@ -214,15 +186,8 @@ class Demo:
             self.gate_mask[i] = np.array(self.gate_mask[i] * gate_masks[i])
 
     def shuffle_wires(self):
-        in_n = input_n
-        self.wires = []
-        key = self.wires_key
-        for gate_n, group_size in layer_sizes[1:]:
-            key, k1 = jax.random.split(key)
-            local_noise = self.local_noise if self.local_noise > 0.0 else None
-            ws = gen_wires(k1, in_n, gate_n, arity, group_size, local_noise)
-            self.wires.append(ws)
-            in_n = gate_n
+
+        self.wires, _ = gen_circuit(key, layer_sizes, arity)
 
     def sample_noise(self):
         self.noise = np.random.rand(case_n, input_n)
@@ -237,34 +202,7 @@ class Demo:
         elif task_name == "noise":
             self.y0 = jp.float32(self.noise < self.noise_p)
         else:
-            self.y0 = jp.float32(unpack(self.tasks[task_name]))
-
-    def update_circuit(self):
-        (loss, aux), grad = grad_loss_f(
-            self.logits, self.wires, self.gate_mask, self.input_x, self.y0
-        )
-        if self.is_training:
-            upd, self.opt_state = self.get_opt().update(
-                grad, self.opt_state, self.logits
-            )
-            self.logits = optax.apply_updates(self.logits, upd)
-
-        self.act = aux["act"]
-        oimg = self.act[-1].T
-        oimg = np.dstack([oimg] * 3)
-        m = aux["err_mask"].T[..., None] * 0.5
-
-        oimg = oimg * (1.0 - m) + m * np.float32([1, 0, 0])
-        oimg = zoom(oimg, 4)
-
-        self.outputs_img = np.uint8(oimg.clip(0, 1) * 255)
-
-        hard_loss = aux["hard_loss"].item()
-        i = self.trainstep_i % len(self.loss_log)
-        self.loss_log[i] = loss
-        self.hard_log[i] = hard_loss
-        if self.is_training:
-            self.trainstep_i += 1
+            _, self.y0 = get_task_data(task_name, case_n)
 
     def draw_gate_lut(self, x, y, logit):
         x0, y0 = x - 20, y - 20 - 36
@@ -300,6 +238,9 @@ class Demo:
             gate_x = (group_x + gate_ofs).ravel()
             y = base_y + li * h + d / 2
             act = np.array(self.act[li][case])
+            
+            # TODO: need to get actual act
+            #act = np.zeros((8,))
             for i, x in enumerate(gate_x):
                 a = int(act[i] * 0xA0)
                 col = 0xFF202020 + (a << 8)
@@ -378,6 +319,69 @@ class Demo:
         x = x0 + (x1 - x0) * (self.active_case_i + 0.5) / case_n
         imgui.get_window_draw_list().add_line((x, y0), (x, y1), 0x8000FF00, 2.0)
 
+    def update_circuit(self):
+        hidden_dim = 64
+        hidden_features = 64
+        n_message_steps = 5
+        loss, aux= loss_f_l4(logitsbp, wires, x, y0)
+        
+        
+        self.act = aux["act"]
+        oimg = self.act[-1].T
+        oimg = np.dstack([oimg] * 3)
+        m = aux["err_mask"].T[..., None] * 0.5
+
+        oimg = oimg * (1.0 - m) + m * np.float32([1, 0, 0])
+        oimg = zoom(oimg, 4)
+
+        self.outputs_img = np.uint8(oimg.clip(0, 1) * 255)
+        graph = build_graph(
+        logitsbp, wires, input_n, arity, hidden_dim=hidden_dim, loss_value=0)
+
+
+        #opt = optax.adamw(1, 0.8, 0.8, weight_decay=1e-1)
+
+        #(loss, graph, aux), grad = nnx.value_and_grad(loss_fn, has_aux=True)(gnn, graph, logitsbp=logitsbp, wires=wires, n_message_steps=n_message_steps,x=x,y0=y0)
+
+        with open("gnn_results.pkl", "rb") as f:
+            gnn_results = pickle.load(f)
+
+        if self.is_training:
+            self.step_metrics = evaluate_model_stepwise(
+                self.gnn,
+                wires,
+                logitsbp,
+                x,
+                y0,
+                input_n,
+                n_message_steps=100,
+                arity=arity,
+                hidden_dim=hidden_dim,
+                loss_type="l4",
+            )
+        # here we take just the last step of message passing
+        last_step_metrics = {}
+        for key, all_steps in self.step_metrics.items():
+            
+            last_step_metrics[key] = all_steps[-1]
+        """    
+        aux = [
+            {"accuracy": acc, "hard_accuracy": hard_acc, "hard_loss": hard_loss}
+            for acc, hard_acc, hard_loss in zip(
+                step_metrics["soft_accuracy"],
+                step_metrics["hard_accuracy"],
+                step_metrics["hard_loss"],
+            )
+        ]
+        """
+        aux = {"act": last_step_metrics["acts"]}
+
+        self.act = aux["act"]
+        
+
+        
+
+            
     def gui(self):
         self.update_circuit()
         runner_params = hello_imgui.get_runner_params()
@@ -385,16 +389,6 @@ class Demo:
         io = imgui.get_io()
 
         imgui.begin_child("main", (-200, 0))
-
-        if implot.begin_plot("Train logs", (-1, 200)):
-            implot.setup_legend(implot.Location_.north_east.value)
-            implot.setup_axis_scale(implot.ImAxis_.y1.value, implot.Scale_.log10.value)
-            implot.plot_line("loss", self.loss_log)
-            implot.plot_line("hard_loss", self.hard_log)
-            implot.drag_line_x(
-                1, self.trainstep_i % len(self.loss_log), (0.8, 0, 0, 0.5)
-            )
-            implot.end_plot()
 
         imgui.separator_text("Inputs")
         self.draw_lut("inputs", self.inputs_img)

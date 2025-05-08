@@ -300,6 +300,7 @@ class Demo:
             gate_x = (group_x + gate_ofs).ravel()
             y = base_y + li * h + d / 2
             act = np.array(self.act[li][case])
+            
             for i, x in enumerate(gate_x):
                 a = int(act[i] * 0xA0)
                 col = 0xFF202020 + (a << 8)

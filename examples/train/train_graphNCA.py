@@ -118,8 +118,7 @@ state = TrainState(params=logitsbp, opt_state=opt.init(logitsbp))
 from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
 from boolean_nca_cc.circuits.train import loss_f_l4
 from boolean_nca_cc.models import CircuitGNN, run_gnn_scan
-from boolean_nca_cc.training import train_gnn
-
+from boolean_nca_cc.training import train_model
 hidden_dim = 64
 hidden_features = 64
 n_message_steps = 5
@@ -254,39 +253,23 @@ plot_losses(
     plot_hard=True,
 )
 
-from boolean_nca_cc.training.evaluation import evaluate_gnn_stepwise
-
+from boolean_nca_cc.training.evaluation import evaluate_model_stepwise
 
 key = jax.random.PRNGKey(42)
 wires_gnn, logits_gnn = gen_circuit(key, layer_sizes, arity=arity)
-step_metrics = evaluate_gnn_stepwise(
+step_metrics = evaluate_model_stepwise(
     gnn,
     wires_gnn,
     logits_gnn,
     x,
     y0,
     input_n,
-    n_message_steps=300,
+    n_message_steps=100,
     arity=arity,
     hidden_dim=hidden_dim,
     loss_type="l4",
 )
 
-
-key = jax.random.PRNGKey(42)
-wires_gnn, logits_gnn = gen_circuit(key, layer_sizes, arity=arity)
-step_metrics = evaluate_gnn_stepwise(
-    gnn,
-    wires_gnn,
-    logits_gnn,
-    x,
-    y0,
-    input_n,
-    n_message_steps=300,
-    arity=arity,
-    hidden_dim=hidden_dim,
-    loss_type="l4",
-)
 
 aux_log_stepwise = [
     {"accuracy": acc, "hard_accuracy": hard_acc, "hard_loss": hard_loss}
@@ -301,4 +284,32 @@ gnn_log_results = {
     "losses": step_metrics["soft_loss"],
     "aux_log": aux_log_stepwise,
 }
+
+
 # %%
+import matplotlib.pyplot as plt
+fig, axs = plt.subplots(
+    2, 2, figsize=(16, 10), sharey="row", sharex="col", constrained_layout=True
+)
+
+for method, axs_method, results in zip(
+    ["GNN", "BP"], axs.T, [gnn_log_results, gnn_log_results]
+):
+    for metric, ax in zip(["loss", "accuracy"], axs_method):
+        if metric == "loss":
+            plot_losses(
+                results["losses"],
+                results["aux_log"],
+                (fig, ax),
+                title=f"{method} INNER LOSS",
+            )
+        else:
+            plot_losses(
+                results["losses"],
+                results["aux_log"],
+                (fig, ax),
+                title=f"{method} INNER ACCURACY",
+                plot_accuracy=True,
+            )
+# %%
+metrics = evaluate_and_visualize(state.params, wires, x, y0, hard=True)
