@@ -10,13 +10,13 @@ import jax.numpy as jp
 from tqdm.auto import tqdm
 from typing import List, Dict, Tuple
 
-from boolean_nca_cc.models import CircuitGNN, run_gnn_scan
+from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention
 from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
 from boolean_nca_cc.training.train_loop import get_loss_from_graph
 
 
-def evaluate_gnn_stepwise(
-    gnn: CircuitGNN,
+def evaluate_model_stepwise(
+    model: CircuitGNN | CircuitSelfAttention,
     wires: List[jp.ndarray],
     logits: List[jp.ndarray],
     x_data: jp.ndarray,
@@ -93,7 +93,7 @@ def evaluate_gnn_stepwise(
     # Evaluate after each message passing step
     for step in pbar:
         # Apply one step of GNN message passing
-        graph = gnn(graph)
+        graph = model(graph)
         # print(graph.nodes["logits"].mean())
 
         # Extract current logits
@@ -115,7 +115,8 @@ def evaluate_gnn_stepwise(
         step_metrics["hard_accuracy"].append(float(hard_accuracy))
         step_metrics["logits_mean"].append(float(graph.nodes["logits"].mean()))
         # Update loss value for graph
-        graph = graph._replace(globals=loss)
+
+        graph = graph._replace(globals=jp.array([loss, step], dtype=jp.float32))
 
         # Update progress bar
         pbar.set_postfix(

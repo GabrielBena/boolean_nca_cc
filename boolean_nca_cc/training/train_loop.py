@@ -14,7 +14,7 @@ from typing import List, Tuple, Dict, Any
 from functools import partial
 from tqdm.auto import tqdm
 
-from boolean_nca_cc.models import CircuitGNN, run_gnn_scan
+from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention
 from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
 from boolean_nca_cc.circuits.train import (
     res2loss,
@@ -55,7 +55,7 @@ def get_loss_from_graph(logits, wires, x, y_target, loss_type: str):
     return loss, (hard_loss, pred, pred_hard)
 
 
-def train_gnn(
+def train_model(
     # Data parameters
     x_data: jp.ndarray,
     y_data: jp.ndarray,
@@ -94,7 +94,7 @@ def train_gnn(
     wiring_fixed_key: jax.random.PRNGKey = jax.random.PRNGKey(
         42
     ),  # Fixed key for generating wirings when wiring_mode='fixed'
-    init_gnn: CircuitGNN = None,
+    init_model: CircuitGNN | CircuitSelfAttention = None,
     init_optimizer: nnx.Optimizer = None,
     init_pool: GraphPool = None,
     initial_metrics: Dict = None,
@@ -158,10 +158,10 @@ def train_gnn(
         reset_steps = list(initial_metrics.get("reset_steps", []))
 
     # Initialize or reuse GNN
-    if init_gnn is None:
+    if init_model is None:
         # Create a new GNN
         rng, init_key = jax.random.split(rng)
-        gnn = CircuitGNN(
+        model = CircuitGNN(
             node_mlp_features=node_mlp_features,
             edge_mlp_features=edge_mlp_features,
             hidden_dim=hidden_dim,
@@ -172,7 +172,7 @@ def train_gnn(
         )
     else:
         # Use the provided GNN
-        gnn = init_gnn
+        model = init_model
 
     # Create optimizer or reuse existing optimizer
     if init_optimizer is None:
@@ -221,7 +221,7 @@ def train_gnn(
             optax.zero_nans(),
             optax.adamw(learning_rate=schedule, weight_decay=weight_decay),
         )
-        optimizer = nnx.Optimizer(gnn, opt_fn)
+        optimizer = nnx.Optimizer(model, opt_fn)
     else:
         # Use the provided optimizer
         optimizer = init_optimizer
@@ -288,7 +288,7 @@ def train_gnn(
         ),
     )
     def pool_train_step(
-        gnn: CircuitGNN,
+        model: CircuitGNN,
         optimizer: nnx.Optimizer,
         pool: GraphPool,
         idxs: jp.ndarray,
@@ -304,7 +304,7 @@ def train_gnn(
         Single training step using graphs from the pool.
 
         Args:
-            gnn: CircuitGNN model
+            model: CircuitGNN model
             optimizer: nnx Optimizer
             pool: GraphPool containing all circuits
             idxs: Indices of sampled graphs in the pool
@@ -360,10 +360,10 @@ def train_gnn(
 
             return loss, (aux, final_graph, updated_logits)
 
-        def batch_loss_fn(gnn, graphs, logits, wires):
+        def batch_loss_fn(model, graphs, logits, wires):
             loss, (aux, updated_graphs, updated_logits) = nnx.vmap(
                 loss_fn, in_axes=(None, 0, 0, 0)
-            )(gnn, graphs, logits, wires)
+            )(model, graphs, logits, wires)
             return jp.mean(loss), (
                 jax.tree.map(lambda x: jp.mean(x, axis=0), aux),
                 updated_graphs,
@@ -373,7 +373,7 @@ def train_gnn(
         # Compute loss and gradients
         (loss, (aux, updated_graphs, updated_logits)), grads = nnx.value_and_grad(
             batch_loss_fn, has_aux=True
-        )(gnn, graphs, logits, wires)
+        )(model, graphs, logits, wires)
 
         # Update GNN parameters
         optimizer.update(grads)
@@ -394,7 +394,7 @@ def train_gnn(
         ),
     )
     def meta_train_step(
-        gnn: CircuitGNN,
+        model: CircuitGNN,
         optimizer: nnx.Optimizer,
         x: jp.ndarray,
         y_target: jp.ndarray,
@@ -408,7 +408,7 @@ def train_gnn(
         Single meta-training step with circuit wirings based on wiring_mode.
 
         Args:
-            gnn: CircuitGNN model
+            model: CircuitGNN model
             optimizer: nnx Optimizer
             x: Input data
             y_target: Target output data
@@ -493,7 +493,7 @@ def train_gnn(
 
         # For meta-learning, average over multiple random circuits
         @partial(nnx.jit, static_argnames=("loss_type", "wiring_mode"))
-        def mean_batch_loss_fn(gnn, rng, loss_type: str, wiring_mode: str):
+        def mean_batch_loss_fn(model, rng, loss_type: str, wiring_mode: str):
             # Create batch of random keys
             if wiring_mode == "random":
                 # Use different random keys for each circuit in the batch
@@ -506,14 +506,14 @@ def train_gnn(
             # Pass loss_type to the vmapped function
             batch_loss_fn = nnx.vmap(loss_fn, in_axes=(None, 0, None))
             # Compute losses for each random circuit
-            losses, aux = batch_loss_fn(gnn, rng=batch_rng, loss_type=loss_type)
+            losses, aux = batch_loss_fn(model, rng=batch_rng, loss_type=loss_type)
             # Average losses and metrics
             return jp.mean(losses), jax.tree.map(lambda x: jp.stack(x, axis=0), aux)
 
         # Compute loss and gradients
         # Pass loss_type to mean_batch_loss_fn
         (loss, aux), grads = nnx.value_and_grad(mean_batch_loss_fn, has_aux=True)(
-            gnn, rng=rng, loss_type=loss_type, wiring_mode=wiring_mode
+            model, rng=rng, loss_type=loss_type, wiring_mode=wiring_mode
         )
 
         # Update GNN parameters
@@ -551,7 +551,7 @@ def train_gnn(
                 (hard_loss, y_pred, y_hard_pred, accuracy, hard_accuracy),
                 circuit_pool,
             ) = pool_train_step(
-                gnn,
+                model,
                 optimizer,
                 circuit_pool,
                 idxs,
@@ -607,7 +607,7 @@ def train_gnn(
 
             # Perform meta-learning training step
             loss, aux_stack = meta_train_step(
-                gnn,
+                model,
                 optimizer,
                 x_batch,
                 y_batch,
@@ -647,7 +647,7 @@ def train_gnn(
 
             # Return the trained GNN model and metrics
             result = {
-                "gnn": nnx.state(gnn),
+                "model": nnx.state(model),
                 "optimizer": nnx.state(optimizer),
                 "losses": losses,
                 "hard_losses": hard_losses,

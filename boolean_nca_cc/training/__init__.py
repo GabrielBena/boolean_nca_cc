@@ -4,16 +4,12 @@ Training utilities for boolean NCA
 This package contains training utilities for boolean NCA.
 """
 
-from boolean_nca_cc.training.train_loop import train_gnn
-from boolean_nca_cc.training.train_step import train_step_gnn
-from boolean_nca_cc.training.attn_train_loop import train_self_attention
-from boolean_nca_cc.training.attn_train_step import train_step_attn
-from boolean_nca_cc.training.evaluation import evaluate_gnn_stepwise
+from boolean_nca_cc.training.train_loop import train_model
+from boolean_nca_cc.training.train_step import train_step_model
+from boolean_nca_cc.training.evaluation import evaluate_model_stepwise
 
 __all__ = [
-    "train_gnn",
-    "train_step_gnn",
-    "train_self_attention",
-    "train_step_attn",
-    "evaluate_gnn_stepwise",
+    "train_model",
+    "train_step_model",
+    "evaluate_model_stepwise",
 ]

@@ -12,8 +12,6 @@ from flax import nnx
 from typing import List, Optional, Tuple, Dict, Callable
 from functools import partial
 
-from boolean_nca_cc.utils.positional_encoding import get_positional_encoding
-
 
 class SelfAttentionLayer(nnx.Module):
     """
@@ -198,7 +196,9 @@ class CircuitSelfAttention(nnx.Module):
         self.deterministic = True
 
         # Compute the total feature dimension (logits + hidden + positional encodings)
-        feature_dim = self.logit_dim + hidden_dim * 3  # logits + hidden + 2 PE's
+        feature_dim = (
+            self.logit_dim + hidden_dim * 3 + 2
+        )  # logits + hidden + 2 PE's + 2 globals
 
         # Feature projection
         self.feature_proj = nnx.Linear(feature_dim, hidden_dim * 4, rngs=rngs)
@@ -261,7 +261,9 @@ class CircuitSelfAttention(nnx.Module):
         # This format matches the MultiHeadAttention mask format
         return mask[None, None, ...]
 
-    def _extract_features(self, nodes: Dict[str, jp.ndarray]) -> jp.ndarray:
+    def _extract_features(
+        self, nodes: Dict[str, jp.ndarray], globals_: jp.ndarray
+    ) -> jp.ndarray:
         """
         Extract and concatenate node features for attention.
 
@@ -274,11 +276,18 @@ class CircuitSelfAttention(nnx.Module):
         # Extract relevant features
         logits = nodes["logits"]  # [n_node, logit_dim]
         hidden = nodes["hidden"]  # [n_node, hidden_dim]
+        # Positional encodings
         layer_pe = nodes["layer_pe"]  # [n_node, hidden_dim]
         intra_layer_pe = nodes["intra_layer_pe"]  # [n_node, hidden_dim]
+        # Global features
+        broadcasted_globals = jp.repeat(
+            jp.reshape(globals_, (1, -1)), self.n_node, axis=0
+        )
 
         # Concatenate all features
-        features = jp.concatenate([logits, hidden, layer_pe, intra_layer_pe], axis=-1)
+        features = jp.concatenate(
+            [logits, hidden, layer_pe, intra_layer_pe, broadcasted_globals], axis=-1
+        )
 
         return features
 
@@ -301,7 +310,7 @@ class CircuitSelfAttention(nnx.Module):
         nodes, edges, receivers, senders, globals_, n_node, n_edge = graph
 
         # Extract and concatenate node features
-        features = self._extract_features(nodes)
+        features = self._extract_features(nodes, globals_)
 
         # Add batch dimension [1, n_node, feature_dim]
         features = features[None, ...]
@@ -325,13 +334,6 @@ class CircuitSelfAttention(nnx.Module):
         # Project to logit and hidden state updates
         logit_updates = self.logit_proj(x)
         hidden_updates = self.hidden_proj(x)
-
-        print(
-            logit_updates.shape,
-            logit_updates.mean(),
-            logit_updates.min(),
-            logit_updates.max(),
-        )
 
         # Remove batch dimension
         logit_updates = logit_updates[0]
