@@ -158,7 +158,7 @@ assert any(jax.tree.leaves(jax.tree.map(lambda x: x.any(), grads))), "No grads"
 
 # %%
 # %% [code]
-SKIP_TRAIN = False # Set to False to execute the cell
+SKIP_TRAIN = True # Set to False to execute the cell
 
 if SKIP_TRAIN:
     print("Skipping training and loading pre-trained model")
@@ -234,7 +234,6 @@ gnn_save = CircuitGNN(
     arity=arity,
 )
 
-nnx.update(gnn_save, gnn_results["gnn"])
 
 
 
@@ -313,3 +312,5 @@ for method, axs_method, results in zip(
             )
 # %%
 metrics = evaluate_and_visualize(state.params, wires, x, y0, hard=True)
+
+# %%
