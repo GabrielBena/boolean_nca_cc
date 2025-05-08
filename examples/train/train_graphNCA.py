@@ -158,51 +158,51 @@ assert any(jax.tree.leaves(jax.tree.map(lambda x: x.any(), grads))), "No grads"
 
 # %%
 # %% [code]
-SKIP_TRAIN = True # Set to False to execute the cell
+SKIP_TRAIN = False # Set to False to execute the cell
 
 if SKIP_TRAIN:
     print("Skipping training and loading pre-trained model")
     with open("gnn_results.pkl", "rb") as f:
         gnn_results = pickle.load(f)
 else:
-    gnn_results = train_gnn(
+    gnn_results = train_model(
+    key=0,
+    init_model=gnn,
     # CIRCUIT PARAMS
     layer_sizes=layer_sizes,
     x_data=x,
     y_data=y0,
     arity=arity,
     # TRAINING PARAMS
-    epochs=2**14,
-    n_message_steps=1,
-    key=0,
+    epochs=2**15,
+    n_message_steps=n_message_steps,
     meta_batch_size=256,
     # WIRING MODE PARAMS
     wiring_mode="fixed",
-    wiring_fixed_key=jax.random.PRNGKey(42),
+    #wiring_fixed_key=jax.random.PRNGKey(42),
     # LOSS PARAMS
     loss_type="l4",
     # OPTIMIZER PARAMS
-    learning_rate=1e-4,
+    learning_rate=1e-3,
     weight_decay=1e-5,
     # LEARNING RATE SCHEDULER
     lr_scheduler="linear_warmup",
-    # INITIAL GNN AND OPTIMIZER
+    # Model Params
     hidden_dim=hidden_dim,
-    init_gnn=gnn,
-    # POOL PARAMS
+    # POOL PARAMS : current mean avg of 100 steps before reset
     use_pool=False,
     pool_size=1024,
-    reset_pool_fraction=0.05,
+    reset_pool_fraction=0.075,
     reset_pool_interval=2**5,
     reset_strategy="combined",
-    )
+)
+
     try:
-        gnn_results["gnn"] = nnx.state(gnn_results["gnn"])
+        gnn_results["model"] = nnx.state(gnn_results["model"])
         gnn_results["optimizer"] = nnx.state(gnn_results["optimizer"])
     except ValueError:
         print("already converted")
         pass
-
 
 
     with open("gnn_results.pkl", "wb") as f:
