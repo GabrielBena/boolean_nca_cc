@@ -52,7 +52,7 @@ def get_loss_from_graph(logits, wires, x, y_target, loss_type: str):
         raise ValueError(f"Unknown loss_type: {loss_type}")
     # --- Calculate initial loss for graph globals --- END
 
-    return loss, (hard_loss, pred, pred_hard)
+    return loss, (hard_loss, pred, pred_hard, acts)
 
 
 def train_model(
@@ -91,9 +91,7 @@ def train_model(
     lr_scheduler_params: Dict = None,
     # Initialization parameters
     key: int = 0,
-    wiring_fixed_key: jax.random.PRNGKey = jax.random.PRNGKey(
-        42
-    ),  # Fixed key for generating wirings when wiring_mode='fixed'
+    wiring_fixed_key: int=42,  # Fixed key for generating wirings when wiring_mode='fixed'
     init_model: CircuitGNN | CircuitSelfAttention = None,
     init_optimizer: nnx.Optimizer = None,
     init_pool: GraphPool = None,
@@ -459,7 +457,7 @@ def train_model(
                     updated_logits = extract_logits_from_graph(
                         graph, logits_original_shapes
                     )
-                    loss, (hard_loss, y_pred, y_hard_pred) = get_loss_from_graph(
+                    loss, (hard_loss, y_pred, y_hard_pred,_) = get_loss_from_graph(
                         updated_logits, wires, x, y_target, loss_type
                     )
 
@@ -473,7 +471,7 @@ def train_model(
 
             # Final extraction of updated logits
             updated_logits = extract_logits_from_graph(graph, logits_original_shapes)
-            loss, (hard_loss, y_pred, y_hard_pred) = get_loss_from_graph(
+            loss, (hard_loss, y_pred, y_hard_pred,_) = get_loss_from_graph(
                 updated_logits, wires, x, y_target, loss_type
             )
 
