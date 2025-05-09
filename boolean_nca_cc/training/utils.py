@@ -301,20 +301,58 @@ def load_best_model_from_wandb(
 
     # Load the saved state
     print(f"Loading model from {checkpoint_path}")
-    loaded_dict = pickle.load(open(f"{checkpoint_path}.{filetype}", "rb"))
+    try:
+        with open(f"{checkpoint_path}.{filetype}", "rb") as f:
+            loaded_dict = pickle.load(f)
 
-    # Get config and instantiate model
-    config = OmegaConf.create(run.config)
-    print(f"Instantiating model using config: {config.model._target_}")
+        # Get config and instantiate model
+        config = OmegaConf.create(run.config)
+        print(f"Instantiating model using config: {config.model._target_}")
 
-    # Create RNG key
-    rng = nnx.Rngs(params=jax.random.PRNGKey(seed))
+        # Create RNG key
+        rng = nnx.Rngs(params=jax.random.PRNGKey(seed))
 
-    # Instantiate model using hydra
-    model = hydra.utils.instantiate(config.model, arity=config.circuit.arity, rngs=rng)
+        # Instantiate model using hydra
+        model = hydra.utils.instantiate(
+            config.model, arity=config.circuit.arity, rngs=rng
+        )
 
-    # Update model with loaded state
-    print("Updating model with loaded state")
-    nnx.update(model, loaded_dict["model"])
+        # Update model with loaded state - handle potential API differences
+        print("Updating model with loaded state")
+        if "model" in loaded_dict:
+            try:
+                # Try the direct update approach
+                nnx.update(model, loaded_dict["model"])
+            except (AttributeError, TypeError) as e:
+                print(f"Direct update failed with error: {e}")
+                print("Trying alternative update approach...")
 
-    return model, loaded_dict
+                # Alternative approach - recreate the state dictionary structure if needed
+                model_state = loaded_dict["model"]
+                # This handles cases where the state might be a VariableState object
+                if hasattr(model_state, "_state_dict"):
+                    model_state = model_state._state_dict
+
+                # Update the model with the extracted state dict
+                for collection_name, collection in model_state.items():
+                    for var_name, value in collection.items():
+                        try:
+                            path = f"{collection_name}.{var_name}"
+                            model.put(path, value)
+                        except Exception as inner_e:
+                            print(f"Warning: Failed to update {path}: {inner_e}")
+
+        else:
+            print("Warning: No 'model' key found in loaded dictionary")
+
+        # Add the run ID to the loaded dictionary for reference
+        loaded_dict["run_id"] = run.id
+
+        return model, loaded_dict
+
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        import traceback
+
+        print(f"Traceback: {traceback.format_exc()}")
+        raise
