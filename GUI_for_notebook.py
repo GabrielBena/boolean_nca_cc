@@ -1,4 +1,13 @@
-import imgui
+from imgui_bundle import (
+    implot,
+    imgui_knobs,
+    imgui,
+    immapp,
+    imgui_ctx,
+    immvision,
+    hello_imgui,
+)
+
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -6,10 +15,22 @@ import jax.numpy as jnp
 # import immapp
 # import immvision
 
-# Placeholder for layer_sizes, arity, and other necessary parameters
-# These would typically be passed in during initialization or updated dynamically
-DEFAULT_LAYER_SIZES = [(8, 4), (8, 4), (1, 1)] # Example: (num_gates, group_size)
-DEFAULT_ARITY = 2
+# --- Parameters from random_wires_demo.py ---
+INPUT_N = 8
+OUTPUT_N = 8
+CIRCUIT_ARITY = 4  # This was 'arity' in random_wires_demo
+LAYER_WIDTH = 64
+LAYER_N = 5
+
+# Define default layer sizes based on the parameters from random_wires_demo.py
+# Structure: list of (num_gates, group_size)
+DEFAULT_LAYER_SIZES = (
+    [(INPUT_N, 1)]  # Input layer: input_n gates, group_size 1 (treated as individual)
+    + [(LAYER_WIDTH, CIRCUIT_ARITY)] * (LAYER_N - 1)  # Hidden layers
+    + [(LAYER_WIDTH // 2, CIRCUIT_ARITY // 2), (OUTPUT_N, 1)]  # Output layers
+)
+DEFAULT_ARITY = CIRCUIT_ARITY
+# --- End Parameters ---
 
 def is_point_in_box(p0, p1, p):
     return p0[0] <= p[0] <= p1[0] and p0[1] <= p[1] <= p1[1]
@@ -37,62 +58,78 @@ class CircuitVisualizer:
         self._initialize_placeholders()
 
     def _initialize_placeholders(self):
-        # Initialize with some default shapes based on layer_sizes and arity
-        # This is very basic and will need to be adapted to your actual data structures
-        
-        # Logits: (num_layers-1, num_groups_per_layer, group_size_per_layer, 1 << arity)
+        # Initialize with shapes based on self.layer_sizes and self.arity
+        # to match the structure expected by drawing logic derived from random_wires_demo.py
+
+        # Logits: List, one per connection between layers.
+        # logits[i] are for inputs to layer i+1. Shape: (num_groups, group_size, 1 << arity)
         self.logits = []
         for i in range(len(self.layer_sizes) - 1):
-            group_n = self.layer_sizes[i+1][0] // self.layer_sizes[i+1][1]
-            group_size = self.layer_sizes[i+1][1]
-            # In random_wires_demo, logits seems to be for the *receiving* layer's gates
-            # So logits[li-1] corresponds to connections feeding layer 'li'
-            self.logits.append(np.random.rand(group_n, group_size, 1 << self.arity).astype(np.float32))
+            # Logits connect layer_sizes[i] to layer_sizes[i+1]
+            # The logits are associated with the gates in layer_sizes[i+1]
+            receiving_layer_gate_n, receiving_layer_group_size = self.layer_sizes[i+1]
+            
+            # Ensure group_size is not zero to avoid division by zero
+            actual_group_size = receiving_layer_group_size if receiving_layer_group_size > 0 else 1
+            num_groups = receiving_layer_gate_n // actual_group_size
+            if num_groups == 0 and receiving_layer_gate_n > 0: # if less gates than group_size
+                num_groups = 1
+                # actual_group_size = receiving_layer_gate_n # This might be more correct for partial groups
 
-        # Wires: (num_layers-1, num_groups_receiving_layer, group_size_receiving_layer, arity)
-        # Values are indices of gates in the previous layer
+            if num_groups > 0 : # Add logits only if there are groups in the receiving layer
+                 # For placeholder, if actual_group_size was adjusted for small gate_n, use it
+                num_gates_in_logit_def = actual_group_size
+                if receiving_layer_gate_n < actual_group_size and num_groups ==1:
+                    num_gates_in_logit_def = receiving_layer_gate_n
+
+
+                self.logits.append(
+                    np.random.rand(num_groups, num_gates_in_logit_def, 1 << self.arity).astype(np.float32)
+                )
+            else: # Should not happen if layer_sizes[i+1] has gates
+                 self.logits.append(np.array([]).astype(np.float32))
+
+
+        # Wires: List, one per connection between layers.
+        # wires[i] connect layer i to layer i+1. Shape: (arity, num_gates_in_receiving_layer)
+        # Values are indices of gates in the previous (sending) layer.
         self.wires = []
-        self.wire_masks = [] # Initialize wire_masks as well
+        self.wire_masks = []
         for i in range(len(self.layer_sizes) - 1):
-            prev_gate_n = self.layer_sizes[i][0]
-            current_layer_gate_n = self.layer_sizes[i+1][0]
-            # Wires connect from prev_gate_n to current_layer_gate_n inputs
-            # Structure in random_wires_demo.py was (li-1).T, so original is (arity, gate_n_current_layer)
-            # where gate_n_current_layer is total gates in the current layer
-            # Wires[li-1] has shape (arity, n_gates_in_layer_li)
-            # For simplicity, let's use a structure that's easier to build:
-            # list of [arity, num_gates_in_current_layer]
-            
-            # Let's try to match the structure implied by draw_circuit:
-            # self.wires[li-1].T means self.wires[li-1] has shape (n_gates_in_layer_li, arity)
-            # No, it was wires = self.wires[li-1].T, so original self.wires[li-1] is (arity, N_gates_curr_layer)
-            # and wires.T is (N_gates_curr_layer, arity)
-            # src_x = prev_gate_x[wires] implies wires are indices.
-            # wires are (arity, num_gates_in_current_layer)
-            
-            # In random_wires_demo, wires[li-1] are for layer 'li' inputs.
-            # Number of inputs to layer 'li' is self.layer_sizes[i+1][0] * self.arity
-            # Each input comes from one of self.layer_sizes[i][0] gates
+            num_gates_prev_layer = self.layer_sizes[i][0]
             num_gates_curr_layer = self.layer_sizes[i+1][0]
-            # Each wire connects to an input slot of a gate in the current layer.
-            # A gate has 'arity' inputs.
-            # wires[li-1] has shape [arity, num_gates_in_layer_li]
-            # Values are indices into prev_layer_gate_x
-            layer_wires = np.random.randint(0, self.layer_sizes[i][0], size=(self.arity, num_gates_curr_layer))
-            self.wires.append(layer_wires)
-            self.wire_masks.append(np.ones_like(layer_wires, dtype=bool))
+
+            if num_gates_curr_layer > 0 and num_gates_prev_layer > 0:
+                layer_wires = np.random.randint(
+                    0, num_gates_prev_layer, size=(self.arity, num_gates_curr_layer)
+                )
+                self.wires.append(layer_wires)
+                self.wire_masks.append(np.ones_like(layer_wires, dtype=bool))
+            else: # Handle cases with no gates in current or prev layer to avoid errors
+                self.wires.append(np.array([]).astype(int))
+                self.wire_masks.append(np.array([]).astype(bool))
 
 
-        # Activations: list per layer, each item is array [num_cases, num_gates_in_layer]
-        # For simplicity, let's assume one case for now
+        # Activations: List, one per layer.
+        # act[i] is for layer i. Shape: (num_cases, num_gates_in_layer)
+        # For placeholders, use num_cases = 1.
         self.act = []
+        num_cases_placeholder = 1 # As in random_wires_demo for drawing a single state
         for gates, _ in self.layer_sizes:
-            self.act.append(np.random.rand(1, gates).astype(np.float32)) # 1 case
+            if gates > 0:
+                self.act.append(np.random.rand(num_cases_placeholder, gates).astype(np.float32))
+            else:
+                self.act.append(np.random.rand(num_cases_placeholder, 0).astype(np.float32))
 
-        # Gate mask: list per layer, each item is array [num_gates_in_layer]
+
+        # Gate mask: List, one per layer.
+        # gate_mask[i] is for layer i. Shape: (num_gates_in_layer,)
         self.gate_mask = []
         for gates, _ in self.layer_sizes:
-            self.gate_mask.append(np.ones(gates, dtype=np.float32))
+            if gates > 0:
+                self.gate_mask.append(np.ones(gates, dtype=np.float32))
+            else:
+                self.gate_mask.append(np.ones(0, dtype=np.float32))
 
     def update_data(self):
         if self.get_circuit_data_callback:
@@ -424,51 +461,49 @@ class CircuitVisualizer:
 # Example of how to run this (requires immapp, which wraps the main loop)
 # This part would typically be in your notebook or a main script.
 #
-# if __name__ == "__main__":
-#     # This is a mock callback. Replace with your actual data fetching logic.
-#     def get_my_circuit_data():
-#         # In a real scenario, this function would return the latest:
-#         # logits, wires, wire_masks, activations, gate_masks, layer_sizes, arity
-#         # from your GNN model or simulation state.
-#         # For this example, it does nothing, relying on initial placeholders.
-#         return {
-#             "layer_sizes": DEFAULT_LAYER_SIZES, # Could be dynamic
-#             "arity": DEFAULT_ARITY, # Could be dynamic
-#             # "logits": new_logits,
-#             # "wires": new_wires,
-#             # ... etc.
-#         }
-# 
-#     visualizer = CircuitVisualizer(get_circuit_data_callback=get_my_circuit_data)
-# 
-#     def run_gui():
-#         # Setup ImGui context if not already done by a wrapper like immapp
-#         # imgui.create_context()
-#         # io = imgui.get_io()
-#         # Setup font, style etc.
-# 
-#         # visualizer.update_data() # Initial data load
-#         visualizer.gui_loop_content()
-# 
-#     # Setup for immapp
-#     # import immapp
-#     # import immvision
-#     # immvision.set_imgui_context(imgui.get_current_context()) # If using immvision outside immapp auto-init
-# 
-#     # runner_params = immapp.RunnerParams()
-#     # runner_params.callbacks.show_gui = run_gui
-#     # runner_params.app_window_params.window_title = "Circuit Visualizer for Notebook"
-#     # runner_params.app_window_params.window_size = (1000, 700)
-#     
-#     # Addons:
-#     # immapp.add_implot_addon_to_runner_params(runner_params) # If using implot
-#     # immapp.add_immvision_addon_to_runner_params(runner_params) # If using immvision
-# 
-#     # immapp.run(runner_params)
-#
-#     # If running without immapp, you need to handle the main loop yourself:
-#     # For example, using Pyglet, SDL, GLFW directly with ImGui bindings.
-#     # This is more involved. immapp simplifies this greatly.
-#     print("GUI_for_notebook.py created. To run, you'll need an ImGui loop (e.g., using immapp).")
+if __name__ == "__main__":
+    # This is a mock callback. Replace with your actual data fetching logic.
+    # For this minimal test, the visualizer will use its internal placeholders.
+    def get_my_circuit_data():
+        # print("get_my_circuit_data called - returning placeholders for now")
+        # In a real scenario, this function would return the latest:
+        # logits, wires, wire_masks, activations, gate_masks, layer_sizes, arity
+        # from your GNN model or simulation state.
+        # For this example, it does nothing, relying on initial placeholders.
+        return {
+            "layer_sizes": DEFAULT_LAYER_SIZES, # Could be dynamic
+            "arity": DEFAULT_ARITY, # Could be dynamic
+            # "logits": new_logits, # example of what you might load
+            # "wires": new_wires,   # example
+            # ... etc.
+        }
+
+    visualizer = CircuitVisualizer(get_circuit_data_callback=None) # Using None for callback to rely on internal placeholders initially
+
+    def run_gui():
+        # Mimic random_wires_demo.py's access to runner_params within the gui function
+        runner_params = hello_imgui.get_runner_params()
+        runner_params.fps_idling.enable_idling = True # Matches demo
+        # io = imgui.get_io() # imgui.get_io() is already called in draw_circuit if needed
+
+        # visualizer.update_data() # Call this if get_my_circuit_data should be polled
+        visualizer.gui_loop_content()
+
+    # Setup for immapp
+    # We will call immapp.run() directly with parameters instead of using RunnerParams explicitly here
+
+    immapp.run(
+        gui_function=run_gui, 
+        window_title="Circuit Visualizer Test", 
+        window_size_auto=True, 
+        window_restore_previous_geometry=True, 
+        fps_idle=10.0,
+        with_implot=True # Match random_wires_demo.py
+        # Add other parameters like with_implot=True if needed, similar to random_wires_demo
+        # For example, if you use implot features directly in gui_loop_content:
+        # with_implot=True 
+    )
+
+    print("GUI_for_notebook.py can now be run directly.")
 #     print("See example main block in the file for how to integrate.")
 
