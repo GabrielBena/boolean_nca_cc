@@ -30,21 +30,21 @@ class GraphPool(struct.PyTreeNode):
     for computing functional circuit loss without redundant extraction.
     """
 
+    # Fields without default values must come first
     size: int = struct.field(pytree_node=False)
-    # graphs is a single jraph.GraphsTuple where each leaf has a leading batch dimension
     graphs: jraph.GraphsTuple
+    input_n: int = struct.field(pytree_node=False)
+    arity: int = struct.field(pytree_node=False)
+    hidden_dim: int = struct.field(pytree_node=False)
+    initial_loss_value: float = struct.field(pytree_node=False)
+
+    # Fields with default values
     # wires is a list of wire matrices with shape [pool_size, ...wire_shape...]
     wires: PyTree = None
     # logits is a list of weight matrices corresponding to each graph
     logits: PyTree = None
     # Reset counter to track which elements were reset recently
     reset_counter: Optional[Array] = None
-
-    # New fields for graph construction parameters
-    input_n: int = struct.field(pytree_node=False)
-    arity: int = struct.field(pytree_node=False)
-    hidden_dim: int = struct.field(pytree_node=False)
-    initial_loss_value: float = struct.field(pytree_node=False)
 
     @classmethod
     def create(
