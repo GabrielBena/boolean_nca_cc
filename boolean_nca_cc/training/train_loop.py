@@ -645,8 +645,8 @@ def train_model(
 
             # Return the trained GNN model and metrics
             result = {
-                "model": nnx.state(model),
-                "optimizer": nnx.state(optimizer),
+                "model": model,
+                "optimizer": optimizer,
                 "losses": losses,
                 "hard_losses": hard_losses,
                 "accuracies": accuracies,
