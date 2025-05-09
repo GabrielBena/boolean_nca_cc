@@ -107,3 +107,50 @@ def apply_damage(
         damaged_logits.append(damaged)
 
     return wires, damaged_logits
+
+
+def zero_luts(
+    rng: jax.random.PRNGKey, wires: List, logits: List, lut_damage_prob: float = 0.05
+) -> Tuple[List, List]:
+    """
+    Apply random damage to the circuit by zeroing out entire LUTs.
+
+    This means that for a selected LUT, all its associated logits will be set to zero.
+    A LUT typically corresponds to a gate, and its logits are often represented
+    as a row in the layer's logit tensor.
+
+    Args:
+        rng: Random key
+        wires: List of wire connections for each layer (passed through unchanged)
+        logits: List of logit tensors for each layer. Each tensor is expected
+                to have its first dimension correspond to the number of LUTs.
+        lut_damage_prob: Probability of damaging each LUT in a layer.
+
+    Returns:
+        Tuple of (wires, damaged_logits)
+    """
+    damaged_logits = []
+
+    for logit_layer in logits:
+        layer_rng, rng = jax.random.split(rng)
+
+        if logit_layer.ndim == 0: # Should not happen for typical logits
+            damaged_logits.append(logit_layer)
+            continue
+            
+        num_luts = logit_layer.shape[0]
+        if num_luts == 0:
+            damaged_logits.append(logit_layer)
+            continue
+
+        # Generate a mask to select which LUTs to damage
+        lut_damage_mask = (
+            jax.random.uniform(layer_rng, (num_luts,)) < lut_damage_prob
+        )
+
+        # Apply damage: set all logits for selected LUTs to 0.0
+        # JAX's .at[indices].set(value) broadcasts value to the shape of the slice.
+        damaged_layer_logits = logit_layer.at[lut_damage_mask].set(0.0)
+        damaged_logits.append(damaged_layer_logits)
+
+    return wires, damaged_logits

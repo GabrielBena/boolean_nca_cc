@@ -8,6 +8,7 @@ import PIL.Image, PIL.ImageDraw
 import IPython
 import orbax.checkpoint as ocp
 import os
+import pickle
 
 from imgui_bundle import (
     implot,
@@ -410,394 +411,156 @@ def main_gui_loop():
     # 3. Draw GUI (visualizer handles its own drawing based on updated data)
     visualizer.gui()
 
-
-
-
-
-
-# GNN FUNCTIONALITY
-import matplotlib.pylab as pl
-import matplotlib.pyplot as plt
-import PIL.Image, PIL.ImageFont, PIL.ImageDraw
-from tqdm.auto import trange
-import jraph
-import numpy as np
-
-pl.style.use("dark_background")
-
-
-# def np2pil(a):
-#     a = np.asarray(a)
-#     if a.dtype.kind == "f":
-#         a = np.uint8(a.clip(0, 1) * 255)
-#     return PIL.Image.fromarray(a)
-
-
-# def imshow(a):
-#     display(np2pil(a))
-
-
-# def zoom(a, k=2):
-#     return np.repeat(np.repeat(a, k, 1), k, 0)
-
-
-# def tile2d(a, w=None):
-#     a = np.asarray(a)
-#     if w is None:
-#         w = int(np.ceil(np.sqrt(len(a))))
-#     th, tw = a.shape[1:3]
-#     pad = (w - len(a)) % w
-#     a = np.pad(a, [(0, pad)] + [(0, 0)] * (a.ndim - 1), "constant")
-#     h = len(a) // w
-#     a = a.reshape([h, w] + list(a.shape[1:]))
-#     a = np.rollaxis(a, 2, 1).reshape([th * h, tw * w] + list(a.shape[4:]))
-#     return a
-
+# GNN FUNCTIONALITY (Replaces original content from this point)
 import jax
 import jax.numpy as jp
 import optax
-from flax import nnx
+from flax import nnx 
+import jraph 
+import os
+import pickle 
+
 from boolean_nca_cc import generate_layer_sizes
-from boolean_nca_cc.circuits.model import gen_circuit
-from boolean_nca_cc.circuits.train import TrainState, train_step
-from boolean_nca_cc.circuits.viz import evaluate_and_visualize
 from boolean_nca_cc.circuits.tasks import get_task_data
-from boolean_nca_cc.models import CircuitGNN, run_gnn_scan
-from boolean_nca_cc.training import train_model
-from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
-from boolean_nca_cc.circuits.train import loss_f_l4
+from boolean_nca_cc.training import train_model # Assuming this is the main training entry point
 
+# --- GNN Training Setup ---
+print("Setting up GNN training parameters...")
 
+# Circuit and Task Definition
 input_n, output_n = 4, 4
 arity = 2
-layer_sizes = generate_layer_sizes(input_n, output_n, arity, layer_n=4)
-loss_type = "l4"
+# This definition of layer_sizes was present in the original GNN section
+layer_sizes = generate_layer_sizes(input_n, output_n, arity, layer_n=4) 
 
-key = jax.random.PRNGKey(42)
-wires, logitsbp = gen_circuit(key, layer_sizes, arity=arity)
-
-opt = optax.adamw(1, 0.8, 0.8, weight_decay=1e-1)
-state = TrainState(params=logitsbp, opt_state=opt.init(logitsbp))
-
-
+# Task Data
 case_n = 1 << input_n
-x = jp.arange(case_n)
-x, y0 = get_task_data(
+x_task_data, y_task_data = get_task_data(
     "binary_multiply", case_n, input_bits=input_n, output_bits=output_n
 )
 
-# GNN params
-hidden_dim = 128
-hidden_features = 128
-n_message_steps = 5
-loss, aux = loss_f_l4(logitsbp, wires, x, y0)
-graph = build_graph(
-    logitsbp, wires, input_n, arity, hidden_dim=hidden_dim, loss_value=loss
-)
+# GNN Hyperparameters
+hidden_dim_gnn = 128 
+n_message_steps_gnn = 5 # As per original GNN setup for n_message_steps
 
-gnn = CircuitGNN(
-    hidden_dim=hidden_dim,
-    message_passing=True,
-    node_mlp_features=[hidden_features, hidden_features],
-    edge_mlp_features=[hidden_features, hidden_features],
-    rngs=nnx.Rngs(params=jax.random.PRNGKey(42)),
-    use_attention=False,
-    arity=arity,
-)
+# --- train_model call with Pool Functionality ---
+print("Starting GNN training with pooling and LUT zeroing...")
 
-opt_fn = optax.adamw(1e-4, weight_decay=1e-5)
-opt = nnx.Optimizer(gnn, opt_fn)
-
-def loss_fn(gnn: CircuitGNN, graph: jraph.GraphsTuple, wires: jax.Array = wires):
-    updated_graph = run_gnn_scan(gnn, graph, n_message_steps)
-    updated_logits = extract_logits_from_graph(
-        updated_graph, [l.shape for l in logitsbp]
-    )
-    loss, aux = loss_f_l4(updated_logits, wires, x, y0)
-    return loss, updated_graph
-
-def plot_losses(
-    loss_log, aux_log, figax=None, title=None, plot_accuracy=False, plot_hard=True
-):
-    if figax is None:
-        fig, ax = plt.subplots()
-    else:
-        fig, ax = figax
-    v = len(loss_log) // 10
-
-    if not plot_accuracy:
-        smooth_losses = np.convolve(loss_log, np.ones(v) / v, mode="valid")
-        hard_losses = [aux["hard_loss"] for aux in aux_log]
-        smooth_hard_losses = np.convolve(hard_losses, np.ones(v) / v, mode="valid")
-        ax.plot(smooth_losses, label="soft")
-        if plot_hard:
-            ax.plot(jp.maximum(smooth_hard_losses, 1e-5), label="hard")
-    else:
-        accs = [aux["accuracy"] for aux in aux_log]
-        smooth_accs = np.convolve(accs, np.ones(v) / v, mode="valid")
-        ax.plot(smooth_accs, label="soft")
-        hard_accs = [aux["hard_accuracy"] for aux in aux_log]
-        smooth_hard_accs = np.convolve(hard_accs, np.ones(v) / v, mode="valid")
-        if plot_hard:
-            ax.plot(smooth_hard_accs, label="hard")
-
-    ax.legend()
-    ax.set_yscale("log")
-
-    if title is not None:
-        ax.set_title(title)
-
-(loss, aux), grads = nnx.value_and_grad(loss_fn, has_aux=True)(gnn, graph)
-opt.update(grads)
-(loss, aux), grads = nnx.value_and_grad(loss_fn, has_aux=True)(gnn, graph)
-assert any(jax.tree.leaves(jax.tree.map(lambda x: x.any(), grads))), "No grads"
-
-# Before calling train_model
-checkpoint_dir = "./gnn_checkpoints"
-# Find the latest checkpoint, e.g., by finding the highest epoch number
-# For simplicity, let's assume you know the epoch you want to load
-epoch_to_load = 100 # or get this dynamically
-load_path = os.path.join(checkpoint_dir, f"epoch_{epoch_to_load}")
-
-loaded_model_state = None
-loaded_optimizer_state = None
-
-if os.path.exists(load_path):
-    checkpointer = ocp.PyTreeCheckpointer()
-    restored_dict = checkpointer.restore(load_path)
-    loaded_model_state = restored_dict['model_state']
-    loaded_optimizer_state = restored_dict['optimizer_state']
-    print(f"Loaded GNN model and optimizer from {load_path}")
-else:
-    print(f"No checkpoint found at {load_path}, training from scratch.")
-
-# Then, when calling train_model:
-gnn_results = train_model(
-    key=0,
-    init_model=loaded_model_state, # Pass the nnx.State directly
-    init_optimizer=loaded_optimizer_state, # Pass the nnx.State directly
-    # CIRCUIT PARAMS
-    layer_sizes=layer_sizes,
-    x_data=x,
-    y_data=y0,
-    arity=arity,
-    # TRAINING PARAMS
-    epochs=2**15,
-    n_message_steps=1, 
-    meta_batch_size=256,
-    # WIRING MODE PARAMS
-    wiring_mode="random",
-    wiring_fixed_key=jax.random.PRNGKey(42),
-    # LOSS PARAMS
-    loss_type="l4",
-    # OPTIMIZER PARAMS
-    learning_rate=1e-3,
-    weight_decay=1e-5,
-    # LEARNING RATE SCHEDULER
-    lr_scheduler="linear_warmup",
-    # Model Params
-    hidden_dim=hidden_dim,
-    # POOL PARAMS : current mean avg of 100 steps before reset
-    use_pool=True,
-    pool_size=1024,
-    reset_pool_fraction=0.075,
-    reset_pool_interval=2**5,
-    reset_strategy="combined",
-)
-
-try:
-    gnn_results["model"] = nnx.state(gnn_results["model"])
-    gnn_results["optimizer"] = nnx.state(gnn_results["optimizer"])
-except ValueError:
-    print("already converted")
-    pass
-
-# --- ADD MODEL SAVING LOGIC HERE ---
-if gnn_results and "model" in gnn_results and "optimizer" in gnn_results and "losses" in gnn_results:
-    import orbax.checkpoint as ocp
-    import os # For creating directories
-
-    # Define a path for checkpoints
-    checkpoint_dir = "./gnn_checkpoints"
-    if not os.path.exists(checkpoint_dir):
-        try:
-            os.makedirs(checkpoint_dir)
-            print(f"Created checkpoint directory: {checkpoint_dir}")
-        except OSError as e:
-            print(f"Error creating checkpoint directory {checkpoint_dir}: {e}")
-            # Decide how to handle this - maybe skip saving or raise error
-
-    if os.path.exists(checkpoint_dir): # Proceed only if directory exists or was created
-        # Create a Checkpointer
-        checkpointer = ocp.PyTreeCheckpointer()
-
-        # Prepare the target to save (model state and optimizer state)
-        save_target = {
-            'model_state': gnn_results["model"], 
-            'optimizer_state': gnn_results["optimizer"] 
-        }
-        
-        num_epochs_completed = len(gnn_results.get("losses", [])) 
-        if num_epochs_completed > 0:
-            save_path_for_epoch = os.path.join(checkpoint_dir, f"epoch_{num_epochs_completed}")
-            try:
-                checkpointer.save(save_path_for_epoch, save_target)
-                print(f"Saved GNN checkpoint at epoch {num_epochs_completed} to {save_path_for_epoch}")
-            except Exception as e:
-                print(f"Error saving checkpoint to {save_path_for_epoch}: {e}")
-                # Optionally print more details for debugging
-                # print("Model state was: ", save_target['model_state'])
-                # print("Optimizer state was: ", save_target['optimizer_state'])
-        else:
-            print("No training epochs completed according to loss log, checkpoint not saved.")
-else:
-    print("Training results missing or checkpoint directory could not be created. GNN model not saved.")
-
-
-# recreate aux in old format
-aux_log = [
-    {
-        "accuracy": accuracies,
-        "hard_accuracy": hard_acc,
-        "hard_loss": hard_loss,
-    }
-    for accuracies, hard_acc, hard_loss in zip(
-        gnn_results["accuracies"],
-        gnn_results["hard_accuracies"],
-        gnn_results["hard_losses"],
-    )
-]
-
-fig, axs = plt.subplots(
-    1, 2, figsize=(10, 5), sharey=False, sharex=True, constrained_layout=True
-)
-plot_losses(
-    gnn_results["losses"], aux_log, (fig, axs[0]), title="META LOSS", plot_hard=True
-)
-plot_losses(
-    gnn_results["losses"],
-    aux_log,
-    (fig, axs[1]),
-    plot_accuracy=True,
-    title="META ACCURACY",
-    plot_hard=True,
-)
-
-gnn_save = CircuitGNN(
-    hidden_dim=hidden_dim,
-    message_passing=True,
-    node_mlp_features=[hidden_features, hidden_features],
-    edge_mlp_features=[hidden_features, hidden_features],
-    rngs=nnx.Rngs(params=jax.random.PRNGKey(42)),
-    use_attention=False,
-    arity=arity,
-)
-
-fig, axs = plt.subplots(
-    1, 2, figsize=(10, 5), sharey=False, sharex=True, constrained_layout=True
-)
-plot_losses(
-    gnn_results["losses"], aux_log, (fig, axs[0]), title="META LOSS", plot_hard=True
-)
-plot_losses(
-    gnn_results["losses"],
-    aux_log,
-    (fig, axs[1]),
-    plot_accuracy=True,
-    title="META ACCURACY",
-    plot_hard=True,
-)
-
-v = len(gnn_results["reset_steps"]) // 10
-plt.plot(np.convolve(gnn_results["reset_steps"], np.ones(v) / v, mode="valid"))
-
-# Get the inner loop losses
-from boolean_nca_cc.training.evaluation import evaluate_model_stepwise
-
-key = jax.random.PRNGKey(42)
-wires_gnn, logits_gnn = gen_circuit(key, layer_sizes, arity=arity)
-step_metrics = evaluate_model_stepwise(
-    gnn,
-    wires_gnn,
-    logits_gnn,
-    x,
-    y0,
-    input_n,
-    n_message_steps=100,
-    arity=arity,
-    hidden_dim=hidden_dim,
-    loss_type="l4",
-)
-
-aux_log_stepwise = [
-    {"accuracy": acc, "hard_accuracy": hard_acc, "hard_loss": hard_loss}
-    for acc, hard_acc, hard_loss in zip(
-        step_metrics["soft_accuracy"],
-        step_metrics["hard_accuracy"],
-        step_metrics["hard_loss"],
-    )
-]
-
-gnn_log_results = {
-    "losses": step_metrics["soft_loss"],
-    "aux_log": aux_log_stepwise,
+# Configuration for GNN instantiation within train_model
+gnn_model_kwargs_config = {
+    "message_passing": True,
+    "node_mlp_features": [hidden_dim_gnn, hidden_dim_gnn],
+    "edge_mlp_features": [hidden_dim_gnn, hidden_dim_gnn],
+    "use_attention": False,
+    "arity": arity, 
 }
 
-
-# if __name__ == "__main__":
-#     app_logic = AppLogic()
+gnn_results = train_model(
+    key=jax.random.PRNGKey(123), 
+    init_model=None, # Training from scratch
+    init_optimizer=None, # Training from scratch
     
-#     visualizer = CircuitVisualizer(
-#         layer_sizes=layer_sizes, # Pass the global layer_sizes
-#         arity=arity,             # Pass the global arity
-#         case_n=case_n,
-#         input_n=input_n,
-#         # --- Register Callbacks ---
-#         on_set_active_case_i=app_logic.handle_set_active_case_i,
-#         on_python_repl=app_logic.handle_python_repl,
-#         on_toggle_training=app_logic.handle_toggle_training,
-#         on_reset_gates=app_logic.handle_reset_gates,
-#         on_reset_gates_opt=app_logic.handle_reset_gates_opt,
-#         on_shuffle_wires=app_logic.handle_shuffle_wires,
-#         on_set_local_noise=app_logic.handle_set_local_noise,
-#         on_set_wd_log10=app_logic.handle_set_wd_log10,
-#         on_reset_gate_mask_action=app_logic.handle_reset_gate_mask_action,
-#         on_mask_unused_gates=app_logic.handle_mask_unused_gates_action,
-#         on_set_task_idx=app_logic.handle_set_task_idx,
-#         on_set_task_text=app_logic.handle_set_task_text,
-#         on_set_noise_p=app_logic.handle_set_noise_p
-#         # Note: The non-input gate click that zeros LUTs is now handled directly by CircuitVisualizer
-#         # so no callback for on_toggle_gate_mask in the traditional sense for that action.
-#     )
+    # CIRCUIT PARAMS
+    layer_sizes=layer_sizes, 
+    x_data=x_task_data,      
+    y_data=y_task_data,      
+    arity=arity,             
     
-#     # Setup ImGui Bundle runner parameters
-#     runner_params = hello_imgui.RunnerParams()
-#     # Set only non-window/non-addon related runner_params if needed.
-#     # For now, most things will be passed to immapp.run directly.
-#     # runner_params.app_window_params.window_title = "CircuitViz Integration Test" # Will be kwarg
-#     # runner_params.app_window_params.window_size_auto = True # Will be kwarg
-#     # runner_params.app_window_params.restore_previous_geometry = True # Will be kwarg
-#     runner_params.fps_idling.enable_idling = True # This might still be useful on RunnerParams if not a direct kwarg
-#     # runner_params.fps_idling.fps_idle = 10 # Will be kwarg
+    # TRAINING PARAMS
+    epochs=100, # Significantly reduced for a quick test run
+    n_message_steps=n_message_steps_gnn, 
+    meta_batch_size=32, # Reduced from original 256 for potentially faster iteration
+    
+    # WIRING MODE PARAMS
+    wiring_mode="fixed", 
+    wiring_fixed_key=jax.random.PRNGKey(42), # Used if wiring_mode is "fixed"
+    
+    # LOSS PARAMS
+    loss_type="l4", 
+    
+    # OPTIMIZER PARAMS
+    learning_rate=1e-4, # As per original GNN opt_fn
+    weight_decay=1e-5,  # As per original GNN opt_fn
+    
+    # LEARNING RATE SCHEDULER
+    lr_scheduler="linear_warmup", # Kept from original example for train_model
 
-#     # Addons: 
-#     # runner_params.imgui_window_params.with_implot = True # Will be kwarg
-#     immvision.use_rgb_color_order() # If images are RGB
+    # MODEL PARAMS (passed to GNN constructor within train_model)
+    hidden_dim=hidden_dim_gnn, 
+    gnn_model_kwargs=gnn_model_kwargs_config,
 
-#     # immapp.run expects a function that takes no arguments (the GUI loop)
-#     # or a GuiFunction object, or a class with a gui method.
-#     # main_gui_loop is a valid GuiFunction.
-#     immapp.run(
-#         gui_function=main_gui_loop, 
-#         # runner_params=runner_params, # Pass runner_params if it has other settings we need
-#         window_title="CircuitViz Integration Test",
-#         window_size_auto=True,
-#         window_restore_previous_geometry=True,
-#         fps_idle=10,
-#         with_implot=True
-#         # Note: if runner_params is passed, these keywords might conflict or be overridden
-#         # depending on the specific version and behavior of imgui-bundle.
-#         # For now, we prioritize direct keywords as per random_wires_demo.py.
-#     )
+    # POOL PARAMS
+    use_pool=True,
+    pool_size=256, # Reduced from original 1024 for quicker test
+    reset_pool_fraction=0.1, 
+    reset_pool_interval=20,  # Roughly every 20 epochs
+    reset_strategy="combined", 
+    
+    # NEW POOL PARAMS for LUT zeroing (passed to train_model)
+    zero_luts_active=True,            
+    zero_luts_fraction=0.05,          # Fraction of pool to apply zeroing
+    zero_luts_interval=15,            # How often to apply (in epochs)
+    zero_luts_strategy="uniform",     # Strategy for selecting circuits for zeroing
+    zero_luts_damage_prob=0.1,        # Prob for zero_luts' internal lut_damage_prob
+    
+    # LOGGING & CHECKPOINTING
+    log_interval=10, # Log more frequently for shorter run
+    checkpoint_interval=0, # Disable Orbax checkpointing by train_model
+)
 
-#     print("Application closed.") 
+print("GNN training completed.")
+
+# --- Save GNN Model and Optimizer State to .pkl ---
+if gnn_results and "model" in gnn_results and "optimizer" in gnn_results:
+    # Ensure model and optimizer are states, similar to original checkpointing logic
+    # It's assumed train_model might return modules, so we convert to state.
+    # If train_model already returns states, this try-except will pass.
+    current_model = gnn_results["model"]
+    current_optimizer = gnn_results["optimizer"]
+    
+    model_to_save = None
+    optimizer_to_save = None
+
+    if current_model is not None:
+        try:
+            model_to_save = nnx.state(current_model)
+        except (ValueError, TypeError): 
+            print("Model in results already state or not an NNX module, using as is for saving.")
+            model_to_save = current_model
+            
+    if current_optimizer is not None:
+        try:
+            optimizer_to_save = nnx.state(current_optimizer)
+        except (ValueError, TypeError):
+            print("Optimizer in results already state or not an NNX module, using as is for saving.")
+            optimizer_to_save = current_optimizer
+
+    if model_to_save is not None and optimizer_to_save is not None:
+        save_data = {
+            "model_state": model_to_save,
+            "optimizer_state": optimizer_to_save,
+            "losses": gnn_results.get("losses"), 
+            "hard_losses": gnn_results.get("hard_losses"),
+            "accuracies": gnn_results.get("accuracies"),
+            "hard_accuracies": gnn_results.get("hard_accuracies"),
+            "reset_steps_log": gnn_results.get("reset_steps_log"), # If train_model logs this
+            "zero_luts_log": gnn_results.get("zero_luts_log"), # Hypothetical log for zeroing
+        }
+        
+        pickle_filename = "gnn_final_state.pkl"
+        try:
+            with open(pickle_filename, "wb") as f:
+                pickle.dump(save_data, f)
+            print(f"Successfully saved GNN model, optimizer, and logs to {pickle_filename}")
+        except Exception as e:
+            print(f"Error saving GNN data to {pickle_filename}: {e}")
+    else:
+        print("Model or optimizer state is None after processing results. Cannot save.")
+else:
+    print("GNN training results are missing 'model' or 'optimizer' key, or results object is None. Cannot save to .pkl file.")
+
+print("GNN processing in test_circuitviz_integration.py finished.")
+
+# End of the script. The GUI part (main_gui_loop, AppLogic, CircuitVisualizer, immapp.run)
+# which was in the latter part of the original file is now effectively removed
+# as this edit replaces from line 418 to the end of the file. 
