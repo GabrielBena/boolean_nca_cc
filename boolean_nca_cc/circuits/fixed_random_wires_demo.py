@@ -12,6 +12,9 @@ import PIL.Image, PIL.ImageDraw
 import IPython
 import ctypes
 from functools import partial
+import pickle
+import os
+from flax import nnx
 
 # Import modules for boolean circuits
 from boolean_nca_cc.circuits.model import (
@@ -19,12 +22,15 @@ from boolean_nca_cc.circuits.model import (
     run_circuit,
     generate_layer_sizes,
 )
-from boolean_nca_cc.training import (
+from boolean_nca_cc.circuits.training import (
     unpack,
     res2loss,
 )
-import graph_old  # Optional graph-based circuit optimization
-import tasks  # Import the tasks module
+import boolean_nca_cc.circuits.tasks as tasks  # Import the tasks module
+
+# Import GNN components
+from boolean_nca_cc.models import CircuitGNN, run_gnn_scan
+from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
 
 from imgui_bundle import (
     implot,
@@ -236,16 +242,40 @@ class Demo:
         self.optimization_methods = ["Backprop", "GNN"]
         self.optimization_method_idx = 0  # Default to Backprop
 
-        # Initialize optimizers
-        self.init_optimizers()
-
-        # GNN setup (initialized on demand)
+        # GNN parameters (used if GNN is selected)
         self.gnn = None
         self.gnn_hidden_dim = 16
-        self.gnn_message_steps = 5
+        self.gnn_message_steps = 5 # Lower default for faster UI
         self.gnn_node_mlp_features = [64, 32]
         self.gnn_edge_mlp_features = [64, 32]
         self.gnn_enable_message_passing = True
+        self.loaded_gnn_state = None # Variable to store loaded state
+
+        # Attempt to load GNN state
+        gnn_state_file = "gnn_results.pkl"
+        if os.path.exists(gnn_state_file):
+            print(f"Found {gnn_state_file}, attempting to load...")
+            try:
+                with open(gnn_state_file, "rb") as f:
+                    # Load the dictionary containing GNN state and potentially optimizer state
+                    loaded_data = pickle.load(f)
+                    # Store the relevant parts for initialize_gnn
+                    if 'gnn' in loaded_data:
+                         self.loaded_gnn_state = loaded_data # Store the whole dict for now
+                         print("GNN state loaded successfully from file.")
+                         # Optionally set GNN as the default method if loaded
+                         # self.optimization_method_idx = self.optimization_methods.index("GNN")
+                    else:
+                        print(f"Warning: '{gnn_state_file}' found but does not contain 'gnn' key.")
+
+            except Exception as e:
+                print(f"Error loading GNN state from {gnn_state_file}: {e}")
+                print("Proceeding without loaded GNN state.")
+        else:
+            print(f"No {gnn_state_file} found, GNN will be initialized from scratch if needed.")
+
+        # Initialize optimizers (Backprop optimizer first)
+        self.init_optimizers()
 
     def init_optimizers(self):
         """Initialize or reinitialize optimization methods"""
@@ -367,18 +397,34 @@ class Demo:
             # Initialize GNN using current circuit configuration
             key = jax.random.PRNGKey(42)  # Fixed seed for reproducibility
             try:
-                self.gnn, _, _ = graph_old.test_gnn(
-                    self.logits,
-                    self.wires,
-                    self.input_n,
-                    arity=self.arity,
-                    hidden_dim=self.gnn_hidden_dim,
-                    message_passing=self.gnn_enable_message_passing,
-                    steps=1,  # Just initialize
-                )
+                # Check if a saved GNN state exists
+                if hasattr(self, 'loaded_gnn_state') and self.loaded_gnn_state:
+                    print("Loading GNN state from file...")
+                    # Restore GNN state
+                    nnx.update(self.gnn, self.loaded_gnn_state['gnn'])
+                    print("GNN state loaded successfully.")
+
+                else:
+                    print("Creating new GNN instance...")
+                    # Create a new GNN instance
+                    self.gnn = CircuitGNN(
+                        node_mlp_features=self.gnn_node_mlp_features,
+                        edge_mlp_features=self.gnn_edge_mlp_features,
+                        hidden_dim=self.gnn_hidden_dim,
+                        arity=self.arity,
+                        message_passing=self.gnn_enable_message_passing,
+                        # Add other necessary params like use_attention if configured
+                        rngs=nnx.Rngs(params=key) # Pass RNGs correctly
+                    )
+                    # Optionally initialize a GNN optimizer if needed for training within the demo
+                    # self.gnn_optimizer = nnx.Optimizer(self.gnn, optax.adam(1e-3))
+                    print("New GNN instance created.")
+
                 print("GNN initialized successfully")
             except Exception as e:
                 print(f"Error initializing GNN: {e}")
+                import traceback
+                print(f"Traceback: {traceback.format_exc()}")
                 # Fallback to backprop
                 self.optimization_method_idx = 0
 
@@ -416,7 +462,7 @@ class Demo:
                 logits_original_shapes = [logit.shape for logit in self.logits]
 
                 # Create graph from current circuit
-                circuit_graph = graph_old.build_graph(
+                circuit_graph = build_graph(
                     self.logits,
                     self.wires,
                     self.input_n,
@@ -425,13 +471,13 @@ class Demo:
                 )
 
                 # Run GNN for specified number of steps
-                updated_graph = graph_old.run_gnn_scan(
+                updated_graph = run_gnn_scan(
                     self.gnn, circuit_graph, self.gnn_message_steps
                 )
 
                 # Extract updated logits if training is enabled
                 if self.is_training:
-                    self.logits = graph_old.extract_logits_from_graph(
+                    self.logits = extract_logits_from_graph(
                         updated_graph, logits_original_shapes
                     )
 
@@ -1075,6 +1121,21 @@ class Demo:
                 if imgui.button("Reinitialize GNN"):
                     self.gnn = None
                     self.initialize_gnn()
+                # Add button to save GNN state
+                if imgui.button("Save GNN State"):
+                    if self.gnn is not None:
+                        try:
+                            gnn_state_to_save = {
+                                'gnn': nnx.state.get_state(self.gnn),
+                                # Add optimizer state if needed and available
+                            }
+                            with open("gnn_results.pkl", "wb") as f:
+                                pickle.dump(gnn_state_to_save, f)
+                            print("GNN state saved to gnn_results.pkl")
+                        except Exception as e:
+                            print(f"Error saving GNN state: {e}")
+                    else:
+                        print("No active GNN model to save.")
 
             # Training controls (common to both methods)
             _, self.is_training = imgui.checkbox("is_training", self.is_training)
