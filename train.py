@@ -7,35 +7,34 @@ when training boolean circuits, using either Graph Neural Networks or Self-Atten
 """
 
 import os
-import sys
-import time
 import logging
-from typing import Dict, List, Tuple, Optional, Union
-from functools import partial
-
 import jax
-import jax.numpy as jp
-import flax
-from flax import nnx
 import optax
-import matplotlib.pyplot as plt
-from tqdm.auto import tqdm
-
 import hydra
 from omegaconf import DictConfig, OmegaConf, open_dict
 import wandb
+from tqdm.auto import tqdm
+from functools import partial
+from flax import nnx
 
 from boolean_nca_cc.circuits.model import gen_circuit
-from boolean_nca_cc.circuits.train import TrainState, loss_f_l4, loss_f_bce, train_step
 from boolean_nca_cc.circuits.tasks import get_task_data
 from boolean_nca_cc import generate_layer_sizes
 from boolean_nca_cc.models import (
     CircuitGNN,
     CircuitSelfAttention,
 )
+from boolean_nca_cc.circuits.train import TrainState, loss_f_l4, loss_f_bce, train_step
+
 from boolean_nca_cc.training.train_loop import train_model
 from boolean_nca_cc.training.evaluation import evaluate_model_stepwise
 from boolean_nca_cc.utils.graph_builder import build_graph
+from boolean_nca_cc.training.utils import (
+    plot_training_curves,
+    save_checkpoint,
+    plot_inner_loop_metrics,
+    compare_with_backprop,
+)
 
 # Configure logging
 log = logging.getLogger(__name__)
@@ -158,200 +157,6 @@ def run_backpropagation_training(cfg, x_data, y_data, loss_type="l4"):
     return results
 
 
-def save_checkpoint(model, optimizer, metrics, cfg, step, output_dir):
-    """Save a checkpoint of the model and optimizer."""
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    checkpoint = {
-        "model": nnx.state(model),
-        "optimizer": nnx.state(optimizer),
-        "metrics": metrics,
-        "config": OmegaConf.to_container(cfg, resolve=True),
-        "step": step,
-    }
-
-    checkpoint_path = os.path.join(output_dir, f"checkpoint_{step}.ckpt")
-    with open(checkpoint_path, "wb") as f:
-        checkpoint_bytes = flax.serialization.to_bytes(checkpoint)
-        f.write(checkpoint_bytes)
-
-    log.info(f"Saved checkpoint to {checkpoint_path}")
-    if cfg.wandb.enabled:
-        wandb.save(checkpoint_path)
-
-    return checkpoint_path
-
-
-def load_checkpoint(checkpoint_path):
-    """Load a checkpoint of the model and optimizer."""
-    with open(checkpoint_path, "rb") as f:
-        checkpoint_bytes = f.read()
-        checkpoint = flax.serialization.from_bytes(None, checkpoint_bytes)
-
-    return checkpoint
-
-
-def plot_training_curves(metrics, title, output_dir):
-    """Generate and save training curve plots."""
-    # Create output directory if it doesn't exist
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    # Plot loss curves
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(metrics["losses"], label="Soft Loss")
-    ax.plot(metrics["hard_losses"], label="Hard Loss")
-    ax.set_xlabel("Training Steps")
-    ax.set_ylabel("Loss")
-    ax.set_yscale("log")
-    ax.set_title(f"{title} - Loss Curves")
-    ax.legend()
-    ax.grid(True)
-    plt.tight_layout()
-
-    loss_plot_path = os.path.join(
-        output_dir, f"{title.lower().replace(' ', '_')}_loss.png"
-    )
-    plt.savefig(loss_plot_path)
-    if wandb.run is not None:
-        wandb.log({f"{title} Loss": wandb.Image(fig)})
-    plt.close(fig)
-
-    # Plot accuracy curves
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(metrics["accuracies"], label="Soft Accuracy")
-    ax.plot(metrics["hard_accuracies"], label="Hard Accuracy")
-    ax.set_xlabel("Training Steps")
-    ax.set_ylabel("Accuracy")
-    ax.set_title(f"{title} - Accuracy Curves")
-    ax.legend()
-    ax.grid(True)
-    plt.tight_layout()
-
-    acc_plot_path = os.path.join(
-        output_dir, f"{title.lower().replace(' ', '_')}_accuracy.png"
-    )
-    plt.savefig(acc_plot_path)
-    if wandb.run is not None:
-        wandb.log({f"{title} Accuracy": wandb.Image(fig)})
-    plt.close(fig)
-
-
-def plot_inner_loop_metrics(step_metrics, title, output_dir):
-    """Plot inner loop metrics over GNN message passing steps."""
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    # Plot loss curves
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(step_metrics["step"], step_metrics["soft_loss"], label="Soft Loss")
-    ax.plot(step_metrics["step"], step_metrics["hard_loss"], label="Hard Loss")
-    ax.set_xlabel("Message Passing Steps")
-    ax.set_ylabel("Loss")
-    ax.set_yscale("log")
-    ax.set_title(f"{title} - Inner Loop Loss")
-    ax.legend()
-    ax.grid(True)
-    plt.tight_layout()
-
-    loss_plot_path = os.path.join(
-        output_dir, f"{title.lower().replace(' ', '_')}_inner_loss.png"
-    )
-    plt.savefig(loss_plot_path)
-    if wandb.run is not None:
-        wandb.log({f"{title} Inner Loop Loss": wandb.Image(fig)})
-    plt.close(fig)
-
-    # Plot accuracy curves
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(step_metrics["step"], step_metrics["soft_accuracy"], label="Soft Accuracy")
-    ax.plot(step_metrics["step"], step_metrics["hard_accuracy"], label="Hard Accuracy")
-    ax.set_xlabel("Message Passing Steps")
-    ax.set_ylabel("Accuracy")
-    ax.set_title(f"{title} - Inner Loop Accuracy")
-    ax.legend()
-    ax.grid(True)
-    plt.tight_layout()
-
-    acc_plot_path = os.path.join(
-        output_dir, f"{title.lower().replace(' ', '_')}_inner_accuracy.png"
-    )
-    plt.savefig(acc_plot_path)
-    if wandb.run is not None:
-        wandb.log({f"{title} Inner Loop Accuracy": wandb.Image(fig)})
-    plt.close(fig)
-
-    # Log the final metrics
-    if wandb.run is not None:
-        wandb.log(
-            {
-                f"inner_loop/final_soft_loss": step_metrics["soft_loss"][-1],
-                f"inner_loop/final_hard_loss": step_metrics["hard_loss"][-1],
-                f"inner_loop/final_soft_accuracy": step_metrics["soft_accuracy"][-1],
-                f"inner_loop/final_hard_accuracy": step_metrics["hard_accuracy"][-1],
-            }
-        )
-
-
-def compare_with_backprop(gnn_metrics, bp_metrics, title, output_dir):
-    """Compare GNN and backpropagation performance."""
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    # Create a figure with 2x2 subplots
-    fig, axs = plt.subplots(2, 2, figsize=(16, 12), constrained_layout=True)
-
-    # Plot soft loss comparison
-    axs[0, 0].plot(gnn_metrics["losses"], label="GNN")
-    axs[0, 0].plot(bp_metrics["losses"], label="Backprop")
-    axs[0, 0].set_title("Soft Loss Comparison")
-    axs[0, 0].set_xlabel("Training Steps")
-    axs[0, 0].set_ylabel("Loss")
-    axs[0, 0].set_yscale("log")
-    axs[0, 0].legend()
-    axs[0, 0].grid(True)
-
-    # Plot hard loss comparison
-    axs[0, 1].plot(gnn_metrics["hard_losses"], label="GNN")
-    axs[0, 1].plot(bp_metrics["hard_losses"], label="Backprop")
-    axs[0, 1].set_title("Hard Loss Comparison")
-    axs[0, 1].set_xlabel("Training Steps")
-    axs[0, 1].set_ylabel("Loss")
-    axs[0, 1].set_yscale("log")
-    axs[0, 1].legend()
-    axs[0, 1].grid(True)
-
-    # Plot soft accuracy comparison
-    axs[1, 0].plot(gnn_metrics["accuracies"], label="GNN")
-    axs[1, 0].plot(bp_metrics["accuracies"], label="Backprop")
-    axs[1, 0].set_title("Soft Accuracy Comparison")
-    axs[1, 0].set_xlabel("Training Steps")
-    axs[1, 0].set_ylabel("Accuracy")
-    axs[1, 0].legend()
-    axs[1, 0].grid(True)
-
-    # Plot hard accuracy comparison
-    axs[1, 1].plot(gnn_metrics["hard_accuracies"], label="GNN")
-    axs[1, 1].plot(bp_metrics["hard_accuracies"], label="Backprop")
-    axs[1, 1].set_title("Hard Accuracy Comparison")
-    axs[1, 1].set_xlabel("Training Steps")
-    axs[1, 1].set_ylabel("Accuracy")
-    axs[1, 1].legend()
-    axs[1, 1].grid(True)
-
-    plt.suptitle(f"{title} - GNN vs Backprop Comparison")
-
-    # Save the figure
-    comp_plot_path = os.path.join(
-        output_dir, f"{title.lower().replace(' ', '_')}_comparison.png"
-    )
-    plt.savefig(comp_plot_path)
-    if wandb.run is not None:
-        wandb.log({f"{title} Comparison": wandb.Image(fig)})
-    plt.close(fig)
-
-
 @hydra.main(version_base=None, config_path="configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     """
@@ -371,13 +176,16 @@ def main(cfg: DictConfig) -> None:
     log.info(f"Working directory: {output_dir}")
 
     # Initialize wandb if enabled
+    wandb_run = None
     if cfg.wandb.enabled:
         wandb.init(
             project=cfg.wandb.project,
             entity=cfg.wandb.entity,
             name=cfg.wandb.run_name,
             dir=output_dir,
+            config=OmegaConf.to_container(cfg, resolve=True),
         )
+        wandb_run = wandb
 
     # Generate circuit layer sizes
     input_n, output_n = cfg.circuit.input_bits, cfg.circuit.output_bits
@@ -454,6 +262,10 @@ def main(cfg: DictConfig) -> None:
     else:
         raise ValueError(f"Unknown model type: {cfg.model.type}")
 
+    # Prepare checkpoint directory
+    checkpoint_dir = os.path.join(output_dir, "checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
     # Train model
     log.info(f"Starting {cfg.model.type.upper()} training")
     gnn_results = train_model(
@@ -464,10 +276,12 @@ def main(cfg: DictConfig) -> None:
         x_data=x,
         y_data=y0,
         layer_sizes=layer_sizes,
+        hidden_dim=cfg.model.hidden_dim,
+        arity=arity,
         # Training hyperparameters
         learning_rate=cfg.training.learning_rate,
         weight_decay=cfg.training.weight_decay,
-        epochs=cfg.training.epochs,
+        epochs=cfg.training.epochs or 2**cfg.training.epochs_power_of_2,
         n_message_steps=cfg.training.n_message_steps,
         loss_type=cfg.training.loss_type,
         # Wiring mode parameters
@@ -475,38 +289,41 @@ def main(cfg: DictConfig) -> None:
         meta_batch_size=cfg.training.meta_batch_size,
         wiring_fixed_key=jax.random.PRNGKey(cfg.test_seed),
         # Pool parameters
-        use_pool=cfg.pool.enabled,
         pool_size=cfg.pool.size,
         reset_pool_fraction=cfg.pool.reset_fraction,
         reset_pool_interval=cfg.pool.reset_interval,
         reset_strategy=cfg.pool.reset_strategy,
         # Learning rate scheduling
         lr_scheduler=cfg.training.lr_scheduler,
+        # Checkpoint parameters
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_interval=cfg.checkpoint.interval,
+        save_best=cfg.checkpoint.save_best,
+        best_metric=cfg.checkpoint.best_metric,
+        save_stable_states=cfg.checkpoint.save_stable_states,
+        # WandB parameters
+        wandb_logging=cfg.wandb.enabled,
+        log_interval=cfg.logging.log_interval,
+        wandb_run_config=OmegaConf.to_container(cfg, resolve=True),
     )
 
-    # Format metrics for plotting
-    metrics = {
-        "losses": gnn_results["losses"],
-        "hard_losses": gnn_results["hard_losses"],
-        "accuracies": gnn_results["accuracies"],
-        "hard_accuracies": gnn_results["hard_accuracies"],
-    }
-
-    # Plot training curves
-    model_name = cfg.model.type.upper()
-    plot_training_curves(
-        metrics, f"{model_name} Training", os.path.join(output_dir, "plots")
-    )
-
-    # Save final model
-    if cfg.checkpoint.enabled:
+    # Save final model if checkpointing is enabled
+    if cfg.checkpoint.enabled and not cfg.wandb.enabled:
+        # If wandb is enabled, checkpoints are already being saved during training
         save_checkpoint(
             gnn_results["model"],
             gnn_results["optimizer"],
-            metrics,
+            {
+                "losses": gnn_results["losses"],
+                "hard_losses": gnn_results["hard_losses"],
+                "accuracies": gnn_results["accuracies"],
+                "hard_accuracies": gnn_results["hard_accuracies"],
+                "reset_steps": gnn_results.get("reset_steps", []),
+            },
             cfg,
-            cfg.training.epochs,
-            os.path.join(output_dir, "checkpoints"),
+            cfg.training.epochs or 2**cfg.training.epochs_power_of_2,
+            checkpoint_dir,
+            filename="final_model.pkl",
         )
 
     # Evaluate inner loop (message passing steps)
@@ -531,6 +348,20 @@ def main(cfg: DictConfig) -> None:
         loss_type=cfg.training.loss_type,
     )
 
+    # Plot training curves
+    model_name = cfg.model.type.upper()
+    if not cfg.wandb.enabled:
+        plot_training_curves(
+            {
+                "losses": gnn_results["losses"],
+                "hard_losses": gnn_results["hard_losses"],
+                "accuracies": gnn_results["accuracies"],
+                "hard_accuracies": gnn_results["hard_accuracies"],
+            },
+            f"{model_name} Training",
+            os.path.join(output_dir, "plots"),
+        )
+
     # Plot inner loop metrics
     plot_inner_loop_metrics(
         step_metrics, f"{model_name} Inner Loop", os.path.join(output_dir, "plots")
@@ -539,7 +370,12 @@ def main(cfg: DictConfig) -> None:
     # Compare with backpropagation if available
     if bp_results is not None:
         compare_with_backprop(
-            metrics,
+            {
+                "losses": step_metrics["soft_loss"],
+                "hard_losses": step_metrics["hard_loss"],
+                "accuracies": step_metrics["soft_accuracy"],
+                "hard_accuracies": step_metrics["hard_accuracy"],
+            },
             bp_results,
             f"{model_name} vs Backprop",
             os.path.join(output_dir, "plots"),
@@ -547,16 +383,22 @@ def main(cfg: DictConfig) -> None:
 
     # Final log
     log.info(f"Training complete. Final results:")
-    log.info(f"  Meta Loss: {metrics['losses'][-1]:.4f}")
-    log.info(f"  Meta Hard Loss: {metrics['hard_losses'][-1]:.4f}")
-    log.info(f"  Meta Accuracy: {metrics['accuracies'][-1]:.4f}")
-    log.info(f"  Meta Hard Accuracy: {metrics['hard_accuracies'][-1]:.4f}")
+    log.info(f"  Meta Loss: {gnn_results['losses'][-1]:.4f}")
+    log.info(f"  Meta Hard Loss: {gnn_results['hard_losses'][-1]:.4f}")
+    log.info(f"  Meta Accuracy: {gnn_results['accuracies'][-1]:.4f}")
+    log.info(f"  Meta Hard Accuracy: {gnn_results['hard_accuracies'][-1]:.4f}")
     log.info(f"  Inner Loop Final Loss: {step_metrics['soft_loss'][-1]:.4f}")
     log.info(f"  Inner Loop Final Hard Loss: {step_metrics['hard_loss'][-1]:.4f}")
     log.info(f"  Inner Loop Final Accuracy: {step_metrics['soft_accuracy'][-1]:.4f}")
     log.info(
         f"  Inner Loop Final Hard Accuracy: {step_metrics['hard_accuracy'][-1]:.4f}"
     )
+
+    # Display best model performance if applicable
+    if cfg.checkpoint.save_best and "best_metric_value" in gnn_results:
+        log.info(
+            f"  Best {gnn_results.get('best_metric', 'metric')}: {gnn_results['best_metric_value']:.4f}"
+        )
 
     # Close wandb if enabled
     if cfg.wandb.enabled:
