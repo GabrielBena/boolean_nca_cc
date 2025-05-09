@@ -86,6 +86,20 @@ def train_model(
         0.5,
         0.5,
     ),  # Weights for [loss, steps] in combined strategy
+    # Renamed parameters for "hard" LUT zeroing (gate knockout)
+    gate_knockout_active: bool = False,
+    gate_knockout_fraction: float = 0.05,
+    gate_knockout_interval: int = 10,
+    gate_knockout_strategy: str = "uniform",
+    gate_knockout_damage_prob: float = 0.1,
+    gate_knockout_combined_weights: Tuple[float, float] = (0.5, 0.5),
+    # New parameters for "soft" LUT damage (preserves globals)
+    soft_lut_damage_active: bool = False,
+    soft_lut_damage_fraction: float = 0.05,
+    soft_lut_damage_interval: int = 10,
+    soft_lut_damage_strategy: str = "uniform",
+    soft_lut_damage_damage_prob: float = 0.1, # Corresponds to lut_damage_prob in zero_luts_for_fraction
+    soft_lut_damage_combined_weights: Tuple[float, float] = (0.5, 0.5),
     # Learning rate scheduling
     lr_scheduler: str = "constant",  # Options: "constant", "exponential", "cosine", "linear_warmup"
     lr_scheduler_params: Dict = None,
@@ -562,39 +576,74 @@ def train_model(
                 loss_type=loss_type,
             )
 
-            # Reset a fraction of the pool periodically
-            if (
-                epoch > 0
-                and reset_pool_interval is not None
-                and epoch % reset_pool_interval == 0
-            ):
-                rng, reset_key, fresh_key = jax.random.split(rng, 3)
+            # Periodically reset a fraction of the pool if active
+            if use_pool and (epoch + 1) % reset_pool_interval == 0:
+                rng, reset_key, init_key_for_reset = jax.random.split(rng, 3)
+                print(f"Epoch {epoch+1}: Resetting {reset_pool_fraction*100}% of the pool (strategy: {reset_strategy})...")
+                
+                # Initialize a temporary small pool of new graphs for reset
+                # Determine the number of new graphs needed for reset, should be at least num_reset
+                num_to_reset_in_pool = jp.maximum(1, jp.round(reset_pool_fraction * circuit_pool.size).astype(jp.int32))
 
-                # Generate fresh circuits for resetting
-                if wiring_mode == "fixed":
-                    # Use the fixed key for generating wirings
-                    fresh_key = wiring_fixed_key
+                # Generate new circuits for reset
+                # Use a different key for generating reset circuits to ensure diversity
+                if wiring_mode != "fixed":
+                    reset_circuit_key = init_key_for_reset
+                else:
+                    # If fixed wiring, can use the same wiring_fixed_key or a derivative if desired
+                    # For simplicity, using a new split from rng if truly new fixed wires are desired for each reset batch
+                    # or wiring_fixed_key if the *same* fixed set is always used for resets.
+                    # Assuming new fixed set for resets for now, derived from main rng path.
+                    reset_circuit_key = init_key_for_reset 
 
-                fresh_pool = initialize_graph_pool(
-                    rng=fresh_key,
+                new_circuits_for_reset_pool = initialize_graph_pool(
+                    rng=reset_circuit_key, # Key for generating the new circuits
                     layer_sizes=layer_sizes,
-                    pool_size=pool_size,  # Use same size as circuit_pool
+                    pool_size=num_to_reset_in_pool, # Generate enough to cover the fraction
                     input_n=input_n,
                     arity=arity,
-                    hidden_dim=hidden_dim,
-                    wiring_mode=wiring_mode,
+                    hidden_dim=hidden_dim, # Use the model's hidden_dim for consistency
+                    loss_value=jp.mean(jp.array(losses[-reset_pool_interval:])) if losses else 0.0, # Initial loss for new graphs
+                    wiring_mode=wiring_mode # Use the same wiring mode as the main pool
                 )
 
-                # Reset a fraction of the pool and get avg steps of reset graphs
                 circuit_pool, avg_steps_reset = circuit_pool.reset_fraction(
-                    reset_key,
-                    reset_pool_fraction,
-                    fresh_pool.graphs,
-                    fresh_pool.wires,
-                    fresh_pool.logits,
+                    key=reset_key, # Key for selecting which pool elements to reset
+                    fraction=reset_pool_fraction,
+                    new_graphs=new_circuits_for_reset_pool.graphs,
+                    new_wires=new_circuits_for_reset_pool.wires,
+                    new_logits=new_circuits_for_reset_pool.logits,
                     reset_strategy=reset_strategy,
                     combined_weights=combined_weights,
                 )
+                print(f"Epoch {epoch+1}: Pool reset complete (avg steps of reset graphs: {avg_steps_reset:.2f})")
+                reset_steps.append(avg_steps_reset)
+
+            # Correctly placed LUT zeroing logic, as a new independent block after pool reset
+            if use_pool and gate_knockout_active and (epoch + 1) % gate_knockout_interval == 0:
+                rng, knockout_key = jax.random.split(rng)
+                print(f"Epoch {epoch+1}: Applying gate knockout to {gate_knockout_fraction*100}% of eligible pool (strategy: {gate_knockout_strategy})...")
+                circuit_pool = circuit_pool.gate_knockout( # Changed from zero_out_luts_for_fraction
+                    key=knockout_key,
+                    fraction=gate_knockout_fraction,
+                    lut_damage_prob=gate_knockout_damage_prob,
+                    reset_strategy=gate_knockout_strategy, # Parameter name in gate_knockout
+                    combined_weights=gate_knockout_combined_weights,
+                )
+                # TODO: Consider adding a log for gate_knockout application if needed.
+
+            # New block for "soft" LUT damage (zero_luts_for_fraction in pool.py)
+            if use_pool and soft_lut_damage_active and (epoch + 1) % soft_lut_damage_interval == 0:
+                rng, soft_damage_key = jax.random.split(rng)
+                print(f"Epoch {epoch+1}: Applying soft LUT damage to {soft_lut_damage_fraction*100}% of the pool (strategy: {soft_lut_damage_strategy})...")
+                circuit_pool = circuit_pool.zero_luts_for_fraction( # This is the "soft" method
+                    key=soft_damage_key,
+                    fraction=soft_lut_damage_fraction,
+                    lut_damage_prob=soft_lut_damage_damage_prob, # lut_damage_prob is the param name in the method
+                    selection_strategy=soft_lut_damage_strategy, # selection_strategy is the param name
+                    combined_weights=soft_lut_damage_combined_weights,
+                )
+                # TODO: Consider adding a log for soft_lut_damage application if needed.
 
         else:
             # Classic meta-learning approach

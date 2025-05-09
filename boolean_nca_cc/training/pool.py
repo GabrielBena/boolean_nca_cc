@@ -16,6 +16,7 @@ import jraph
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.utils.graph_builder import build_graph
 from boolean_nca_cc.utils.extraction import extract_logits_from_graph
+from .perturbation import zero_luts
 
 PyTree = Any
 
@@ -29,15 +30,24 @@ class GraphPool(struct.PyTreeNode):
     for computing functional circuit loss without redundant extraction.
     """
 
+    # Fields without default values must come first
     size: int = struct.field(pytree_node=False)
-    # graphs is a single jraph.GraphsTuple where each leaf has a leading batch dimension
     graphs: jraph.GraphsTuple
+    # Added fields for graph reconstruction, non-default
+    input_n: int = struct.field(pytree_node=False)
+    arity: int = struct.field(pytree_node=False)
+    hidden_dim: int = struct.field(pytree_node=False)
+    initial_loss_value: float = struct.field(pytree_node=False)
+
+    # Fields with default values
     # wires is a list of wire matrices with shape [pool_size, ...wire_shape...]
     wires: PyTree = None
     # logits is a list of weight matrices corresponding to each graph
     logits: PyTree = None
     # Reset counter to track which elements were reset recently
     reset_counter: Optional[Array] = None
+    # New field to track if gate_knockout has been applied to a slot
+    gate_knockout_applied: Optional[Array] = None # Boolean array, True if knockout applied
 
     @classmethod
     def create(
@@ -46,6 +56,11 @@ class GraphPool(struct.PyTreeNode):
         wires: PyTree = None,
         logits: PyTree = None,
         reset_counter: Optional[Array] = None,
+        # Added parameters for graph reconstruction capabilities
+        input_n: int = 0, # Default for safety, should be provided
+        arity: int = 0,   # Default for safety
+        hidden_dim: int = 0, # Default for safety
+        initial_loss_value: float = 0.0, # Default for safety
     ) -> "GraphPool":
         """
         Create a new GraphPool instance from a batched GraphsTuple.
@@ -56,13 +71,15 @@ class GraphPool(struct.PyTreeNode):
             wires: The wire matrices corresponding to each graph.
             logits: The logit matrices corresponding to each graph.
             reset_counter: Optional counter to track reset operations.
+            input_n: Number of inputs to the circuit.
+            arity: Number of inputs per gate.
+            hidden_dim: Dimension of hidden features.
+            initial_loss_value: Initial loss value for graph globals when reset.
 
         Returns:
             A new GraphPool instance.
         """
         # Determine size from the n_node field, assuming it's always present and batched.
-        # If build_graph produces n_node of shape (1,), vmap makes it (pool_size, 1).
-        # So, shape[0] gives the pool_size.
         if batched_graphs.n_node is None:
             raise ValueError(
                 "batched_graphs.n_node cannot be None for GraphPool.create"
@@ -72,13 +89,23 @@ class GraphPool(struct.PyTreeNode):
         # Initialize reset counter if not provided
         if reset_counter is None:
             reset_counter = jp.zeros(size, dtype=jp.int32)
+        
+        # Initialize gate_knockout_applied field
+        gate_knockout_applied_init = jp.zeros(size, dtype=jp.bool_)
 
         return cls(
             size=size,
             graphs=batched_graphs,
+            # Pass through new fields
+            input_n=input_n,
+            arity=arity,
+            hidden_dim=hidden_dim,
+            initial_loss_value=initial_loss_value,
+            # Original fields
             wires=wires,
             logits=logits,
             reset_counter=reset_counter,
+            gate_knockout_applied=gate_knockout_applied_init,
         )
 
     @jax.jit
@@ -88,6 +115,7 @@ class GraphPool(struct.PyTreeNode):
         batch_of_graphs: jraph.GraphsTuple,
         batch_of_wires: PyTree = None,
         batch_of_logits: PyTree = None,
+        gate_knockout_status_for_idxs: Optional[Array] = None,
     ) -> "GraphPool":
         """
         Update graphs in the pool at the specified indices with a batch of graphs.
@@ -101,6 +129,8 @@ class GraphPool(struct.PyTreeNode):
                            If None, wires remain unchanged.
             batch_of_logits: Optional PyTree of logits corresponding to batch_of_graphs.
                            If None, logits remain unchanged.
+            gate_knockout_status_for_idxs: Optional boolean Array. If provided, sets the
+                                           gate_knockout_applied flag for the updated idxs.
 
         Returns:
             A new GraphPool instance with the updated graphs.
@@ -183,11 +213,19 @@ class GraphPool(struct.PyTreeNode):
             else None
         )
 
+        # Update gate_knockout_applied status if provided
+        updated_gate_knockout_applied = self.gate_knockout_applied
+        if gate_knockout_status_for_idxs is not None and self.gate_knockout_applied is not None:
+            updated_gate_knockout_applied = self.gate_knockout_applied.at[idxs].set(
+                gate_knockout_status_for_idxs
+            )
+
         return self.replace(
             graphs=updated_graphs_data,
             wires=updated_wires,
             logits=updated_logits,
             reset_counter=updated_reset_counter,
+            gate_knockout_applied=updated_gate_knockout_applied,
         )
 
     @partial(jax.jit, static_argnames=("batch_size",))
@@ -406,7 +444,13 @@ class GraphPool(struct.PyTreeNode):
             reset_logits = jax.tree.map(lambda leaf: leaf[sample_idxs], new_logits)
 
         # Update the pool with reset elements
-        reset_pool = self.update(reset_idxs, reset_graphs, reset_wires, reset_logits)
+        reset_pool = self.update(
+            reset_idxs, 
+            reset_graphs, 
+            reset_wires, 
+            reset_logits,
+            gate_knockout_status_for_idxs=jp.full_like(reset_idxs, False, dtype=jp.bool_) # New circuits are not knocked out
+            )
 
         # Increment the reset counter for all elements
         if reset_pool.reset_counter is not None:
@@ -414,6 +458,292 @@ class GraphPool(struct.PyTreeNode):
             reset_pool = reset_pool.replace(reset_counter=new_counter)
 
         return reset_pool, avg_steps_reset
+
+    def gate_knockout(
+        self,
+        key: Array,
+        fraction: float,
+        lut_damage_prob: float,
+        reset_strategy: str = "uniform",
+        combined_weights: Tuple[float, float] = (0.5, 0.5),
+    ) -> "GraphPool":
+        """
+        Selects a fraction of circuits from the pool that have not undergone gate knockout yet,
+        applies LUT zeroing to them, rebuilds their graph representations with reset globals,
+        and updates them in the pool. Marks these circuits as having had gate knockout applied.
+
+        Args:
+            key: Random key for selection and perturbation.
+            fraction: Fraction of the pool to apply LUT zeroing to (between 0 and 1).
+            lut_damage_prob: Probability of zeroing out each LUT in the selected circuits.
+            reset_strategy: Strategy for selecting circuits: "uniform", "steps_biased",
+                            "loss_biased", or "combined".
+            combined_weights: Tuple of weights (loss_weight, steps_weight) for the
+                              "combined" strategy.
+
+        Returns:
+            A new GraphPool instance with the modified circuits.
+        """
+        if self.size == 0:
+            return self
+        
+        if self.wires is None or self.logits is None or self.gate_knockout_applied is None:
+            # Cannot apply if essential components are missing
+            print("Warning: Cannot apply gate_knockout, essential components (wires, logits, or gate_knockout_applied flag) missing.")
+            return self
+
+        # Identify eligible circuits (those not yet knocked out)
+        eligible_indices = jp.where(jp.logical_not(self.gate_knockout_applied))[0]
+        num_eligible = eligible_indices.shape[0]
+
+        if num_eligible == 0:
+            print("Warning: No eligible circuits for gate_knockout (all may have been knocked out already).")
+            return self
+
+        # Determine how many to target based on fraction of total pool size, capped by eligible count
+        num_to_target_overall = jp.round(fraction * self.size).astype(jp.int32)
+        num_to_actually_select = jp.minimum(num_to_target_overall, num_eligible)
+        
+        if num_to_actually_select == 0:
+            return self
+
+        key_select, key_zero_luts = jax.random.split(key)
+
+        # Select elements from ELIGIBLE indices based on the reset strategy
+        if reset_strategy == "uniform":
+            selected_indices_in_eligible_array = jax.random.choice(
+                key_select, num_eligible, shape=(num_to_actually_select,), replace=False
+            )
+        elif reset_strategy == "steps_biased":
+            if self.graphs.globals is None:
+                selected_indices_in_eligible_array = jax.random.choice(
+                    key_select, num_eligible, shape=(num_to_actually_select,), replace=False
+                )
+            else:
+                update_steps_eligible = self.graphs.globals[eligible_indices, 1]
+                probs_eligible = update_steps_eligible + 1.0
+                # Handle case where all eligible update_steps are zero, leading to sum(probs_eligible) = num_eligible
+                sum_probs = jp.sum(probs_eligible)
+                probs_eligible = jp.where(sum_probs == 0, jp.ones_like(probs_eligible) / num_eligible, probs_eligible / sum_probs)
+                selected_indices_in_eligible_array = jax.random.choice(
+                    key_select, num_eligible, shape=(num_to_actually_select,), replace=False, p=probs_eligible
+                )
+        elif reset_strategy == "loss_biased":
+            if self.graphs.globals is None:
+                selected_indices_in_eligible_array = jax.random.choice(
+                    key_select, num_eligible, shape=(num_to_actually_select,), replace=False
+                )
+            else:
+                loss_values_eligible = self.graphs.globals[eligible_indices, 0]
+                probs_eligible = loss_values_eligible + 1e-6
+                probs_eligible = jp.clip(probs_eligible, 0.0, 100.0)
+                sum_probs = jp.sum(probs_eligible)
+                probs_eligible = jp.where(sum_probs == 0, jp.ones_like(probs_eligible) / num_eligible, probs_eligible / sum_probs)
+                selected_indices_in_eligible_array = jax.random.choice(
+                    key_select, num_eligible, shape=(num_to_actually_select,), replace=False, p=probs_eligible
+                )
+        elif reset_strategy == "combined":
+            if self.graphs.globals is None:
+                selected_indices_in_eligible_array = jax.random.choice(
+                    key_select, num_eligible, shape=(num_to_actually_select,), replace=False
+                )
+            else:
+                loss_values_eligible = self.graphs.globals[eligible_indices, 0]
+                update_steps_eligible = self.graphs.globals[eligible_indices, 1]
+                loss_weight, steps_weight = combined_weights
+                
+                min_loss_eligible = jp.min(loss_values_eligible)
+                max_loss_eligible = jp.max(loss_values_eligible)
+                min_steps_eligible = jp.min(update_steps_eligible)
+                max_steps_eligible = jp.max(update_steps_eligible)
+
+                loss_scores_eligible = (loss_values_eligible - min_loss_eligible) / (
+                    max_loss_eligible - min_loss_eligible + 1e-6
+                )
+                step_scores_eligible = (update_steps_eligible - min_steps_eligible) / (
+                    max_steps_eligible - min_steps_eligible + 1e-6
+                )
+                combined_scores_eligible = loss_weight * loss_scores_eligible + steps_weight * step_scores_eligible
+                probs_eligible = combined_scores_eligible + 1e-6
+                sum_probs = jp.sum(probs_eligible)
+                probs_eligible = jp.where(sum_probs == 0, jp.ones_like(probs_eligible) / num_eligible, probs_eligible / sum_probs)
+                selected_indices_in_eligible_array = jax.random.choice(
+                    key_select, num_eligible, shape=(num_to_actually_select,), replace=False, p=probs_eligible
+                )
+        else:
+            raise ValueError(
+                f"Unknown reset_strategy: {reset_strategy}. "
+                f"Must be 'uniform', 'steps_biased', 'loss_biased', or 'combined'."
+            )
+        
+        # Map selected indices from the eligible array back to original pool indices
+        target_idxs = eligible_indices[selected_indices_in_eligible_array]
+        actual_num_to_zero = target_idxs.shape[0]
+
+        if actual_num_to_zero == 0: # Should be redundant due to earlier checks, but safe
+            return self
+
+        selected_wires_batched = jax.tree.map(lambda x: x[target_idxs], self.wires)
+        selected_logits_batched = jax.tree.map(lambda x: x[target_idxs], self.logits)
+
+        keys_for_zeroing = jax.random.split(key_zero_luts, actual_num_to_zero)
+        
+        vmap_zero_luts = jax.vmap(zero_luts, in_axes=(0, 0, 0, None))
+        _, perturbed_logits_batched = vmap_zero_luts(
+            keys_for_zeroing, selected_wires_batched, selected_logits_batched, lut_damage_prob
+        )
+
+        rebuilt_graphs_batch = jax.vmap(
+            lambda l_pytree, w_pytree, loss_val, upd_steps: build_graph(
+                logits=l_pytree,
+                wires=w_pytree,
+                input_n=self.input_n,
+                arity=self.arity,
+                hidden_dim=self.hidden_dim,
+                loss_value=loss_val,
+                update_steps=upd_steps
+            ),
+            in_axes=(0, 0, 0, 0) 
+        )(perturbed_logits_batched, selected_wires_batched, 
+          jp.full((actual_num_to_zero,), self.initial_loss_value), 
+          jp.zeros((actual_num_to_zero,), dtype=jp.int32))
+
+        updated_pool = self.update(
+            target_idxs,
+            rebuilt_graphs_batch,
+            selected_wires_batched, 
+            perturbed_logits_batched,
+            gate_knockout_status_for_idxs=jp.full((actual_num_to_zero,), True, dtype=jp.bool_) # Set flag to True
+        )
+
+        return updated_pool
+
+    def zero_luts_for_fraction(
+        self,
+        key: Array,
+        fraction: float,
+        lut_damage_prob: float,
+        selection_strategy: str = "uniform", # Renamed from reset_strategy for clarity
+        combined_weights: Tuple[float, float] = (0.5, 0.5),
+    ) -> "GraphPool":
+        """
+        Selects a fraction of circuits, applies LUT damage (zeros logits),
+        rebuilds their graph representations preserving their original globals (loss, update_steps),
+        and updates them in the pool. The reset_counter for these circuits will be set to 0.
+
+        Args:
+            key: Random key for selection and perturbation.
+            fraction: Fraction of the pool to apply LUT damage to.
+            lut_damage_prob: Probability of zeroing out each LUT in selected circuits.
+            selection_strategy: Strategy for selecting circuits: "uniform", "steps_biased",
+                                "loss_biased", or "combined".
+            combined_weights: Tuple of weights for the "combined" strategy.
+
+        Returns:
+            A new GraphPool instance with the modified circuits.
+        """
+        if self.size == 0:
+            return self
+        
+        if self.wires is None or self.logits is None or self.graphs.globals is None:
+            # Cannot apply if essential components are missing
+            print("Warning: Cannot apply LUT damage, essential components (wires, logits, or globals) missing.")
+            return self
+
+        num_to_damage = jp.round(fraction * self.size).astype(jp.int32)
+        if num_to_damage == 0:
+            return self
+
+        key_select, key_zero_luts = jax.random.split(key)
+
+        # Select elements to apply LUT damage based on the selection_strategy
+        # (Logic copied and adapted from zero_out_luts_for_fraction/reset_fraction)
+        if selection_strategy == "uniform":
+            target_idxs = jax.random.choice(
+                key_select, self.size, shape=(num_to_damage,), replace=False
+            )
+        elif selection_strategy == "steps_biased":
+            update_steps = self.graphs.globals[..., 1]
+            probs = update_steps + 1.0
+            probs = probs / jp.sum(probs)
+            target_idxs = jax.random.choice(
+                key_select, self.size, shape=(num_to_damage,), replace=False, p=probs
+            )
+        elif selection_strategy == "loss_biased":
+            loss_values = self.graphs.globals[..., 0]
+            probs = loss_values + 1e-6
+            probs = jp.clip(probs, 0.0, 100.0) # Clip extreme loss values for stability
+            probs = probs / jp.sum(probs)
+            target_idxs = jax.random.choice(
+                key_select, self.size, shape=(num_to_damage,), replace=False, p=probs
+            )
+        elif selection_strategy == "combined":
+            loss_values = self.graphs.globals[..., 0]
+            update_steps = self.graphs.globals[..., 1]
+            loss_weight, steps_weight = combined_weights
+            loss_scores = (loss_values - jp.min(loss_values)) / (
+                jp.max(loss_values) - jp.min(loss_values) + 1e-6
+            )
+            step_scores = (update_steps - jp.min(update_steps)) / (
+                jp.max(update_steps) - jp.min(update_steps) + 1e-6
+            )
+            combined_scores = loss_weight * loss_scores + steps_weight * step_scores
+            probs = combined_scores + 1e-6
+            probs = probs / jp.sum(probs)
+            target_idxs = jax.random.choice(
+                key_select, self.size, shape=(num_to_damage,), replace=False, p=probs
+            )
+        else:
+            raise ValueError(
+                f"Unknown selection_strategy: {selection_strategy}. "
+                f"Must be 'uniform', 'steps_biased', 'loss_biased', or 'combined'."
+            )
+        
+        actual_num_to_damage = target_idxs.shape[0]
+        if actual_num_to_damage == 0:
+            return self
+
+        # Get wires, logits, and current globals for the selected circuits
+        selected_wires_batched = jax.tree.map(lambda x: x[target_idxs], self.wires)
+        selected_logits_batched = jax.tree.map(lambda x: x[target_idxs], self.logits)
+        current_globals_batched = self.graphs.globals[target_idxs] # Shape: (actual_num_to_damage, global_features)
+
+        # Apply zero_luts perturbation
+        keys_for_zeroing = jax.random.split(key_zero_luts, actual_num_to_damage)
+        
+        vmap_zero_luts = jax.vmap(zero_luts, in_axes=(0, 0, 0, None))
+        _, perturbed_logits_batched = vmap_zero_luts(
+            keys_for_zeroing, selected_wires_batched, selected_logits_batched, lut_damage_prob
+        )
+
+        # Rebuild graphs for the perturbed circuits, preserving their original globals
+        preserved_loss_values = current_globals_batched[..., 0]
+        preserved_update_steps = current_globals_batched[..., 1].astype(jp.int32)
+
+        rebuilt_graphs_batch = jax.vmap(
+            lambda l_pytree, w_pytree, loss_val, upd_steps: build_graph(
+                logits=l_pytree,
+                wires=w_pytree,
+                input_n=self.input_n,
+                arity=self.arity,
+                hidden_dim=self.hidden_dim,
+                loss_value=loss_val, # Use preserved loss
+                update_steps=upd_steps # Use preserved update steps
+            ),
+            in_axes=(0, 0, 0, 0) 
+        )(perturbed_logits_batched, selected_wires_batched, 
+          preserved_loss_values, preserved_update_steps)
+
+        # Update the pool with the modified circuits
+        # The update method will set reset_counter for target_idxs to 0.
+        updated_pool = self.update(
+            target_idxs,
+            rebuilt_graphs_batch,
+            selected_wires_batched,  # Wires are unchanged by zero_luts
+            perturbed_logits_batched
+        )
+
+        return updated_pool
 
 
 def initialize_graph_pool(
@@ -484,4 +814,14 @@ def initialize_graph_pool(
     # Initialize reset counter
     reset_counter = jp.zeros(pool_size, dtype=jp.int32)
 
-    return GraphPool.create(graphs, all_wires, all_logits, reset_counter)
+    return GraphPool.create(
+        graphs,
+        all_wires,
+        all_logits,
+        reset_counter,
+        # Pass the necessary parameters for graph reconstruction
+        input_n=input_n,
+        arity=arity,
+        hidden_dim=hidden_dim,
+        initial_loss_value=loss_value
+    )

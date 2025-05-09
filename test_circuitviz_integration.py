@@ -456,7 +456,7 @@ gnn_model_kwargs_config = {
 }
 
 gnn_results = train_model(
-    key=jax.random.PRNGKey(123), 
+    key=123, # Pass a scalar integer seed
     init_model=None, # Training from scratch
     init_optimizer=None, # Training from scratch
     
@@ -487,7 +487,11 @@ gnn_results = train_model(
 
     # MODEL PARAMS (passed to GNN constructor within train_model)
     hidden_dim=hidden_dim_gnn, 
-    gnn_model_kwargs=gnn_model_kwargs_config,
+    message_passing=True, # From gnn_model_kwargs_config
+    node_mlp_features=[hidden_dim_gnn, hidden_dim_gnn], # From gnn_model_kwargs_config
+    edge_mlp_features=[hidden_dim_gnn, hidden_dim_gnn], # From gnn_model_kwargs_config
+    use_attention=False, # From gnn_model_kwargs_config
+    # arity is already passed directly to train_model and is in its signature
 
     # POOL PARAMS
     use_pool=True,
@@ -497,15 +501,24 @@ gnn_results = train_model(
     reset_strategy="combined", 
     
     # NEW POOL PARAMS for LUT zeroing (passed to train_model)
-    zero_luts_active=True,            
-    zero_luts_fraction=0.05,          # Fraction of pool to apply zeroing
-    zero_luts_interval=15,            # How often to apply (in epochs)
-    zero_luts_strategy="uniform",     # Strategy for selecting circuits for zeroing
-    zero_luts_damage_prob=0.1,        # Prob for zero_luts' internal lut_damage_prob
+    gate_knockout_active=True,            
+    gate_knockout_fraction=0.05,          
+    gate_knockout_interval=15,            
+    gate_knockout_strategy="uniform",     
+    gate_knockout_damage_prob=0.1,        
+    gate_knockout_combined_weights=(0.5,0.5), # Added for completeness if strategy changes
+
+    # Parameters for "soft" LUT damage (zero_luts_for_fraction in pool.py)
+    soft_lut_damage_active=True,
+    soft_lut_damage_fraction=0.05,
+    soft_lut_damage_interval=12, # Different interval for variety
+    soft_lut_damage_strategy="uniform",
+    soft_lut_damage_damage_prob=0.05, # Gentler probability
+    soft_lut_damage_combined_weights=(0.5,0.5),
     
     # LOGGING & CHECKPOINTING
-    log_interval=10, # Log more frequently for shorter run
-    checkpoint_interval=0, # Disable Orbax checkpointing by train_model
+    # log_interval=10, # Removed, as it's not in the current train_model signature
+    # checkpoint_interval=0, # Removed, not in current train_model signature
 )
 
 print("GNN training completed.")

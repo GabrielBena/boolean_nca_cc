@@ -150,7 +150,19 @@ def zero_luts(
 
         # Apply damage: set all logits for selected LUTs to 0.0
         # JAX's .at[indices].set(value) broadcasts value to the shape of the slice.
-        damaged_layer_logits = logit_layer.at[lut_damage_mask].set(0.0)
+        # Use jp.where for JIT-friendliness with boolean masks
+        if logit_layer.ndim > 1 and lut_damage_mask.ndim == 1: # Ensure mask is 1D and logit_layer is at least 2D
+            # Reshape lut_damage_mask to be (num_luts, 1, ..., 1) to match logit_layer.ndim
+            # For example, if logit_layer is (num_luts, d1, d2), mask becomes (num_luts, 1, 1)
+            broadcast_shape_for_mask = (num_luts,) + (1,) * (logit_layer.ndim - 1)
+            reshaped_mask = lut_damage_mask.reshape(broadcast_shape_for_mask)
+            damaged_layer_logits = jp.where(reshaped_mask, 0.0, logit_layer)
+        elif logit_layer.ndim == 1 and lut_damage_mask.ndim == 1: # Both are 1D (e.g. bias term for a layer)
+             damaged_layer_logits = jp.where(lut_damage_mask, 0.0, logit_layer)
+        else: # Fallback or if shapes are unexpected, keep original (or raise error)
+            # This case might need more specific handling if logit_layer can have more diverse shapes
+            # For now, let's assume typical LUT structures or simple biases
+            damaged_layer_logits = logit_layer 
         damaged_logits.append(damaged_layer_logits)
 
     return wires, damaged_logits
