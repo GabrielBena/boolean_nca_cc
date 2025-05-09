@@ -7,35 +7,34 @@ when training boolean circuits, using either Graph Neural Networks or Self-Atten
 """
 
 import os
-import sys
-import time
 import logging
-from typing import Dict, List, Tuple, Optional, Union
-from functools import partial
-
 import jax
-import jax.numpy as jp
-import flax
-from flax import nnx
 import optax
-import matplotlib.pyplot as plt
-from tqdm.auto import tqdm
-
 import hydra
 from omegaconf import DictConfig, OmegaConf, open_dict
 import wandb
+from tqdm.auto import tqdm
+from functools import partial
+from flax import nnx
 
 from boolean_nca_cc.circuits.model import gen_circuit
-from boolean_nca_cc.circuits.train import TrainState, loss_f_l4, loss_f_bce, train_step
 from boolean_nca_cc.circuits.tasks import get_task_data
 from boolean_nca_cc import generate_layer_sizes
 from boolean_nca_cc.models import (
     CircuitGNN,
     CircuitSelfAttention,
 )
+from boolean_nca_cc.circuits.train import TrainState, loss_f_l4, loss_f_bce, train_step
+
 from boolean_nca_cc.training.train_loop import train_model
 from boolean_nca_cc.training.evaluation import evaluate_model_stepwise
 from boolean_nca_cc.utils.graph_builder import build_graph
+from boolean_nca_cc.training.utils import (
+    plot_training_curves,
+    save_checkpoint,
+    plot_inner_loop_metrics,
+    compare_with_backprop,
+)
 
 # Configure logging
 log = logging.getLogger(__name__)
@@ -158,200 +157,6 @@ def run_backpropagation_training(cfg, x_data, y_data, loss_type="l4"):
     return results
 
 
-def save_checkpoint(model, optimizer, metrics, cfg, step, output_dir):
-    """Save a checkpoint of the model and optimizer."""
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    checkpoint = {
-        "model": nnx.state(model),
-        "optimizer": nnx.state(optimizer),
-        "metrics": metrics,
-        "config": OmegaConf.to_container(cfg, resolve=True),
-        "step": step,
-    }
-
-    checkpoint_path = os.path.join(output_dir, f"checkpoint_{step}.ckpt")
-    with open(checkpoint_path, "wb") as f:
-        checkpoint_bytes = flax.serialization.to_bytes(checkpoint)
-        f.write(checkpoint_bytes)
-
-    log.info(f"Saved checkpoint to {checkpoint_path}")
-    if cfg.wandb.enabled:
-        wandb.save(checkpoint_path)
-
-    return checkpoint_path
-
-
-def load_checkpoint(checkpoint_path):
-    """Load a checkpoint of the model and optimizer."""
-    with open(checkpoint_path, "rb") as f:
-        checkpoint_bytes = f.read()
-        checkpoint = flax.serialization.from_bytes(None, checkpoint_bytes)
-
-    return checkpoint
-
-
-def plot_training_curves(metrics, title, output_dir):
-    """Generate and save training curve plots."""
-    # Create output directory if it doesn't exist
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    # Plot loss curves
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(metrics["losses"], label="Soft Loss")
-    ax.plot(metrics["hard_losses"], label="Hard Loss")
-    ax.set_xlabel("Training Steps")
-    ax.set_ylabel("Loss")
-    ax.set_yscale("log")
-    ax.set_title(f"{title} - Loss Curves")
-    ax.legend()
-    ax.grid(True)
-    plt.tight_layout()
-
-    loss_plot_path = os.path.join(
-        output_dir, f"{title.lower().replace(' ', '_')}_loss.png"
-    )
-    plt.savefig(loss_plot_path)
-    if wandb.run is not None:
-        wandb.log({f"{title} Loss": wandb.Image(fig)})
-    plt.close(fig)
-
-    # Plot accuracy curves
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(metrics["accuracies"], label="Soft Accuracy")
-    ax.plot(metrics["hard_accuracies"], label="Hard Accuracy")
-    ax.set_xlabel("Training Steps")
-    ax.set_ylabel("Accuracy")
-    ax.set_title(f"{title} - Accuracy Curves")
-    ax.legend()
-    ax.grid(True)
-    plt.tight_layout()
-
-    acc_plot_path = os.path.join(
-        output_dir, f"{title.lower().replace(' ', '_')}_accuracy.png"
-    )
-    plt.savefig(acc_plot_path)
-    if wandb.run is not None:
-        wandb.log({f"{title} Accuracy": wandb.Image(fig)})
-    plt.close(fig)
-
-
-def plot_inner_loop_metrics(step_metrics, title, output_dir):
-    """Plot inner loop metrics over GNN message passing steps."""
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    # Plot loss curves
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(step_metrics["step"], step_metrics["soft_loss"], label="Soft Loss")
-    ax.plot(step_metrics["step"], step_metrics["hard_loss"], label="Hard Loss")
-    ax.set_xlabel("Message Passing Steps")
-    ax.set_ylabel("Loss")
-    ax.set_yscale("log")
-    ax.set_title(f"{title} - Inner Loop Loss")
-    ax.legend()
-    ax.grid(True)
-    plt.tight_layout()
-
-    loss_plot_path = os.path.join(
-        output_dir, f"{title.lower().replace(' ', '_')}_inner_loss.png"
-    )
-    plt.savefig(loss_plot_path)
-    if wandb.run is not None:
-        wandb.log({f"{title} Inner Loop Loss": wandb.Image(fig)})
-    plt.close(fig)
-
-    # Plot accuracy curves
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(step_metrics["step"], step_metrics["soft_accuracy"], label="Soft Accuracy")
-    ax.plot(step_metrics["step"], step_metrics["hard_accuracy"], label="Hard Accuracy")
-    ax.set_xlabel("Message Passing Steps")
-    ax.set_ylabel("Accuracy")
-    ax.set_title(f"{title} - Inner Loop Accuracy")
-    ax.legend()
-    ax.grid(True)
-    plt.tight_layout()
-
-    acc_plot_path = os.path.join(
-        output_dir, f"{title.lower().replace(' ', '_')}_inner_accuracy.png"
-    )
-    plt.savefig(acc_plot_path)
-    if wandb.run is not None:
-        wandb.log({f"{title} Inner Loop Accuracy": wandb.Image(fig)})
-    plt.close(fig)
-
-    # Log the final metrics
-    if wandb.run is not None:
-        wandb.log(
-            {
-                f"inner_loop/final_soft_loss": step_metrics["soft_loss"][-1],
-                f"inner_loop/final_hard_loss": step_metrics["hard_loss"][-1],
-                f"inner_loop/final_soft_accuracy": step_metrics["soft_accuracy"][-1],
-                f"inner_loop/final_hard_accuracy": step_metrics["hard_accuracy"][-1],
-            }
-        )
-
-
-def compare_with_backprop(gnn_metrics, bp_metrics, title, output_dir):
-    """Compare GNN and backpropagation performance."""
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    # Create a figure with 2x2 subplots
-    fig, axs = plt.subplots(2, 2, figsize=(16, 12), constrained_layout=True)
-
-    # Plot soft loss comparison
-    axs[0, 0].plot(gnn_metrics["losses"], label="GNN")
-    axs[0, 0].plot(bp_metrics["losses"], label="Backprop")
-    axs[0, 0].set_title("Soft Loss Comparison")
-    axs[0, 0].set_xlabel("Training Steps")
-    axs[0, 0].set_ylabel("Loss")
-    axs[0, 0].set_yscale("log")
-    axs[0, 0].legend()
-    axs[0, 0].grid(True)
-
-    # Plot hard loss comparison
-    axs[0, 1].plot(gnn_metrics["hard_losses"], label="GNN")
-    axs[0, 1].plot(bp_metrics["hard_losses"], label="Backprop")
-    axs[0, 1].set_title("Hard Loss Comparison")
-    axs[0, 1].set_xlabel("Training Steps")
-    axs[0, 1].set_ylabel("Loss")
-    axs[0, 1].set_yscale("log")
-    axs[0, 1].legend()
-    axs[0, 1].grid(True)
-
-    # Plot soft accuracy comparison
-    axs[1, 0].plot(gnn_metrics["accuracies"], label="GNN")
-    axs[1, 0].plot(bp_metrics["accuracies"], label="Backprop")
-    axs[1, 0].set_title("Soft Accuracy Comparison")
-    axs[1, 0].set_xlabel("Training Steps")
-    axs[1, 0].set_ylabel("Accuracy")
-    axs[1, 0].legend()
-    axs[1, 0].grid(True)
-
-    # Plot hard accuracy comparison
-    axs[1, 1].plot(gnn_metrics["hard_accuracies"], label="GNN")
-    axs[1, 1].plot(bp_metrics["hard_accuracies"], label="Backprop")
-    axs[1, 1].set_title("Hard Accuracy Comparison")
-    axs[1, 1].set_xlabel("Training Steps")
-    axs[1, 1].set_ylabel("Accuracy")
-    axs[1, 1].legend()
-    axs[1, 1].grid(True)
-
-    plt.suptitle(f"{title} - GNN vs Backprop Comparison")
-
-    # Save the figure
-    comp_plot_path = os.path.join(
-        output_dir, f"{title.lower().replace(' ', '_')}_comparison.png"
-    )
-    plt.savefig(comp_plot_path)
-    if wandb.run is not None:
-        wandb.log({f"{title} Comparison": wandb.Image(fig)})
-    plt.close(fig)
-
-
 @hydra.main(version_base=None, config_path="configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     """
@@ -377,6 +182,7 @@ def main(cfg: DictConfig) -> None:
             entity=cfg.wandb.entity,
             name=cfg.wandb.run_name,
             dir=output_dir,
+            config=OmegaConf.to_container(cfg, resolve=True),
         )
 
     # Generate circuit layer sizes
@@ -464,18 +270,19 @@ def main(cfg: DictConfig) -> None:
         x_data=x,
         y_data=y0,
         layer_sizes=layer_sizes,
+        hidden_dim=cfg.model.hidden_dim,
+        arity=arity,
         # Training hyperparameters
         learning_rate=cfg.training.learning_rate,
         weight_decay=cfg.training.weight_decay,
-        epochs=cfg.training.epochs,
-        n_message_steps=cfg.training.n_message_steps,
+        epochs=cfg.training.epochs or 2**cfg.training.epochs_power_of_2,
+        n_message_steps=1,
         loss_type=cfg.training.loss_type,
         # Wiring mode parameters
         wiring_mode=cfg.training.wiring_mode,
         meta_batch_size=cfg.training.meta_batch_size,
         wiring_fixed_key=jax.random.PRNGKey(cfg.test_seed),
         # Pool parameters
-        use_pool=cfg.pool.enabled,
         pool_size=cfg.pool.size,
         reset_pool_fraction=cfg.pool.reset_fraction,
         reset_pool_interval=cfg.pool.reset_interval,
@@ -505,7 +312,7 @@ def main(cfg: DictConfig) -> None:
             gnn_results["optimizer"],
             metrics,
             cfg,
-            cfg.training.epochs,
+            cfg.training.epochs or 2**cfg.training.epochs_power_of_2,
             os.path.join(output_dir, "checkpoints"),
         )
 

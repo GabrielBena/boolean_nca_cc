@@ -20,27 +20,26 @@ wandb:
 
 # Circuit configuration
 circuit:
-  task: "reverse"
-  input_bits: 8
-  output_bits: 8
-  arity: 4
-  num_layers: 4
+  task: "binary_multiply"
+  input_bits: 4
+  output_bits: 4
+  arity: 2
+  num_layers: 5
   layer_sizes: null  # Auto-generate if null 
 
 # Training parameters
 training:
-  learning_rate: 1e-3
+  learning_rate: 3e-3
   weight_decay: 1e-5
-  epochs: 2048  # 2^11
+  epochs: null
+  epochs_power_of_2: 12 # 2^10
   loss_type: "l4"  # Options: "l4" or "bce"
   wiring_mode: "fixed"  # Options: "fixed" or "random"
   meta_batch_size: 4
   lr_scheduler: "linear_warmup"  # Options: "constant", "exponential", "cosine", "linear_warmup"
-  meta_batch_size: 16
   
 # Pool configuration for meta-learning
 pool:
-  enabled: true
   size: 1024
   reset_fraction: 0.05
   reset_interval: 32  # 2^5
@@ -59,12 +58,10 @@ backprop:
 # Evaluation parameters
 eval:
   inner_steps: 100  # Number of message passing steps for inner loop evaluation
-  frequency: 100  # Evaluate every N epochs
   
 # Checkpointing
 checkpoint:
   enabled: true
-  frequency: 100  # Save checkpoint every N epochs
   
 # Logging configuration
 logging:

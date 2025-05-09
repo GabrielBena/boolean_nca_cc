@@ -448,8 +448,6 @@ def initialize_graph_pool(
         single_wires, single_logits = gen_circuit(rng, layer_sizes, arity=arity)
         # print(f"INIT WITH RNG {rng}")
 
-        print(f"SINGLE WIRES {single_wires}")
-
         # Replicate the same wiring for all circuits in the pool
         all_wires = jax.tree.map(
             lambda leaf: jp.repeat(leaf[None, ...], pool_size, axis=0), single_wires

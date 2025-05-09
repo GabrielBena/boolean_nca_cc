@@ -45,17 +45,24 @@ class EdgeUpdateModule(nnx.Module):
         pe_dim = hidden_dim  # Dimension for positional encodings
 
         # Input: Sender's Logits, Hidden, Layer PE, Intra-Layer PE
-        mlp_input_size = self.logit_dim + hidden_dim + pe_dim + pe_dim
+        self.arity = arity
+        self.mlp_input_size = self.logit_dim + hidden_dim + pe_dim + pe_dim
         # Output: Features used for aggregation (Logits + Hidden dimensions)
-        mlp_output_size = self.logit_dim + hidden_dim
-        mlp_features = [mlp_input_size, *edge_mlp_features, mlp_output_size]
+        self.mlp_output_size = self.logit_dim + hidden_dim
+        self.mlp_features = [
+            self.mlp_input_size,
+            *edge_mlp_features,
+            self.mlp_output_size,
+        ]
 
         # Define Edge MLP architecture with batch normalization
         edge_mlp_layers = []
-        for i, (in_f, out_f) in enumerate(zip(mlp_features[:-1], mlp_features[1:])):
+        for i, (in_f, out_f) in enumerate(
+            zip(self.mlp_features[:-1], self.mlp_features[1:])
+        ):
             edge_mlp_layers.append(nnx.Linear(in_f, out_f, rngs=rngs))
             # Add BatchNorm and ReLU except for the last layer
-            if i < len(mlp_features) - 2:
+            if i < len(self.mlp_features) - 2:
                 edge_mlp_layers.append(
                     nnx.LayerNorm(
                         num_features=out_f,
