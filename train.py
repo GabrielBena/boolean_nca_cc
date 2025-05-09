@@ -238,29 +238,25 @@ def main(cfg: DictConfig) -> None:
 
     # Initialize model
     rng, init_rng = jax.random.split(rng)
-    if cfg.model.type == "gnn":
-        model = CircuitGNN(
-            hidden_dim=cfg.model.hidden_dim,
-            message_passing=cfg.model.message_passing,
-            node_mlp_features=cfg.model.node_mlp_features,
-            edge_mlp_features=cfg.model.edge_mlp_features,
-            use_attention=cfg.model.use_attention,
-            arity=arity,
-            rngs=nnx.Rngs(params=init_rng),
+
+    # Common overrides for hydra.instantiate
+    # These are values computed in train.py or essential for all models
+    instantiate_overrides = {"arity": arity, "rngs": nnx.Rngs(params=init_rng)}
+
+    # Specific overrides based on model type, which should still be in the YAML.
+    # Alternatively, we could inspect cfg.model._target_ if 'type' was removed.
+    if cfg.model.type == "self_attention":
+        instantiate_overrides["n_node"] = n_nodes
+    # CircuitGNN does not require n_node in its constructor based on original setup.
+
+    # Instantiate the model using Hydra
+    try:
+        model = hydra.utils.instantiate(cfg.model, **instantiate_overrides)
+    except Exception as e:
+        log.error(
+            f"Error instantiating model {cfg.model._target_ if '_target_' in cfg.model else cfg.model.type}: {e}"
         )
-    elif cfg.model.type == "self_attention":
-        model = CircuitSelfAttention(
-            n_node=n_nodes,
-            hidden_dim=cfg.model.hidden_dim,
-            arity=arity,
-            num_heads=cfg.model.num_heads,
-            num_layers=cfg.model.num_layers,
-            mlp_dim=cfg.model.mlp_dim,
-            dropout_rate=cfg.model.dropout_rate,
-            rngs=nnx.Rngs(params=init_rng),
-        )
-    else:
-        raise ValueError(f"Unknown model type: {cfg.model.type}")
+        raise
 
     # Prepare checkpoint directory
     checkpoint_dir = os.path.join(output_dir, "checkpoints")

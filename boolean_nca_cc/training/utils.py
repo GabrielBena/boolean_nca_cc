@@ -6,6 +6,8 @@ import os
 import wandb
 from omegaconf import OmegaConf
 import logging
+import hydra
+import jax
 
 log = logging.getLogger(__name__)
 
@@ -229,3 +231,128 @@ def compare_with_backprop(gnn_metrics, bp_metrics, title, output_dir):
         wandb.log({f"{title} Comparison": wandb.Image(fig)})
     plt.savefig(comp_plot_path)
     plt.close(fig)
+
+
+def load_best_model_from_wandb(
+    run_id=None,
+    filters=None,
+    seed=0,
+    project="boolean-nca-cc",
+    entity="m2snn",
+    download_dir="saves",
+    filename="best_model_hard_accuracy",
+    filetype="pkl",
+):
+    """Load the best model from wandb artifacts.
+
+    Args:
+        run_id: Optional specific run ID to load from
+        filters: Optional dictionary of filters to find runs
+        seed: Seed for RNG initialization
+        project: WandB project name
+        entity: WandB entity/username
+        download_dir: Directory to download artifacts to
+        filename: Filename of the best model
+        filetype: Filetype of the best model
+
+    Returns:
+        Tuple of (loaded_model, loaded_dict) containing the instantiated model and full loaded state
+    """
+    # Initialize WandB API
+    api = wandb.Api()
+
+    # Find the run
+    if run_id:
+        print(f"Looking for run with ID: {run_id}")
+        run = api.run(f"{entity}/{project}/{run_id}")
+        print(f"Found run: {run.name}")
+    else:
+        if not filters:
+            filters = {}
+        print(f"Looking for runs with filters: {filters}")
+        runs = api.runs(f"{entity}/{project}", filters=filters)
+
+        if not runs:
+            raise ValueError(f"No runs found matching filters: {filters}")
+
+        print(f"Found {len(runs)} matching runs, using the most recent one.")
+        run = runs[len(runs) - 1]  # Most recent run first
+        print(f"Selected run: {run.name} (ID: {run.id})")
+
+    # Get artifacts and find best model
+    print("Retrieving artifacts...")
+    artifacts = run.logged_artifacts()
+    best_models = [a for a in artifacts if filename in a.name]
+
+    if not best_models:
+        raise ValueError(f"No best model artifacts found for run {run.id}")
+
+    latest_best = best_models[-1]
+    print(f"Found best model artifact: {latest_best.name}")
+
+    # Create download directory if it doesn't exist
+    download_path = os.path.join(download_dir, f"run_{run.id}")
+    os.makedirs(download_path, exist_ok=True)
+
+    # Download the artifact
+    print(f"Downloading artifact to {download_path}")
+    artifact_path = latest_best.download(download_path)
+    checkpoint_path = os.path.join(artifact_path, filename)
+
+    # Load the saved state
+    print(f"Loading model from {checkpoint_path}")
+    try:
+        with open(f"{checkpoint_path}.{filetype}", "rb") as f:
+            loaded_dict = pickle.load(f)
+
+        # Get config and instantiate model
+        config = OmegaConf.create(run.config)
+        print(f"Instantiating model using config: {config.model._target_}")
+
+        # Create RNG key
+        rng = nnx.Rngs(params=jax.random.PRNGKey(seed))
+
+        # Instantiate model using hydra
+        model = hydra.utils.instantiate(
+            config.model, arity=config.circuit.arity, rngs=rng
+        )
+
+        # Update model with loaded state - handle potential API differences
+        print("Updating model with loaded state")
+        if "model" in loaded_dict:
+            try:
+                # Try the direct update approach
+                nnx.update(model, loaded_dict["model"])
+            except (AttributeError, TypeError) as e:
+                print(f"Direct update failed with error: {e}")
+                print("Trying alternative update approach...")
+
+                # Alternative approach - recreate the state dictionary structure if needed
+                model_state = loaded_dict["model"]
+                # This handles cases where the state might be a VariableState object
+                if hasattr(model_state, "_state_dict"):
+                    model_state = model_state._state_dict
+
+                # Update the model with the extracted state dict
+                for collection_name, collection in model_state.items():
+                    for var_name, value in collection.items():
+                        try:
+                            path = f"{collection_name}.{var_name}"
+                            model.put(path, value)
+                        except Exception as inner_e:
+                            print(f"Warning: Failed to update {path}: {inner_e}")
+
+        else:
+            print("Warning: No 'model' key found in loaded dictionary")
+
+        # Add the run ID to the loaded dictionary for reference
+        loaded_dict["run_id"] = run.id
+
+        return model, loaded_dict
+
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        import traceback
+
+        print(f"Traceback: {traceback.format_exc()}")
+        raise
