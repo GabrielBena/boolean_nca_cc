@@ -34,27 +34,27 @@ wandb:
 
 # Circuit configuration
 circuit:
-  task: "binary_multiply"
+  task: "reverse"
   input_bits: 8
   output_bits: 8
   arity: 4
-  num_layers: 5
+  num_layers: 4
   layer_sizes: null  # Auto-generate if null 
 
 # Training parameters
 training:
-  learning_rate: 3e-3
+  learning_rate: 1e-3
   weight_decay: 1e-5
-  epochs: null
-  epochs_power_of_2: 13 # 2^n
+  epochs: 2048  # 2^11
   loss_type: "l4"  # Options: "l4" or "bce"
   wiring_mode: "fixed"  # Options: "fixed" or "random"
-  meta_batch_size: 32
-  n_message_steps: 1  # Number of message passing steps per training iteration
+  meta_batch_size: 4
   lr_scheduler: "linear_warmup"  # Options: "constant", "exponential", "cosine", "linear_warmup"
+  meta_batch_size: 16
   
 # Pool configuration for meta-learning
 pool:
+  enabled: true
   size: 1024
   reset_fraction: 0.01
   reset_interval: 32  # 2^5
@@ -82,7 +82,7 @@ pool:
 # Backpropagation baseline
 backprop:
   enabled: true
-  epochs: 100 
+  epochs: 100  # 2^12
   learning_rate: 1
   weight_decay: 1e-1
   optimizer: "adamw"
@@ -92,15 +92,13 @@ backprop:
 # Evaluation parameters
 eval:
   inner_steps: 100  # Number of message passing steps for inner loop evaluation
+  frequency: 100  # Evaluate every N epochs
   
 # Checkpointing
 checkpoint:
   enabled: true
-  interval: 1024  # Save checkpoints every N epochs
-  save_best: true  # Whether to track and save the best model
-  best_metric: "hard_accuracy"  # Metric to use for determining best model (loss, hard_loss, accuracy, hard_accuracy)
-  save_stable_states: true  # Whether to save a checkpoint before potential NaN losses
-
+  frequency: 100  # Save checkpoint every N epochs
+  
 # Logging configuration
 logging:
   log_interval: 10  # Log metrics every N epochs

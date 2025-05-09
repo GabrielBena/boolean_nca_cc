@@ -1,4 +1,3 @@
-_target_: boolean_nca_cc.models.CircuitSelfAttention
 # Configuration for Self-Attention model
 
 type: "self_attention"
