@@ -6,7 +6,8 @@ import os
 import wandb
 from omegaconf import OmegaConf
 import logging
-import hydra.utils
+import hydra
+import jax
 
 log = logging.getLogger(__name__)
 
@@ -233,234 +234,87 @@ def compare_with_backprop(gnn_metrics, bp_metrics, title, output_dir):
 
 
 def load_best_model_from_wandb(
-    project_name: str = "m2snn/boolean-nca-cc",
-    run_id: str = None,
-    filters: dict = None,
-    download_root: str = "saves",
-    artifact_name_keyword: str = "best_model_hard_accuracy",
-    target_filename: str = "best_model.pkl",
+    run_id=None,
+    filters=None,
+    seed=0,
+    project="boolean-nca-cc",
+    entity="m2snn",
+    download_dir="saves",
+    filename="best_model_hard_accuracy",
+    filetype="pkl",
 ):
-    """
-    Loads a model checkpoint from a W&B run and instantiates the model.
-
-    Identifies a run by run_id or filters. If filters match multiple runs,
-    it selects the one that appears last in the list returned by W&B API
-    (typically the oldest).
-
-    Within the run, it finds artifacts with `artifact_name_keyword`.
-    Among these, it selects the one that appears last (typically oldest version).
-
-    The artifact (.pkl file) is downloaded. Its content (a dictionary) is loaded.
-    The model state is extracted from this dictionary.
-    The model architecture is instantiated using Hydra configuration from the W&B run.
-    The loaded state is applied to the instantiated model.
+    """Load the best model from wandb artifacts.
 
     Args:
-        project_name (str): W&B project name.
-        run_id (str, optional): Specific W&B run ID. Overrides filters.
-        filters (dict, optional): Filters to select W&B runs.
-        download_root (str): Root directory for artifact download.
-        artifact_name_keyword (str): Keyword for relevant model artifacts.
-        target_filename (str): Filename for the downloaded .pkl model file.
+        run_id: Optional specific run ID to load from
+        filters: Optional dictionary of filters to find runs
+        seed: Seed for RNG initialization
+        project: WandB project name
+        entity: WandB entity/username
+        download_dir: Directory to download artifacts to
+        filename: Filename of the best model
+        filetype: Filetype of the best model
 
     Returns:
-        tuple[Optional[Any], Optional[dict]]:
-            - The instantiated and state-updated model object (e.g., an nnx.Module).
-              Returns None if model instantiation or state update fails.
-            - The full dictionary loaded from the checkpoint artifact.
-              Returns None if run/artifact loading fails before model processing.
+        Tuple of (loaded_model, loaded_dict) containing the instantiated model and full loaded state
     """
+    # Initialize WandB API
     api = wandb.Api()
-    run_to_process = None
 
-    log.info(
-        f"Attempting to load best model. Project: {project_name}, Run ID: {run_id}, Filters: {filters}"
-    )
-
+    # Find the run
     if run_id:
-        try:
-            full_run_path = run_id if "/" in run_id else f"{project_name}/{run_id}"
-            run_to_process = api.run(full_run_path)
-            log.info(f"Fetched run by ID: {run_to_process.id} (Path: {full_run_path})")
-        except wandb.errors.CommError as e:
-            log.error(
-                f"Could not fetch run by ID '{run_id}' (tried path '{full_run_path}'): {e}"
-            )
-            return None, None
-    elif filters:
-        try:
-            runs = api.runs(project_name, filters=filters)
-            if not runs:
-                log.warning(
-                    f"No runs found for project '{project_name}' with filters: {filters}"
-                )
-                return None, None
-            log.info(
-                f"Found {len(runs)} runs matching the provided filters for project '{project_name}'."
-            )
-            run_to_process = runs[-1]
-            log.info(
-                f"Selected run '{run_to_process.id}' (the last from {len(runs)} found runs) using filters: {filters}. Note: This is typically the oldest matching run."
-            )
-        except Exception as e:
-            log.error(
-                f"Error fetching/selecting runs with filters for project '{project_name}': {e}"
-            )
-            return None, None
+        print(f"Looking for run with ID: {run_id}")
+        run = api.run(f"{entity}/{project}/{run_id}")
+        print(f"Found run: {run.name}")
     else:
-        log.error(
-            "Either run_id or filters must be provided to load_best_model_from_wandb."
-        )
-        return None, None
+        if not filters:
+            filters = {}
+        print(f"Looking for runs with filters: {filters}")
+        runs = api.runs(f"{entity}/{project}", filters=filters)
 
-    if not run_to_process:  # Should be caught earlier, but as a safeguard
-        log.error("Failed to identify a run to process.")
-        return None, None
+        if not runs:
+            raise ValueError(f"No runs found matching filters: {filters}")
 
-    log.info(f"Processing run: {run_to_process.name} (ID: {run_to_process.id})")
+        print(f"Found {len(runs)} matching runs, using the most recent one.")
+        run = runs[len(runs) - 1]  # Most recent run first
+        print(f"Selected run: {run.name} (ID: {run.id})")
 
-    all_artifacts = run_to_process.logged_artifacts()
-    if not all_artifacts:
-        log.warning(f"No artifacts found for run '{run_to_process.id}'.")
-        return None, None
+    # Get artifacts and find best model
+    print("Retrieving artifacts...")
+    artifacts = run.logged_artifacts()
+    best_models = [a for a in artifacts if filename in a.name]
 
-    candidate_artifacts = [
-        art for art in all_artifacts if artifact_name_keyword in art.name
-    ]
+    if not best_models:
+        raise ValueError(f"No best model artifacts found for run {run.id}")
 
-    if not candidate_artifacts:
-        log.warning(
-            f"No artifacts matching keyword '{artifact_name_keyword}' found in run '{run_to_process.id}'. Artifacts names checked: {[art.name for art in all_artifacts]}."
-        )
-        return None, None
+    latest_best = best_models[-1]
+    print(f"Found best model artifact: {latest_best.name}")
 
-    log.info(
-        f"Found {len(candidate_artifacts)} artifacts containing keyword '{artifact_name_keyword}' in their names for run '{run_to_process.id}'."
-    )
-    selected_artifact = candidate_artifacts[-1]
-    log.info(
-        f"Selected artifact: '{selected_artifact.name}' (version: {selected_artifact.version}, type: {selected_artifact.type}). Note: This is typically the oldest matching artifact."
-    )
+    # Create download directory if it doesn't exist
+    download_path = os.path.join(download_dir, f"run_{run.id}")
+    os.makedirs(download_path, exist_ok=True)
 
-    run_specific_download_dir = os.path.join(download_root, f"run_{run_to_process.id}")
-    os.makedirs(run_specific_download_dir, exist_ok=True)
+    # Download the artifact
+    print(f"Downloading artifact to {download_path}")
+    artifact_path = latest_best.download(download_path)
+    checkpoint_path = os.path.join(artifact_path, filename)
 
-    final_target_path = os.path.join(run_specific_download_dir, target_filename)
-    loaded_checkpoint_data = None  # Initialize here
+    # Load the saved state
+    print(f"Loading model from {checkpoint_path}")
+    loaded_dict = pickle.load(open(f"{checkpoint_path}.{filetype}", "rb"))
 
-    try:
-        log.info(
-            f"Downloading artifact '{selected_artifact.name}' to '{run_specific_download_dir}'..."
-        )
-        downloaded_artifact_location = selected_artifact.download(
-            root=run_specific_download_dir
-        )
+    # Get config and instantiate model
+    config = OmegaConf.create(run.config)
+    print(f"Instantiating model using config: {config.model._target_}")
 
-        files_in_download_dir = os.listdir(downloaded_artifact_location)
-        pkl_files = [
-            f
-            for f in files_in_download_dir
-            if f.endswith(".pkl")
-            and os.path.isfile(os.path.join(downloaded_artifact_location, f))
-        ]
+    # Create RNG key
+    rng = nnx.Rngs(params=jax.random.PRNGKey(seed))
 
-        if not pkl_files:
-            log.error(
-                f"No .pkl file found in downloaded artifact '{selected_artifact.name}' content at '{downloaded_artifact_location}'. Files found: {files_in_download_dir}"
-            )
-            return None, None
+    # Instantiate model using hydra
+    model = hydra.utils.instantiate(config.model, arity=config.circuit.arity, rngs=rng)
 
-        downloaded_pkl_filename = pkl_files[0]
-        if len(pkl_files) > 1:
-            log.warning(
-                f"Multiple .pkl files found in artifact download location '{downloaded_artifact_location}': {pkl_files}. Using '{downloaded_pkl_filename}'."
-            )
+    # Update model with loaded state
+    print("Updating model with loaded state")
+    nnx.update(model, loaded_dict["model"])
 
-        original_pkl_path = os.path.join(
-            downloaded_artifact_location, downloaded_pkl_filename
-        )
-
-        if original_pkl_path != final_target_path:
-            if os.path.exists(final_target_path):
-                log.info(
-                    f"Target file '{final_target_path}' exists. Removing before overwrite."
-                )
-                os.remove(final_target_path)
-            os.rename(original_pkl_path, final_target_path)
-            log.info(
-                f"Moved/Renamed downloaded file from '{original_pkl_path}' to '{final_target_path}'."
-            )
-        else:
-            log.info(
-                f"Downloaded artifact file already at target path: '{final_target_path}'."
-            )
-
-        log.info(
-            f"Attempting to load checkpoint directly using pickle from '{final_target_path}'..."
-        )
-        with open(final_target_path, "rb") as f:
-            loaded_checkpoint_data = pickle.load(f)
-        log.info(f"Data from '{final_target_path}' loaded successfully using pickle.")
-
-        # New logic: Instantiate model using Hydra and update with loaded state
-        log.info(
-            "Attempting to instantiate model using Hydra and update with loaded state..."
-        )
-        loaded_model_state = loaded_checkpoint_data.get("model")
-        if loaded_model_state is None:
-            log.error("Key 'model' not found in loaded checkpoint data.")
-            return None, loaded_checkpoint_data
-
-        run_config = run_to_process.config
-        model_hydra_config = run_config.get("model")
-
-        if (
-            not isinstance(model_hydra_config, dict)
-            or "_target_" not in model_hydra_config
-        ):
-            log.error(
-                f"Valid Hydra model config (dict with '_target_') not found in W&B run config at key 'model'. Found: {model_hydra_config}"
-            )
-            return None, loaded_checkpoint_data
-
-        try:
-            log.info(f"Instantiating model with Hydra config: {model_hydra_config}")
-            # Ensure that nnx ops are performed on a JAX-compatible device if necessary,
-            # though instantiation itself is usually fine on CPU.
-            # NNX usually handles device placement during module calls or state updates.
-            model = hydra.utils.instantiate(model_hydra_config)
-            log.info(f"Model instantiated successfully: {type(model)}")
-
-            log.info("Updating instantiated model with loaded state...")
-            nnx.update(model, loaded_model_state)
-            log.info("Model state updated successfully.")
-            return model, loaded_checkpoint_data
-        except Exception as e:
-            import traceback
-
-            log.error(
-                f"Error during model instantiation or state update: {e}\n{traceback.format_exc()}"
-            )
-            return None, loaded_checkpoint_data
-
-    except wandb.errors.Error as e:
-        log.error(
-            f"A W&B error occurred during artifact processing for run '{run_to_process.id}', artifact '{selected_artifact.name if 'selected_artifact' in locals() else 'unknown'}': {e}"
-        )
-        return (
-            None,
-            loaded_checkpoint_data,
-        )  # Return loaded_checkpoint_data if it was loaded before this error
-    except FileNotFoundError as e:
-        log.error(f"File not found error during download/load: {e}")
-        return None, loaded_checkpoint_data
-    except Exception as e:
-        import traceback
-
-        log.error(
-            f"An unexpected error occurred in load_best_model_from_wandb: {e}\n{traceback.format_exc()}"
-        )
-        return (
-            None,
-            loaded_checkpoint_data,
-        )  # Return loaded_checkpoint_data if available
+    return model, loaded_dict
