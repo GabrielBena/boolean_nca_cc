@@ -8,6 +8,8 @@ from omegaconf import OmegaConf
 import logging
 import hydra
 import jax
+import hydra
+import jax
 
 log = logging.getLogger(__name__)
 
@@ -242,7 +244,6 @@ def load_best_model_from_wandb(
     download_dir="saves",
     filename="best_model_hard_accuracy",
     filetype="pkl",
-    run_from_last=1,
 ):
     """Load the best model from wandb artifacts.
 
@@ -259,70 +260,6 @@ def load_best_model_from_wandb(
     Returns:
         Tuple of (loaded_model, loaded_dict) containing the instantiated model and full loaded state
     """
-    # Construct the potential local path
-    expected_checkpoint_path = None
-    if run_id:
-        local_artifact_dir = os.path.join(download_dir, f"run_{run_id}")
-        expected_checkpoint_path = os.path.join(
-            local_artifact_dir, f"{filename}.{filetype}"
-        )
-        print(f"Checking for local checkpoint at: {expected_checkpoint_path}")
-        if os.path.exists(expected_checkpoint_path):
-            print(f"Found local checkpoint for run {run_id}. Loading from disk.")
-            try:
-                with open(expected_checkpoint_path, "rb") as f:
-                    loaded_dict = pickle.load(f)
-
-                # Get config (assuming it's stored or can be fetched if needed for instantiation)
-                # For simplicity, we assume config is part of loaded_dict or can be inferred.
-                # If full config is needed and not in pickle, this part might need adjustment
-                # or fetching from wandb api.run(run_id).config
-                api = wandb.Api()
-                run_config = api.run(f"{entity}/{project}/{run_id}").config
-                config = OmegaConf.create(run_config)
-                print(
-                    f"Instantiating model using config from run {run_id}: {config.model._target_}"
-                )
-
-                rng = nnx.Rngs(params=jax.random.PRNGKey(seed))
-                model = hydra.utils.instantiate(
-                    config.model, arity=config.circuit.arity, rngs=rng
-                )
-
-                if "model" in loaded_dict:
-                    try:
-                        nnx.update(model, loaded_dict["model"])
-                    except (AttributeError, TypeError) as e:
-                        print(f"Direct update failed with error: {e}")
-                        print("Trying alternative update approach for local load...")
-                        model_state = loaded_dict["model"]
-                        if hasattr(model_state, "_state_dict"):
-                            model_state = model_state._state_dict
-                        for collection_name, collection in model_state.items():
-                            for var_name, value in collection.items():
-                                try:
-                                    path = f"{collection_name}.{var_name}"
-                                    model.put(path, value)
-                                except Exception as inner_e:
-                                    print(
-                                        f"Warning: Failed to update {path} during local load: {inner_e}"
-                                    )
-                else:
-                    print("Warning: No 'model' key found in local loaded dictionary")
-
-                # Ensure essential keys are present in loaded_dict
-                if "run_id" not in loaded_dict:
-                    loaded_dict["run_id"] = run_id
-                if "config" not in loaded_dict:
-                    loaded_dict["config"] = config  # Add config if not present
-
-                return model, loaded_dict
-            except Exception as e:
-                print(
-                    f"Error loading model from local checkpoint {expected_checkpoint_path}: {e}"
-                )
-                print("Proceeding to download from WandB.")
-
     # Initialize WandB API
     api = wandb.Api()
 
@@ -341,7 +278,7 @@ def load_best_model_from_wandb(
             raise ValueError(f"No runs found matching filters: {filters}")
 
         print(f"Found {len(runs)} matching runs, using the most recent one.")
-        run = runs[len(runs) - run_from_last]  # Most recent run first
+        run = runs[len(runs) - 1]  # Most recent run first
         print(f"Selected run: {run.name} (ID: {run.id})")
 
     # Get artifacts and find best model
@@ -361,17 +298,13 @@ def load_best_model_from_wandb(
 
     # Download the artifact
     print(f"Downloading artifact to {download_path}")
-    artifact_dir = latest_best.download(
-        root=download_path
-    )  # Use root to control download folder precisely
-    checkpoint_path = os.path.join(
-        artifact_dir, f"{filename}.{filetype}"
-    )  # Adjusted path
+    artifact_path = latest_best.download(download_path)
+    checkpoint_path = os.path.join(artifact_path, filename)
 
     # Load the saved state
     print(f"Loading model from {checkpoint_path}")
     try:
-        with open(checkpoint_path, "rb") as f:  # Use the corrected checkpoint_path
+        with open(f"{checkpoint_path}.{filetype}", "rb") as f:
             loaded_dict = pickle.load(f)
 
         # Get config and instantiate model
@@ -416,8 +349,6 @@ def load_best_model_from_wandb(
 
         # Add the run ID to the loaded dictionary for reference
         loaded_dict["run_id"] = run.id
-        # Ensure config from the run is in loaded_dict, especially if not loading locally
-        loaded_dict["config"] = config
 
         return model, loaded_dict
 
