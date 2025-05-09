@@ -445,7 +445,7 @@ def initialize_graph_pool(
     # Generate circuit wirings based on wiring mode
     if wiring_mode == "fixed":
         # In fixed mode, generate a single wiring and repeat it
-        single_wires, single_logits = gen_circuit(rng, layer_sizes, arity=arity)
+        single_wires, single_logits = gen_circuit(jax.random.PRNGKey(rng), layer_sizes, arity=arity)
         # print(f"INIT WITH RNG {rng}")
 
         # Replicate the same wiring for all circuits in the pool
