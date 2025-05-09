@@ -15,6 +15,9 @@ from functools import partial
 import pickle
 import os
 from flax import nnx
+import pickle
+import os
+from flax import nnx
 
 # Import modules for boolean circuits
 from boolean_nca_cc.circuits.model import (
@@ -22,7 +25,7 @@ from boolean_nca_cc.circuits.model import (
     run_circuit,
     generate_layer_sizes,
 )
-from boolean_nca_cc.circuits.train import (
+from boolean_nca_cc.circuits.circuits.train import (
     unpack,
     res2loss,
 )
@@ -30,14 +33,7 @@ import boolean_nca_cc.circuits.tasks as tasks  # Import the tasks module
 
 # Import GNN components
 from boolean_nca_cc.models import CircuitGNN, run_gnn_scan
-from boolean_nca_cc.models.self_attention import (
-    CircuitSelfAttention,
-    run_self_attention_scan,
-)
 from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
-
-# Import model loading utility
-from boolean_nca_cc.training.utils import load_best_model_from_wandb
 
 from imgui_bundle import (
     implot,
@@ -256,161 +252,40 @@ class Demo:
         self.optimization_method_idx = 0  # Default to Backprop
 
         # GNN parameters (used if GNN is selected)
+        # GNN parameters (used if GNN is selected)
         self.gnn = None
-        self.gnn_message_steps = 1  # Lower default for faster UI
+        self.gnn_hidden_dim = 16
+        self.gnn_message_steps = 5 # Lower default for faster UI
         self.gnn_node_mlp_features = [64, 32]
         self.gnn_edge_mlp_features = [64, 32]
         self.gnn_enable_message_passing = True
+        self.loaded_gnn_state = None # Variable to store loaded state
 
-        # Self-Attention parameters
-        self.sa_model = None
-        self.sa_message_steps = 1  # Lower default for faster UI
-        self.sa_num_heads = 4
-        self.sa_num_layers = 3
-        self.sa_mlp_dim = 64
-        self.sa_dropout_rate = 0.0
+        # Attempt to load GNN state
+        gnn_state_file = "gnn_results.pkl"
+        if os.path.exists(gnn_state_file):
+            print(f"Found {gnn_state_file}, attempting to load...")
+            try:
+                with open(gnn_state_file, "rb") as f:
+                    # Load the dictionary containing GNN state and potentially optimizer state
+                    loaded_data = pickle.load(f)
+                    # Store the relevant parts for initialize_gnn
+                    if 'gnn' in loaded_data:
+                         self.loaded_gnn_state = loaded_data # Store the whole dict for now
+                         print("GNN state loaded successfully from file.")
+                         # Optionally set GNN as the default method if loaded
+                         # self.optimization_method_idx = self.optimization_methods.index("GNN")
+                    else:
+                        print(f"Warning: '{gnn_state_file}' found but does not contain 'gnn' key.")
 
-        # WandB loading parameters
-        self.run_id = None  # Specific run ID if provided
-        self.loaded_run_id = None  # Last successfully loaded run ID
-        self.wandb_entity = "m2snn"
-        self.wandb_project = "boolean-nca-cc"
-        self.wandb_download_dir = "saves"
-
-        # Model caching
-        self.model_cache = {}  # Dictionary to cache models by run_id
+            except Exception as e:
+                print(f"Error loading GNN state from {gnn_state_file}: {e}")
+                print("Proceeding without loaded GNN state.")
+        else:
+            print(f"No {gnn_state_file} found, GNN will be initialized from scratch if needed.")
 
         # Initialize optimizers (Backprop optimizer first)
         self.init_optimizers()
-
-    def create_filter_from_params(self):
-        """Create filter parameters for wandb query based on current demo settings"""
-        current_task = self.available_tasks[self.task_idx]
-        current_opt_method = self.optimization_methods[self.optimization_method_idx]
-
-        # Set model type based on optimization method
-        if current_opt_method == "GNN":
-            model_type = "gnn"
-        elif current_opt_method == "Self-Attention":
-            model_type = "self_attention"
-        else:
-            model_type = "backprop"
-
-        # Create filter dictionary
-        filters = {
-            "config.circuit.input_bits": self.input_n,
-            "config.circuit.output_bits": self.output_n,
-            "config.circuit.arity": self.arity,
-            "config.circuit.num_layers": self.layer_n,
-            "config.model.type": model_type,
-            "config.training.wiring_mode": self.wiring_mode,
-        }
-
-        # Add task to filter if it's a standard task (not text or noise)
-        if current_task not in ["text", "noise"]:
-            filters["config.circuit.task"] = current_task
-
-        return filters
-
-    def get_cache_key(self):
-        """Generate a cache key based on current parameters"""
-        # Use a combination of parameters that define the model we need
-        method = self.optimization_methods[self.optimization_method_idx]
-        task = self.available_tasks[self.task_idx]
-        return f"{method}_{self.input_n}_{self.output_n}_{self.arity}_{self.layer_n}_{task}_{self.wiring_mode}"
-
-    def load_best_model(self):
-        """Load the best model from wandb based on current parameters or from cache"""
-        try:
-            # Generate a cache key for the current configuration
-            cache_key = self.get_cache_key()
-
-            # Check if we already have this model in cache
-            if cache_key in self.model_cache:
-                print(f"Using cached model for {cache_key}")
-                cached_data = self.model_cache[cache_key]
-                self.loaded_run_id = cached_data["run_id"]
-
-                # Set method-specific model from cache
-                method_name = self.optimization_methods[self.optimization_method_idx]
-                if method_name == "GNN":
-                    self.gnn = cached_data["model"]
-                    print("GNN model loaded from cache")
-                    return True
-                elif method_name == "Self-Attention":
-                    self.sa_model = cached_data["model"]
-                    print("Self-Attention model loaded from cache")
-                    return True
-
-            # If not in cache, load from wandb
-            filters = None
-            if self.run_id:
-                print(f"Loading model from specific run ID: {self.run_id}")
-            else:
-                # Create filters from current parameters
-                filters = self.create_filter_from_params()
-                print(f"Loading best model with filters: {filters}")
-
-            # Load the model
-            method_name = self.optimization_methods[self.optimization_method_idx]
-            print(f"Loading {method_name} model from WandB...")
-
-            try:
-                model, loaded_dict = load_best_model_from_wandb(
-                    run_id=self.run_id,
-                    filters=filters,
-                    seed=42,  # Use a consistent seed
-                    project=self.wandb_project,
-                    entity=self.wandb_entity,
-                    download_dir=self.wandb_download_dir,
-                )
-
-                # Get run_id from loaded data
-                if self.run_id:
-                    self.loaded_run_id = self.run_id
-                elif "run_id" in loaded_dict:
-                    self.loaded_run_id = loaded_dict["run_id"]
-                elif hasattr(model, "run_id"):
-                    self.loaded_run_id = model.run_id
-                else:
-                    # Generate a temporary ID if none exists
-                    self.loaded_run_id = f"temp_{time.time()}"
-
-                # Get hidden_dim from config
-                if "config" in loaded_dict:
-                    config = loaded_dict["config"]
-                    self.hidden_dim = config["model"]["hidden_dim"]
-
-                # Store in cache with appropriate model type
-                self.model_cache[cache_key] = {
-                    "run_id": self.loaded_run_id,
-                    "model": model,
-                    "hidden_dim": self.hidden_dim,
-                }
-
-                # Store model in appropriate attribute
-                if method_name == "GNN":
-                    self.gnn = model
-                    print("GNN model loaded successfully")
-                elif method_name == "Self-Attention":
-                    self.sa_model = model
-                    print("Self-Attention model loaded successfully")
-
-                return True
-
-            except Exception as inner_e:
-                print(f"Error in model loading process: {inner_e}")
-                import traceback
-
-                print(f"Traceback: {traceback.format_exc()}")
-                return False
-
-        except Exception as e:
-            print(f"Error loading model from wandb: {e}")
-            import traceback
-
-            print(f"Traceback: {traceback.format_exc()}")
-            return False
 
     def init_optimizers(self):
         """Initialize or reinitialize optimization methods"""
@@ -553,27 +428,33 @@ class Demo:
             key = jax.random.PRNGKey(42)  # Fixed seed for reproducibility
 
             try:
-                # Try to load model from cache or WandB
-                if self.load_best_model():
-                    print("Successfully loaded GNN model")
-                    return True
+                # Check if a saved GNN state exists
+                if hasattr(self, 'loaded_gnn_state') and self.loaded_gnn_state:
+                    print("Loading GNN state from file...")
+                    # Restore GNN state
+                    nnx.update(self.gnn, self.loaded_gnn_state['gnn'])
+                    print("GNN state loaded successfully.")
+
                 else:
-                    print("Failed to load GNN model, creating new instance")
-                    # Create new GNN instance with current parameters
+                    print("Creating new GNN instance...")
+                    # Create a new GNN instance
                     self.gnn = CircuitGNN(
                         node_mlp_features=self.gnn_node_mlp_features,
                         edge_mlp_features=self.gnn_edge_mlp_features,
-                        hidden_dim=self.hidden_dim,
+                        hidden_dim=self.gnn_hidden_dim,
                         arity=self.arity,
                         message_passing=self.gnn_enable_message_passing,
-                        rngs=nnx.Rngs(params=key),
+                        # Add other necessary params like use_attention if configured
+                        rngs=nnx.Rngs(params=key) # Pass RNGs correctly
                     )
-                    return True
+                    # Optionally initialize a GNN optimizer if needed for training within the demo
+                    # self.gnn_optimizer = nnx.Optimizer(self.gnn, optax.adam(1e-3))
+                    print("New GNN instance created.")
 
+                print("GNN initialized successfully")
             except Exception as e:
                 print(f"Error initializing GNN: {e}")
                 import traceback
-
                 print(f"Traceback: {traceback.format_exc()}")
                 # Fallback to backprop
                 self.optimization_method_idx = 0
@@ -615,6 +496,7 @@ class Demo:
 
                 # Create graph from current circuit
                 circuit_graph = build_graph(
+                circuit_graph = build_graph(
                     self.logits,
                     self.wires,
                     self.input_n,
@@ -623,10 +505,13 @@ class Demo:
                 )
 
                 # Run GNN for specified number of steps
-                updated_graph = self.gnn(circuit_graph)
+                updated_graph = run_gnn_scan(
+                    self.gnn, circuit_graph, self.gnn_message_steps
+                )
 
                 # Extract updated logits if training is enabled
                 if self.is_training:
+                    self.logits = extract_logits_from_graph(
                     self.logits = extract_logits_from_graph(
                         updated_graph, logits_original_shapes
                     )
@@ -1384,9 +1269,8 @@ class Demo:
                     if self.gnn is not None:
                         try:
                             gnn_state_to_save = {
-                                "gnn": nnx.state(self.gnn),
+                                'gnn': nnx.state.get_state(self.gnn),
                                 # Add optimizer state if needed and available
-                                # 'optimizer': self.gnn_optimizer.state_dict() if hasattr(self, 'gnn_optimizer') else None
                             }
                             with open("gnn_results.pkl", "wb") as f:
                                 pickle.dump(gnn_state_to_save, f)
@@ -1395,46 +1279,6 @@ class Demo:
                             print(f"Error saving GNN state: {e}")
                     else:
                         print("No active GNN model to save.")
-
-            # Self-Attention parameters (only shown when Self-Attention is selected)
-            elif (
-                self.optimization_methods[self.optimization_method_idx]
-                == "Self-Attention"
-            ):
-                imgui.text("Self-Attention Parameters:")
-                _, self.sa_message_steps = imgui.slider_int(
-                    "Message Steps", self.sa_message_steps, 1, 20
-                )
-                _, self.sa_num_heads = imgui.slider_int(
-                    "Attention Heads", self.sa_num_heads, 1, 8
-                )
-                _, self.sa_num_layers = imgui.slider_int(
-                    "Attention Layers", self.sa_num_layers, 1, 6
-                )
-                _, self.sa_mlp_dim = imgui.slider_int(
-                    "MLP Dimension", self.sa_mlp_dim, 16, 128
-                )
-                _, self.sa_dropout_rate = imgui.slider_float(
-                    "Dropout Rate", self.sa_dropout_rate, 0.0, 0.5
-                )
-                if imgui.button("Reinitialize Self-Attention"):
-                    self.sa_model = None
-                    self.initialize_self_attention()
-                # Add button to save Self-Attention state
-                if imgui.button("Save Self-Attention State"):
-                    if self.sa_model is not None:
-                        try:
-                            sa_state_to_save = {
-                                "sa": nnx.state(self.sa_model),
-                                # Add optimizer state if needed
-                            }
-                            with open("gnn_results.pkl", "wb") as f:
-                                pickle.dump(sa_state_to_save, f)
-                            print("Self-Attention state saved to gnn_results.pkl")
-                        except Exception as e:
-                            print(f"Error saving Self-Attention state: {e}")
-                    else:
-                        print("No active Self-Attention model to save.")
 
             # Training controls (common to both methods)
             _, self.is_training = imgui.checkbox("is_training", self.is_training)
