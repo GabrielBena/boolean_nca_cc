@@ -19,6 +19,20 @@ hydra:
 #      pool.soft_lut_damage.active: true,false
 #      backprop.enabled: true
 
+hydra:
+  mode: RUN
+#  sweeper:
+#    params:
+#      circuit.input_bits: 2,3,4
+#      circuit.output_bits: 2,3,4
+#      circuit.num_layers: 2,3,4
+#      training.wiring_mode: fixed,random
+#      training.epochs_power_of_2: 8,16
+#      training.n_message_steps: 1,10,25
+#      pool.gate_knockout.active: true,false
+#      pool.soft_lut_damage.active: true,false
+#      backprop.enabled: true
+
 # Random seed for reproducibility
 seed: 0
 test_seed: 42
@@ -34,18 +48,19 @@ wandb:
 
 # Circuit configuration
 circuit:
-  task: "reverse"
-  input_bits: 8
-  output_bits: 8
-  arity: 4
-  num_layers: 4
+  task: "binary_multiply"
+  input_bits: 4
+  output_bits: 4
+  arity: 2
+  num_layers: 3
   layer_sizes: null  # Auto-generate if null 
 
 # Training parameters
 training:
   learning_rate: 1e-3
   weight_decay: 1e-5
-  epochs: 2048  # 2^11
+  epochs: null
+  epochs_power_of_2: 8 # 2^10
   loss_type: "l4"  # Options: "l4" or "bce"
   wiring_mode: "fixed"  # Options: "fixed" or "random"
   meta_batch_size: 4
@@ -63,7 +78,7 @@ pool:
 
   # Gate knockout ("hard" LUT zeroing - resets globals)
   gate_knockout:
-    active: true
+    active: false
     fraction: 0.05
     interval: 64 
     strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
@@ -105,17 +120,4 @@ logging:
   level: "INFO" 
 
 # execution_environment:
-#   target_gpu_ids: "1"  # Specify intended GPU ID(s), e.g., "0", "0,1" 
-
-# gpu_id: 2
-
-# latest: shuffled wires, soft damage
-# second latest: shuffled wires, no kind of damage
-# third latest: shuffled and both damages
-
-# MORNING RUNS
-# 1. shuffled wires, no damage, reset pool 0.01
-# 2. shuffled wires, soft damage, reset pool 0.01 for 2^18 epochs
-# 3. shuffled wires, soft damage, reset pool 0.01 for 2^18 epochs???
-# 4. SANITY CHECK: fixed wires, no damage, reset pool 0.01 for 2^18 epochs
-# 5. fixed wires, both damage, reset pool 0.01 for 2^19 epochs
+#   target_gpu_ids: "2"  # Specify intended GPU ID(s), e.g., "0", "0,1" 

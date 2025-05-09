@@ -949,7 +949,7 @@ def train_model(
             and epoch % gate_knockout_interval == 0
         ):
             rng, knockout_key = jax.random.split(rng)
-            # log.info(f"Applying gate knockout at epoch {epoch}")
+            log.info(f"Applying gate knockout at epoch {epoch}")
             circuit_pool = circuit_pool.gate_knockout(
                 knockout_key,
                 gate_knockout_fraction,
@@ -966,7 +966,7 @@ def train_model(
             and epoch % soft_lut_damage_interval == 0
         ):
             rng, soft_damage_key = jax.random.split(rng)
-            # log.info(f"Applying soft LUT damage at epoch {epoch}")
+            log.info(f"Applying soft LUT damage at epoch {epoch}")
             circuit_pool = circuit_pool.zero_luts_for_fraction(
                 soft_damage_key,
                 soft_lut_damage_fraction,
