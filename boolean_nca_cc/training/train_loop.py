@@ -10,12 +10,17 @@ import jax.numpy as jp
 import optax
 from flax import nnx
 import jraph
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 from functools import partial
 from tqdm.auto import tqdm
+import os
+import logging
+import tempfile
+from datetime import datetime
 
 from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention
 from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
+from boolean_nca_cc.training.utils import save_checkpoint, plot_training_curves
 from boolean_nca_cc.circuits.train import (
     res2loss,
     binary_cross_entropy,
@@ -26,6 +31,239 @@ from boolean_nca_cc.training.pool import GraphPool, initialize_graph_pool
 
 # Type alias for PyTree
 PyTree = Any
+
+# Setup logging
+log = logging.getLogger(__name__)
+
+
+def _init_wandb(
+    wandb_logging: bool, wandb_run_config: Optional[Dict] = None
+) -> Optional[Any]:
+    """Initialize wandb if enabled and return the run object."""
+    if not wandb_logging:
+        return None
+
+    try:
+        import wandb
+
+        if not wandb.run:
+            # Only initialize wandb if not already initialized
+            wandb.init(
+                config=wandb_run_config,
+                resume="allow",
+            )
+
+        # Get the unique run ID for checkpointing
+        log.info(f"WandB run ID: {wandb.run.id}")
+        return wandb
+    except ImportError:
+        log.warning("wandb not installed. Running without wandb logging.")
+        return None
+    except Exception as e:
+        log.warning(f"Error initializing wandb: {e}. Running without wandb logging.")
+        return None
+
+
+def _log_to_wandb(
+    wandb_run, metrics_dict: Dict, epoch: int, log_interval: int = 1
+) -> None:
+    """Log metrics to wandb if enabled and interval allows."""
+    if wandb_run is None or epoch % log_interval != 0:
+        return
+
+    try:
+        wandb_run.log(metrics_dict)
+    except Exception as e:
+        log.warning(f"Error logging to wandb: {e}")
+
+
+def _setup_checkpoint_dir(
+    checkpoint_dir: Optional[str], wandb_id: Optional[str]
+) -> Optional[str]:
+    """Setup checkpoint directory with unique identifier."""
+    if checkpoint_dir is None:
+        return None
+
+    # Create unique checkpoint directory using wandb ID or timestamp
+    unique_id = wandb_id if wandb_id else datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    checkpoint_path = os.path.join(checkpoint_dir, f"run_{unique_id}")
+    os.makedirs(checkpoint_path, exist_ok=True)
+    log.info(f"Checkpoints will be saved to: {checkpoint_path}")
+
+    return checkpoint_path
+
+
+def _save_periodic_checkpoint(
+    checkpoint_path: str,
+    model,
+    optimizer,
+    metrics: Dict,
+    epoch: int,
+    checkpoint_interval: int,
+    wandb_run=None,
+) -> None:
+    """Save periodic checkpoint if interval allows."""
+    if checkpoint_path is None or epoch == 0 or epoch % checkpoint_interval != 0:
+        return
+
+    ckpt_filename = f"checkpoint_epoch_{epoch}.pkl"
+    log.info(f"Saving periodic checkpoint at epoch {epoch}")
+
+    try:
+        save_checkpoint(
+            model,
+            optimizer,
+            metrics,
+            {"epoch": epoch},
+            epoch,
+            checkpoint_path,
+            filename=ckpt_filename,
+        )
+
+        # Log to wandb if enabled
+        if wandb_run:
+            wandb_run.save(os.path.join(checkpoint_path, ckpt_filename))
+    except Exception as e:
+        log.warning(f"Error saving checkpoint: {e}")
+
+
+def _save_best_checkpoint(
+    checkpoint_path: str,
+    is_best: bool,
+    save_best: bool,
+    model,
+    optimizer,
+    metrics: Dict,
+    epoch: int,
+    best_metric: str,
+    current_metric_value: float,
+    wandb_run=None,
+) -> None:
+    """Save best checkpoint if enabled and is best."""
+    if not (checkpoint_path and save_best and is_best):
+        return
+
+    # Use a fixed filename for the best model to avoid creating multiple files
+    best_filename = f"best_model_{best_metric}.pkl"
+    log.info(
+        f"Saving best model at epoch {epoch} with {best_metric}={current_metric_value:.4f}"
+    )
+
+    try:
+        save_checkpoint(
+            model,
+            optimizer,
+            metrics,
+            {"epoch": epoch, f"best_{best_metric}": current_metric_value},
+            epoch,
+            checkpoint_path,
+            filename=best_filename,
+        )
+
+        # Log to wandb if enabled
+        if wandb_run:
+            wandb_run.log(
+                {f"best/{best_metric}": current_metric_value, "best/epoch": epoch}
+            )
+
+            # Save the best model to wandb (will overwrite the previous best)
+            wandb_run.save(os.path.join(checkpoint_path, best_filename))
+
+            # Also log this as an artifact for better tracking in wandb
+            try:
+                artifact = wandb_run.Artifact(f"best_model_{best_metric}", type="model")
+                artifact.add_file(os.path.join(checkpoint_path, best_filename))
+                wandb_run.log_artifact(artifact)
+            except Exception as e:
+                log.warning(f"Error logging best model as artifact: {e}")
+    except Exception as e:
+        log.warning(f"Error saving best checkpoint: {e}")
+
+
+def _save_stable_state(
+    checkpoint_path: str,
+    save_stable_states: bool,
+    last_stable_state: Dict,
+    epoch: int,
+    wandb_run=None,
+) -> None:
+    """Save the last stable state before NaN loss."""
+    if not (checkpoint_path and save_stable_states):
+        return
+
+    try:
+        stable_path = os.path.join(
+            checkpoint_path, f"stable_state_epoch_{epoch - 1}.pkl"
+        )
+        log.info(f"Saving last stable state to {stable_path}")
+        save_checkpoint(
+            last_stable_state["model"],
+            last_stable_state["optimizer"],
+            last_stable_state["metrics"],
+            {"epoch": epoch - 1},
+            epoch - 1,
+            os.path.dirname(stable_path),
+            filename=os.path.basename(stable_path),
+        )
+
+        # Log to wandb if enabled
+        if wandb_run:
+            wandb_run.log({"training/early_stop_epoch": epoch - 1})
+            wandb_run.alert(
+                title="Training Stopped - NaN Loss",
+                text=f"Training stopped at epoch {epoch} due to NaN loss. Last stable state saved.",
+                level=wandb_run.AlertLevel.WARN,
+            )
+    except Exception as e:
+        log.warning(f"Error saving stable state: {e}")
+
+
+def _log_final_wandb_metrics(wandb_run, results: Dict, epochs: int) -> None:
+    """Log final metrics and plots to wandb."""
+    if wandb_run is None:
+        return
+
+    try:
+        # Log final metrics
+        wandb_run.log(
+            {
+                "final/loss": results["losses"][-1],
+                "final/hard_loss": results["hard_losses"][-1],
+                "final/accuracy": results["accuracies"][-1],
+                "final/hard_accuracy": results["hard_accuracies"][-1],
+                "final/epoch": epochs,
+                f"best/{results.get('best_metric', 'metric')}": results.get(
+                    "best_metric_value", 0
+                ),
+            }
+        )
+
+        # Create and log final summary plots
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plot_training_curves(
+                {
+                    "losses": results["losses"],
+                    "hard_losses": results["hard_losses"],
+                    "accuracies": results["accuracies"],
+                    "hard_accuracies": results["hard_accuracies"],
+                },
+                "Training Summary",
+                tmpdir,
+            )
+            # Log the plots to wandb
+            wandb_run.log(
+                {
+                    "summary/loss_curve": wandb_run.Image(
+                        os.path.join(tmpdir, "training_summary_loss.png")
+                    ),
+                    "summary/accuracy_curve": wandb_run.Image(
+                        os.path.join(tmpdir, "training_summary_accuracy.png")
+                    ),
+                }
+            )
+    except Exception as e:
+        log.warning(f"Error logging final metrics to wandb: {e}")
 
 
 def get_loss_from_graph(logits, wires, x, y_target, loss_type: str):
@@ -97,6 +335,16 @@ def train_model(
     init_optimizer: nnx.Optimizer = None,
     init_pool: GraphPool = None,
     initial_metrics: Dict = None,
+    # Checkpointing parameters
+    checkpoint_dir: str = None,
+    checkpoint_interval: int = 10,
+    save_best: bool = True,
+    best_metric: str = "hard_accuracy",  # Options: 'loss', 'hard_loss', 'accuracy', 'hard_accuracy'
+    save_stable_states: bool = True,
+    # Wandb parameters
+    wandb_logging: bool = False,
+    log_interval: int = 1,
+    wandb_run_config: Dict = None,
 ):
     """
     Train a GNN to optimize boolean circuit parameters.
@@ -124,12 +372,20 @@ def train_model(
         combined_weights: Tuple of weights (loss_weight, steps_weight) for combining factors in "combined" strategy
         key: Random seed
         wiring_fixed_key: Fixed key for generating wirings when wiring_mode='fixed'
-        init_gnn: Optional pre-trained GNN model to continue training
+        init_model: Optional pre-trained GNN model to continue training
         init_optimizer: Optional pre-trained optimizer to continue training
         init_pool: Optional pre-initialized GraphPool to continue training with
         initial_metrics: Optional dictionary of metrics from previous training
         lr_scheduler: Learning rate scheduler type
         lr_scheduler_params: Dictionary of parameters for the scheduler
+        checkpoint_dir: Directory to save checkpoints
+        checkpoint_interval: How often to save periodic checkpoints
+        save_best: Whether to track and save the best model
+        best_metric: Metric to use for determining the best model
+        save_stable_states: Whether to save stable states (before potential NaN losses)
+        wandb_logging: Whether to log metrics to wandb
+        log_interval: Interval for logging metrics
+        wandb_run_config: Configuration to pass to wandb
     Returns:
         Dictionary with trained GNN model and training metrics
     """
@@ -243,7 +499,7 @@ def train_model(
         )
     else:
         # Use the provided pool
-        print("INIT POOL IS PROVIDED")
+        log.info("Using provided pool for training")
         circuit_pool = init_pool
 
     # Function to run a circuit and calculate loss
@@ -380,10 +636,34 @@ def train_model(
 
         return loss, aux, updated_pool
 
-    # Define meta-training step function (classic approach generating new circuits)
+    # Setup wandb logging if enabled
+    wandb_run = _init_wandb(wandb_logging, wandb_run_config)
+    wandb_id = wandb_run.run.id if wandb_run else None
+
+    # Setup checkpointing directory
+    checkpoint_path = _setup_checkpoint_dir(checkpoint_dir, wandb_id)
+
+    # Track best model
+    best_metric_value = float("-inf") if "accuracy" in best_metric else float("inf")
+
     # Create progress bar for training
     pbar = tqdm(range(epochs), desc="Training GNN")
     avg_steps_reset = 0
+
+    # Save initial stable state if needed
+    last_stable_state = {
+        "model": model,
+        "optimizer": optimizer,
+        "pool": circuit_pool,
+        "metrics": {
+            "losses": losses,
+            "hard_losses": hard_losses,
+            "accuracies": accuracies,
+            "hard_accuracies": hard_accuracies,
+            "reset_steps": reset_steps,
+        },
+        "epoch": 0,
+    }
 
     result = {}
     # Training loop
@@ -456,16 +736,70 @@ def train_model(
             )
 
         if jp.isnan(loss):
-            print(f"Loss is NaN at epoch {epoch}")
-            # return last stable state
-            return result
+            log.warning(f"Loss is NaN at epoch {epoch}, returning last stable state")
+            # Save the last stable state if enabled
+            _save_stable_state(
+                checkpoint_path,
+                save_stable_states,
+                last_stable_state,
+                epoch,
+                wandb_run,
+            )
+            return last_stable_state
         else:
+            # Update last stable state
+            last_stable_state = {
+                "model": model,
+                "optimizer": optimizer,
+                "pool": circuit_pool,
+                "metrics": {
+                    "losses": losses.copy(),
+                    "hard_losses": hard_losses.copy(),
+                    "accuracies": accuracies.copy(),
+                    "hard_accuracies": hard_accuracies.copy(),
+                    "reset_steps": reset_steps.copy(),
+                },
+                "epoch": epoch,
+            }
+
             # Record metrics
             losses.append(float(loss))
             hard_losses.append(float(hard_loss))
             accuracies.append(float(accuracy))
             hard_accuracies.append(float(hard_accuracy))
             reset_steps.append(float(avg_steps_reset))
+
+            # Get current metric value for best model tracking
+            current_metric_value = None
+            if best_metric == "loss":
+                current_metric_value = float(loss)
+            elif best_metric == "hard_loss":
+                current_metric_value = float(hard_loss)
+            elif best_metric == "accuracy":
+                current_metric_value = float(accuracy)
+            elif best_metric == "hard_accuracy":
+                current_metric_value = float(hard_accuracy)
+            else:
+                raise ValueError(f"Unknown best_metric: {best_metric}")
+
+            # Log to wandb if enabled
+            metrics_dict = {
+                "training/epoch": epoch,
+                "training/loss": float(loss),
+                "training/hard_loss": float(hard_loss),
+                "training/accuracy": float(accuracy),
+                "training/hard_accuracy": float(hard_accuracy),
+                "pool/reset_steps": float(avg_steps_reset),
+                "pool/avg_update_steps": float(circuit_pool.get_average_update_steps()),
+            }
+
+            # Add learning rate if available
+            try:
+                metrics_dict["training/lr"] = optimizer.opt_fn.learning_rate.get_count()
+            except (AttributeError, TypeError):
+                pass  # Skip if learning rate not available
+
+            _log_to_wandb(wandb_run, metrics_dict, epoch, log_interval)
 
             # Update progress bar with current metrics
             pbar.set_postfix(
@@ -478,6 +812,54 @@ def train_model(
                 }
             )
 
+            # Check if this is the best model based on the specified metric
+            is_best = False
+            if "accuracy" in best_metric:  # For accuracy metrics, higher is better
+                if current_metric_value > best_metric_value:
+                    best_metric_value = current_metric_value
+                    is_best = True
+            else:  # For loss metrics, lower is better
+                if current_metric_value < best_metric_value:
+                    best_metric_value = current_metric_value
+                    is_best = True
+
+            # Save periodic checkpoint if needed
+            _save_periodic_checkpoint(
+                checkpoint_path,
+                model,
+                optimizer,
+                {
+                    "losses": losses,
+                    "hard_losses": hard_losses,
+                    "accuracies": accuracies,
+                    "hard_accuracies": hard_accuracies,
+                    "reset_steps": reset_steps,
+                },
+                epoch,
+                checkpoint_interval,
+                wandb_run,
+            )
+
+            # Save best model if enabled and is best
+            _save_best_checkpoint(
+                checkpoint_path,
+                is_best,
+                save_best,
+                model,
+                optimizer,
+                {
+                    "losses": losses,
+                    "hard_losses": hard_losses,
+                    "accuracies": accuracies,
+                    "hard_accuracies": hard_accuracies,
+                    "reset_steps": reset_steps,
+                },
+                epoch,
+                best_metric,
+                current_metric_value,
+                wandb_run,
+            )
+
             # Return the trained GNN model and metrics
             result = {
                 "model": model,
@@ -487,9 +869,14 @@ def train_model(
                 "accuracies": accuracies,
                 "hard_accuracies": hard_accuracies,
                 "reset_steps": reset_steps,
+                "best_metric_value": best_metric_value,
+                "best_metric": best_metric,
             }
 
             # Add pool to result if used
             result["pool"] = circuit_pool
+
+    # Log final results to wandb
+    _log_final_wandb_metrics(wandb_run, result, epochs)
 
     return result

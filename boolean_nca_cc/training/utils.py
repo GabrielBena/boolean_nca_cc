@@ -10,8 +10,21 @@ import logging
 log = logging.getLogger(__name__)
 
 
-def save_checkpoint(model, optimizer, metrics, cfg, step, output_dir):
-    """Save a checkpoint of the model and optimizer."""
+def save_checkpoint(model, optimizer, metrics, cfg, step, output_dir, filename=None):
+    """Save a checkpoint of the model and optimizer.
+
+    Args:
+        model: The model to save
+        optimizer: The optimizer to save
+        metrics: Dictionary of training metrics
+        cfg: Configuration object or dictionary
+        step: Current training step
+        output_dir: Directory to save the checkpoint
+        filename: Optional custom filename for the checkpoint
+
+    Returns:
+        Path to the saved checkpoint
+    """
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
@@ -19,17 +32,31 @@ def save_checkpoint(model, optimizer, metrics, cfg, step, output_dir):
         "model": nnx.state(model),
         "optimizer": nnx.state(optimizer),
         "metrics": metrics,
-        "config": OmegaConf.to_container(cfg, resolve=True),
+        "config": OmegaConf.to_container(cfg, resolve=True)
+        if hasattr(cfg, "to_container")
+        else cfg,
         "step": step,
     }
 
-    checkpoint_path = os.path.join(output_dir, f"checkpoint_{step}.pkl")
+    if filename is None:
+        checkpoint_path = os.path.join(output_dir, f"checkpoint_{step}.pkl")
+    else:
+        checkpoint_path = os.path.join(output_dir, filename)
+
     with open(checkpoint_path, "wb") as f:
         pickle.dump(checkpoint, f)
 
     log.info(f"Saved checkpoint to {checkpoint_path}")
-    if cfg.wandb.enabled:
-        wandb.save(checkpoint_path)
+    if hasattr(cfg, "wandb") and cfg.wandb.enabled:
+        try:
+            import wandb
+
+            if wandb.run:
+                wandb.save(checkpoint_path)
+        except ImportError:
+            log.warning("wandb not installed, skipping checkpoint logging to W&B")
+        except Exception as e:
+            log.warning(f"Error logging checkpoint to W&B: {e}")
 
     return checkpoint_path
 
@@ -197,7 +224,8 @@ def compare_with_backprop(gnn_metrics, bp_metrics, title, output_dir):
     comp_plot_path = os.path.join(
         output_dir, f"{title.lower().replace(' ', '_')}_comparison.png"
     )
-    plt.savefig(comp_plot_path)
+
     if wandb.run is not None:
         wandb.log({f"{title} Comparison": wandb.Image(fig)})
+    plt.savefig(comp_plot_path)
     plt.close(fig)

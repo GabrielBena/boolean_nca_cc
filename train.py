@@ -176,6 +176,7 @@ def main(cfg: DictConfig) -> None:
     log.info(f"Working directory: {output_dir}")
 
     # Initialize wandb if enabled
+    wandb_run = None
     if cfg.wandb.enabled:
         wandb.init(
             project=cfg.wandb.project,
@@ -184,6 +185,7 @@ def main(cfg: DictConfig) -> None:
             dir=output_dir,
             config=OmegaConf.to_container(cfg, resolve=True),
         )
+        wandb_run = wandb
 
     # Generate circuit layer sizes
     input_n, output_n = cfg.circuit.input_bits, cfg.circuit.output_bits
@@ -260,6 +262,10 @@ def main(cfg: DictConfig) -> None:
     else:
         raise ValueError(f"Unknown model type: {cfg.model.type}")
 
+    # Prepare checkpoint directory
+    checkpoint_dir = os.path.join(output_dir, "checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
     # Train model
     log.info(f"Starting {cfg.model.type.upper()} training")
     gnn_results = train_model(
@@ -276,7 +282,7 @@ def main(cfg: DictConfig) -> None:
         learning_rate=cfg.training.learning_rate,
         weight_decay=cfg.training.weight_decay,
         epochs=cfg.training.epochs or 2**cfg.training.epochs_power_of_2,
-        n_message_steps=1,
+        n_message_steps=cfg.training.n_message_steps,
         loss_type=cfg.training.loss_type,
         # Wiring mode parameters
         wiring_mode=cfg.training.wiring_mode,
@@ -289,31 +295,35 @@ def main(cfg: DictConfig) -> None:
         reset_strategy=cfg.pool.reset_strategy,
         # Learning rate scheduling
         lr_scheduler=cfg.training.lr_scheduler,
+        # Checkpoint parameters
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_interval=cfg.checkpoint.interval,
+        save_best=cfg.checkpoint.save_best,
+        best_metric=cfg.checkpoint.best_metric,
+        save_stable_states=cfg.checkpoint.save_stable_states,
+        # WandB parameters
+        wandb_logging=cfg.wandb.enabled,
+        log_interval=cfg.logging.log_interval,
+        wandb_run_config=OmegaConf.to_container(cfg, resolve=True),
     )
 
-    # Format metrics for plotting
-    metrics = {
-        "losses": gnn_results["losses"],
-        "hard_losses": gnn_results["hard_losses"],
-        "accuracies": gnn_results["accuracies"],
-        "hard_accuracies": gnn_results["hard_accuracies"],
-    }
-
-    # Plot training curves
-    model_name = cfg.model.type.upper()
-    plot_training_curves(
-        metrics, f"{model_name} Training", os.path.join(output_dir, "plots")
-    )
-
-    # Save final model
-    if cfg.checkpoint.enabled:
+    # Save final model if checkpointing is enabled
+    if cfg.checkpoint.enabled and not cfg.wandb.enabled:
+        # If wandb is enabled, checkpoints are already being saved during training
         save_checkpoint(
             gnn_results["model"],
             gnn_results["optimizer"],
-            metrics,
+            {
+                "losses": gnn_results["losses"],
+                "hard_losses": gnn_results["hard_losses"],
+                "accuracies": gnn_results["accuracies"],
+                "hard_accuracies": gnn_results["hard_accuracies"],
+                "reset_steps": gnn_results.get("reset_steps", []),
+            },
             cfg,
             cfg.training.epochs or 2**cfg.training.epochs_power_of_2,
-            os.path.join(output_dir, "checkpoints"),
+            checkpoint_dir,
+            filename="final_model.pkl",
         )
 
     # Evaluate inner loop (message passing steps)
@@ -338,6 +348,20 @@ def main(cfg: DictConfig) -> None:
         loss_type=cfg.training.loss_type,
     )
 
+    # Plot training curves
+    model_name = cfg.model.type.upper()
+    if not cfg.wandb.enabled:
+        plot_training_curves(
+            {
+                "losses": gnn_results["losses"],
+                "hard_losses": gnn_results["hard_losses"],
+                "accuracies": gnn_results["accuracies"],
+                "hard_accuracies": gnn_results["hard_accuracies"],
+            },
+            f"{model_name} Training",
+            os.path.join(output_dir, "plots"),
+        )
+
     # Plot inner loop metrics
     plot_inner_loop_metrics(
         step_metrics, f"{model_name} Inner Loop", os.path.join(output_dir, "plots")
@@ -346,7 +370,12 @@ def main(cfg: DictConfig) -> None:
     # Compare with backpropagation if available
     if bp_results is not None:
         compare_with_backprop(
-            metrics,
+            {
+                "losses": step_metrics["soft_loss"],
+                "hard_losses": step_metrics["hard_loss"],
+                "accuracies": step_metrics["soft_accuracy"],
+                "hard_accuracies": step_metrics["hard_accuracy"],
+            },
             bp_results,
             f"{model_name} vs Backprop",
             os.path.join(output_dir, "plots"),
@@ -354,16 +383,22 @@ def main(cfg: DictConfig) -> None:
 
     # Final log
     log.info(f"Training complete. Final results:")
-    log.info(f"  Meta Loss: {metrics['losses'][-1]:.4f}")
-    log.info(f"  Meta Hard Loss: {metrics['hard_losses'][-1]:.4f}")
-    log.info(f"  Meta Accuracy: {metrics['accuracies'][-1]:.4f}")
-    log.info(f"  Meta Hard Accuracy: {metrics['hard_accuracies'][-1]:.4f}")
+    log.info(f"  Meta Loss: {gnn_results['losses'][-1]:.4f}")
+    log.info(f"  Meta Hard Loss: {gnn_results['hard_losses'][-1]:.4f}")
+    log.info(f"  Meta Accuracy: {gnn_results['accuracies'][-1]:.4f}")
+    log.info(f"  Meta Hard Accuracy: {gnn_results['hard_accuracies'][-1]:.4f}")
     log.info(f"  Inner Loop Final Loss: {step_metrics['soft_loss'][-1]:.4f}")
     log.info(f"  Inner Loop Final Hard Loss: {step_metrics['hard_loss'][-1]:.4f}")
     log.info(f"  Inner Loop Final Accuracy: {step_metrics['soft_accuracy'][-1]:.4f}")
     log.info(
         f"  Inner Loop Final Hard Accuracy: {step_metrics['hard_accuracy'][-1]:.4f}"
     )
+
+    # Display best model performance if applicable
+    if cfg.checkpoint.save_best and "best_metric_value" in gnn_results:
+        log.info(
+            f"  Best {gnn_results.get('best_metric', 'metric')}: {gnn_results['best_metric_value']:.4f}"
+        )
 
     # Close wandb if enabled
     if cfg.wandb.enabled:
