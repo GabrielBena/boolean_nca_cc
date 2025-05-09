@@ -22,7 +22,7 @@ from boolean_nca_cc.circuits.model import (
     run_circuit,
     generate_layer_sizes,
 )
-from boolean_nca_cc.circuits.training import (
+from boolean_nca_cc.circuits.train import (
     unpack,
     res2loss,
 )
@@ -30,6 +30,10 @@ import boolean_nca_cc.circuits.tasks as tasks  # Import the tasks module
 
 # Import GNN components
 from boolean_nca_cc.models import CircuitGNN, run_gnn_scan
+from boolean_nca_cc.models.self_attention import (
+    CircuitSelfAttention,
+    run_self_attention_scan,
+)
 from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
 
 from imgui_bundle import (
@@ -239,40 +243,62 @@ class Demo:
         self.is_training = True
 
         # Optimization method (backprop/GNN)
-        self.optimization_methods = ["Backprop", "GNN"]
+        self.optimization_methods = ["Backprop", "GNN", "Self-Attention"]
         self.optimization_method_idx = 0  # Default to Backprop
 
         # GNN parameters (used if GNN is selected)
         self.gnn = None
         self.gnn_hidden_dim = 16
-        self.gnn_message_steps = 5 # Lower default for faster UI
+        self.gnn_message_steps = 1  # Lower default for faster UI
         self.gnn_node_mlp_features = [64, 32]
         self.gnn_edge_mlp_features = [64, 32]
         self.gnn_enable_message_passing = True
-        self.loaded_gnn_state = None # Variable to store loaded state
 
-        # Attempt to load GNN state
+        # Self-Attention parameters
+        self.sa_model = None
+        self.sa_hidden_dim = 16
+        self.sa_message_steps = 1  # Lower default for faster UI
+        self.sa_num_heads = 4
+        self.sa_num_layers = 3
+        self.sa_mlp_dim = 64
+        self.sa_dropout_rate = 0.0
+
+        self.loaded_gnn_state = None  # Variable to store loaded state
+        self.loaded_sa_state = None  # Variable to store loaded self-attention state
+
+        # Attempt to load GNN/SA state
         gnn_state_file = "gnn_results.pkl"
         if os.path.exists(gnn_state_file):
             print(f"Found {gnn_state_file}, attempting to load...")
             try:
                 with open(gnn_state_file, "rb") as f:
-                    # Load the dictionary containing GNN state and potentially optimizer state
+                    # Load the dictionary containing model state and potentially optimizer state
                     loaded_data = pickle.load(f)
-                    # Store the relevant parts for initialize_gnn
-                    if 'gnn' in loaded_data:
-                         self.loaded_gnn_state = loaded_data # Store the whole dict for now
-                         print("GNN state loaded successfully from file.")
-                         # Optionally set GNN as the default method if loaded
-                         # self.optimization_method_idx = self.optimization_methods.index("GNN")
+                    # Store the relevant parts for initialization
+                    if "gnn" in loaded_data:
+                        self.loaded_gnn_state = (
+                            loaded_data  # Store the whole dict for now
+                        )
+                        print("GNN state loaded successfully from file.")
+                        # Optionally set GNN as the default method if loaded
+                        # self.optimization_method_idx = self.optimization_methods.index("GNN")
+                    elif "sa" in loaded_data:
+                        self.loaded_sa_state = loaded_data
+                        print("Self-Attention state loaded successfully from file.")
+                        # Optionally set Self-Attention as the default method
+                        # self.optimization_method_idx = self.optimization_methods.index("Self-Attention")
                     else:
-                        print(f"Warning: '{gnn_state_file}' found but does not contain 'gnn' key.")
+                        print(
+                            f"Warning: '{gnn_state_file}' found but does not contain recognized model keys."
+                        )
 
             except Exception as e:
-                print(f"Error loading GNN state from {gnn_state_file}: {e}")
-                print("Proceeding without loaded GNN state.")
+                print(f"Error loading model state from {gnn_state_file}: {e}")
+                print("Proceeding without loaded model state.")
         else:
-            print(f"No {gnn_state_file} found, GNN will be initialized from scratch if needed.")
+            print(
+                f"No {gnn_state_file} found, models will be initialized from scratch if needed."
+            )
 
         # Initialize optimizers (Backprop optimizer first)
         self.init_optimizers()
@@ -398,10 +424,10 @@ class Demo:
             key = jax.random.PRNGKey(42)  # Fixed seed for reproducibility
             try:
                 # Check if a saved GNN state exists
-                if hasattr(self, 'loaded_gnn_state') and self.loaded_gnn_state:
+                if hasattr(self, "loaded_gnn_state") and self.loaded_gnn_state:
                     print("Loading GNN state from file...")
                     # Restore GNN state
-                    nnx.update(self.gnn, self.loaded_gnn_state['gnn'])
+                    nnx.update(self.gnn, self.loaded_gnn_state["gnn"])
                     print("GNN state loaded successfully.")
 
                 else:
@@ -414,7 +440,7 @@ class Demo:
                         arity=self.arity,
                         message_passing=self.gnn_enable_message_passing,
                         # Add other necessary params like use_attention if configured
-                        rngs=nnx.Rngs(params=key) # Pass RNGs correctly
+                        rngs=nnx.Rngs(params=key),  # Pass RNGs correctly
                     )
                     # Optionally initialize a GNN optimizer if needed for training within the demo
                     # self.gnn_optimizer = nnx.Optimizer(self.gnn, optax.adam(1e-3))
@@ -424,6 +450,7 @@ class Demo:
             except Exception as e:
                 print(f"Error initializing GNN: {e}")
                 import traceback
+
                 print(f"Traceback: {traceback.format_exc()}")
                 # Fallback to backprop
                 self.optimization_method_idx = 0
@@ -515,14 +542,84 @@ class Demo:
             self.err_mask = np.ones((self.case_n, self.output_n), bool)
             return self.max_loss_value, self.max_loss_value
 
+    def update_circuit_self_attention(self):
+        """Update circuit using Self-Attention"""
+        try:
+            # Ensure Self-Attention model is initialized
+            self.initialize_self_attention()
+
+            # Run Self-Attention for specified number of steps
+            try:
+                # Store original logit shapes for reconstruction
+                logits_original_shapes = [logit.shape for logit in self.logits]
+
+                # Create graph from current circuit - same as for GNN
+                circuit_graph = build_graph(
+                    self.logits,
+                    self.wires,
+                    self.input_n,
+                    self.arity,
+                    self.sa_hidden_dim,  # Use self-attention hidden dim
+                )
+
+                # Run Self-Attention for specified number of steps
+                updated_graph = run_self_attention_scan(
+                    self.sa_model, circuit_graph, self.sa_message_steps
+                )
+
+                # Extract updated logits if training is enabled
+                if self.is_training:
+                    self.logits = extract_logits_from_graph(
+                        updated_graph, logits_original_shapes
+                    )
+
+                # Run circuit with updated logits
+                self.act = run_circuit_gui(
+                    self.logits, self.wires, self.gate_mask, self.input_x
+                )
+                hard_act = run_circuit_gui(
+                    self.logits, self.wires, self.gate_mask, self.input_x, hard=True
+                )
+
+                # Generate error mask for visualization
+                self.err_mask = hard_act[-1] != self.y0
+
+                # Calculate loss
+                loss = res2loss(self.act[-1] - self.y0)
+                hard_loss = res2loss(hard_act[-1] - self.y0)
+
+                return loss, hard_loss
+
+            except Exception as e:
+                print(f"Error in Self-Attention update: {e}")
+                import traceback
+
+                print(f"Traceback: {traceback.format_exc()}")
+                # Fallback to backprop
+                self.optimization_method_idx = 0
+                return self.update_circuit_backprop()
+
+        except Exception as e:
+            print(f"Critical error in Self-Attention update: {e}")
+            import traceback
+
+            print(f"Traceback: {traceback.format_exc()}")
+
+            # Return fallback values to avoid crashing
+            self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
+            self.err_mask = np.ones((self.case_n, self.output_n), bool)
+            return self.max_loss_value, self.max_loss_value
+
     def update_circuit(self):
         """Update circuit using selected optimization method"""
         try:
             # Choose optimization method
             if self.optimization_methods[self.optimization_method_idx] == "Backprop":
                 loss, hard_loss = self.update_circuit_backprop()
-            else:  # GNN
+            elif self.optimization_methods[self.optimization_method_idx] == "GNN":
                 loss, hard_loss = self.update_circuit_gnn()
+            else:  # Self-Attention
+                loss, hard_loss = self.update_circuit_self_attention()
 
             # Extract output activations and visualize
             oimg = self.act[-1].T
@@ -1126,8 +1223,9 @@ class Demo:
                     if self.gnn is not None:
                         try:
                             gnn_state_to_save = {
-                                'gnn': nnx.state.get_state(self.gnn),
+                                "gnn": nnx.state.get_state(self.gnn),
                                 # Add optimizer state if needed and available
+                                # 'optimizer': self.gnn_optimizer.state_dict() if hasattr(self, 'gnn_optimizer') else None
                             }
                             with open("gnn_results.pkl", "wb") as f:
                                 pickle.dump(gnn_state_to_save, f)
@@ -1136,6 +1234,49 @@ class Demo:
                             print(f"Error saving GNN state: {e}")
                     else:
                         print("No active GNN model to save.")
+
+            # Self-Attention parameters (only shown when Self-Attention is selected)
+            elif (
+                self.optimization_methods[self.optimization_method_idx]
+                == "Self-Attention"
+            ):
+                imgui.text("Self-Attention Parameters:")
+                _, self.sa_message_steps = imgui.slider_int(
+                    "Message Steps", self.sa_message_steps, 1, 20
+                )
+                _, self.sa_hidden_dim = imgui.slider_int(
+                    "Hidden Dim", self.sa_hidden_dim, 4, 64
+                )
+                _, self.sa_num_heads = imgui.slider_int(
+                    "Attention Heads", self.sa_num_heads, 1, 8
+                )
+                _, self.sa_num_layers = imgui.slider_int(
+                    "Attention Layers", self.sa_num_layers, 1, 6
+                )
+                _, self.sa_mlp_dim = imgui.slider_int(
+                    "MLP Dimension", self.sa_mlp_dim, 16, 128
+                )
+                _, self.sa_dropout_rate = imgui.slider_float(
+                    "Dropout Rate", self.sa_dropout_rate, 0.0, 0.5
+                )
+                if imgui.button("Reinitialize Self-Attention"):
+                    self.sa_model = None
+                    self.initialize_self_attention()
+                # Add button to save Self-Attention state
+                if imgui.button("Save Self-Attention State"):
+                    if self.sa_model is not None:
+                        try:
+                            sa_state_to_save = {
+                                "sa": nnx.state.get_state(self.sa_model),
+                                # Add optimizer state if needed
+                            }
+                            with open("gnn_results.pkl", "wb") as f:
+                                pickle.dump(sa_state_to_save, f)
+                            print("Self-Attention state saved to gnn_results.pkl")
+                        except Exception as e:
+                            print(f"Error saving Self-Attention state: {e}")
+                    else:
+                        print("No active Self-Attention model to save.")
 
             # Training controls (common to both methods)
             _, self.is_training = imgui.checkbox("is_training", self.is_training)
@@ -1313,6 +1454,58 @@ class Demo:
             import traceback
 
             print(f"Traceback: {traceback.format_exc()}")
+
+    def initialize_self_attention(self):
+        """Initialize Self-Attention optimizer if needed"""
+        if self.sa_model is None:
+            print("Initializing Self-Attention model...")
+            # Total number of nodes in the circuit
+            n_node = sum(gate_n for gate_n, _ in self.layer_sizes)
+
+            # Initialize Self-Attention using current circuit configuration
+            key = jax.random.PRNGKey(42)  # Fixed seed for reproducibility
+            try:
+                # Check if a saved SA state exists
+                if hasattr(self, "loaded_sa_state") and self.loaded_sa_state:
+                    print("Loading Self-Attention state from file...")
+                    # Create initial model instance
+                    self.sa_model = CircuitSelfAttention(
+                        n_node=n_node,
+                        hidden_dim=self.sa_hidden_dim,
+                        arity=self.arity,
+                        num_heads=self.sa_num_heads,
+                        num_layers=self.sa_num_layers,
+                        mlp_dim=self.sa_mlp_dim,
+                        dropout_rate=self.sa_dropout_rate,
+                        rngs=nnx.Rngs(params=key),
+                    )
+                    # Update with loaded state
+                    nnx.update(self.sa_model, self.loaded_sa_state["sa"])
+                    print("Self-Attention state loaded successfully.")
+
+                else:
+                    print("Creating new Self-Attention instance...")
+                    # Create a new Self-Attention instance
+                    self.sa_model = CircuitSelfAttention(
+                        n_node=n_node,
+                        hidden_dim=self.sa_hidden_dim,
+                        arity=self.arity,
+                        num_heads=self.sa_num_heads,
+                        num_layers=self.sa_num_layers,
+                        mlp_dim=self.sa_mlp_dim,
+                        dropout_rate=self.sa_dropout_rate,
+                        rngs=nnx.Rngs(params=key),
+                    )
+                    print("New Self-Attention instance created.")
+
+                print("Self-Attention initialized successfully")
+            except Exception as e:
+                print(f"Error initializing Self-Attention: {e}")
+                import traceback
+
+                print(f"Traceback: {traceback.format_exc()}")
+                # Fallback to backprop
+                self.optimization_method_idx = 0
 
 
 if __name__ == "__main__":
