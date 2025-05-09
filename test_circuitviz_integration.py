@@ -467,7 +467,7 @@ gnn_results = train_model(
     arity=arity,             
     
     # TRAINING PARAMS
-    epochs=100, # Significantly reduced for a quick test run
+    epochs=2**16, # Significantly reduced for a quick test run
     n_message_steps=n_message_steps_gnn, 
     meta_batch_size=32, # Reduced from original 256 for potentially faster iteration
     
