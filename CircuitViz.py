@@ -189,38 +189,50 @@ class CircuitVisualizer:
                 is_hovered = is_point_in_box(p0, p1, io.mouse_pos)
                 if is_hovered:
                     dl.add_rect(p0, p1, 0xA00000FF, 4, thickness=2.0)
-                    if li > 0 and i < len(self.logits[li-1].flat): # Check bounds for logits
-                        # Logits are [layer_idx-1][group_idx, element_in_group_idx]
-                        # i is the flattened index for the current layer li
-                        logit_val = self.logits[li - 1].reshape(-1)[i // group_size, i % group_size] # This indexing might be wrong
-                        # Original: self.logits[li - 1][i // group_size, i % group_size]
-                        # self.logits is a list of arrays, each shaped (group_n, group_size, lut_size)
-                        # So we need to access the correct logit based on its group and position in group.
-                        
-                        # Ensure logits for layer li-1 exist and i is a valid index
-                        if self.logits and li > 0 and (li-1) < len(self.logits):
-                            current_layer_logits = self.logits[li-1] # Shape (group_n_prev_layer, group_size_prev_layer, lut_size)
-                            # This needs to map 'i' (gate index in current layer) to a logit in the *previous* layer's output
-                            # This logic is complex as 'i' is for the current layer 'li' of nodes,
-                            # but logits are associated with connections/gates *between* layers.
-                            # The original `hover_gate` logic used `self.logits[li - 1][i // group_size, i % group_size]`
-                            # This implies `i` here should refer to the gate index *in the context of the logits array for that layer*.
-                            # The current `i` is an index for the *nodes* in layer `li`.
-                            # A gate's output becomes a node in the next layer. So, node `i` in layer `li` corresponds to gate `i` in layer `li-1`.
-                            num_groups_in_logit_layer = current_layer_logits.shape[0]
-                            num_in_group_logit_layer = current_layer_logits.shape[1]
-                            
-                            if (i // num_in_group_logit_layer) < num_groups_in_logit_layer and \
-                               (i % num_in_group_logit_layer) < num_in_group_logit_layer:
-                                logit_val_for_hover = current_layer_logits[i // num_in_group_logit_layer, i % num_in_group_logit_layer]
-                                hover_gate = (x_coord, y, logit_val_for_hover)
+                    if li > 0 and self.logits and (li-1) < len(self.logits) and self.logits[li-1] is not None: # Check if logits for prev layer exist
+                        current_layer_logits = self.logits[li-1]
+                        total_gates_in_logit_array = current_layer_logits.shape[0] * current_layer_logits.shape[1]
+                        if i < total_gates_in_logit_array: # Check if 'i' is a valid gate index for this logit array
+                            # Logits are [layer_idx-1][group_idx, element_in_group_idx]
+                            # i is the flattened index for the current layer li (node index)
+                            # This node i is the output of gate i from the perspective of the logit array structure.
+                            logit_val = current_layer_logits[i // group_size, i % group_size]
+                            hover_gate = (x_coord, y, logit_val)
 
 
                 if io.mouse_clicked[0] and is_hovered:
                     if li > 0: # Not input layer
-                        if self.on_toggle_gate_mask:
-                             # Needs layer index (li) and gate index within layer (i)
-                            self.on_toggle_gate_mask(li, i)
+                        # Directly modify logits to zero out the LUT, similar to random_wires_demo.py
+                        if (li - 1) < len(self.logits) and self.logits[li-1] is not None and \
+                           li < len(self.layer_sizes): # Ensure layer_sizes[li] is accessible
+                            
+                            # layer_sizes is a list of (gate_n, group_size) tuples
+                            # node 'i' in layer 'li' is determined by a gate in the output of layer 'li-1'
+                            # The group_size for indexing nodes in layer 'li' is self.layer_sizes[li][1]
+                            _, current_layer_node_group_size = self.layer_sizes[li]
+
+                            if current_layer_node_group_size > 0 : # Avoid division by zero
+                                group_idx = i // current_layer_node_group_size
+                                gate_in_group_idx = i % current_layer_node_group_size
+                                
+                                logit_array_for_gate_input_layer = self.logits[li-1] # JAX array for gates feeding into layer li
+
+                                # Ensure indices are within bounds for the specific logit array
+                                if group_idx < logit_array_for_gate_input_layer.shape[0] and \
+                                   gate_in_group_idx < logit_array_for_gate_input_layer.shape[1]:
+                                    
+                                    target_lut = logit_array_for_gate_input_layer[group_idx, gate_in_group_idx]
+                                    zero_lut = jp.zeros_like(target_lut)
+                                    
+                                    updated_logit_array_for_layer = logit_array_for_gate_input_layer.at[group_idx, gate_in_group_idx].set(zero_lut)
+                                    self.logits[li-1] = updated_logit_array_for_layer
+                                    # No change to self.gate_mask here, gate remains "active" for other purposes.
+                                else:
+                                    # This print might be noisy, consider logging or removing in production
+                                    print(f"CircuitViz Warning: Logit index out of bounds for layer {li-1}. Clicked node {i} in layer {li}. GroupIdx: {group_idx}, GateInGroupIdx: {gate_in_group_idx}, LogitArrayShape: {logit_array_for_gate_input_layer.shape}")
+                            else:
+                                print(f"CircuitViz Warning: group_size for layer {li} (nodes) is 0 or invalid, cannot determine logit index for click on node {i}.")
+                        # The self.on_toggle_gate_mask callback is no longer called here for this action.
                     else: # Input layer
                         if self.on_set_active_case_i:
                             # Toggle the i-th bit of active_case_i
@@ -370,6 +382,11 @@ class CircuitVisualizer:
         view_w = imgui.get_content_region_avail().x
         img_h, img_w = img_data_to_display.shape[:2]
         
+        # Ensure the width passed to immvision is not negative or extremely small.
+        display_param_w = view_w
+        if view_w < 1.0:
+            display_param_w = 0.0
+        
         # immvision.image_display_resizable expects a name that is unique for the image texture
         unique_img_name = f"{name}_display_##{id(img_data_to_display)}"
 
@@ -377,7 +394,7 @@ class CircuitVisualizer:
         display_img_cont = np.ascontiguousarray(img_data_to_display)
 
         mx, _ = immvision.image_display_resizable(
-            unique_img_name, display_img_cont, (view_w, 0), resizable=False, refresh_image=True
+            unique_img_name, display_img_cont, (display_param_w, 0), resizable=False, refresh_image=True
         )
         
         if img_w > 0 and self.case_n > 0: # Avoid division by zero
@@ -417,7 +434,7 @@ class CircuitVisualizer:
                 # The function signature is (label_id: str, x_value: float, color: Union[Vec4, Vec3] = ..., thickness: float = ...)
                 # So, we pass self.trainstep_i directly if it is the x_value.
                 # The id `1` needs to be unique if multiple drag lines are used.
-                implot.drag_line_x("training_progress_line", float(current_step_in_log), (0.8, 0, 0, 0.5))
+                implot.drag_line_x(1, float(current_step_in_log), (0.8, 0, 0, 0.5))
             implot.end_plot()
 
         imgui.separator_text("Inputs")

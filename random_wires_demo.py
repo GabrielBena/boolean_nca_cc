@@ -398,9 +398,18 @@ class Demo:
     def draw_lut(self, name, img):
         view_w = imgui.get_content_region_avail().x
         img_h, img_w = img.shape[:2]
+
+        # Ensure the width passed to immvision is not negative or extremely small.
+        # If view_w is < 1.0, pass 0.0 for width to image_display_resizable.
+        # For immvision, (0.0, 0.0) size usually means display at original image size.
+        display_param_w = view_w
+        if view_w < 1.0:
+            display_param_w = 0.0
+
         mx, _ = immvision.image_display_resizable(
-            name, img, (view_w, 0), resizable=False, refresh_image=True
+            name, img, (display_param_w, 0.0), resizable=False, refresh_image=True
         )
+
         if mx > 0.0 and mx < img_w:
             self.active_case_i = int(mx / img_w * case_n)
         x0, y0 = imgui.get_item_rect_min()
