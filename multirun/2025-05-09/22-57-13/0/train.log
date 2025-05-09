@@ -1,0 +1,128 @@
+[2025-05-09 22:58:19,720][__main__][INFO] - model:
+  type: gnn
+  hidden_dim: 128
+  message_passing: true
+  node_mlp_features:
+  - 128
+  - 128
+  edge_mlp_features:
+  - 128
+  - 128
+  use_attention: true
+seed: 0
+test_seed: 42
+wandb:
+  enabled: true
+  project: boolean-nca-cc
+  entity: m2snn
+  run_name: null
+  tags:
+  - boolean-circuit
+  - nca
+  - meta-learning
+circuit:
+  task: binary_multiply
+  input_bits: 2
+  output_bits: 2
+  arity: 2
+  num_layers: 2
+  layer_sizes: null
+training:
+  learning_rate: 0.003
+  weight_decay: 1.0e-05
+  epochs: null
+  epochs_power_of_2: 8
+  loss_type: l4
+  wiring_mode: fixed
+  meta_batch_size: 4
+  n_message_steps: 1
+  lr_scheduler: linear_warmup
+pool:
+  size: 1024
+  reset_fraction: 0.05
+  reset_interval: 32
+  reset_strategy: combined
+  combined_weights:
+  - 0.5
+  - 0.5
+  gate_knockout:
+    active: true
+    fraction: 0.05
+    interval: 64
+    strategy: uniform
+    damage_prob: 0.1
+    combined_weights:
+    - 0.5
+    - 0.5
+  soft_lut_damage:
+    active: true
+    fraction: 0.05
+    interval: 64
+    strategy: uniform
+    damage_prob: 0.1
+    combined_weights:
+    - 0.5
+    - 0.5
+backprop:
+  enabled: true
+  epochs: 100
+  learning_rate: 1
+  weight_decay: 0.1
+  optimizer: adamw
+  beta1: 0.8
+  beta2: 0.8
+eval:
+  inner_steps: 100
+checkpoint:
+  enabled: true
+  interval: 1024
+  save_best: true
+  best_metric: hard_accuracy
+  save_stable_states: true
+logging:
+  log_interval: 10
+  level: INFO
+
+[2025-05-09 22:58:19,773][__main__][INFO] - Working directory: /home/marcello/workspace/boolean_nca_cc
+[2025-05-09 22:58:24,890][__main__][INFO] - Circuit layer sizes: [(2, 1), (8, 2), (4, 1), (2, 1)]
+[2025-05-09 22:58:24,890][__main__][INFO] - Number of nodes: 16
+[2025-05-09 22:58:25,093][__main__][INFO] - Running baseline backpropagation training
+[2025-05-09 22:58:27,441][__main__][INFO] - BP Epoch 0: Loss=1.7263, Acc=0.6250, Hard Acc=0.6250
+[2025-05-09 22:58:28,947][__main__][INFO] - BP Epoch 10: Loss=0.0014, Acc=1.0000, Hard Acc=1.0000
+[2025-05-09 22:58:28,994][__main__][INFO] - BP Epoch 20: Loss=0.0016, Acc=1.0000, Hard Acc=1.0000
+[2025-05-09 22:58:29,044][__main__][INFO] - BP Epoch 30: Loss=0.0004, Acc=1.0000, Hard Acc=1.0000
+[2025-05-09 22:58:29,092][__main__][INFO] - BP Epoch 40: Loss=0.0002, Acc=1.0000, Hard Acc=1.0000
+[2025-05-09 22:58:29,141][__main__][INFO] - BP Epoch 50: Loss=0.0001, Acc=1.0000, Hard Acc=1.0000
+[2025-05-09 22:58:29,191][__main__][INFO] - BP Epoch 60: Loss=0.0000, Acc=1.0000, Hard Acc=1.0000
+[2025-05-09 22:58:29,239][__main__][INFO] - BP Epoch 70: Loss=0.0000, Acc=1.0000, Hard Acc=1.0000
+[2025-05-09 22:58:29,288][__main__][INFO] - BP Epoch 80: Loss=0.0000, Acc=1.0000, Hard Acc=1.0000
+[2025-05-09 22:58:29,339][__main__][INFO] - BP Epoch 90: Loss=0.0000, Acc=1.0000, Hard Acc=1.0000
+[2025-05-09 22:58:30,356][__main__][INFO] - BP Final: Loss=0.0000, Acc=1.0000, Hard Acc=1.0000
+[2025-05-09 22:58:33,183][__main__][INFO] - Starting GNN training
+[2025-05-09 22:58:35,150][boolean_nca_cc.training.train_loop][INFO] - WandB run ID: 5hf2vyb5
+[2025-05-09 22:58:35,150][boolean_nca_cc.training.train_loop][INFO] - Checkpoints will be saved to: /home/marcello/workspace/boolean_nca_cc/checkpoints/run_5hf2vyb5
+[2025-05-09 22:58:45,386][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 0 with hard_accuracy=0.6250
+[2025-05-09 22:58:45,401][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_5hf2vyb5/best_model_hard_accuracy.pkl
+[2025-05-09 22:58:45,962][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 24 with hard_accuracy=0.6562
+[2025-05-09 22:58:45,982][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_5hf2vyb5/best_model_hard_accuracy.pkl
+[2025-05-09 22:58:46,245][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 29 with hard_accuracy=0.6875
+[2025-05-09 22:58:46,260][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_5hf2vyb5/best_model_hard_accuracy.pkl
+[2025-05-09 22:58:46,497][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 31 with hard_accuracy=0.8750
+[2025-05-09 22:58:46,515][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_5hf2vyb5/best_model_hard_accuracy.pkl
+[2025-05-09 22:58:50,460][boolean_nca_cc.training.train_loop][INFO] - Applying gate knockout at epoch 64
+[2025-05-09 22:58:53,616][boolean_nca_cc.training.train_loop][INFO] - Applying soft LUT damage at epoch 64
+[2025-05-09 22:58:54,768][boolean_nca_cc.training.train_loop][INFO] - Applying gate knockout at epoch 128
+[2025-05-09 22:58:55,604][boolean_nca_cc.training.train_loop][INFO] - Applying soft LUT damage at epoch 128
+[2025-05-09 22:58:56,669][boolean_nca_cc.training.train_loop][INFO] - Applying gate knockout at epoch 192
+[2025-05-09 22:58:57,582][boolean_nca_cc.training.train_loop][INFO] - Applying soft LUT damage at epoch 192
+[2025-05-09 22:58:58,961][__main__][INFO] - Evaluating inner loop performance
+[2025-05-09 22:59:09,371][__main__][INFO] - Training complete. Final results:
+[2025-05-09 22:59:09,371][__main__][INFO] -   Meta Loss: 0.1254
+[2025-05-09 22:59:09,372][__main__][INFO] -   Meta Hard Loss: 1.0000
+[2025-05-09 22:59:09,372][__main__][INFO] -   Meta Accuracy: 0.8750
+[2025-05-09 22:59:09,372][__main__][INFO] -   Meta Hard Accuracy: 0.8750
+[2025-05-09 22:59:09,372][__main__][INFO] -   Inner Loop Final Loss: 0.1250
+[2025-05-09 22:59:09,372][__main__][INFO] -   Inner Loop Final Hard Loss: 1.0000
+[2025-05-09 22:59:09,372][__main__][INFO] -   Inner Loop Final Accuracy: 0.8750
+[2025-05-09 22:59:09,372][__main__][INFO] -   Inner Loop Final Hard Accuracy: 0.8750
+[2025-05-09 22:59:09,372][__main__][INFO] -   Best hard_accuracy: 0.8750

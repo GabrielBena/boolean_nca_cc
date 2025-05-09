@@ -5,6 +5,20 @@ defaults:
   - model: gnn  # Default model (gnn or self_attention)
   - _self_  # For self-overrides
 
+hydra:
+  mode: RUN
+#  sweeper:
+#    params:
+#      circuit.input_bits: 2,3,4
+#      circuit.output_bits: 2,3,4
+#      circuit.num_layers: 2,3,4
+#      training.wiring_mode: fixed,random
+#      training.epochs_power_of_2: 8,16
+#      training.n_message_steps: 1,10,25
+#      pool.gate_knockout.active: true,false
+#      pool.soft_lut_damage.active: true,false
+#      backprop.enabled: true
+
 # Random seed for reproducibility
 seed: 0
 test_seed: 42
@@ -24,7 +38,7 @@ circuit:
   input_bits: 4
   output_bits: 4
   arity: 2
-  num_layers: 5
+  num_layers: 3
   layer_sizes: null  # Auto-generate if null 
 
 # Training parameters
@@ -32,7 +46,7 @@ training:
   learning_rate: 3e-3
   weight_decay: 1e-5
   epochs: null
-  epochs_power_of_2: 7 # 2^10
+  epochs_power_of_2: 8 # 2^10
   loss_type: "l4"  # Options: "l4" or "bce"
   wiring_mode: "fixed"  # Options: "fixed" or "random"
   meta_batch_size: 4
@@ -45,7 +59,26 @@ pool:
   reset_fraction: 0.05
   reset_interval: 32  # 2^5
   reset_strategy: "combined"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
-  
+  combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
+
+  # Gate knockout ("hard" LUT zeroing - resets globals)
+  gate_knockout:
+    active: false
+    fraction: 0.05
+    interval: 64 
+    strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
+    damage_prob: 0.1  # Probability of zeroing an entire LUT in selected circuits
+    combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined strategy
+
+  # Soft LUT damage ("soft" LUT zeroing - preserves globals)
+  soft_lut_damage:
+    active: true
+    fraction: 0.05
+    interval: 64
+    strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
+    damage_prob: 0.1 # Probability of zeroing an entire LUT in selected circuits
+    combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined strategy
+
 # Backpropagation baseline
 backprop:
   enabled: true
@@ -72,3 +105,6 @@ checkpoint:
 logging:
   log_interval: 10  # Log metrics every N epochs
   level: "INFO" 
+
+# execution_environment:
+#   target_gpu_ids: "2"  # Specify intended GPU ID(s), e.g., "0", "0,1" 

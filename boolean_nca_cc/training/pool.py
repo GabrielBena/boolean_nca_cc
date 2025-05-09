@@ -489,7 +489,6 @@ class GraphPool(struct.PyTreeNode):
         
         if self.wires is None or self.logits is None or self.gate_knockout_applied is None:
             # Cannot apply if essential components are missing
-            print("Warning: Cannot apply gate_knockout, essential components (wires, logits, or gate_knockout_applied flag) missing.")
             return self
 
         # Identify eligible circuits (those not yet knocked out)
@@ -497,7 +496,6 @@ class GraphPool(struct.PyTreeNode):
         num_eligible = eligible_indices.shape[0]
 
         if num_eligible == 0:
-            print("Warning: No eligible circuits for gate_knockout (all may have been knocked out already).")
             return self
 
         # Determine how many to target based on fraction of total pool size, capped by eligible count
@@ -647,7 +645,6 @@ class GraphPool(struct.PyTreeNode):
         
         if self.wires is None or self.logits is None or self.graphs.globals is None:
             # Cannot apply if essential components are missing
-            print("Warning: Cannot apply LUT damage, essential components (wires, logits, or globals) missing.")
             return self
 
         num_to_damage = jp.round(fraction * self.size).astype(jp.int32)
@@ -778,7 +775,7 @@ def initialize_graph_pool(
         single_wires, single_logits = gen_circuit(rng, layer_sizes, arity=arity)
         # print(f"INIT WITH RNG {rng}")
 
-        print(f"SINGLE WIRES {single_wires}")
+        # print(f"SINGLE WIRES {single_wires}")
 
         # Replicate the same wiring for all circuits in the pool
         all_wires = jax.tree.map(

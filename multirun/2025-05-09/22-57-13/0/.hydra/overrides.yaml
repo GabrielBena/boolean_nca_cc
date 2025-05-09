@@ -1,0 +1,9 @@
+- circuit.input_bits=2
+- circuit.output_bits=2
+- circuit.num_layers=2
+- training.wiring_mode=fixed
+- training.epochs_power_of_2=8
+- training.n_message_steps=1
+- pool.gate_knockout.active=True
+- pool.soft_lut_damage.active=True
+- backprop.enabled=True

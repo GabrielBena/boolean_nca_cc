@@ -747,6 +747,40 @@ def train_model(
                 combined_weights=combined_weights,
             )
 
+        # Apply gate knockout periodically
+        if (
+            gate_knockout_active
+            and epoch > 0
+            and gate_knockout_interval is not None
+            and epoch % gate_knockout_interval == 0
+        ):
+            rng, knockout_key = jax.random.split(rng)
+            log.info(f"Applying gate knockout at epoch {epoch}")
+            circuit_pool = circuit_pool.gate_knockout(
+                knockout_key,
+                gate_knockout_fraction,
+                gate_knockout_damage_prob,  # Corresponds to lut_damage_prob in pool.py
+                gate_knockout_strategy,  # Corresponds to reset_strategy in pool.py
+                gate_knockout_combined_weights,
+            )
+
+        # Apply soft LUT damage (zero_luts_for_fraction) periodically
+        if (
+            soft_lut_damage_active
+            and epoch > 0
+            and soft_lut_damage_interval is not None
+            and epoch % soft_lut_damage_interval == 0
+        ):
+            rng, soft_damage_key = jax.random.split(rng)
+            log.info(f"Applying soft LUT damage at epoch {epoch}")
+            circuit_pool = circuit_pool.zero_luts_for_fraction(
+                soft_damage_key,
+                soft_lut_damage_fraction,
+                soft_lut_damage_damage_prob,  # Corresponds to lut_damage_prob in pool.py
+                soft_lut_damage_strategy,  # Corresponds to selection_strategy in pool.py
+                soft_lut_damage_combined_weights,
+            )
+            
         if jp.isnan(loss):
             log.warning(f"Loss is NaN at epoch {epoch}, returning last stable state")
             # Save the last stable state if enabled
