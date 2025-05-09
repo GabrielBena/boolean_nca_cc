@@ -2,6 +2,9 @@
 # Randomly wired boolean circuits demo - FIXED VERSION FOR WSL
 # Modified from Alexander Mordvintsev's original
 # This version avoids immvision and uses direct imgui image display
+import os
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import time
 import numpy as np
@@ -15,6 +18,9 @@ from functools import partial
 import pickle
 import os
 from flax import nnx
+from sklearn.decomposition import PCA
+import math
+
 
 # Import modules for boolean circuits
 from boolean_nca_cc.circuits.model import (
@@ -22,7 +28,7 @@ from boolean_nca_cc.circuits.model import (
     run_circuit,
     generate_layer_sizes,
 )
-from boolean_nca_cc.circuits.training import (
+from boolean_nca_cc.circuits.train import (
     unpack,
     res2loss,
 )
@@ -160,10 +166,12 @@ max_trainstep_n = 1000
 class Demo:
     def __init__(self):
         # Circuit configuration
-        self.input_n = 4
-        self.output_n = 4
-        self.arity = 2
-        self.layer_n = 2
+        self.input_n = 8
+        self.output_n = 8
+        self.arity = 4
+        self.layer_n = 4
+        
+        self.edge_colors = {}
 
         # Update case_n based on input_n
         self.case_n = 1 << self.input_n
@@ -213,6 +221,7 @@ class Demo:
 
         # Visualization settings
         self.use_simple_viz = False
+        self.use_message_viz = False
 
         # Plot settings
         self.max_loss_value = 10.0  # Maximum loss value to display
@@ -240,19 +249,23 @@ class Demo:
 
         # Optimization method (backprop/GNN)
         self.optimization_methods = ["Backprop", "GNN"]
-        self.optimization_method_idx = 0  # Default to Backprop
+        self.optimization_method_idx = 0  # GNN
 
         # GNN parameters (used if GNN is selected)
         self.gnn = None
-        self.gnn_hidden_dim = 16
-        self.gnn_message_steps = 5 # Lower default for faster UI
-        self.gnn_node_mlp_features = [64, 32]
-        self.gnn_edge_mlp_features = [64, 32]
+        self.gnn_hidden_dim = 64
+        self.gnn_message_steps = 1 # Lower default for faster UI
+        hidden_features = 64
+
+        self.gnn_node_mlp_features = [hidden_features, hidden_features]
+        self.gnn_edge_mlp_features = [hidden_features, hidden_features]
         self.gnn_enable_message_passing = True
         self.loaded_gnn_state = None # Variable to store loaded state
 
         # Attempt to load GNN state
         gnn_state_file = "gnn_results.pkl"
+        gnn_state_file = "tofix"
+
         if os.path.exists(gnn_state_file):
             print(f"Found {gnn_state_file}, attempting to load...")
             try:
@@ -260,13 +273,13 @@ class Demo:
                     # Load the dictionary containing GNN state and potentially optimizer state
                     loaded_data = pickle.load(f)
                     # Store the relevant parts for initialize_gnn
-                    if 'gnn' in loaded_data:
+                    if 'model' in loaded_data:
                          self.loaded_gnn_state = loaded_data # Store the whole dict for now
                          print("GNN state loaded successfully from file.")
                          # Optionally set GNN as the default method if loaded
                          # self.optimization_method_idx = self.optimization_methods.index("GNN")
                     else:
-                        print(f"Warning: '{gnn_state_file}' found but does not contain 'gnn' key.")
+                        print(f"Warning: '{gnn_state_file}' found but does not contain 'model' key.")
 
             except Exception as e:
                 print(f"Error loading GNN state from {gnn_state_file}: {e}")
@@ -316,6 +329,8 @@ class Demo:
             )
             self.wires.append(ws)
             in_n = gate_n
+        self.wire_colors = [jp.zeros_like(layer_wires) for layer_wires in self.wires]
+
 
         # Reset GNN when wires change
         self.gnn = None
@@ -401,7 +416,16 @@ class Demo:
                 if hasattr(self, 'loaded_gnn_state') and self.loaded_gnn_state:
                     print("Loading GNN state from file...")
                     # Restore GNN state
-                    nnx.update(self.gnn, self.loaded_gnn_state['gnn'])
+                    self.gnn = CircuitGNN(
+                        node_mlp_features=self.gnn_node_mlp_features,
+                        edge_mlp_features=self.gnn_edge_mlp_features,
+                        hidden_dim=self.gnn_hidden_dim,
+                        arity=self.arity,
+                        message_passing=self.gnn_enable_message_passing,
+                        # Add other necessary params like use_attention if configured
+                        rngs=nnx.Rngs(params=key) # Pass RNGs correctly
+                    )
+                    nnx.update(self.gnn, self.loaded_gnn_state['model'])
                     print("GNN state loaded successfully.")
 
                 else:
@@ -452,6 +476,7 @@ class Demo:
 
     def update_circuit_gnn(self):
         """Update circuit using GNN"""
+        run_PCA = False
         try:
             # Ensure GNN is initialized
             self.initialize_gnn()
@@ -469,11 +494,99 @@ class Demo:
                     self.arity,
                     self.gnn_hidden_dim,
                 )
+                
+                total_elements = sum(wire.shape[0]*wire.shape[1] for wire in self.wires)
+                print(f"Total number of elements in self.wires sub-arrays: {total_elements}")
+                
 
                 # Run GNN for specified number of steps
-                updated_graph = run_gnn_scan(
-                    self.gnn, circuit_graph, self.gnn_message_steps
+                updated_graph, messages = run_gnn_scan(
+                    self.gnn, circuit_graph, self.gnn_message_steps, run_PCA=True
                 )
+                
+                # late night attempt failed, do now how to get the pin ouf of arity from messages info
+                if run_PCA:
+                    pca = PCA(n_components=3)
+                    # Fit PCA on the data and transform
+                    colors = pca.fit_transform(messages)
+                    
+                    senders = updated_graph.senders
+                    receivers = updated_graph.receivers
+                    #print(messages.shape[0])
+                    
+                    #print(len([el for el in updated_graph.nodes["layer"] if el==1]))
+                    
+                    for message_idx in range(colors.shape[0]):
+                        
+                        #if message_idx == 256:
+                            #print("check")
+          
+                        sender = int(senders[message_idx]) 
+                        temp = updated_graph.nodes["gate_id"]
+                        sender_node_idx = [idx for idx, el in enumerate(temp) if el==sender]
+                        sender_node_idx = sender_node_idx[0]
+                        #print(sender, sender_node_idx)
+                        sender_layer = int(updated_graph.nodes["layer"][sender_node_idx])                          
+                        receiver_layer = sender_layer + 1
+                        
+                        # figure out on which gate in the layer the sender corresponds to
+                        if sender_layer >= len(self.layer_sizes):
+                            break
+                        
+                        if sender_layer:
+                            #temp = []
+                            #for layer in self.layer_sizes[:sender_layer]:
+                            #    temp.append(np.prod(*layer) )
+                            #n_prec_gates = sum(temp)
+                            
+
+                            n_prec_gates = sum([math.prod(layer) for layer in self.layer_sizes[:sender_layer]])
+                        else:
+                            n_prec_gates = 0
+                        src_idx = sender-n_prec_gates
+                        """
+                        
+                        # figure out on which gate in the layer the sender corresponds to
+                        receiver = int(receivers[message_idx]) 
+                        if receiver_layer == 1:
+                            n_prec_gates = sum(self.layer_sizes[0])
+                        else:
+                            n_prec_gates = sum([np.prod(*layer) for layer in self.layer_sizes[:receiver_layer]])
+
+                        receiver_idx = receiver-n_prec_gates
+                        """
+                        if receiver_layer < len(self.layer_sizes):
+                            num_receiving_groups = self.layer_sizes[receiver_layer][1]
+                            pin_idx = np.random.randint(0, self.arity)
+                            group_idx = np.random.randint(0, num_receiving_groups)
+                            self.edge_colors[(receiver_layer, src_idx, pin_idx, group_idx)] = colors[message_idx,...]
+                            #print(message_idx)
+                            
+
+
+                        #num_gates_per_group = self.layer_sizes[receiver_layer][0]
+                        #receiver_node_idxs = [el for el in range(num_gates_per_group)]*num_receiving_groups
+                        #group_idxs = np.repeat(np.arange(num_receiving_groups), num_gates_per_group) 
+                        
+                        
+                        #print(receiver_idx, len(group_idxs))
+
+                        #pin_idx = np.random.randint(0, self.arity)
+                        #pin_idx = receiver_node_idxs[receiver_idx]
+                        #group_idx = int(group_idxs[receiver_idx])
+                        
+                        #src_idx = 
+                        #group_idx = np.random.randint(0, num_receiving_groups)
+                        
+
+                        
+                        
+                    
+                else:
+                    self.edge_colors = {}
+                    
+                    
+                
 
                 # Extract updated logits if training is enabled
                 if self.is_training:
@@ -633,6 +746,30 @@ class Demo:
         for (i, j), c in np.ndenumerate(col):
             x, y = x0 + j * 10, y0 + i * 10
             dl.add_rect_filled((x, y), (x + 10, y + 10), c)
+            
+            
+    def color_from_rgb_array(self, a, alpha=255):
+        """
+        Takes a 3-element array [r, g, b] (values can be floats or ints),
+        clamps to [0, 255], and returns a packed 32-bit ARGB color.
+        """
+        r = max(0, min(255, int(a[0])))
+        g = max(0, min(255, int(a[1])))
+        b = max(0, min(255, int(a[2])))
+        return (alpha << 24) | (r << 16) | (g << 8) | b
+
+    def to_rgb_color(self, a):
+        # Normalize and clamp each component to [0, 255]
+        def normalize(v):
+            # Map values from [-1, 1] to [0, 255]
+            return max(0, min(255, int((v + 1) * 127.5)))
+
+        r = normalize(a[0])
+        g = normalize(a[1])
+        b = normalize(a[2])
+
+        # Pack into 0xRRGGBB
+        return (r << 16) + (g << 8) + b
 
     def draw_circuit(self, pad=4, d=24, H=600):
         io = imgui.get_io()
@@ -682,6 +819,7 @@ class Demo:
 
             for i, x in enumerate(gate_x):
                 a = int(act[i] * 0xA0) if i < len(act) else 0
+                #col = 0xFF404040 + (a << 16)  # Shift `a` into the red channel
                 col = 0xFF202020 + (a << 8)
                 p0, p1 = (x - gate_w / 2, y - d / 2), (x + gate_w / 2, y + d / 2)
                 dl.add_rect_filled(p0, p1, col, 4)
@@ -727,14 +865,56 @@ class Demo:
                     + (np.arange(self.arity) + 0.5) / self.arity * group_w
                     - group_w / 2
                 )
+                
                 my = (prev_y + y) / 2
-                for x0, x1, si, m in zip(
-                    src_x.ravel(), dst_x.ravel(), wires.ravel(), masks.ravel()
+                
+                num_receiving_groups = self.layer_sizes[li][1]
+                receiver_node_idxs = [el for el in range(self.arity)]*num_receiving_groups
+                group_idxs = np.repeat(np.arange(num_receiving_groups), self.arity)          
+                for x0, x1, si, ri, gi,  m in zip(
+                    src_x.ravel(), dst_x.ravel(), wires.ravel(), receiver_node_idxs, group_idxs, masks.ravel()
                 ):
+                    # si is the ID of source node
                     if not m:
                         continue
                     a = int(prev_act[si] * 0x60) if si < len(prev_act) else 0
-                    col = 0xFF404040 + (a << 8)
+                    
+                    #a = [0,0,255]
+                    #col = self.color_from_rgb_array(a)
+                    
+                    if self.use_message_viz and self.optimization_methods[self.optimization_method_idx] != "Backprop":
+                        import random
+                        r = random.randint(0, 255)
+                        g = random.randint(0, 255)
+                        b = random.randint(0, 255)
+                        a = random.randint(0, 255)  # Optional alpha value
+
+                        # Combine into a single 32-bit integer in ARGB format
+                        col = (a << 24) | (r << 16) | (g << 8) | b
+                    else:
+                        col = 0xFF404040 + (a << 8)
+                    
+                    
+                    """
+                    if self.edge_colors:
+                        if (li, int(si), ri, int(gi)) in self.edge_colors.keys():
+                            color = self.edge_colors[(li, int(si), ri, int(gi))]  # this is 3 values for the rgb
+                            col = self.to_rgb_color(color)
+                        else:
+                            col = 0xFF404040 + (a << 8)
+                    """
+
+                    #else:
+                    #    col = 0xFF404040 + (a << 8)
+                    
+                    #col2 = 0xFF404040 + (a << 8)
+                    
+                    #r, g, b = prev_act[si] * 255, 0, 0  # Example: Red intensity based on activation
+                    #col = 0xFF000000 | (int(b) << 16) | (int(g) << 8) | int(r)
+                    #col = 0xFF404040 + (a << 16)  # Shift `a` into the red channel
+                    
+                    #r = int(r) & 0xFF  # Ensure the value is in the range 0-255
+
                     dl.add_bezier_cubic(
                         (x0, prev_y + d / 2),
                         (x0, my),
@@ -1058,6 +1238,16 @@ class Demo:
                 print(
                     f"Visualization mode: {'Simple' if self.use_simple_viz else 'Detailed'}"
                 )
+            
+                
+            activated_message_viz, self.use_message_viz = imgui.checkbox(
+                "Message visualization", self.use_message_viz
+            )
+            if activated_message_viz:
+                print(
+                    f"Visualization mode: {'Messages displayed' if self.use_message_viz else 'Messages not displayed'}"
+                )
+            
 
             # Plot settings
             imgui.separator_text("Plot Settings")

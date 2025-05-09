@@ -33,8 +33,7 @@ class CircuitGNN(nnx.Module):
         message_passing: bool = True,
         use_attention: bool = False,
         *,
-        rngs: nnx.Rngs,
-    ):
+        rngs: nnx.Rngs):
         """
         Initialize the Circuit GNN.
 
@@ -50,7 +49,7 @@ class CircuitGNN(nnx.Module):
         self.arity = arity
         self.message_passing = message_passing
         self.hidden_dim = hidden_dim
-
+        
         # Create the node and edge update modules
         self.node_update = NodeUpdateModule(
             node_mlp_features=node_mlp_features,
@@ -77,6 +76,8 @@ class CircuitGNN(nnx.Module):
             )
         else:
             self.aggregate_fn = aggregate_sum
+            
+            
 
     def __call__(self, graph: jraph.GraphsTuple) -> jraph.GraphsTuple:
         """
@@ -117,13 +118,12 @@ class CircuitGNN(nnx.Module):
         )
 
         # Return updated graph
-        return graph._replace(nodes=updated_nodes)
+        return graph._replace(nodes=updated_nodes), messages
 
 
 @partial(nnx.jit, static_argnames=("num_steps",))
 def run_gnn_scan(
-    gnn: CircuitGNN, graph: jraph.GraphsTuple, num_steps: int
-) -> jraph.GraphsTuple:
+    gnn: CircuitGNN, graph: jraph.GraphsTuple, num_steps: int, run_PCA: bool=False) -> jraph.GraphsTuple:
     """
     Apply the GNN message passing iteratively for multiple steps using jax.lax.scan.
 
@@ -146,12 +146,13 @@ def run_gnn_scan(
         edges = jp.zeros((senders_count, logit_dim + hidden_dim), dtype=jp.float32)
         graph = graph._replace(edges=edges)
 
+    # Initialize a placeholder for messages
     def scan_body(carry_graph, _):
-        # Apply one step of GNN message passing
-        updated_graph = gnn(carry_graph)
-        return updated_graph, None
+        updated_graph, messages = gnn(carry_graph)
+        return updated_graph, messages
 
-    # Run the scan
-    final_graph, _ = jax.lax.scan(scan_body, graph, None, length=num_steps)
+    final_graph, all_messages = jax.lax.scan(scan_body, graph, None, length=num_steps)
+    messages = jax.tree.map(lambda x: x[-1], all_messages)
 
-    return final_graph
+
+    return final_graph, messages
