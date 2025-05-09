@@ -949,10 +949,38 @@ class Demo:
                             self.logits[li - 1][i // group_size, i % group_size],
                         )
                     if io.mouse_clicked[0]:
-                        if li > 0:
-                            self.gate_mask[li][i] = 1.0 - self.gate_mask[li][i]
-                        else:
-                            self.active_case_i = self.active_case_i ^ (1 << i)
+                        if li > 0:  # Not an input layer node
+                            # Ensure that we can access self.logits[li-1]
+                            if (li - 1) < len(self.logits) and self.logits[li-1] is not None:
+                                logit_array_for_gate_inputs = self.logits[li-1]
+                                # 'group_size' is defined in this scope from self.layer_sizes[li][1].
+                                # 'i' is the flattened index of the gate/node in the current layer 'li'.
+                                
+                                if group_size > 0: 
+                                    group_idx = i // group_size
+                                    gate_in_group_idx = i % group_size
+
+                                    # Check bounds for the logit array
+                                    if group_idx < logit_array_for_gate_inputs.shape[0] and \
+                                       gate_in_group_idx < logit_array_for_gate_inputs.shape[1]:
+                                        
+                                        # Create a JAX array of zeros with the same shape as the target LUT
+                                        zero_lut_for_gate = jp.zeros_like(
+                                            logit_array_for_gate_inputs[group_idx, gate_in_group_idx]
+                                        )
+                                        
+                                        # Update the logits for the specific gate to be all zeros
+                                        self.logits[li - 1] = logit_array_for_gate_inputs.at[
+                                            group_idx, gate_in_group_idx
+                                        ].set(zero_lut_for_gate)
+                                    # else: (Removed potentially problematic commented out else)
+                                    #     print(f"FixedDemo Warning: Logit index out of bounds for layer {li-1}. Clicked node {i}.")
+                                # else: (Removed potentially problematic commented out else)
+                                #    print(f"FixedDemo Warning: group_size for nodes in layer {li} is 0.")
+                        else:  # Input layer node
+                            # 'i' here is the index of the input node.
+                            if i < self.input_n: # Make sure 'i' is a valid input bit index
+                                self.active_case_i = self.active_case_i ^ (1 << i)
                 if (
                     li < len(self.gate_mask)
                     and i < len(self.gate_mask[li])
