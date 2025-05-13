@@ -124,6 +124,13 @@ def _save_periodic_checkpoint(
         # Log to wandb if enabled
         if wandb_run:
             wandb_run.save(os.path.join(checkpoint_path, ckpt_filename))
+        # Also log this as an artifact for better tracking in wandb
+            try:
+                artifact = wandb_run.Artifact(f"checkpoint_epoch_{epoch}", type="model")
+                artifact.add_file(os.path.join(checkpoint_path, ckpt_filename))
+                wandb_run.log_artifact(artifact)
+            except Exception as e:
+                log.warning(f"Error logging checkpoint as artifact: {e}")
     except Exception as e:
         log.warning(f"Error saving checkpoint: {e}")
 
@@ -755,7 +762,7 @@ def train_model(
             and epoch % gate_knockout_interval == 0
         ):
             rng, knockout_key = jax.random.split(rng)
-            log.info(f"Applying gate knockout at epoch {epoch}")
+            # log.info(f"Applying gate knockout at epoch {epoch}")
             circuit_pool = circuit_pool.gate_knockout(
                 knockout_key,
                 gate_knockout_fraction,
@@ -772,7 +779,7 @@ def train_model(
             and epoch % soft_lut_damage_interval == 0
         ):
             rng, soft_damage_key = jax.random.split(rng)
-            log.info(f"Applying soft LUT damage at epoch {epoch}")
+            # log.info(f"Applying soft LUT damage at epoch {epoch}")
             circuit_pool = circuit_pool.zero_luts_for_fraction(
                 soft_damage_key,
                 soft_lut_damage_fraction,
