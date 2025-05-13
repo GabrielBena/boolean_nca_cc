@@ -175,8 +175,7 @@ def build_graph(
         globals_val = jp.zeros((2,), dtype=jp.float32)
     else:
         # Combine loss_value and update_steps into a single globals array
-        # Ensure update_steps is float32 before creating the array
-        globals_val = jp.array([loss_value, jp.astype(update_steps, jp.float32)], dtype=jp.float32)
+        globals_val = jp.array([loss_value, float(update_steps)], dtype=jp.float32)
 
     # Create and return the GraphsTuple
     graph = jraph.GraphsTuple(

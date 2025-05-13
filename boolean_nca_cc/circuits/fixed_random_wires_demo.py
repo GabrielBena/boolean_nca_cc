@@ -12,12 +12,6 @@ import PIL.Image, PIL.ImageDraw
 import IPython
 import ctypes
 from functools import partial
-import pickle
-import os
-from flax import nnx
-import pickle
-import os
-from flax import nnx
 
 # Import modules for boolean circuits
 from boolean_nca_cc.circuits.model import (
@@ -25,18 +19,12 @@ from boolean_nca_cc.circuits.model import (
     run_circuit,
     generate_layer_sizes,
 )
-from boolean_nca_cc.circuits.circuits.train import (
+from boolean_nca_cc.training import (
     unpack,
     res2loss,
 )
-import boolean_nca_cc.circuits.tasks as tasks  # Import the tasks module
-
-# Import GNN components
-from boolean_nca_cc.models import CircuitGNN, run_gnn_scan
-from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
-
-# Import model loading utility
-from boolean_nca_cc.training.utils import load_best_model_from_wandb
+import graph_old  # Optional graph-based circuit optimization
+import tasks  # Import the tasks module
 
 from imgui_bundle import (
     implot,
@@ -169,16 +157,10 @@ class Demo:
         self.input_n = 4
         self.output_n = 4
         self.arity = 2
-        self.layer_n = 3
-        self.hidden_dim = 128
+        self.layer_n = 2
 
         # Update case_n based on input_n
         self.case_n = 1 << self.input_n
-
-        # Wiring mode - MUST be initialized before self.update_wires() is called
-        self.wiring_modes = ["fixed", "random"]
-        self.wiring_mode_idx = 0  # Default to fixed
-        self.wiring_mode = self.wiring_modes[self.wiring_mode_idx]
 
         # Generate initial layer sizes
         self.layer_sizes = generate_layer_sizes(
@@ -195,7 +177,7 @@ class Demo:
         # Wiring configuration
         self.wires_key = jax.random.PRNGKey(42)
         self.local_noise = 0.0
-        self.update_wires()
+        self.shuffle_wires()
         self.reset_gate_mask()
 
         # Input data
@@ -251,182 +233,19 @@ class Demo:
         self.is_training = True
 
         # Optimization method (backprop/GNN)
-        self.optimization_methods = ["Backprop", "GNN", "Self-Attention"]
+        self.optimization_methods = ["Backprop", "GNN"]
         self.optimization_method_idx = 0  # Default to Backprop
 
-        # GNN parameters (used if GNN is selected)
-        # GNN parameters (used if GNN is selected)
+        # Initialize optimizers
+        self.init_optimizers()
+
+        # GNN setup (initialized on demand)
         self.gnn = None
         self.gnn_hidden_dim = 16
-        self.gnn_message_steps = 5 # Lower default for faster UI
+        self.gnn_message_steps = 5
         self.gnn_node_mlp_features = [64, 32]
         self.gnn_edge_mlp_features = [64, 32]
         self.gnn_enable_message_passing = True
-
-        # Self-Attention parameters
-        self.sa_model = None
-        self.sa_hidden_dim = 16
-        self.sa_message_steps = 1  # Lower default for faster UI
-        self.sa_num_heads = 4
-        self.sa_num_layers = 3
-        self.sa_mlp_dim = 64
-        self.sa_dropout_rate = 0.0
-
-        # WandB loading parameters
-        self.run_id = None  # Specific run ID if provided
-        self.loaded_run_id = None  # Last successfully loaded run ID
-        self.wandb_entity = "m2snn"
-        self.wandb_project = "boolean-nca-cc"
-        self.wandb_download_dir = "saves"
-
-        self.loaded_gnn_state = None  # Variable to store loaded state
-        self.loaded_sa_state = None  # Variable to store loaded self-attention state
-
-        # Initialize optimizers (Backprop optimizer first)
-        self.init_optimizers()
-
-    def create_filter_from_params(self):
-        """Create filter parameters for wandb query based on current demo settings"""
-        current_task = self.available_tasks[self.task_idx]
-        current_opt_method = self.optimization_methods[self.optimization_method_idx]
-
-        # Set model type based on optimization method
-        if current_opt_method == "GNN":
-            model_type = "gnn"
-        elif current_opt_method == "Self-Attention":
-            model_type = "self_attention"
-        else:
-            model_type = "backprop"
-
-        # Create filter dictionary
-        filters = {
-            "config.circuit.input_bits": self.input_n,
-            "config.circuit.output_bits": self.output_n,
-            "config.circuit.arity": self.arity,
-            "config.circuit.n_layers": self.layer_n,
-            "config.model.type": model_type,
-        }
-
-        # Add task to filter if it's a standard task (not text or noise)
-        if current_task not in ["text", "noise"]:
-            filters["config.dataset.task"] = current_task
-
-        # Add additional model-specific parameters if available
-        if current_opt_method == "GNN":
-            filters["config.model.hidden_dim"] = self.gnn_hidden_dim
-        elif current_opt_method == "Self-Attention":
-            filters["config.model.hidden_dim"] = self.sa_hidden_dim
-            filters["config.model.num_heads"] = self.sa_num_heads
-
-        return filters
-
-    def check_existing_model(self, run_id=None):
-        """Check if a model is already downloaded for this run_id"""
-        if run_id:
-            # Check if we already have this specific run downloaded
-            model_dir = os.path.join(self.wandb_download_dir, f"run_{run_id}")
-            if os.path.exists(model_dir):
-                print(f"Found existing downloaded model for run {run_id}")
-                # Look for model files in this directory
-                for root, dirs, files in os.walk(model_dir):
-                    for file in files:
-                        if file.endswith(".pkl") and "best_model" in file:
-                            model_path = os.path.join(root, file)
-                            print(f"Using existing model file: {model_path}")
-                            return model_path
-
-        # No existing model found
-        return None
-
-    def load_best_model(self):
-        """Load the best model from wandb based on current parameters"""
-        try:
-            filters = None
-            if self.run_id:
-                # Check if we already have this model downloaded
-                existing_model = self.check_existing_model(self.run_id)
-                if existing_model and self.run_id == self.loaded_run_id:
-                    print(f"Model for run {self.run_id} is already loaded")
-                    return True
-
-                print(f"Loading model from specific run ID: {self.run_id}")
-            else:
-                # Create filters from current parameters
-                filters = self.create_filter_from_params()
-                print(f"Loading best model with filters: {filters}")
-
-                # Check if we already have a model with these filters
-                # This is more complex and would require storing filter-to-run mappings
-
-            # Load the model
-            method_name = self.optimization_methods[self.optimization_method_idx]
-            print(f"Loading {method_name} model...")
-
-            try:
-                model, loaded_dict = load_best_model_from_wandb(
-                    run_id=self.run_id,
-                    filters=filters,
-                    seed=42,  # Use a consistent seed
-                    project=self.wandb_project,
-                    entity=self.wandb_entity,
-                    download_dir=self.wandb_download_dir,
-                )
-
-                # Store the loaded state based on optimization method
-                if method_name == "GNN":
-                    # Handle potential API differences by extracting state carefully
-                    try:
-                        self.loaded_gnn_state = {"gnn": nnx.state(model)}
-                    except (AttributeError, TypeError) as e:
-                        print(f"Error getting state with nnx.state: {e}")
-                        # Try alternative approach
-                        if hasattr(model, "_tree"):
-                            self.loaded_gnn_state = {"gnn": model._tree}
-                        else:
-                            # Last resort - store the whole model
-                            self.loaded_gnn_state = {"gnn": model}
-
-                    self.gnn = None  # Force reinitialization with new state
-                    print("GNN model loaded successfully")
-                elif method_name == "Self-Attention":
-                    # Handle potential API differences by extracting state carefully
-                    try:
-                        self.loaded_sa_state = {"sa": nnx.state(model)}
-                    except (AttributeError, TypeError) as e:
-                        print(f"Error getting state with nnx.state: {e}")
-                        # Try alternative approach
-                        if hasattr(model, "_tree"):
-                            self.loaded_sa_state = {"sa": model._tree}
-                        else:
-                            # Last resort - store the whole model
-                            self.loaded_sa_state = {"sa": model}
-
-                    self.sa_model = None  # Force reinitialization with new state
-                    print("Self-Attention model loaded successfully")
-
-                # Store the run ID we just loaded
-                if self.run_id:
-                    self.loaded_run_id = self.run_id
-                elif "run_id" in loaded_dict:
-                    self.loaded_run_id = loaded_dict["run_id"]
-                elif hasattr(model, "run_id"):
-                    self.loaded_run_id = model.run_id
-
-                return True
-
-            except Exception as inner_e:
-                print(f"Error in model loading process: {inner_e}")
-                import traceback
-
-                print(f"Traceback: {traceback.format_exc()}")
-                return False
-
-        except Exception as e:
-            print(f"Error loading model from wandb: {e}")
-            import traceback
-
-            print(f"Traceback: {traceback.format_exc()}")
-            return False
 
     def init_optimizers(self):
         """Initialize or reinitialize optimization methods"""
@@ -455,16 +274,7 @@ class Demo:
         for i in range(len(gate_masks)):
             self.gate_mask[i] = np.array(self.gate_mask[i] * gate_masks[i])
 
-    def update_wires(self):
-        if self.wiring_mode == "random":
-            self.generate_random_wires()
-        else:  # fixed
-            self.generate_fixed_wires()
-        # Reset GNN when wires change, as its internal state might depend on wiring
-        self.gnn = None
-        self.sa_model = None  # Also reset self-attention model
-
-    def generate_random_wires(self):
+    def shuffle_wires(self):
         in_n = self.input_n
         self.wires = []
         key = self.wires_key
@@ -477,20 +287,8 @@ class Demo:
             self.wires.append(ws)
             in_n = gate_n
 
-    def generate_fixed_wires(self):
-        in_n = self.input_n
-        self.wires = []
-        # Use a fixed key for fixed wires, but allow local_noise to have an effect
-        key = jax.random.PRNGKey(42)  # Fixed seed for deterministic fixed wires
-        for gate_n, group_size in self.layer_sizes[1:]:
-            # Split the key for each layer to ensure different fixed wires per layer if noise is 0
-            key, k1 = jax.random.split(key)
-            local_noise = self.local_noise if self.local_noise > 0.0 else None
-            ws = gen_wires_with_noise(
-                k1, in_n, gate_n, self.arity, group_size, local_noise
-            )
-            self.wires.append(ws)
-            in_n = gate_n
+        # Reset GNN when wires change
+        self.gnn = None
 
     def sample_noise(self):
         self.noise = np.random.rand(self.case_n, self.input_n)
@@ -563,84 +361,26 @@ class Demo:
         self.inputs_img = np.uint8(inp_img.clip(0, 1) * 255)  # Convert to uint8
 
     def initialize_gnn(self):
-        """Initialize GNN using model loaded from WandB"""
+        """Initialize GNN optimizer if needed"""
         if self.gnn is None:
             print("Initializing GNN...")
+            # Initialize GNN using current circuit configuration
             key = jax.random.PRNGKey(42)  # Fixed seed for reproducibility
-
-
             try:
-                # Try to load model from WandB if not already loaded
-                if not self.loaded_gnn_state:
-                    print("Attempting to load GNN model from WandB...")
-                    if self.load_best_model():
-                        print("Successfully loaded GNN model from WandB")
-                    else:
-                        print(
-                            "Failed to load GNN model from WandB, creating new instance"
-                        )
-
-                # Create GNN instance (whether we have loaded state or not)
-                self.gnn = CircuitGNN(
-                    node_mlp_features=self.gnn_node_mlp_features,
-                    edge_mlp_features=self.gnn_edge_mlp_features,
-                    hidden_dim=self.gnn_hidden_dim,
+                self.gnn, _, _ = graph_old.test_gnn(
+                    self.logits,
+                    self.wires,
+                    self.input_n,
                     arity=self.arity,
+                    hidden_dim=self.gnn_hidden_dim,
                     message_passing=self.gnn_enable_message_passing,
-                    rngs=nnx.Rngs(params=key),
+                    steps=1,  # Just initialize
                 )
-
-                # Update with loaded state if available
-                if self.loaded_gnn_state:
-                    print("Applying loaded GNN state...")
-                    try:
-                        # Try standard update first
-                        nnx.update(self.gnn, self.loaded_gnn_state["gnn"])
-                    except (AttributeError, TypeError) as e:
-                        print(f"Standard update failed: {e}")
-                        print("Trying alternative update approach...")
-
-                        # Alternative: Try to access the state differently
-                        gnn_state = self.loaded_gnn_state["gnn"]
-
-                        # If it's a full model, get its tree/state
-                        if hasattr(gnn_state, "_tree"):
-                            gnn_state = gnn_state._tree
-
-                        # Try to update with the extracted state
-                        try:
-                            # Try using put for each parameter
-                            for collection_name, collection in gnn_state.items():
-                                for var_name, value in collection.items():
-                                    try:
-                                        path = f"{collection_name}.{var_name}"
-                                        self.gnn.put(path, value)
-                                    except Exception as inner_e:
-                                        print(
-                                            f"Warning: Failed to update {path}: {inner_e}"
-                                        )
-                        except Exception as update_e:
-                            print(f"Alternative update also failed: {update_e}")
-                            print("Will proceed with uninitialized model")
-
-                    print("GNN initialized with loaded state")
-                else:
-                    print("GNN initialized with default parameters")
-
-                return True
-
+                print("GNN initialized successfully")
             except Exception as e:
                 print(f"Error initializing GNN: {e}")
-                import traceback
-                print(f"Traceback: {traceback.format_exc()}")
-                # Clear the loaded state to avoid repeated failures
-                self.loaded_gnn_state = None
                 # Fallback to backprop
                 self.optimization_method_idx = 0
-                print("Falling back to Backprop optimization")
-                return False
-                print("Falling back to Backprop optimization")
-                return False
 
     def update_circuit_backprop(self):
         """Update circuit using backpropagation"""
@@ -676,24 +416,22 @@ class Demo:
                 logits_original_shapes = [logit.shape for logit in self.logits]
 
                 # Create graph from current circuit
-                circuit_graph = build_graph(
-                circuit_graph = build_graph(
+                circuit_graph = graph_old.build_graph(
                     self.logits,
                     self.wires,
                     self.input_n,
                     self.arity,
-                    self.hidden_dim,
+                    self.gnn_hidden_dim,
                 )
 
                 # Run GNN for specified number of steps
-                updated_graph = run_gnn_scan(
+                updated_graph = graph_old.run_gnn_scan(
                     self.gnn, circuit_graph, self.gnn_message_steps
                 )
 
                 # Extract updated logits if training is enabled
                 if self.is_training:
-                    self.logits = extract_logits_from_graph(
-                    self.logits = extract_logits_from_graph(
+                    self.logits = graph_old.extract_logits_from_graph(
                         updated_graph, logits_original_shapes
                     )
 
@@ -731,82 +469,14 @@ class Demo:
             self.err_mask = np.ones((self.case_n, self.output_n), bool)
             return self.max_loss_value, self.max_loss_value
 
-    def update_circuit_self_attention(self):
-        """Update circuit using Self-Attention"""
-        try:
-            # Ensure Self-Attention model is initialized
-            self.initialize_self_attention()
-
-            # Run Self-Attention for specified number of steps
-            try:
-                # Store original logit shapes for reconstruction
-                logits_original_shapes = [logit.shape for logit in self.logits]
-
-                # Create graph from current circuit - same as for GNN
-                circuit_graph = build_graph(
-                    self.logits,
-                    self.wires,
-                    self.input_n,
-                    self.arity,
-                    self.hidden_dim,  # Use self-attention hidden dim
-                )
-
-                # Run Self-Attention for specified number of steps
-                updated_graph = self.sa_model(circuit_graph)
-
-                # Extract updated logits if training is enabled
-                if self.is_training:
-                    self.logits = extract_logits_from_graph(
-                        updated_graph, logits_original_shapes
-                    )
-
-                # Run circuit with updated logits
-                self.act = run_circuit_gui(
-                    self.logits, self.wires, self.gate_mask, self.input_x
-                )
-                hard_act = run_circuit_gui(
-                    self.logits, self.wires, self.gate_mask, self.input_x, hard=True
-                )
-
-                # Generate error mask for visualization
-                self.err_mask = hard_act[-1] != self.y0
-
-                # Calculate loss
-                loss = res2loss(self.act[-1] - self.y0)
-                hard_loss = res2loss(hard_act[-1] - self.y0)
-
-                return loss, hard_loss
-
-            except Exception as e:
-                print(f"Error in Self-Attention update: {e}")
-                import traceback
-
-                print(f"Traceback: {traceback.format_exc()}")
-                # Fallback to backprop
-                self.optimization_method_idx = 0
-                return self.update_circuit_backprop()
-
-        except Exception as e:
-            print(f"Critical error in Self-Attention update: {e}")
-            import traceback
-
-            print(f"Traceback: {traceback.format_exc()}")
-
-            # Return fallback values to avoid crashing
-            self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
-            self.err_mask = np.ones((self.case_n, self.output_n), bool)
-            return self.max_loss_value, self.max_loss_value
-
     def update_circuit(self):
         """Update circuit using selected optimization method"""
         try:
             # Choose optimization method
             if self.optimization_methods[self.optimization_method_idx] == "Backprop":
                 loss, hard_loss = self.update_circuit_backprop()
-            elif self.optimization_methods[self.optimization_method_idx] == "GNN":
+            else:  # GNN
                 loss, hard_loss = self.update_circuit_gnn()
-            else:  # Self-Attention
-                loss, hard_loss = self.update_circuit_self_attention()
 
             # Extract output activations and visualize
             oimg = self.act[-1].T
@@ -978,38 +648,10 @@ class Demo:
                             self.logits[li - 1][i // group_size, i % group_size],
                         )
                     if io.mouse_clicked[0]:
-                        if li > 0:  # Not an input layer node
-                            # Ensure that we can access self.logits[li-1]
-                            if (li - 1) < len(self.logits) and self.logits[li-1] is not None:
-                                logit_array_for_gate_inputs = self.logits[li-1]
-                                # 'group_size' is defined in this scope from self.layer_sizes[li][1].
-                                # 'i' is the flattened index of the gate/node in the current layer 'li'.
-                                
-                                if group_size > 0: 
-                                    group_idx = i // group_size
-                                    gate_in_group_idx = i % group_size
-
-                                    # Check bounds for the logit array
-                                    if group_idx < logit_array_for_gate_inputs.shape[0] and \
-                                       gate_in_group_idx < logit_array_for_gate_inputs.shape[1]:
-                                        
-                                        # Create a JAX array of zeros with the same shape as the target LUT
-                                        zero_lut_for_gate = jp.zeros_like(
-                                            logit_array_for_gate_inputs[group_idx, gate_in_group_idx]
-                                        )
-                                        
-                                        # Update the logits for the specific gate to be all zeros
-                                        self.logits[li - 1] = logit_array_for_gate_inputs.at[
-                                            group_idx, gate_in_group_idx
-                                        ].set(zero_lut_for_gate)
-                                    # else: (Removed potentially problematic commented out else)
-                                    #     print(f"FixedDemo Warning: Logit index out of bounds for layer {li-1}. Clicked node {i}.")
-                                # else: (Removed potentially problematic commented out else)
-                                #    print(f"FixedDemo Warning: group_size for nodes in layer {li} is 0.")
-                        else:  # Input layer node
-                            # 'i' here is the index of the input node.
-                            if i < self.input_n: # Make sure 'i' is a valid input bit index
-                                self.active_case_i = self.active_case_i ^ (1 << i)
+                        if li > 0:
+                            self.gate_mask[li][i] = 1.0 - self.gate_mask[li][i]
+                        else:
+                            self.active_case_i = self.active_case_i ^ (1 << i)
                 if (
                     li < len(self.gate_mask)
                     and i < len(self.gate_mask[li])
@@ -1249,7 +891,7 @@ class Demo:
 
         # Regenerate wires with new key to ensure fresh connections
         self.wires_key = jax.random.PRNGKey(42)  # Fixed seed for reproducibility
-        self.update_wires()
+        self.shuffle_wires()
 
         # Initialize empty activations to ensure proper dimensions
         self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
@@ -1411,21 +1053,12 @@ class Demo:
                 "Method", self.optimization_method_idx, self.optimization_methods
             )
             if opt_changed:
-                selected_method = self.optimization_methods[
-                    self.optimization_method_idx
-                ]
-                print(f"Switching to {selected_method} optimization")
-
-                # Auto-load model when switching to GNN or Self-Attention
-                if selected_method == "GNN":
-                    self.gnn = None  # Force reinitialization
+                print(
+                    f"Switching to {self.optimization_methods[self.optimization_method_idx]} optimization"
+                )
+                # Initialize GNN if needed when switching to it
+                if self.optimization_methods[self.optimization_method_idx] == "GNN":
                     self.initialize_gnn()
-                elif selected_method == "Self-Attention":
-                    self.sa_model = None  # Force reinitialization
-                    self.initialize_self_attention()
-                elif selected_method == "Self-Attention":
-                    self.sa_model = None  # Force reinitialization
-                    self.initialize_self_attention()
 
             # GNN parameters (only shown when GNN is selected)
             if self.optimization_methods[self.optimization_method_idx] == "GNN":
@@ -1433,8 +1066,8 @@ class Demo:
                 _, self.gnn_message_steps = imgui.slider_int(
                     "Message Steps", self.gnn_message_steps, 1, 20
                 )
-                _, self.hidden_dim = imgui.slider_int(
-                    "Hidden Dim", self.hidden_dim, 4, 64
+                _, self.gnn_hidden_dim = imgui.slider_int(
+                    "Hidden Dim", self.gnn_hidden_dim, 4, 64
                 )
                 _, self.gnn_enable_message_passing = imgui.checkbox(
                     "Enable Message Passing", self.gnn_enable_message_passing
@@ -1442,64 +1075,6 @@ class Demo:
                 if imgui.button("Reinitialize GNN"):
                     self.gnn = None
                     self.initialize_gnn()
-                # Add button to save GNN state
-                if imgui.button("Save GNN State"):
-                    if self.gnn is not None:
-                        try:
-                            gnn_state_to_save = {
-                                "gnn": nnx.state(self.gnn),
-                                # Add optimizer state if needed and available
-                            }
-                            with open("gnn_results.pkl", "wb") as f:
-                                pickle.dump(gnn_state_to_save, f)
-                            print("GNN state saved to gnn_results.pkl")
-                        except Exception as e:
-                            print(f"Error saving GNN state: {e}")
-                    else:
-                        print("No active GNN model to save.")
-
-            # Self-Attention parameters (only shown when Self-Attention is selected)
-            elif (
-                self.optimization_methods[self.optimization_method_idx]
-                == "Self-Attention"
-            ):
-                imgui.text("Self-Attention Parameters:")
-                _, self.sa_message_steps = imgui.slider_int(
-                    "Message Steps", self.sa_message_steps, 1, 20
-                )
-                _, self.sa_hidden_dim = imgui.slider_int(
-                    "Hidden Dim", self.sa_hidden_dim, 4, 64
-                )
-                _, self.sa_num_heads = imgui.slider_int(
-                    "Attention Heads", self.sa_num_heads, 1, 8
-                )
-                _, self.sa_num_layers = imgui.slider_int(
-                    "Attention Layers", self.sa_num_layers, 1, 6
-                )
-                _, self.sa_mlp_dim = imgui.slider_int(
-                    "MLP Dimension", self.sa_mlp_dim, 16, 128
-                )
-                _, self.sa_dropout_rate = imgui.slider_float(
-                    "Dropout Rate", self.sa_dropout_rate, 0.0, 0.5
-                )
-                if imgui.button("Reinitialize Self-Attention"):
-                    self.sa_model = None
-                    self.initialize_self_attention()
-                # Add button to save Self-Attention state
-                if imgui.button("Save Self-Attention State"):
-                    if self.sa_model is not None:
-                        try:
-                            sa_state_to_save = {
-                                "sa": nnx.state(self.sa_model),
-                                # Add optimizer state if needed
-                            }
-                            with open("gnn_results.pkl", "wb") as f:
-                                pickle.dump(sa_state_to_save, f)
-                            print("Self-Attention state saved to gnn_results.pkl")
-                        except Exception as e:
-                            print(f"Error saving Self-Attention state: {e}")
-                    else:
-                        print("No active Self-Attention model to save.")
 
             # Training controls (common to both methods)
             _, self.is_training = imgui.checkbox("is_training", self.is_training)
@@ -1514,13 +1089,13 @@ class Demo:
                 self.gnn = None
             if imgui.button("shuffle wires"):
                 self.wires_key, key = jax.random.split(self.wires_key)
-                self.update_wires()
+                self.shuffle_wires()
                 self.trainstep_i = 0
             local_noise_changed, self.local_noise = imgui.slider_float(
                 "local noise", self.local_noise, 0.0, 20.0
             )
             if local_noise_changed:
-                self.update_wires()
+                self.shuffle_wires()
 
             # Weight decay (only affects backprop)
             wd_changed, self.wd_log10 = imgui.slider_float(
@@ -1530,47 +1105,6 @@ class Demo:
                 wd_changed and self.optimization_method_idx == 0
             ):  # Only reinitialize for backprop
                 self.init_optimizers()
-
-            # Add WandB integration section
-            if self.optimization_methods[self.optimization_method_idx] in [
-                "GNN",
-                "Self-Attention",
-            ]:
-                imgui.separator_text("WandB Integration")
-
-                # Run ID input field
-                run_id_buffer = self.run_id if self.run_id else ""
-                changed, run_id_buffer = imgui.input_text(
-                    "Run ID (optional)", run_id_buffer, 256
-                )
-                if changed:
-                    self.run_id = run_id_buffer if run_id_buffer else None
-                    # Trigger reinitialization if run ID changes
-                    if self.optimization_methods[self.optimization_method_idx] == "GNN":
-                        self.gnn = None
-                        self.initialize_gnn()
-                    else:  # Self-Attention
-                        self.sa_model = None
-                        self.initialize_self_attention()
-
-                imgui.text_wrapped("Enter a Run ID or leave blank to use filters")
-
-                # Show filter parameters that will be used
-                if imgui.tree_node("Filter Parameters"):
-                    filters = self.create_filter_from_params()
-                    for key, value in filters.items():
-                        imgui.text(f"{key}: {value}")
-                    imgui.tree_pop()
-
-                # Status of loaded model
-                if self.loaded_run_id:
-                    imgui.text_colored(
-                        f"Loaded model from run: {self.loaded_run_id}",
-                        0.0,
-                        1.0,
-                        0.0,
-                        1.0,
-                    )
 
             imgui.separator_text("Masks")
             if imgui.button("reset gate mask"):
@@ -1718,91 +1252,6 @@ class Demo:
             import traceback
 
             print(f"Traceback: {traceback.format_exc()}")
-
-    def initialize_self_attention(self):
-        """Initialize Self-Attention using model loaded from WandB"""
-        if self.sa_model is None:
-            print("Initializing Self-Attention model...")
-            # Total number of nodes in the circuit
-            n_node = sum(gate_n for gate_n, _ in self.layer_sizes)
-            key = jax.random.PRNGKey(42)  # Fixed seed for reproducibility
-
-
-            try:
-                # Try to load model from WandB if not already loaded
-                if not self.loaded_sa_state:
-                    print("Attempting to load Self-Attention model from WandB...")
-                    if self.load_best_model():
-                        print("Successfully loaded Self-Attention model from WandB")
-                    else:
-                        print(
-                            "Failed to load Self-Attention model from WandB, creating new instance"
-                        )
-
-                # Create Self-Attention instance (whether we have loaded state or not)
-                self.sa_model = CircuitSelfAttention(
-                    n_node=n_node,
-                    hidden_dim=self.sa_hidden_dim,
-                    arity=self.arity,
-                    num_heads=self.sa_num_heads,
-                    num_layers=self.sa_num_layers,
-                    mlp_dim=self.sa_mlp_dim,
-                    dropout_rate=self.sa_dropout_rate,
-                    rngs=nnx.Rngs(params=key),
-                )
-
-                # Update with loaded state if available
-                if self.loaded_sa_state:
-                    print("Applying loaded Self-Attention state...")
-                    try:
-                        # Try standard update first
-                        nnx.update(self.sa_model, self.loaded_sa_state["sa"])
-                    except (AttributeError, TypeError) as e:
-                        print(f"Standard update failed: {e}")
-                        print("Trying alternative update approach...")
-
-                        # Alternative: Try to access the state differently
-                        sa_state = self.loaded_sa_state["sa"]
-
-                        # If it's a full model, get its tree/state
-                        if hasattr(sa_state, "_tree"):
-                            sa_state = sa_state._tree
-
-                        # Try to update with the extracted state
-                        try:
-                            # Try using put for each parameter
-                            for collection_name, collection in sa_state.items():
-                                for var_name, value in collection.items():
-                                    try:
-                                        path = f"{collection_name}.{var_name}"
-                                        self.sa_model.put(path, value)
-                                    except Exception as inner_e:
-                                        print(
-                                            f"Warning: Failed to update {path}: {inner_e}"
-                                        )
-                        except Exception as update_e:
-                            print(f"Alternative update also failed: {update_e}")
-                            print("Will proceed with uninitialized model")
-
-                    print("Self-Attention initialized with loaded state")
-                else:
-                    print("Self-Attention initialized with default parameters")
-
-                return True
-
-            except Exception as e:
-                print(f"Error initializing Self-Attention: {e}")
-                import traceback
-
-                print(f"Traceback: {traceback.format_exc()}")
-                # Clear the loaded state to avoid repeated failures
-                self.loaded_sa_state = None
-                # Fallback to backprop
-                self.optimization_method_idx = 0
-                print("Falling back to Backprop optimization")
-                return False
-                print("Falling back to Backprop optimization")
-                return False
 
 
 if __name__ == "__main__":

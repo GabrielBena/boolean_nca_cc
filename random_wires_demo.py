@@ -305,55 +305,19 @@ class Demo:
                 col = 0xFF202020 + (a << 8)
                 p0, p1 = (x - gate_w / 2, y - d / 2), (x + gate_w / 2, y + d / 2)
                 dl.add_rect_filled(p0, p1, col, 4)
-                
-                is_gate_hovered = is_point_in_box(p0, p1, io.mouse_pos) 
-
-                if is_gate_hovered:
+                if is_point_in_box(p0, p1, io.mouse_pos):
                     dl.add_rect(p0, p1, 0xA00000FF, 4, thickness=2.0)
-                    if li > 0: # Not an input node
-                        # Get the group_size for the current layer li to correctly index logits
-                        _, current_layer_group_size = layer_sizes[li]
-                        group_idx = i // current_layer_group_size
-                        gate_in_group_idx = i % current_layer_group_size
-                        
-                        # Ensure valid indexing for logits
-                        if (li - 1) < len(self.logits) and \
-                           group_idx < self.logits[li-1].shape[0] and \
-                           gate_in_group_idx < self.logits[li-1].shape[1]:
-                            hover_gate = (
-                                x,
-                                y,
-                                self.logits[li - 1][group_idx, gate_in_group_idx],
-                            )
-                
-                if io.mouse_clicked[0] and is_gate_hovered:
-                    if li > 0: # Not an input node - reset its LUT
-                        # Get the group_size for the current layer li for correct logit indexing
-                        _, current_layer_group_size = layer_sizes[li]
-                        group_idx_for_logit = i // current_layer_group_size
-                        gate_in_group_idx_for_logit = i % current_layer_group_size
-
-                        if (li - 1) < len(self.logits):                            
-                            logit_array_for_layer = self.logits[li-1]
-                            # Ensure indices are within bounds for the specific logit array
-                            if group_idx_for_logit < logit_array_for_layer.shape[0] and \
-                               gate_in_group_idx_for_logit < logit_array_for_layer.shape[1]:
-                                
-                                # Create a zero array with the same shape as the LUT for that gate
-                                zero_lut = jp.zeros_like(logit_array_for_layer[group_idx_for_logit, gate_in_group_idx_for_logit])
-                                
-                                # Update the specific LUT in the JAX array
-                                updated_logit_array = logit_array_for_layer.at[group_idx_for_logit, gate_in_group_idx_for_logit].set(zero_lut)
-                                self.logits[li-1] = updated_logit_array
-                                # No change to self.gate_mask here, gate remains active for backprop
+                    if li > 0:
+                        hover_gate = (
+                            x,
+                            y,
+                            self.logits[li - 1][i // group_size, i % group_size],
+                        )
+                    if io.mouse_clicked[0]:
+                        if li > 0:
+                            self.gate_mask[li][i] = 1.0 - self.gate_mask[li][i]
                         else:
-                            # This case should ideally not be reached if logic is correct
-                            print(f"Warning: Logit index out of bounds for layer {li-1}")
-                    else: # Input layer node - toggle active_case_i bit
-                        # Ensure 'i' is a valid bit index for input_n
-                        if i < input_n:
-                             self.active_case_i = self.active_case_i ^ (1 << i)
-
+                            self.active_case_i = self.active_case_i ^ (1 << i)
                 if self.gate_mask[li][i] == 0.0:
                     dl.add_rect_filled(p0, p1, 0xA00000FF, 4)
 
@@ -398,18 +362,9 @@ class Demo:
     def draw_lut(self, name, img):
         view_w = imgui.get_content_region_avail().x
         img_h, img_w = img.shape[:2]
-
-        # Ensure the width passed to immvision is not negative or extremely small.
-        # If view_w is < 1.0, pass 0.0 for width to image_display_resizable.
-        # For immvision, (0.0, 0.0) size usually means display at original image size.
-        display_param_w = view_w
-        if view_w < 1.0:
-            display_param_w = 0.0
-
         mx, _ = immvision.image_display_resizable(
-            name, img, (display_param_w, 0.0), resizable=False, refresh_image=True
+            name, img, (view_w, 0), resizable=False, refresh_image=True
         )
-
         if mx > 0.0 and mx < img_w:
             self.active_case_i = int(mx / img_w * case_n)
         x0, y0 = imgui.get_item_rect_min()

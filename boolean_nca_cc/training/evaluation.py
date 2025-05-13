@@ -52,7 +52,7 @@ def evaluate_model_stepwise(
     logits_original_shapes = [logit.shape for logit in logits]
 
     # Calculate initial loss and accuracy using the imported function
-    initial_loss, (initial_hard_loss, initial_pred, initial_pred_hard, init_acts) = (
+    initial_loss, (initial_hard_loss, initial_pred, initial_pred_hard) = (
         get_loss_from_graph(logits, wires, x_data, y_data, loss_type)
     )
     # Need to compute accuracy separately if not returned by the imported get_loss_from_graph
@@ -78,7 +78,6 @@ def evaluate_model_stepwise(
         "soft_accuracy": [],
         "hard_accuracy": [],
         "logits_mean": [],
-        "acts": []
     }
 
     # Record initial metrics
@@ -88,8 +87,6 @@ def evaluate_model_stepwise(
     step_metrics["soft_accuracy"].append(float(initial_accuracy))
     step_metrics["hard_accuracy"].append(float(initial_hard_accuracy))
     step_metrics["logits_mean"].append(float(graph.nodes["logits"].mean()))
-    step_metrics["acts"].append(init_acts)
-
     # Create progress bar for evaluation
     pbar = tqdm(range(1, n_message_steps + 1), desc="Evaluating GNN steps")
 
@@ -103,7 +100,7 @@ def evaluate_model_stepwise(
         current_logits = extract_logits_from_graph(graph, logits_original_shapes)
 
         # Get loss and metrics using the imported function
-        loss, (hard_loss, pred, pred_hard, acts) = get_loss_from_graph(
+        loss, (hard_loss, pred, pred_hard) = get_loss_from_graph(
             current_logits, wires, x_data, y_data, loss_type
         )
         # Compute accuracy separately
@@ -117,8 +114,6 @@ def evaluate_model_stepwise(
         step_metrics["soft_accuracy"].append(float(accuracy))
         step_metrics["hard_accuracy"].append(float(hard_accuracy))
         step_metrics["logits_mean"].append(float(graph.nodes["logits"].mean()))
-        step_metrics["acts"].append(acts)
-
         # Update loss value for graph
 
         graph = graph._replace(globals=jp.array([loss, step], dtype=jp.float32))

@@ -173,7 +173,6 @@ class CircuitSelfAttention(nnx.Module):
         dropout_rate: float = 0.0,
         *,
         rngs: nnx.Rngs,
-        type: str = "self_attention",
     ):
         """
         Initialize the circuit self-attention model.

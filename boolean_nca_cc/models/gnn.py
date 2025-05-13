@@ -34,7 +34,6 @@ class CircuitGNN(nnx.Module):
         use_attention: bool = False,
         *,
         rngs: nnx.Rngs,
-        type: str = "gnn",
     ):
         """
         Initialize the Circuit GNN.

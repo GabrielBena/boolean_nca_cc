@@ -1,9 +1,0 @@
-_target_: boolean_nca_cc.models.CircuitGNN
-# Configuration for Graph Neural Network model
-
-type: "gnn"
-hidden_dim: 128
-message_passing: true
-node_mlp_features: [128, 128]
-edge_mlp_features: [128, 128]
-use_attention: true 

@@ -42,7 +42,6 @@ def make_nops(gate_n, arity, group_size, nop_scale=3.0):
     logits = (2.0 * luts - 1.0) * nop_scale
     return logits.reshape(gate_n // group_size, group_size, -1)
 
-make_nops(4, 2, 2)
 
 @jax.jit
 def run_layer(lut, inputs):
