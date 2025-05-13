@@ -473,7 +473,7 @@ gnn_results = train_model(
     
     # WIRING MODE PARAMS
     wiring_mode="fixed", 
-    wiring_fixed_key=jax.random.PRNGKey(42), # Used if wiring_mode is "fixed"
+    wiring_fixed_key=42, # Used if wiring_mode is "fixed"
     
     # LOSS PARAMS
     loss_type="l4", 
@@ -494,7 +494,7 @@ gnn_results = train_model(
     # arity is already passed directly to train_model and is in its signature
 
     # POOL PARAMS
-    use_pool=True,
+    # use_pool=True, # This parameter is not in train_model, pooling is implicitly managed
     pool_size=256, # Reduced from original 1024 for quicker test
     reset_pool_fraction=0.1, 
     reset_pool_interval=20,  # Roughly every 20 epochs
