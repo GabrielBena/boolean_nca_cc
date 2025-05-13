@@ -94,7 +94,7 @@ def popcount(case_n, input_bits=8, output_bits=None):
     if output_bits is None:
         # Number of bits needed to represent the count (log2 of input_bits, rounded up)
         output_bits = (input_bits.bit_length() - 1) + 1
-        
+
     x = jp.arange(case_n)
     y = jp.sum(unpack(x, input_bits), axis=-1)  # Sum the bits to get the count
     return unpack(x, input_bits), unpack(y, output_bits)
@@ -119,4 +119,12 @@ def get_task_data(task_name, case_n, **kwargs):
     if task_name not in TASKS:
         raise ValueError(f"Unknown task: {task_name}. Available: {list(TASKS.keys())}")
 
-    return TASKS[task_name](case_n, **kwargs)
+    task_specific_kwargs = {
+        k: v
+        for k, v in kwargs.items()
+        if k
+        in TASKS[task_name].__code__.co_varnames[
+            : TASKS[task_name].__code__.co_argcount
+        ]
+    }
+    return TASKS[task_name](case_n, **task_specific_kwargs)
