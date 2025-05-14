@@ -90,7 +90,15 @@ grad_loss_f_gui = jax.jit(jax.value_and_grad(loss_f_gui, has_aux=True))
 
 
 def calc_lut_input_use(logits):
-    # (..., lut) -> (..., input_use_mask)
+    """
+    Computes which inputs are used by each LUT (lookup table) gate based on its logits.
+
+    Args:
+        logits: ndarray of shape (..., lut), where the last dimension represents the LUT truth table.
+
+    Returns:
+        input_use_mask: ndarray of shape (..., arity), boolean mask indicating for each LUT which inputs affect its output.
+    """
     luts = jp.sign(logits) * 0.5 + 0.5
     arity = luts.shape[-1].bit_length() - 1
     luts = luts.reshape(luts.shape[:-1] + (2,) * arity)
@@ -104,6 +112,19 @@ def calc_lut_input_use(logits):
 
 
 def propatate_gate_use(input_n, wires, logits, output_use):
+    """
+    Propagates gate usage backwards through a layer, determining which previous gates and wires are used.
+
+    Args:
+        input_n: int, number of inputs to the current layer.
+        wires: ndarray, wire indices for the current layer.
+        logits: ndarray, LUT logits for the current layer.
+        output_use: ndarray, boolean mask indicating which gates in the current layer are used.
+
+    Returns:
+        prev_gate_use: ndarray of shape (input_n,), boolean mask indicating which previous gates are used.
+        wire_use_mask: ndarray, boolean mask indicating which wires in the current layer are used.
+    """
     output_use = output_use.reshape(logits.shape[:2])
     gate_input_use = calc_lut_input_use(logits) * output_use
     wire_use_mask = gate_input_use.any(-1)
@@ -114,6 +135,18 @@ def propatate_gate_use(input_n, wires, logits, output_use):
 
 
 def calc_gate_use_masks(input_n, wires, logits):
+    """
+    Computes masks indicating which gates and wires are used throughout a multi-layer circuit, propagating usage from outputs to inputs.
+
+    Args:
+        input_n: int, number of input gates to the first layer.
+        wires: list of ndarrays, each specifying the wire indices for a layer.
+        logits: list of ndarrays, each specifying the LUT logits for a layer.
+
+    Returns:
+        gate_masks: list of ndarrays, each a boolean mask for gates in each layer (from input to output).
+        wire_masks: list of ndarrays, each a boolean mask for wires in each layer (from input to output).
+    """
     layer_sizes = [input_n] + [np.prod(l.shape[:2]) for l in logits]
     gate_use_mask = np.ones(layer_sizes[-1], np.bool_)
     gate_masks = [gate_use_mask]

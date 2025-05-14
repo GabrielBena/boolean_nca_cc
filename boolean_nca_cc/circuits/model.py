@@ -10,6 +10,7 @@ The implementation uses JAX for automatic differentiation and numerical operatio
 
 import jax
 import jax.numpy as jp
+from boolean_nca_cc.utils.trees import get_n4_chain_circuit_spec, get_n4_balanced_circuit_spec
 
 
 def make_nops(gate_n, arity, group_size, nop_scale=3.0):
@@ -127,9 +128,11 @@ def gen_wires_with_noise(key, in_n, out_n, arity, group_size, local_noise=None):
         jp.arange(edge_n) + jax.random.normal(key, shape=(edge_n,)) * local_noise
     ).argsort()
     return i.reshape(-1, arity).T
-
-
-def gen_circuit(key, layer_sizes, arity=4, verbose=False):
+    
+def gen_circuit(key, layer_sizes, arity=4, verbose=False,
+                structure_type: str | None = None, # For your new structures
+                local_noise=0.0, # Existing optional param
+                init_logits_fn=make_nops):
     """
     Generate a complete circuit with random wiring and initial operations.
 
@@ -137,22 +140,33 @@ def gen_circuit(key, layer_sizes, arity=4, verbose=False):
         key: JAX random key
         layer_sizes: List of tuples (nodes, group_size) for each layer
         arity: Number of inputs per gate (fan-in)
+        structure_type: Type of circuit structure to use from trees.py
+        local_noise: Amount of noise to add to local connections
+        init_logits_fn: Function to initialize logits
 
     Returns:
         Tuple of (wires, logits) where each is a list per layer
     """
-    in_n = layer_sizes[0][0]
-    all_wires, all_logits = [], []
-    for out_n, group_size in layer_sizes[1:]:
-        if verbose:
-            print(f"in_n: {in_n}, out_n: {out_n}, group_size: {group_size}")
-        wires = gen_wires(key, in_n, out_n, arity, group_size)
-        logits = make_nops(out_n, arity, group_size)
-        _, key = jax.random.split(key)
-        in_n = out_n
-        all_wires.append(wires)
-        all_logits.append(logits)
-    return all_wires, all_logits
+    if structure_type == "n4_chain":
+        wires, logits, _ = get_n4_chain_circuit_spec(arity)
+        return wires, logits
+    elif structure_type == "n4_balanced":
+        wires, logits, _ = get_n4_balanced_circuit_spec(arity)
+        return wires, logits
+    else: # Default behavior
+        in_n = layer_sizes[0][0]
+        all_wires, all_logits = [], []
+        for out_n, group_size in layer_sizes[1:]:
+            if verbose:
+                print(f"in_n: {in_n}, out_n: {out_n}, group_size: {group_size}")
+            wires = gen_wires(key, in_n, out_n, arity, group_size) # Assuming gen_wires also takes local_noise if needed
+            # Use the provided function to initialize logits:
+            logits = init_logits_fn(out_n, arity, group_size)
+            _, key = jax.random.split(key)
+            in_n = out_n
+            all_wires.append(wires)
+            all_logits.append(logits)
+        return all_wires, all_logits
 
 
 def run_circuit(logits, wires, x, gate_mask=None, hard=False):
