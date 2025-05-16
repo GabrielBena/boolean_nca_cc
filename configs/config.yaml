@@ -63,9 +63,9 @@ pool:
 
   # Gate knockout ("hard" LUT zeroing - resets globals)
   gate_knockout:
-    active: true
-    fraction: 0.05
-    interval: 64 
+    active: false
+    fraction: 0.01
+    interval: 64
     strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
     damage_prob: 0.1  # Probability of zeroing an entire LUT in selected circuits
     combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined strategy
@@ -73,7 +73,7 @@ pool:
   # Soft LUT damage ("soft" LUT zeroing - preserves globals)
   soft_lut_damage:
     active: true
-    fraction: 0.05
+    fraction: 0.01
     interval: 64
     strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
     damage_prob: 0.1 # Probability of zeroing an entire LUT in selected circuits

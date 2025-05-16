@@ -431,6 +431,52 @@ class Demo:
                     self.sa_model = None  # Force reinitialization with new state
                     print("Self-Attention model loaded successfully")
 
+                # Update GUI parameters from loaded config
+                if loaded_dict and 'config' in loaded_dict:
+                    print("Updating GUI parameters from loaded WandB config...")
+                    config = loaded_dict['config']
+                    architecture_changed = False
+
+                    new_input_n = config.get('circuit', {}).get('input_bits', self.input_n)
+                    if new_input_n != self.input_n:
+                        print(f"Updating input_n from {self.input_n} to {new_input_n}")
+                        self.input_n = new_input_n
+                        architecture_changed = True
+
+                    new_output_n = config.get('circuit', {}).get('output_bits', self.output_n)
+                    if new_output_n != self.output_n:
+                        print(f"Updating output_n from {self.output_n} to {new_output_n}")
+                        self.output_n = new_output_n
+                        architecture_changed = True
+
+                    new_arity = config.get('circuit', {}).get('arity', self.arity)
+                    if new_arity != self.arity:
+                        print(f"Updating arity from {self.arity} to {new_arity}")
+                        self.arity = new_arity
+                        architecture_changed = True
+                    
+                    # num_layers in config corresponds to layer_n in the demo
+                    new_layer_n = config.get('circuit', {}).get('num_layers', self.layer_n)
+                    if new_layer_n != self.layer_n:
+                        print(f"Updating layer_n from {self.layer_n} to {new_layer_n}")
+                        self.layer_n = new_layer_n
+                        architecture_changed = True
+
+                    # Use test_seed from config for wires_key
+                    new_wires_key_seed = config.get('test_seed', 42) # Default to 42 if not found
+                    new_wires_key = jax.random.PRNGKey(new_wires_key_seed)
+                    # Compare PRNGKeys by their array values if they are JAX arrays
+                    if not jp.array_equal(self.wires_key, new_wires_key):
+                        print(f"Updating wires_key seed from current to {new_wires_key_seed}")
+                        self.wires_key = new_wires_key
+                        architecture_changed = True # Technically not architecture, but requires regeneration
+
+                    if architecture_changed:
+                        print("Architecture or wiring key changed, regenerating circuit...")
+                        self.regenerate_circuit()
+                    else:
+                        print("Loaded model architecture matches current GUI settings.")
+
                 # Store the run ID we just loaded
                 if self.run_id:
                     self.loaded_run_id = self.run_id
@@ -1252,7 +1298,8 @@ class Demo:
         self.reset_gate_mask()
 
         # Regenerate wires with new key to ensure fresh connections
-        self.wires_key = jax.random.PRNGKey(42)  # Fixed seed for reproducibility
+        # self.wires_key = jax.random.PRNGKey(42)  # Fixed seed for reproducibility
+        # Use the existing self.wires_key, which might have been updated by load_best_model
         self.shuffle_wires()
 
         # Initialize empty activations to ensure proper dimensions
