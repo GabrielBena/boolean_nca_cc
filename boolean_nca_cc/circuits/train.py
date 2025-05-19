@@ -110,14 +110,11 @@ def loss_f_l4(logits, wires, x, y0):
     hard_loss = res2loss(hard_res)
     accuracy = compute_accuracy(y, y0)
     hard_accuracy = compute_accuracy(hard_y, y0)
-    err_mask = hard_act[-1] != y0
-
     return loss, dict(
         act=act,
         accuracy=accuracy,
         hard_loss=hard_loss,
         hard_accuracy=hard_accuracy,
-        err_mask=err_mask
     )
 
 

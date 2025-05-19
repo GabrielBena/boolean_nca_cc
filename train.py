@@ -289,21 +289,6 @@ def main(cfg: DictConfig) -> None:
         reset_pool_fraction=cfg.pool.reset_fraction,
         reset_pool_interval=cfg.pool.reset_interval,
         reset_strategy=cfg.pool.reset_strategy,
-        combined_weights=cfg.pool.combined_weights,
-        # Gate knockout parameters
-        gate_knockout_active=cfg.pool.gate_knockout.active,
-        gate_knockout_fraction=cfg.pool.gate_knockout.fraction,
-        gate_knockout_interval=cfg.pool.gate_knockout.interval,
-        gate_knockout_strategy=cfg.pool.gate_knockout.strategy,
-        gate_knockout_damage_prob=cfg.pool.gate_knockout.damage_prob,
-        gate_knockout_combined_weights=cfg.pool.gate_knockout.combined_weights,
-        # Soft LUT damage parameters
-        soft_lut_damage_active=cfg.pool.soft_lut_damage.active,
-        soft_lut_damage_fraction=cfg.pool.soft_lut_damage.fraction,
-        soft_lut_damage_interval=cfg.pool.soft_lut_damage.interval,
-        soft_lut_damage_strategy=cfg.pool.soft_lut_damage.strategy,
-        soft_lut_damage_damage_prob=cfg.pool.soft_lut_damage.damage_prob,
-        soft_lut_damage_combined_weights=cfg.pool.soft_lut_damage.combined_weights,
         # Learning rate scheduling
         lr_scheduler=cfg.training.lr_scheduler,
         # Checkpoint parameters

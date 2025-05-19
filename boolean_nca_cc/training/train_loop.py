@@ -124,13 +124,6 @@ def _save_periodic_checkpoint(
         # Log to wandb if enabled
         if wandb_run:
             wandb_run.save(os.path.join(checkpoint_path, ckpt_filename))
-        # Also log this as an artifact for better tracking in wandb
-            try:
-                artifact = wandb_run.Artifact(f"checkpoint_epoch_{epoch}", type="model")
-                artifact.add_file(os.path.join(checkpoint_path, ckpt_filename))
-                wandb_run.log_artifact(artifact)
-            except Exception as e:
-                log.warning(f"Error logging checkpoint as artifact: {e}")
     except Exception as e:
         log.warning(f"Error saving checkpoint: {e}")
 
@@ -297,7 +290,7 @@ def get_loss_from_graph(logits, wires, x, y_target, loss_type: str):
         raise ValueError(f"Unknown loss_type: {loss_type}")
     # --- Calculate initial loss for graph globals --- END
 
-    return loss, (hard_loss, pred, pred_hard, acts)
+    return loss, (hard_loss, pred, pred_hard)
 
 
 def train_model(
@@ -330,26 +323,14 @@ def train_model(
         0.5,
         0.5,
     ),  # Weights for [loss, steps] in combined strategy
-    # Renamed parameters for "hard" LUT zeroing (gate knockout)
-    gate_knockout_active: bool = False,
-    gate_knockout_fraction: float = 0.05,
-    gate_knockout_interval: int = 10,
-    gate_knockout_strategy: str = "uniform",
-    gate_knockout_damage_prob: float = 0.1,
-    gate_knockout_combined_weights: Tuple[float, float] = (0.5, 0.5),
-    # New parameters for "soft" LUT damage (preserves globals)
-    soft_lut_damage_active: bool = False,
-    soft_lut_damage_fraction: float = 0.05,
-    soft_lut_damage_interval: int = 10,
-    soft_lut_damage_strategy: str = "uniform",
-    soft_lut_damage_damage_prob: float = 0.1, # Corresponds to lut_damage_prob in zero_luts_for_fraction
-    soft_lut_damage_combined_weights: Tuple[float, float] = (0.5, 0.5),
     # Learning rate scheduling
     lr_scheduler: str = "constant",  # Options: "constant", "exponential", "cosine", "linear_warmup"
     lr_scheduler_params: Dict = None,
     # Initialization parameters
     key: int = 0,
-    wiring_fixed_key: int=42,  # Fixed key for generating wirings when wiring_mode='fixed'
+    wiring_fixed_key: jax.random.PRNGKey = jax.random.PRNGKey(
+        42
+    ),  # Fixed key for generating wirings when wiring_mode='fixed'
     init_model: CircuitGNN | CircuitSelfAttention = None,
     init_optimizer: nnx.Optimizer = None,
     init_pool: GraphPool = None,
@@ -754,40 +735,6 @@ def train_model(
                 combined_weights=combined_weights,
             )
 
-        # Apply gate knockout periodically
-        if (
-            gate_knockout_active
-            and epoch > 0
-            and gate_knockout_interval is not None
-            and epoch % gate_knockout_interval == 0
-        ):
-            rng, knockout_key = jax.random.split(rng)
-            # log.info(f"Applying gate knockout at epoch {epoch}")
-            circuit_pool = circuit_pool.gate_knockout(
-                knockout_key,
-                gate_knockout_fraction,
-                gate_knockout_damage_prob,  # Corresponds to lut_damage_prob in pool.py
-                gate_knockout_strategy,  # Corresponds to reset_strategy in pool.py
-                gate_knockout_combined_weights,
-            )
-
-        # Apply soft LUT damage (zero_luts_for_fraction) periodically
-        if (
-            soft_lut_damage_active
-            and epoch > 0
-            and soft_lut_damage_interval is not None
-            and epoch % soft_lut_damage_interval == 0
-        ):
-            rng, soft_damage_key = jax.random.split(rng)
-            # log.info(f"Applying soft LUT damage at epoch {epoch}")
-            circuit_pool = circuit_pool.zero_luts_for_fraction(
-                soft_damage_key,
-                soft_lut_damage_fraction,
-                soft_lut_damage_damage_prob,  # Corresponds to lut_damage_prob in pool.py
-                soft_lut_damage_strategy,  # Corresponds to selection_strategy in pool.py
-                soft_lut_damage_combined_weights,
-            )
-            
         if jp.isnan(loss):
             log.warning(f"Loss is NaN at epoch {epoch}, returning last stable state")
             # Save the last stable state if enabled
