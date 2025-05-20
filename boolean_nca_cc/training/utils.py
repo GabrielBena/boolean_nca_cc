@@ -329,8 +329,12 @@ def load_best_model_from_wandb(
     # Find the run
     if run_id:
         print(f"Looking for run with ID: {run_id}")
-        run = api.run(f"{entity}/{project}/{run_id}")
-        print(f"Found run: {run.name}")
+        try:
+            run = api.run(f"{entity}/{project}/{run_id}")
+            print(f"Found run: {run.name}")
+        except Exception as e:
+            print(f"Error finding run {run_id}: {e}")
+            raise ValueError(f"Could not find run with ID {run_id}")
     else:
         if not filters:
             filters = {}
@@ -347,10 +351,25 @@ def load_best_model_from_wandb(
     # Get artifacts and find best model
     print("Retrieving artifacts...")
     artifacts = run.logged_artifacts()
+    
+    # Print all available artifacts for debugging
+    print("Available artifacts:")
+    for a in artifacts:
+        print(f"  - {a.name}")
+    
     best_models = [a for a in artifacts if filename in a.name]
 
     if not best_models:
-        raise ValueError(f"No best model artifacts found for run {run.id}")
+        print(f"No artifacts found matching '{filename}'")
+        # Try to find any model artifacts
+        model_artifacts = [a for a in artifacts if "model" in a.name.lower()]
+        if model_artifacts:
+            print("Found other model artifacts:")
+            for a in model_artifacts:
+                print(f"  - {a.name}")
+            raise ValueError(f"No {filename} artifacts found for run {run.id}, but found other model artifacts. Please check the artifact names.")
+        else:
+            raise ValueError(f"No model artifacts found for run {run.id}")
 
     latest_best = best_models[-1]
     print(f"Found best model artifact: {latest_best.name}")
@@ -371,59 +390,83 @@ def load_best_model_from_wandb(
     # Load the saved state
     print(f"Loading model from {checkpoint_path}")
     try:
-        with open(checkpoint_path, "rb") as f:  # Use the corrected checkpoint_path
+        with open(checkpoint_path, "rb") as f:
             loaded_dict = pickle.load(f)
+    except Exception as e:
+        print(f"Error loading checkpoint from {checkpoint_path}: {e}")
+        raise
 
-        # Get config and instantiate model
-        config = OmegaConf.create(run.config)
-        print(f"Instantiating model using config: {config.model._target_}")
+    # Get config from run
+    config = OmegaConf.create(run.config)
+    print(f"Instantiating model using original _target_: {config.model._target_}")
 
-        # Create RNG key
-        rng = nnx.Rngs(params=jax.random.PRNGKey(seed))
+    # Initialize rngs for the model constructor
+    rng = nnx.Rngs(params=jax.random.PRNGKey(seed))
+    
+    current_config_model_node = config.model
+    
+    # Convert the OmegaConf node for the model to a standard Python dictionary.
+    # This dictionary will contain parameters like `hidden_dim`, `edge_mlp_features`, etc.,
+    # and also `_target_` if present.
+    model_params_from_config = OmegaConf.to_container(current_config_model_node, resolve=True)
 
-        # Instantiate model using hydra
-        model = hydra.utils.instantiate(
-            config.model, arity=config.circuit.arity, rngs=rng
-        )
+    if not isinstance(model_params_from_config, dict):
+        print(f"Error: Model config from WandB did not resolve to a dictionary. Got: {type(model_params_from_config)}")
+        raise TypeError(f"Expected model config to be a dict, got {type(model_params_from_config)}")
 
-        # Update model with loaded state - handle potential API differences
-        print("Updating model with loaded state")
-        if "model" in loaded_dict:
-            try:
-                # Try the direct update approach
-                nnx.update(model, loaded_dict["model"])
-            except (AttributeError, TypeError) as e:
-                print(f"Direct update failed with error: {e}")
-                print("Trying alternative update approach...")
+    # Get the class path from _target_ and remove it from the params dict.
+    class_path = model_params_from_config.pop("_target_", None)
+    
+    if class_path is None:
+        print(f"Warning: '_target_' was missing in the resolved model parameters. Defaulting to 'boolean_nca_cc.models.CircuitGNN'")
+        class_path = "boolean_nca_cc.models.CircuitGNN"
+    
+    # Get the actual class type using Hydra's utility
+    try:
+        ModelClazz = hydra.utils.get_class(class_path)
+    except Exception as e:
+        print(f"Error getting class '{class_path}': {e}")
+        raise
 
-                # Alternative approach - recreate the state dictionary structure if needed
-                model_state = loaded_dict["model"]
-                # This handles cases where the state might be a VariableState object
-                if hasattr(model_state, "_state_dict"):
-                    model_state = model_state._state_dict
+    # Prepare the full set of keyword arguments for the model's constructor
+    final_constructor_kwargs = model_params_from_config.copy() # Start with params from saved config
+    final_constructor_kwargs['arity'] = config.circuit.arity    # Add arity
+    final_constructor_kwargs['rngs'] = rng                       # Add the runtime rngs object
+    
+    print(f"Attempting to instantiate {ModelClazz} with kwargs: {final_constructor_kwargs}")
 
-                # Update the model with the extracted state dict
-                for collection_name, collection in model_state.items():
-                    for var_name, value in collection.items():
-                        try:
-                            path = f"{collection_name}.{var_name}"
-                            model.put(path, value)
-                        except Exception as inner_e:
-                            print(f"Warning: Failed to update {path}: {inner_e}")
+    # Instantiate the model directly
+    try:
+        model = ModelClazz(**final_constructor_kwargs)
+    except Exception as e:
+        print(f"Error during manual instantiation of {ModelClazz} with {final_constructor_kwargs}: {e}")
+        raise
 
-        else:
-            print("Warning: No 'model' key found in loaded dictionary")
+    # Update model with loaded state (weights from the checkpoint)
+    print("Updating model with loaded state")
+    if "model" in loaded_dict:
+        try:
+            nnx.update(model, loaded_dict["model"])
+        except (AttributeError, TypeError) as e:
+            print(f"Direct update failed with error: {e}")
+            print("Trying alternative update approach...")
+            model_state = loaded_dict["model"]
+            if hasattr(model_state, "_state_dict"):
+                model_state = model_state._state_dict
+            for collection_name, collection in model_state.items():
+                for var_name, value in collection.items():
+                    try:
+                        path = f"{collection_name}.{var_name}"
+                        model.put(path, value)
+                    except Exception as inner_e:
+                        print(f"Warning: Failed to update {path}: {inner_e}")
+    else:
+        print("Warning: No 'model' key found in loaded dictionary")
 
-        # Add the run ID to the loaded dictionary for reference
+    # Ensure essential keys are present in loaded_dict
+    if "run_id" not in loaded_dict:
         loaded_dict["run_id"] = run.id
-        # Ensure config from the run is in loaded_dict, especially if not loading locally
+    if "config" not in loaded_dict:
         loaded_dict["config"] = config
 
-        return model, loaded_dict
-
-    except Exception as e:
-        print(f"Error loading model: {e}")
-        import traceback
-
-        print(f"Traceback: {traceback.format_exc()}")
-        raise
+    return model, loaded_dict
