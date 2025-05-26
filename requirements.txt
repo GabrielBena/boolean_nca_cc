@@ -11,7 +11,6 @@ attrs>=25.0.0
 babel>=2.0.0
 beautifulsoup4>=4.0.0
 bleach>=6.0.0
-boolean_nca_cc @ git+ssh://git@github.com/GabrielBena/boolean_nca_cc.git@c6613f63073ff996f13f2d7651333b11ec77c462#egg=boolean_nca_cc
 certifi
 cffi>=1.0.0
 charset-normalizer>=3.0.0
@@ -53,7 +52,7 @@ jax-cuda12-plugin>=0.5.0
 jaxlib>=0.6.0
 jedi>=0.19.0
 Jinja2>=3.0.0
-jraph>=0.0
+jraph
 json5>=0.12.0
 jsonpointer>=3.0.0
 jsonschema>=4.0.0

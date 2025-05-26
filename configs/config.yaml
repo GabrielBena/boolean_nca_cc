@@ -32,7 +32,7 @@ training:
   learning_rate: 3e-3
   weight_decay: 1e-5
   epochs: null
-  epochs_power_of_2: 12 # 2^n
+  epochs_power_of_2: 11 # 2^n
   loss_type: "l4"  # Options: "l4" or "bce"
   wiring_mode: "fixed"  # Options: "fixed" or "random"
   meta_batch_size: 32
@@ -67,7 +67,7 @@ pool:
 
 # Backpropagation baseline
 backprop:
-  enabled: true
+  enabled: false
   epochs: 100 
   learning_rate: 1
   weight_decay: 1e-1
@@ -91,3 +91,28 @@ checkpoint:
 logging:
   log_interval: 10  # Log metrics every N epochs
   level: "INFO" 
+
+# Hydra multi-run sweep configuration
+hydra:
+  mode: MULTIRUN
+  sweeper:
+    # The default BasicSweeper performs a grid search (Cartesian product of all parameters)
+    params:
+      # Ensure gate_knockout is the active mechanism for all runs in this sweep
+      pool.gate_knockout.active: true
+      pool.soft_lut_damage.active: false # Explicitly disable soft LUT damage
+
+      # Parameters to sweep over:
+      # model will be taken from the defaults, but we explicitly list them here for clarity if needed,
+      # or use hydra's +model=gnn,self_attention syntax if preferred over default list.
+      # For this setup, model=gnn,self_attention is the standard way.
+      model: gnn,self_attention
+
+      # Gate knockout parameters
+      pool.gate_knockout.fraction: 0.01,0.05
+      pool.gate_knockout.interval: 32,64      # Current default is 64
+      pool.gate_knockout.damage_prob: 0.1,0.25 # Current default is 0.1
+
+      # Training parameters
+      training.n_message_steps: 5,10         # Current default is 10
+      training.learning_rate: 0.001,0.0003   # Current default is 0.003. Using float representation. 
