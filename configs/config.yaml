@@ -32,7 +32,7 @@ training:
   learning_rate: 3e-3
   weight_decay: 1e-5
   epochs: null
-  epochs_power_of_2: 11 # 2^n
+  epochs_power_of_2: 12 # 2^n
   loss_type: "l4"  # Options: "l4" or "bce"
   wiring_mode: "fixed"  # Options: "fixed" or "random"
   meta_batch_size: 32
