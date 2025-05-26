@@ -85,3 +85,8 @@ logging:
   level: INFO
 
 [2025-05-26 15:36:04,648][__main__][INFO] - Working directory: /home/marcello/workspace/boolean_nca_cc
+[2025-05-26 15:36:10,426][__main__][INFO] - Circuit layer sizes: [(8, 1), (64, 4), (64, 4), (64, 4), (64, 4), (32, 2), (8, 1)]
+[2025-05-26 15:36:10,426][__main__][INFO] - Number of nodes: 304
+[2025-05-26 15:36:12,573][__main__][INFO] - Starting GNN training
+[2025-05-26 15:36:14,682][boolean_nca_cc.training.train_loop][INFO] - WandB run ID: 25hz3cef
+[2025-05-26 15:36:14,683][boolean_nca_cc.training.train_loop][INFO] - Checkpoints will be saved to: /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef
