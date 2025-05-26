@@ -32,7 +32,7 @@ training:
   learning_rate: 3e-3
   weight_decay: 1e-5
   epochs: null
-  epochs_power_of_2: 13 # 2^n
+  epochs_power_of_2: 12 # 2^n
   loss_type: "l4"  # Options: "l4" or "bce"
   wiring_mode: "fixed"  # Options: "fixed" or "random"
   meta_batch_size: 32
@@ -43,14 +43,13 @@ training:
 pool:
   size: 1024
   reset_fraction: 0.05
-  reset_fraction: 0.05
   reset_interval: 32  # 2^5
   reset_strategy: "combined"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
 
   # Gate knockout ("hard" LUT zeroing - resets globals)
   gate_knockout:
-    active: false
+    active: true
     fraction: 0.01
     interval: 64
     strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
@@ -59,7 +58,7 @@ pool:
 
   # Soft LUT damage ("soft" LUT zeroing - preserves globals)
   soft_lut_damage:
-    active: true
+    active: false
     fraction: 0.01
     interval: 64
     strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
