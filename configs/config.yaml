@@ -81,11 +81,11 @@ eval:
   
 # Checkpointing
 checkpoint:
-  enabled: true
+  enabled: false
   interval: 1024  # Save checkpoints every N epochs
-  save_best: true  # Whether to track and save the best model
+  save_best: false  # Whether to track and save the best model
   best_metric: "hard_accuracy"  # Metric to use for determining best model (loss, hard_loss, accuracy, hard_accuracy)
-  save_stable_states: true  # Whether to save a checkpoint before potential NaN losses
+  save_stable_states: false  # Whether to save a checkpoint before potential NaN losses
 
 # Logging configuration
 logging:
