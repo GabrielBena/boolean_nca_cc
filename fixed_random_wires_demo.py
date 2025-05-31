@@ -207,6 +207,10 @@ class Demo:
         self.layer_n = 3
         self.hidden_dim = 128
 
+        # Add GNN update counter
+        self.gnn_update_counter = 0
+        self.max_gnn_updates = None  # Fixed number of updates before stopping
+
         # Update case_n based on input_n
         self.case_n = 1 << self.input_n
 
@@ -260,6 +264,7 @@ class Demo:
 
         # Visualization settings
         self.use_simple_viz = False
+        self.use_message_viz = False
 
         # Plot settings
         self.max_loss_value = 10.0  # Maximum loss value to display
@@ -286,7 +291,7 @@ class Demo:
         self.is_training = True
 
         # Optimization method (backprop/GNN)
-        self.optimization_methods = ["Backprop", "GNN", "Self-Attention"]
+        self.optimization_methods = ["Backprop", "GNN"]  # , "Self-Attention"]
         self.optimization_method_idx = 0  # Default to Backprop
 
         # GNN parameters (used if GNN is selected)
@@ -317,6 +322,8 @@ class Demo:
         self.wandb_entity = "m2snn"
         self.wandb_project = "boolean-nca-cc"
         self.wandb_download_dir = "saves"
+
+        self.run_from_last = 2
 
         # Model caching
         self.model_cache = {}  # Dictionary to cache models by run_id
@@ -361,38 +368,39 @@ class Demo:
         return f"{method}_{self.input_n}_{self.output_n}_{self.arity}_{self.layer_n}_{task}_{self.wiring_mode}"
 
     def load_best_model(self):
-        """Load the best model from wandb based on current parameters or from cache"""
+        """Load the best model from wandb based on current parameters or from cache.
+        Cache is keyed ONLY by actual run_id."""
         try:
-            # Generate a cache key for the current configuration
-            cache_key = self.get_cache_key()
+            # If a specific run_id is provided by the user, check cache using that run_id
+            if self.run_id and self.run_id in self.model_cache:
+                print(f"Using cached model for run_id: {self.run_id}")
+                cached_data = self.model_cache[self.run_id]
+                self.loaded_run_id = cached_data[
+                    "run_id"
+                ]  # This should be == self.run_id
+                self.hidden_dim = cached_data.get("hidden_dim", self.hidden_dim)
 
-            # Check if we already have this model in cache
-            if cache_key in self.model_cache:
-                print(f"Using cached model for {cache_key}")
-                cached_data = self.model_cache[cache_key]
-                self.loaded_run_id = cached_data["run_id"]
-
-                # Set method-specific model from cache
                 method_name = self.optimization_methods[self.optimization_method_idx]
                 if method_name == "GNN":
                     self.gnn = cached_data["model"]
                     print("GNN model loaded from cache")
-                    return True
                 elif method_name == "Self-Attention":
                     self.sa_model = cached_data["model"]
                     print("Self-Attention model loaded from cache")
-                    return True
+                return True
 
-            # If not in cache, load from wandb
-            filters = None
+            # If self.run_id is None, or if it was set but not found in cache,
+            # we proceed to load from WandB. We cannot do a run_id based cache check
+            # if self.run_id is None, as the cache is keyed only by run_id.
+
+            # Load from WandB
+            filters_for_load = None
             if self.run_id:
                 print(f"Loading model from specific run ID: {self.run_id}")
             else:
-                # Create filters from current parameters
-                filters = self.create_filter_from_params()
-                print(f"Loading best model with filters: {filters}")
+                filters_for_load = self.create_filter_from_params()
+                print(f"Loading best model with filters: {filters_for_load}")
 
-            # Load the model
             method_name = self.optimization_methods[self.optimization_method_idx]
             print(f"Loading {method_name} model from WandB...")
 
@@ -611,8 +619,7 @@ class Demo:
                 elif hasattr(model, "run_id"):
                     self.loaded_run_id = model.run_id
                 else:
-                    # Generate a temporary ID if none exists
-                    self.loaded_run_id = f"temp_{time.time()}"
+                    self.loaded_run_id = actual_model_run_id
 
                 # Get hidden_dim from config
                 # Try to get hidden_dim from the pickled config first
@@ -657,14 +664,18 @@ class Demo:
                             f"Warning: Could not determine hidden_dim from pickled config or GNN model. Retaining current value: {self.hidden_dim}"
                         )
 
-                # Store in cache with appropriate model type
-                self.model_cache[cache_key] = {
-                    "run_id": self.loaded_run_id,
-                    "model": model,
-                    "hidden_dim": self.hidden_dim,
-                }
+                # Store in cache using the actual_model_run_id as the key, if determined
+                if actual_model_run_id:
+                    self.model_cache[actual_model_run_id] = {
+                        "run_id": actual_model_run_id,
+                        "model": model,
+                        "hidden_dim": self.hidden_dim,
+                    }
+                    print(
+                        f"Model for run_id '{actual_model_run_id}' stored/updated in cache."
+                    )
 
-                # Store model in appropriate attribute
+                # Assign the loaded model to the appropriate attribute
                 if method_name == "GNN":
                     self.gnn = model
                     print("GNN model loaded successfully")
@@ -750,7 +761,7 @@ class Demo:
                 return False
 
         except Exception as e:
-            print(f"Error loading model from wandb: {e}")
+            print(f"Error loading model: {e}")
             import traceback
 
             print(f"Traceback: {traceback.format_exc()}")
@@ -788,11 +799,8 @@ class Demo:
             self.generate_random_wires()
         else:  # fixed
             self.generate_fixed_wires()
-        # Reset GNN when wires change, as its internal state might depend on wiring
-        self.gnn = None
-        self.sa_model = None  # Also reset self-attention model
 
-    def generate_random_wires(self):
+    def generate_random_wires_(self):
         in_n = self.input_n
         self.wires = []
         key = self.wires_key
@@ -804,6 +812,10 @@ class Demo:
             )
             self.wires.append(ws)
             in_n = gate_n
+
+    def generate_random_wires(self):
+        key, self.wires_key = jax.random.split(self.wires_key)
+        self.wires, self.logits = gen_circuit(key, self.layer_sizes, self.arity)
 
     def generate_fixed_wires(self):
         in_n = self.input_n
@@ -896,6 +908,21 @@ class Demo:
         inp_img = zoom(inp_img, zoom_factor)
         self.inputs_img = np.uint8(inp_img.clip(0, 1) * 255)  # Convert to uint8
 
+    def initialize_circuit_graph(self):
+        """Initialize circuit graph"""
+        # Create graph from current circuit
+        circuit_graph = build_graph(
+            logits=self.logits,
+            wires=self.wires,
+            input_n=self.input_n,
+            arity=self.arity,
+            hidden_dim=self.hidden_dim,
+            loss_value=0.0,
+            update_steps=0,
+        )
+        self.circuit_graph = circuit_graph
+        self.gnn_update_counter = 0
+
     def initialize_gnn(self):
         """Initialize GNN using model loaded from WandB or cache"""
         if self.gnn is None:
@@ -906,9 +933,9 @@ class Demo:
                 # Try to load model from cache or WandB
                 if self.load_best_model():
                     print("Successfully loaded GNN model")
-                    return True
                 else:
                     print("Failed to load GNN model, creating new instance")
+
                     # Create new GNN instance with current parameters
                     self.gnn = CircuitGNN(
                         node_mlp_features=self.gnn_node_mlp_features,
@@ -918,7 +945,9 @@ class Demo:
                         message_passing=self.gnn_enable_message_passing,
                         rngs=nnx.Rngs(params=key),
                     )
-                    return True
+
+                self.initialize_circuit_graph()
+                return True
 
             except Exception as e:
                 print(f"Error initializing GNN: {e}")
@@ -957,6 +986,16 @@ class Demo:
     def update_circuit_gnn(self):
         """Update circuit using GNN"""
         try:
+            # Check if we've reached the maximum number of updates
+            if (
+                self.max_gnn_updates is not None
+                and self.gnn_update_counter >= self.max_gnn_updates
+            ):
+                print(
+                    f"Reached maximum GNN updates ({self.max_gnn_updates}). Stopping updates."
+                )
+                return self.max_loss_value, self.max_loss_value
+
             # Ensure GNN is initialized
             if not self.gnn:
                 if (
@@ -1300,13 +1339,29 @@ class Demo:
                     - group_w / 2
                 )
                 my = (prev_y + y) / 2
+
                 for x0, x1, si, m in zip(
                     src_x.ravel(), dst_x.ravel(), wires.ravel(), masks.ravel()
                 ):
                     if not m:
                         continue
                     a = int(prev_act[si] * 0x60) if si < len(prev_act) else 0
-                    col = 0xFF404040 + (a << 8)
+                    if (
+                        self.use_message_viz
+                        and self.optimization_methods[self.optimization_method_idx]
+                        != "Backprop"
+                    ):
+                        import random
+
+                        r = random.randint(0, 255)
+                        g = random.randint(0, 255)
+                        b = random.randint(0, 255)
+                        a = random.randint(0, 255)  # Optional alpha value
+
+                        # Combine into a single 32-bit integer in ARGB format
+                        col = (a << 24) | (r << 16) | (g << 8) | b
+                    else:
+                        col = 0xFF404040 + (a << 8)
                     dl.add_bezier_cubic(
                         (x0, prev_y + d / 2),
                         (x0, my),
@@ -1480,6 +1535,11 @@ class Demo:
 
             print(f"Error in draw_lut: {traceback.format_exc()}")
 
+    def reset_gnn_counter(self):
+        """Reset the GNN update counter"""
+        self.gnn_update_counter = 0
+        print("GNN update counter reset")
+
     def regenerate_circuit(self):
         """Completely regenerate the circuit with current parameters"""
         print("\nREGENERATING CIRCUIT DUE TO PARAMETER CHANGE OR MANUAL REQUEST:")
@@ -1489,6 +1549,9 @@ class Demo:
         print(
             f"  Using: wiring_mode='{self.wiring_mode}', wires_key_seed={self.current_wires_key_seed if hasattr(self, 'current_wires_key_seed') else 'N/A'}"
         )
+
+        # Reset GNN counter when regenerating circuit
+        self.reset_gnn_counter()
 
         # Update derived values
         self.case_n = 1 << self.input_n
@@ -1591,6 +1654,17 @@ class Demo:
                 )
                 implot.end_plot()
 
+            # Add GNN update counter display
+            if (
+                self.optimization_methods[self.optimization_method_idx] == "GNN"
+                and self.max_gnn_updates is not None
+            ):
+                imgui.text(
+                    f"GNN Updates: {self.gnn_update_counter}/{self.max_gnn_updates}"
+                )
+                if imgui.button("Reset GNN Counter"):
+                    self.reset_gnn_counter()
+
             imgui.separator_text("Inputs")
             self.draw_lut("inputs", self.inputs_img, self.input_texture)
 
@@ -1634,6 +1708,14 @@ class Demo:
             if changed:
                 print(
                     f"Visualization mode: {'Simple' if self.use_simple_viz else 'Detailed'}"
+                )
+
+            activated_message_viz, self.use_message_viz = imgui.checkbox(
+                "Message visualization", self.use_message_viz
+            )
+            if activated_message_viz:
+                print(
+                    f"Visualization mode: {'Messages displayed' if self.use_message_viz else 'Messages not displayed'}"
                 )
 
             # Plot settings
@@ -1772,16 +1854,22 @@ class Demo:
             if imgui.button("reset gates"):
                 self.logits = self.logits0
                 self.trainstep_i = 0
+                if self.optimization_methods[self.optimization_method_idx] == "GNN":
+                    self.initialize_circuit_graph()
+
             if imgui.button("reset gates + opt"):
                 self.logits = self.logits0
                 self.init_optimizers()
                 self.trainstep_i = 0
                 # Reset GNN as well
                 self.gnn = None
+
             if imgui.button("shuffle wires"):
                 self.wires_key, key = jax.random.split(self.wires_key)
                 self.update_wires()
                 self.trainstep_i = 0
+                self.initialize_circuit_graph()
+
             local_noise_changed, self.local_noise = imgui.slider_float(
                 "local noise", self.local_noise, 0.0, 20.0
             )
@@ -1802,12 +1890,15 @@ class Demo:
             wiring_mode_changed, self.wiring_mode_idx = imgui.combo(
                 "Wiring Mode", self.wiring_mode_idx, self.wiring_modes
             )
+
             if wiring_mode_changed:
                 self.wiring_mode = self.wiring_modes[self.wiring_mode_idx]
                 print(f"Switched to {self.wiring_mode} wiring.")
                 # Regenerate wires when mode changes
                 self.update_wires()
                 self.trainstep_i = 0  # Reset training progress
+                self.initialize_circuit_graph()
+                self.gnn = None
 
             # Add WandB integration section
             if self.optimization_methods[self.optimization_method_idx] in [
@@ -1839,6 +1930,14 @@ class Demo:
                     for key, value in filters.items():
                         imgui.text(f"{key}: {value}")
                     imgui.tree_pop()
+
+                # Add slider for run_from_last
+                _, self.run_from_last = imgui.slider_int(
+                    "Run from Last", self.run_from_last, 1, 10
+                )
+                imgui.text_wrapped(
+                    "Selects n-th most recent run matching filters (if no Run ID)."
+                )
 
                 # Status of loaded model
                 if self.loaded_run_id:
