@@ -9,6 +9,8 @@ import logging
 import hydra
 import jax
 import glob
+from boolean_nca_cc.circuits.model import gen_circuit, run_circuit
+from boolean_nca_cc.circuits.train import generate_layer_sizes, build_graph
 
 log = logging.getLogger(__name__)
 
