@@ -107,8 +107,8 @@ def _save_periodic_checkpoint(
     if checkpoint_path is None or epoch == 0 or epoch % checkpoint_interval != 0:
         return
 
-    ckpt_filename = f"checkpoint_epoch_{epoch}.pkl"
-    # log.info(f"Saving periodic checkpoint at epoch {epoch}")
+    ckpt_filename = "latest_checkpoint.pkl"
+    log.info(f"Saving periodic checkpoint at epoch {epoch}")
 
     try:
         save_checkpoint(
@@ -124,6 +124,15 @@ def _save_periodic_checkpoint(
         # Log to wandb if enabled
         if wandb_run:
             wandb_run.save(os.path.join(checkpoint_path, ckpt_filename))
+
+            # Also log this as an artifact for better tracking in wandb
+            try:
+                artifact = wandb_run.Artifact("latest_checkpoint", type="model")
+                artifact.add_file(os.path.join(checkpoint_path, ckpt_filename))
+                wandb_run.log_artifact(artifact)
+            except Exception as e:
+                log.warning(f"Error logging checkpoint as artifact: {e}")
+
     except Exception as e:
         log.warning(f"Error saving checkpoint: {e}")
 
