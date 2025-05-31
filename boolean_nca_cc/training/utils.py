@@ -8,11 +8,7 @@ from omegaconf import OmegaConf
 import logging
 import hydra
 import jax
-
-# Additional imports needed for n_node computation
-from boolean_nca_cc.circuits.model import gen_circuit
-from boolean_nca_cc import generate_layer_sizes
-from boolean_nca_cc.utils.graph_builder import build_graph
+import glob
 
 log = logging.getLogger(__name__)
 
@@ -248,6 +244,7 @@ def load_best_model_from_wandb(
     filename="best_model_hard_accuracy",
     filetype="pkl",
     run_from_last=1,
+    use_local_latest=False,
 ):
     """Load the best model from wandb artifacts.
 
@@ -297,6 +294,29 @@ def load_best_model_from_wandb(
         return n_nodes
 
     # Construct the potential local path
+
+    # Initialize WandB API
+    api = wandb.Api()
+
+    # Find the run
+    if run_id:
+        print(f"Looking for run with ID: {run_id}")
+        run = api.run(f"{entity}/{project}/{run_id}")
+        print(f"Found run: {run.name}")
+    else:
+        if not filters:
+            filters = {}
+        print(f"Looking for runs with filters: {filters}")
+        runs = api.runs(f"{entity}/{project}", filters=filters)
+
+        if not runs:
+            raise ValueError(f"No runs found matching filters: {filters}")
+
+        print(f"Found {len(runs)} matching runs, using the most recent one.")
+        run = runs[len(runs) - run_from_last]  # Most recent run first
+        print(f"Selected run: {run.name} (ID: {run.id})")
+        run_id = run.id
+
     expected_checkpoint_path = None
     if run_id:
         local_artifact_dir = os.path.join(download_dir, f"run_{run_id}")
@@ -304,7 +324,7 @@ def load_best_model_from_wandb(
             local_artifact_dir, f"{filename}.{filetype}"
         )
         print(f"Checking for local checkpoint at: {expected_checkpoint_path}")
-        if os.path.exists(expected_checkpoint_path):
+        if os.path.exists(expected_checkpoint_path) and not use_local_latest:
             print(f"Found local checkpoint for run {run_id}. Loading from disk.")
             try:
                 with open(expected_checkpoint_path, "rb") as f:
@@ -370,30 +390,62 @@ def load_best_model_from_wandb(
                 )
                 print("Proceeding to download from WandB.")
 
-    # Initialize WandB API
-    api = wandb.Api()
+        elif use_local_latest:
+            print("Loading latest model from local directory.")
+            # Get all checkpoint files in the download directory
+            checkpoint_file = glob.glob(
+                os.path.join(download_dir, "**", "*.pkl"), recursive=True
+            )
+            checkpoint_file.sort(key=os.path.getmtime, reverse=True)
+            latest_checkpoint = checkpoint_file[0]
+            print(f"Loading latest checkpoint: {latest_checkpoint}")
 
-    # Find the run
-    if run_id:
-        print(f"Looking for run with ID: {run_id}")
-        try:
-            run = api.run(f"{entity}/{project}/{run_id}")
-            print(f"Found run: {run.name}")
-        except Exception as e:
-            print(f"Error finding run {run_id}: {e}")
-            raise ValueError(f"Could not find run with ID {run_id}")
-    else:
-        if not filters:
-            filters = {}
-        print(f"Looking for runs with filters: {filters}")
-        runs = api.runs(f"{entity}/{project}", filters=filters)
+            with open(latest_checkpoint, "rb") as f:
+                loaded_dict = pickle.load(f)
 
-        if not runs:
-            raise ValueError(f"No runs found matching filters: {filters}")
+            api = wandb.Api()
+            run_config = api.run(f"{entity}/{project}/{run_id}").config
+            config = OmegaConf.create(run_config)
+            print(
+                f"Instantiating model using config from run {run_id}: {config.model._target_}"
+            )
 
-        print(f"Found {len(runs)} matching runs, using the most recent one.")
-        run = runs[len(runs) - run_from_last]  # Most recent run first
-        print(f"Selected run: {run.name} (ID: {run.id})")
+            rng = nnx.Rngs(params=jax.random.PRNGKey(seed))
+            model = hydra.utils.instantiate(
+                config.model, arity=config.circuit.arity, rngs=rng
+            )
+
+            if "model" in loaded_dict:
+                try:
+                    nnx.update(model, loaded_dict["model"])
+                except (AttributeError, TypeError) as e:
+                    print(f"Direct update failed with error: {e}")
+                    print("Trying alternative update approach for local load...")
+                    model_state = loaded_dict["model"]
+                    if hasattr(model_state, "_state_dict"):
+                        model_state = model_state._state_dict
+                    for collection_name, collection in model_state.items():
+                        for var_name, value in collection.items():
+                            try:
+                                path = f"{collection_name}.{var_name}"
+                                model.put(path, value)
+                            except Exception as inner_e:
+                                print(
+                                    f"Warning: Failed to update {path} during local load: {inner_e}"
+                                )
+            else:
+                print("Warning: No 'model' key found in local loaded dictionary")
+                model = None
+
+            # Ensure essential keys are present in loaded_dict
+            if "run_id" not in loaded_dict:
+                loaded_dict["run_id"] = run_id
+            if "config" not in loaded_dict:
+                loaded_dict["config"] = config  # Add config if not present
+
+            return model, loaded_dict
+
+            # Sort by modification time (newest first)
 
     # Get artifacts and find best model
     print("Retrieving artifacts...")
