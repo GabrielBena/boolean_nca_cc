@@ -311,6 +311,13 @@ class Demo:
         self.wandb_project = "boolean-nca-cc"
         self.wandb_download_dir = "saves"
 
+        # WandB loading parameters
+        self.run_id = None  # Specific run ID if provided
+        self.loaded_run_id = None  # Last successfully loaded run ID
+        self.wandb_entity = "m2snn"
+        self.wandb_project = "boolean-nca-cc"
+        self.wandb_download_dir = "saves"
+
         # Model caching
         self.model_cache = {}  # Dictionary to cache models by run_id
 
@@ -918,6 +925,8 @@ class Demo:
                 import traceback
 
                 print(f"Traceback: {traceback.format_exc()}")
+                # Clear the loaded state to avoid repeated failures
+                self.loaded_gnn_state = None
                 # Fallback to backprop
                 self.optimization_method_idx = 0
                 print("Falling back to Backprop optimization")
@@ -2016,6 +2025,8 @@ class Demo:
                 import traceback
 
                 print(f"Traceback: {traceback.format_exc()}")
+                # Clear the loaded state to avoid repeated failures
+                self.loaded_sa_state = None
                 # Fallback to backprop
                 self.optimization_method_idx = 0
                 print("Falling back to Backprop optimization")
