@@ -108,7 +108,7 @@ def _save_periodic_checkpoint(
         return
 
     ckpt_filename = f"checkpoint_epoch_{epoch}.pkl"
-    log.info(f"Saving periodic checkpoint at epoch {epoch}")
+    # log.info(f"Saving periodic checkpoint at epoch {epoch}")
 
     try:
         save_checkpoint(
@@ -146,9 +146,9 @@ def _save_best_checkpoint(
 
     # Use a fixed filename for the best model to avoid creating multiple files
     best_filename = f"best_model_{best_metric}.pkl"
-    log.info(
-        f"Saving best model at epoch {epoch} with {best_metric}={current_metric_value:.4f}"
-    )
+    # log.info(
+    #     f"Saving best model at epoch {epoch} with {best_metric}={current_metric_value:.4f}"
+    # )
 
     try:
         save_checkpoint(
@@ -196,7 +196,7 @@ def _save_stable_state(
         stable_path = os.path.join(
             checkpoint_path, f"stable_state_epoch_{epoch - 1}.pkl"
         )
-        log.info(f"Saving last stable state to {stable_path}")
+        # log.info(f"Saving last stable state to {stable_path}")
         save_checkpoint(
             last_stable_state["model"],
             last_stable_state["optimizer"],
@@ -499,11 +499,10 @@ def train_model(
         )
     else:
         # Use the provided pool
-        log.info("Using provided pool for training")
+        # log.info("Using provided pool for training")
         circuit_pool = init_pool
 
     # Function to run a circuit and calculate loss
-    # @partial(nnx.jit, static_argnames=("loss_type",))
     def get_loss_from_wires_logits(logits, wires, x, y_target, loss_type: str):
         # Run circuit and calculate loss
         acts = run_circuit(logits, wires, x)

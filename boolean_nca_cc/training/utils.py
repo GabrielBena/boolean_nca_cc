@@ -9,6 +9,11 @@ import logging
 import hydra
 import jax
 
+# Additional imports needed for n_node computation
+from boolean_nca_cc.circuits.model import gen_circuit
+from boolean_nca_cc import generate_layer_sizes
+from boolean_nca_cc.utils.graph_builder import build_graph
+
 log = logging.getLogger(__name__)
 
 
@@ -257,8 +262,40 @@ def load_best_model_from_wandb(
         filetype: Filetype of the best model
 
     Returns:
-        Tuple of (loaded_model, loaded_dict) containing the instantiated model and full loaded state
+        Tuple of (loaded_model, loaded_dict, config) containing the instantiated model,
+        full loaded state, and the complete hydra config used during training
     """
+
+    def compute_n_nodes_from_config(config):
+        """Compute n_nodes for CircuitSelfAttention models by building a dummy graph."""
+        # Generate circuit layer sizes
+        input_n, output_n = config.circuit.input_bits, config.circuit.output_bits
+        arity = config.circuit.arity
+
+        if config.circuit.layer_sizes is None:
+            layer_sizes = generate_layer_sizes(
+                input_n, output_n, arity, layer_n=config.circuit.num_layers
+            )
+        else:
+            layer_sizes = config.circuit.layer_sizes
+
+        # Generate dummy circuit
+        test_key = jax.random.PRNGKey(config.get("test_seed", 42))
+        wires, logits = gen_circuit(test_key, layer_sizes, arity=arity)
+
+        # Generate dummy graph
+        graph = build_graph(
+            wires=wires,
+            logits=logits,
+            input_n=input_n,
+            arity=arity,
+            hidden_dim=config.model.hidden_dim,
+        )
+
+        n_nodes = int(graph.n_node[0])
+        print(f"Computed n_nodes for CircuitSelfAttention: {n_nodes}")
+        return n_nodes
+
     # Construct the potential local path
     expected_checkpoint_path = None
     if run_id:
@@ -285,9 +322,19 @@ def load_best_model_from_wandb(
                 )
 
                 rng = nnx.Rngs(params=jax.random.PRNGKey(seed))
-                model = hydra.utils.instantiate(
-                    config.model, arity=config.circuit.arity, rngs=rng
-                )
+
+                # Common overrides for hydra.instantiate
+                instantiate_overrides = {"arity": config.circuit.arity, "rngs": rng}
+
+                # Check if this is a self-attention model and add n_node if needed
+                if (
+                    config.model.get("type") == "self_attention"
+                    or "self_attention" in config.model.get("_target_", "").lower()
+                ):
+                    n_nodes = compute_n_nodes_from_config(config)
+                    instantiate_overrides["n_node"] = n_nodes
+
+                model = hydra.utils.instantiate(config.model, **instantiate_overrides)
 
                 if "model" in loaded_dict:
                     try:
@@ -316,7 +363,7 @@ def load_best_model_from_wandb(
                 if "config" not in loaded_dict:
                     loaded_dict["config"] = config  # Add config if not present
 
-                return model, loaded_dict
+                return model, loaded_dict, config
             except Exception as e:
                 print(
                     f"Error loading model from local checkpoint {expected_checkpoint_path}: {e}"
@@ -351,12 +398,12 @@ def load_best_model_from_wandb(
     # Get artifacts and find best model
     print("Retrieving artifacts...")
     artifacts = run.logged_artifacts()
-    
+
     # Print all available artifacts for debugging
     print("Available artifacts:")
     for a in artifacts:
         print(f"  - {a.name}")
-    
+
     best_models = [a for a in artifacts if filename in a.name]
 
     if not best_models:
@@ -367,7 +414,9 @@ def load_best_model_from_wandb(
             print("Found other model artifacts:")
             for a in model_artifacts:
                 print(f"  - {a.name}")
-            raise ValueError(f"No {filename} artifacts found for run {run.id}, but found other model artifacts. Please check the artifact names.")
+            raise ValueError(
+                f"No {filename} artifacts found for run {run.id}, but found other model artifacts. Please check the artifact names."
+            )
         else:
             raise ValueError(f"No model artifacts found for run {run.id}")
 
@@ -402,25 +451,33 @@ def load_best_model_from_wandb(
 
     # Initialize rngs for the model constructor
     rng = nnx.Rngs(params=jax.random.PRNGKey(seed))
-    
+
     current_config_model_node = config.model
-    
+
     # Convert the OmegaConf node for the model to a standard Python dictionary.
     # This dictionary will contain parameters like `hidden_dim`, `edge_mlp_features`, etc.,
     # and also `_target_` if present.
-    model_params_from_config = OmegaConf.to_container(current_config_model_node, resolve=True)
+    model_params_from_config = OmegaConf.to_container(
+        current_config_model_node, resolve=True
+    )
 
     if not isinstance(model_params_from_config, dict):
-        print(f"Error: Model config from WandB did not resolve to a dictionary. Got: {type(model_params_from_config)}")
-        raise TypeError(f"Expected model config to be a dict, got {type(model_params_from_config)}")
+        print(
+            f"Error: Model config from WandB did not resolve to a dictionary. Got: {type(model_params_from_config)}"
+        )
+        raise TypeError(
+            f"Expected model config to be a dict, got {type(model_params_from_config)}"
+        )
 
     # Get the class path from _target_ and remove it from the params dict.
     class_path = model_params_from_config.pop("_target_", None)
-    
+
     if class_path is None:
-        print(f"Warning: '_target_' was missing in the resolved model parameters. Defaulting to 'boolean_nca_cc.models.CircuitGNN'")
+        print(
+            f"Warning: '_target_' was missing in the resolved model parameters. Defaulting to 'boolean_nca_cc.models.CircuitGNN'"
+        )
         class_path = "boolean_nca_cc.models.CircuitGNN"
-    
+
     # Get the actual class type using Hydra's utility
     try:
         ModelClazz = hydra.utils.get_class(class_path)
@@ -429,17 +486,32 @@ def load_best_model_from_wandb(
         raise
 
     # Prepare the full set of keyword arguments for the model's constructor
-    final_constructor_kwargs = model_params_from_config.copy() # Start with params from saved config
-    final_constructor_kwargs['arity'] = config.circuit.arity    # Add arity
-    final_constructor_kwargs['rngs'] = rng                       # Add the runtime rngs object
-    
-    print(f"Attempting to instantiate {ModelClazz} with kwargs: {final_constructor_kwargs}")
+    final_constructor_kwargs = (
+        model_params_from_config.copy()
+    )  # Start with params from saved config
+    final_constructor_kwargs["arity"] = config.circuit.arity  # Add arity
+    final_constructor_kwargs["rngs"] = rng  # Add the runtime rngs object
+
+    # Check if this is a self-attention model and add n_node if needed
+    if (
+        config.model.get("type") == "self_attention"
+        or "self_attention" in class_path.lower()
+        or "CircuitSelfAttention" in class_path
+    ):
+        n_nodes = compute_n_nodes_from_config(config)
+        final_constructor_kwargs["n_node"] = n_nodes
+
+    print(
+        f"Attempting to instantiate {ModelClazz} with kwargs: {final_constructor_kwargs}"
+    )
 
     # Instantiate the model directly
     try:
         model = ModelClazz(**final_constructor_kwargs)
     except Exception as e:
-        print(f"Error during manual instantiation of {ModelClazz} with {final_constructor_kwargs}: {e}")
+        print(
+            f"Error during manual instantiation of {ModelClazz} with {final_constructor_kwargs}: {e}"
+        )
         raise
 
     # Update model with loaded state (weights from the checkpoint)
@@ -469,4 +541,4 @@ def load_best_model_from_wandb(
     if "config" not in loaded_dict:
         loaded_dict["config"] = config
 
-    return model, loaded_dict
+    return model, loaded_dict, config
