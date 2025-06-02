@@ -18,16 +18,18 @@ import IPython
 from flax import nnx
 
 # Import shared training infrastructure
-from boolean_nca_cc.circuits.model import gen_circuit
+from boolean_nca_cc.circuits.model import gen_circuit, run_circuit
 from boolean_nca_cc.circuits.tasks import get_task_data, TASKS
 from boolean_nca_cc import generate_layer_sizes
 
 # Import training loop functions
 from boolean_nca_cc.training.train_loop import get_loss_from_graph
 from boolean_nca_cc.training.utils import load_best_model_from_wandb
+from boolean_nca_cc.training.evaluation import (
+    evaluate_model_stepwise_generator,
+)
 
 # Import model components
-from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
 
 from imgui_bundle import (
     implot,
@@ -35,6 +37,96 @@ from imgui_bundle import (
     immapp,
     hello_imgui,
 )
+
+
+################## circuit gate and wire use analysis ##################
+
+
+def calc_lut_input_use(logits):
+    """
+    Computes which inputs are used by each LUT (lookup table) gate based on its logits.
+
+    Args:
+        logits: ndarray of shape (..., lut), where the last dimension represents the LUT truth table.
+
+    Returns:
+        input_use_mask: ndarray of shape (..., arity), boolean mask indicating for each LUT which inputs affect its output.
+    """
+    luts = jp.sign(logits) * 0.5 + 0.5
+    arity = luts.shape[-1].bit_length() - 1
+    luts = luts.reshape(luts.shape[:-1] + (2,) * arity)
+    axes_to_flatten = -1 - np.arange(arity - 1)
+    input_use = []
+    for i in range(1, arity + 1):
+        m = luts.take(0, -i) != luts.take(1, -i)
+        m = m.any(axes_to_flatten)
+        input_use.append(m)
+    return jp.stack(input_use)
+
+
+def propagate_gate_use(input_n, wires, logits, output_use):
+    """
+    Propagates gate usage backwards through a layer, determining which previous gates and wires are used.
+
+    Args:
+        input_n: int, number of inputs to the current layer.
+        wires: ndarray, wire indices for the current layer.
+        logits: ndarray, LUT logits for the current layer.
+        output_use: ndarray, boolean mask indicating which gates in the current layer are used.
+
+    Returns:
+        prev_gate_use: ndarray of shape (input_n,), boolean mask indicating which previous gates are used.
+        wire_use_mask: ndarray, boolean mask indicating which wires in the current layer are used.
+    """
+    output_use = output_use.reshape(logits.shape[:2])
+    gate_input_use = calc_lut_input_use(logits) * output_use
+    wire_use_mask = gate_input_use.any(-1)
+    used_wires = wires[wire_use_mask]
+    prev_gate_use = np.zeros(input_n, np.bool_)
+    prev_gate_use[used_wires] = True
+    return prev_gate_use, wire_use_mask
+
+
+def calc_gate_use_masks(input_n, wires, logits):
+    """
+    Computes masks indicating which gates and wires are used throughout a multi-layer circuit, propagating usage from outputs to inputs.
+
+    Args:
+        input_n: int, number of input gates to the first layer.
+        wires: list of ndarrays, each specifying the wire indices for a layer.
+        logits: list of ndarrays, each specifying the LUT logits for a layer.
+
+    Returns:
+        gate_masks: list of ndarrays, each a boolean mask for gates in each layer (from input to output).
+        wire_masks: list of ndarrays, each a boolean mask for wires in each layer (from input to output).
+    """
+    layer_sizes = [input_n] + [np.prod(l.shape[:2]) for l in logits]
+    gate_use_mask = np.ones(layer_sizes[-1], np.bool_)
+    gate_masks = [gate_use_mask]
+    wire_masks = []
+    for i in range(len(logits))[::-1]:
+        gate_use_mask, wire_use_mask = propagate_gate_use(
+            layer_sizes[i], wires[i], logits[i], gate_use_mask
+        )
+        wire_masks.append(wire_use_mask)
+        gate_masks.append(gate_use_mask)
+    return gate_masks[::-1], wire_masks[::-1]
+
+
+######################## helper functions ##############################
+
+
+def is_point_in_box(p0, p1, p):
+    """Check if point p is inside box defined by p0 and p1"""
+    (x0, y0), (x1, y1), (x, y) = p0, p1, p
+    return (x0 <= x <= x1) and (y0 <= y <= y1)
+
+
+class LogitContainer(nnx.Module):
+    """Simple container to hold circuit logits for nnx.Optimizer"""
+
+    def __init__(self, logits):
+        self.logits = logits
 
 
 def zoom(a, k=2):
@@ -77,7 +169,7 @@ class CircuitOptimizationDemo:
 
         # Optimization configuration
         self.loss_type = "l4"
-        self.learning_rate = 1e-3
+        self.learning_rate = 1.0  # Learning rate for backprop
         self.n_message_steps = 1
 
         # Initialize circuit using shared functions
@@ -105,15 +197,28 @@ class CircuitOptimizationDemo:
         self.frozen_model = None
         self.logit_optimizer = None  # Only for backprop
 
-        # Graph caching for efficiency
-        self.cached_graph_structure = None
-        self.graph_cache_valid = False
+        # Step-by-step generator for GNN/Self-Attention (unified with training code)
+        self.model_generator = None
+        self.last_step_result = None
 
         # Visualization settings
         self.use_simple_viz = False
+        self.use_message_viz = False  # For circuit visualization
         self.max_loss_value = 10.0
         self.min_loss_value = 1e-6
         self.auto_scale_plot = True
+
+        # Gate mask management for circuit visualization
+        self.gate_mask = []
+        self.wire_masks = []
+        self.reset_gate_mask()
+
+        # Store activations for circuit visualization
+        self.act = []
+        self.err_mask = None
+
+        # Active case for visualization
+        self.active_case_i = 123 % self.case_n
 
         # WandB integration
         self.wandb_entity = "m2snn"
@@ -127,6 +232,9 @@ class CircuitOptimizationDemo:
 
         # Initialize optimization method
         self.initialize_optimization_method()
+
+        # Initialize activations now that everything is set up
+        self.initialize_activations()
 
     def initialize_circuit(self):
         """Initialize circuit using shared infrastructure"""
@@ -147,6 +255,17 @@ class CircuitOptimizationDemo:
             f"Circuit initialized with {sum(l.size for l in self.logits0)} parameters"
         )
         print(f"Layer structure: {self.layer_sizes}")
+
+        # Reset gate masks for new circuit structure
+        self.reset_gate_mask()
+
+        # Initialize empty activations (will be properly set after task setup)
+        self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
+        self.err_mask = np.zeros((self.case_n, self.output_n), bool)
+
+        # Reset the model generator when circuit changes
+        self.model_generator = None
+        self.last_step_result = None
 
     def sample_noise(self):
         """Sample noise for noise task"""
@@ -198,8 +317,15 @@ class CircuitOptimizationDemo:
         self.loss_log = np.zeros(max_trainstep_n, np.float32)
         self.hard_log = np.zeros(max_trainstep_n, np.float32)
 
+        # Reset the model generator when task changes
+        self.model_generator = None
+        self.last_step_result = None
+
         # Update visualization
         self.setup_visualization()
+
+        # Refresh activations for new task
+        self.initialize_activations()
 
     def setup_visualization(self):
         """Setup visualization using shared functions"""
@@ -219,49 +345,118 @@ class CircuitOptimizationDemo:
         # Initialize output image placeholder
         self.outputs_img = np.zeros_like(self.ground_truth_img)
 
-        # Initialize textures
-        dummy_texture = imgui.get_io().fonts.tex_id
-        self.input_texture = (
-            dummy_texture,
-            self.inputs_img.shape[1],
-            self.inputs_img.shape[0],
-        )
-        self.output_texture = (
-            dummy_texture,
-            self.outputs_img.shape[1],
-            self.outputs_img.shape[0],
-        )
-        self.ground_truth_texture = (
-            dummy_texture,
-            self.ground_truth_img.shape[1],
-            self.ground_truth_img.shape[0],
-        )
+        # Initialize textures with None - will be set when ImGui context is available
+        self.input_texture = None
+        self.output_texture = None
+        self.ground_truth_texture = None
+        self.imgui_initialized = False
 
         # Initialize active case
         self.active_case_i = 123 % self.case_n
+
+    def initialize_imgui_textures(self):
+        """Initialize ImGui textures once context is available"""
+        if not self.imgui_initialized:
+            try:
+                dummy_texture = imgui.get_io().fonts.tex_id
+                self.input_texture = (
+                    dummy_texture,
+                    self.inputs_img.shape[1],
+                    self.inputs_img.shape[0],
+                )
+                self.output_texture = (
+                    dummy_texture,
+                    self.outputs_img.shape[1],
+                    self.outputs_img.shape[0],
+                )
+                self.ground_truth_texture = (
+                    dummy_texture,
+                    self.ground_truth_img.shape[1],
+                    self.ground_truth_img.shape[0],
+                )
+                self.imgui_initialized = True
+            except:
+                # ImGui context not ready yet
+                pass
 
     def initialize_optimization_method(self):
         """Initialize the selected optimization method"""
         method_name = self.optimization_methods[self.optimization_method_idx]
 
         if method_name == "Backprop":
-            # Create optimizer for logits only
-            opt_fn = optax.adamw(self.learning_rate)
-            self.logit_optimizer = nnx.Optimizer(self.logits, opt_fn)
+            # Use direct optax optimizer (not nnx.Optimizer) for logits
+            opt_fn = optax.adamw(self.learning_rate, 0.8, 0.8, weight_decay=1e-1)
+            self.logit_opt_state = opt_fn.init(self.logits)
+            self.logit_optimizer = opt_fn
             self.frozen_model = None
+            # Reset generator when switching to backprop
+            self.model_generator = None
+            self.last_step_result = None
 
         elif method_name in ["GNN", "Self-Attention"]:
             # Try to load pre-trained frozen model
             if self.try_load_wandb_model():
                 print(f"Loaded frozen {method_name} model from WandB")
                 self.logit_optimizer = None  # No optimizer needed for frozen models
-                # Invalidate cache when switching to GNN/SA (different hidden_dim requirements)
-                self.invalidate_graph_cache()
+                self.logit_opt_state = (
+                    None  # No optimizer state needed for frozen models
+                )
+                # Initialize the generator for step-by-step evaluation
+                self.initialize_model_generator()
             else:
                 print(f"Could not load {method_name} model. Falling back to Backprop.")
                 self.optimization_method_idx = 0
                 self.initialize_optimization_method()
                 return
+
+    def initialize_model_generator(self):
+        """Initialize the step-by-step model generator using the unified training code"""
+        if self.frozen_model is None:
+            return
+
+        try:
+            # Use the exact same generator as training and evaluation
+            self.model_generator = evaluate_model_stepwise_generator(
+                model=self.frozen_model,
+                wires=self.wires,
+                logits=self.logits,
+                x_data=self.input_x,
+                y_data=self.y0,
+                input_n=self.input_n,
+                arity=self.arity,
+                hidden_dim=self.hidden_dim,
+                max_steps=None,  # Infinite steps for live demo
+                loss_type=self.loss_type,
+                bidirectional_edges=True,
+            )
+
+            # Get the initial state (step 0)
+            self.last_step_result = next(self.model_generator)
+            print(
+                f"Initialized model generator with initial loss: {self.last_step_result.loss:.4f}"
+            )
+
+        except Exception as e:
+            print(f"Error initializing model generator: {e}")
+            self.model_generator = None
+            self.last_step_result = None
+
+    def reset_gate_mask(self):
+        """Reset all gate masks to active"""
+        # Ensure we have the right number of masks
+        self.gate_mask = [np.ones(gate_n) for gate_n, _ in self.layer_sizes]
+        self.wire_masks = [np.ones_like(w, np.bool_) for w in self.wires]
+        print(
+            f"Reset gate mask: {len(self.gate_mask)} gate masks, {len(self.wire_masks)} wire masks"
+        )
+
+    def mask_unused_gates(self):
+        """Mask unused gates based on circuit analysis"""
+        gate_masks, self.wire_masks = calc_gate_use_masks(
+            self.input_n, self.wires, self.logits
+        )
+        for i in range(len(gate_masks)):
+            self.gate_mask[i] = np.array(self.gate_mask[i] * gate_masks[i])
 
     def try_load_wandb_model(self):
         """Try to load frozen model from WandB"""
@@ -279,7 +474,7 @@ class CircuitOptimizationDemo:
             }
 
             # Load frozen model
-            model, loaded_dict = load_best_model_from_wandb(
+            model, loaded_dict, loaded_config = load_best_model_from_wandb(
                 run_id=self.run_id,
                 filters=filters if not self.run_id else None,
                 seed=42,
@@ -290,6 +485,20 @@ class CircuitOptimizationDemo:
 
             self.frozen_model = model
             self.loaded_run_id = loaded_dict.get("run_id", "unknown")
+
+            # Extract hidden_dim from loaded config for graph compatibility
+            if hasattr(loaded_config, "model") and hasattr(
+                loaded_config.model, "hidden_dim"
+            ):
+                self.model_hidden_dim = loaded_config.model.hidden_dim
+                print(
+                    f"Using model hidden_dim={self.model_hidden_dim} from loaded config"
+                )
+            else:
+                self.model_hidden_dim = self.hidden_dim  # Fallback to demo default
+                print(
+                    f"Could not find hidden_dim in config, using default: {self.model_hidden_dim}"
+                )
 
             return True
 
@@ -305,7 +514,7 @@ class CircuitOptimizationDemo:
             if method_name == "Backprop":
                 loss, hard_loss = self.optimize_backprop()
             else:
-                loss, hard_loss = self.optimize_with_frozen_model()
+                loss, hard_loss = self.optimize_with_unified_model()
 
             # Update loss logs
             i = self.step_i % len(self.loss_log)
@@ -315,6 +524,12 @@ class CircuitOptimizationDemo:
             self.hard_log[i] = max(
                 min(float(hard_loss), self.max_loss_value), self.min_loss_value
             )
+
+            # Debug output every 100 steps
+            if self.is_optimizing and self.step_i % 100 == 0:
+                print(
+                    f"Step {self.step_i}: Loss = {float(loss):.4f}, Hard Loss = {float(hard_loss):.4f}"
+                )
 
             if self.is_optimizing:
                 self.step_i += 1
@@ -330,12 +545,19 @@ class CircuitOptimizationDemo:
 
     def optimize_backprop(self):
         """Optimize circuit logits using backpropagation"""
+        # Get current logits
+        current_logits = self.logits
+
         # Calculate loss and get predictions for visualization
         loss, (hard_loss, pred, pred_hard) = get_loss_from_graph(
-            self.logits, self.wires, self.input_x, self.y0, self.loss_type
+            current_logits, self.wires, self.input_x, self.y0, self.loss_type
         )
 
-        if self.is_optimizing:
+        if (
+            self.is_optimizing
+            and hasattr(self, "logit_optimizer")
+            and self.logit_optimizer
+        ):
             # Compute gradients with respect to logits
             def loss_fn(logits):
                 loss, _ = get_loss_from_graph(
@@ -344,20 +566,53 @@ class CircuitOptimizationDemo:
                 return loss
 
             grad_fn = jax.grad(loss_fn)
-            grads = grad_fn(self.logits)
+            grads = grad_fn(current_logits)
 
-            # Update logits using optimizer
-            self.logit_optimizer.update(grads)
-            self.logits = self.logit_optimizer.model
+            # Update logits using optax
+            updates, self.logit_opt_state = self.logit_optimizer.update(
+                grads, self.logit_opt_state, current_logits
+            )
+            self.logits = optax.apply_updates(current_logits, updates)
 
         # Store predictions for visualization
         self.current_pred = pred
         self.current_pred_hard = pred_hard
 
+        # Generate circuit activations for visualization using shared circuit runner
+        try:
+            # Import the circuit runner from the shared infrastructure
+            from boolean_nca_cc.circuits.model import run_circuit
+
+            # Run circuit to get layer-by-layer activations
+            activations = run_circuit(
+                current_logits, self.wires, self.input_x, hard=False
+            )
+
+            # Convert to format expected by visualization (list of arrays for each layer)
+            self.act = []
+            # Add input layer
+            self.act.append(self.input_x)  # Input activations
+            # Add hidden and output layers
+            for layer_act in activations[
+                :-1
+            ]:  # Exclude final output as it's handled separately
+                self.act.append(layer_act)
+            # Add final output
+            self.act.append(pred)
+
+            # Generate error mask for visualization
+            self.err_mask = pred_hard != self.y0
+
+        except Exception as e:
+            print(f"Warning: Could not generate circuit activations: {e}")
+            # Fallback: create empty activations
+            self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
+            self.err_mask = np.zeros((self.case_n, self.output_n), bool)
+
         return loss, hard_loss
 
-    def optimize_with_frozen_model(self):
-        """Use frozen GNN/Self-Attention model to suggest logit improvements"""
+    def optimize_with_unified_model(self):
+        """Use the unified generator from training code to optimize with frozen GNN/Self-Attention model"""
         if self.frozen_model is None:
             print("No frozen model loaded, falling back to backprop")
             self.optimization_method_idx = 0
@@ -365,48 +620,86 @@ class CircuitOptimizationDemo:
             return self.optimize_backprop()
 
         try:
-            # Calculate initial loss
-            initial_loss, _ = get_loss_from_graph(
-                self.logits, self.wires, self.input_x, self.y0, self.loss_type
-            )
-
-            # Build graph from current circuit
-            circuit_graph = self.get_or_build_graph_structure()
-
-            # Store original logit shapes for reconstruction
-            logits_original_shapes = [logit.shape for logit in self.logits]
+            # Initialize generator if needed
+            if self.model_generator is None:
+                self.initialize_model_generator()
+                if self.model_generator is None:
+                    # Fallback to backprop if generator initialization failed
+                    print("Generator initialization failed, falling back to backprop")
+                    self.optimization_method_idx = 0
+                    self.initialize_optimization_method()
+                    return self.optimize_backprop()
 
             if self.is_optimizing:
-                # Use frozen model to suggest improvements (like evaluate_model_stepwise)
-                updated_graph, _ = self.update_graph_with_current_state(
-                    circuit_graph, initial_loss
+                # Get the next step from the generator (exactly like training)
+                try:
+                    # Run the specified number of message steps
+                    for _ in range(self.n_message_steps):
+                        self.last_step_result = next(self.model_generator)
+
+                    # Update circuit logits with the results from the generator
+                    self.logits = self.last_step_result.logits
+
+                except StopIteration:
+                    # Generator exhausted, reinitialize
+                    print("Model generator exhausted, reinitializing...")
+                    self.initialize_model_generator()
+                    if self.model_generator is None:
+                        return self.optimize_backprop()
+                    self.last_step_result = next(self.model_generator)
+
+            # Use the last step result for visualization
+            if self.last_step_result is not None:
+                # Store predictions for visualization (exactly like training)
+                self.current_pred = self.last_step_result.predictions
+                self.current_pred_hard = self.last_step_result.hard_predictions
+
+                # Generate circuit activations for visualization using the same method as backprop
+                try:
+                    # Run circuit to get layer-by-layer activations
+                    activations = run_circuit(
+                        self.logits, self.wires, self.input_x, hard=False
+                    )
+
+                    # Convert to format expected by visualization
+                    self.act = []
+                    # Add input layer
+                    self.act.append(self.input_x)
+                    # Add hidden and output layers
+                    for layer_act in activations[:-1]:
+                        self.act.append(layer_act)
+                    # Add final output
+                    self.act.append(self.current_pred)
+
+                    # Generate error mask for visualization
+                    self.err_mask = self.current_pred_hard != self.y0
+
+                except Exception as act_e:
+                    print(
+                        f"Warning: Could not generate circuit activations in unified model: {act_e}"
+                    )
+                    # Fallback: create empty activations
+                    self.act = [
+                        np.zeros((self.case_n, size)) for size, _ in self.layer_sizes
+                    ]
+                    self.err_mask = np.zeros((self.case_n, self.output_n), bool)
+
+                return self.last_step_result.loss, self.last_step_result.hard_loss
+            else:
+                # No result yet, return current state
+                loss, (hard_loss, pred, pred_hard) = get_loss_from_graph(
+                    self.logits, self.wires, self.input_x, self.y0, self.loss_type
                 )
-
-                # Apply frozen model for n_message_steps
-                for _ in range(self.n_message_steps):
-                    updated_graph = self.frozen_model(updated_graph)
-
-                # Extract improved logits
-                improved_logits = extract_logits_from_graph(
-                    updated_graph, logits_original_shapes
-                )
-
-                # Update circuit logits with improvements
-                self.logits = improved_logits
-
-            # Calculate final loss and predictions for visualization
-            loss, (hard_loss, pred, pred_hard) = get_loss_from_graph(
-                self.logits, self.wires, self.input_x, self.y0, self.loss_type
-            )
-
-            # Store predictions for visualization
-            self.current_pred = pred
-            self.current_pred_hard = pred_hard
-
-            return loss, hard_loss
+                self.current_pred = pred
+                self.current_pred_hard = pred_hard
+                return loss, hard_loss
 
         except Exception as e:
-            print(f"Error with frozen model: {e}")
+            import traceback
+
+            print(f"Error with unified model: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
+            print("Falling back to backprop")
             # Fallback to backprop
             self.optimization_method_idx = 0
             self.initialize_optimization_method()
@@ -442,8 +735,11 @@ class CircuitOptimizationDemo:
         # Reinitialize circuit
         self.initialize_circuit()
 
-        # Invalidate graph cache since circuit structure changed
-        self.invalidate_graph_cache()
+        # Clear cached predictions to avoid shape mismatches
+        if hasattr(self, "current_pred"):
+            delattr(self, "current_pred")
+        if hasattr(self, "current_pred_hard"):
+            delattr(self, "current_pred_hard")
 
         # Update task and visualization
         self.sample_noise()
@@ -466,15 +762,203 @@ class CircuitOptimizationDemo:
         self.loss_log = np.zeros(max_trainstep_n, np.float32)
         self.hard_log = np.zeros(max_trainstep_n, np.float32)
 
-        # Invalidate graph cache since logits changed significantly
-        self.invalidate_graph_cache()
+        # Reset the model generator when circuit is reset
+        self.model_generator = None
+        self.last_step_result = None
 
         # Reinitialize optimizer for backprop
         if self.optimization_methods[self.optimization_method_idx] == "Backprop":
-            opt_fn = optax.adamw(self.learning_rate)
-            self.logit_optimizer = nnx.Optimizer(self.logits, opt_fn)
+            opt_fn = optax.adamw(self.learning_rate, 0.8, 0.8, weight_decay=1e-1)
+            self.logit_opt_state = opt_fn.init(self.logits)
+            self.logit_optimizer = opt_fn
+        else:
+            # Reinitialize generator for GNN/Self-Attention
+            self.initialize_model_generator()
 
         print("Circuit reset to initial state")
+
+    def draw_gate_lut(self, x, y, logit):
+        """Draw the lookup table for a gate when hovering"""
+        x0, y0 = x - 20, y - 20 - 36
+        dl = imgui.get_window_draw_list()
+        lut = jax.nn.sigmoid(logit).reshape(-1, 4)
+        col = np.uint32(lut * 255)
+        col = (col << 16) | (col << 8) | col | 0xFF000000
+        for (i, j), c in np.ndenumerate(col):
+            x_pos, y_pos = x0 + j * 10, y0 + i * 10
+            dl.add_rect_filled((x_pos, y_pos), (x_pos + 10, y_pos + 10), c)
+
+    def draw_circuit(self, pad=4, d=24, H=600):
+        """Draw the detailed circuit visualization"""
+        io = imgui.get_io()
+        W = imgui.get_content_region_avail().x - pad * 2
+        imgui.invisible_button("circuit", (W, H))
+        base_x, base_y = imgui.get_item_rect_min()
+        base_x += pad
+
+        dl = imgui.get_window_draw_list()
+        h = (H - d) / (len(self.layer_sizes) - 1) if len(self.layer_sizes) > 1 else H
+        prev_gate_x = None
+        prev_y = 0
+        prev_act = None
+        case = self.active_case_i
+        hover_gate = None
+
+        # Ensure activations exist and have correct dimensions
+        if not hasattr(self, "act") or len(self.act) != len(self.layer_sizes):
+            if not hasattr(self, "_activation_warning_shown"):
+                print(
+                    "Warning: Activations not initialized properly, creating empty activations"
+                )
+                self._activation_warning_shown = True
+            self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
+
+        # Ensure each activation layer has the right shape
+        for li, (gate_n, group_size) in enumerate(self.layer_sizes):
+            if li >= len(self.act) or self.act[li].shape != (self.case_n, gate_n):
+                if li >= len(self.act):
+                    # Extend act list if needed
+                    while len(self.act) <= li:
+                        default_size = (
+                            self.layer_sizes[len(self.act)][0]
+                            if len(self.act) < len(self.layer_sizes)
+                            else gate_n
+                        )
+                        self.act.append(np.zeros((self.case_n, default_size)))
+                else:
+                    # Reshape if needed
+                    self.act[li] = np.zeros((self.case_n, gate_n))
+
+        # Ensure wire_masks has the right length
+        if len(self.wire_masks) != len(self.wires):
+            print(
+                f"Warning: wire_masks length mismatch. Expected {len(self.wires)}, got {len(self.wire_masks)}"
+            )
+            self.wire_masks = [np.ones_like(w, np.bool_) for w in self.wires]
+
+        for li, (gate_n, group_size) in enumerate(self.layer_sizes):
+            group_n = gate_n // group_size
+            span_x = W / group_n if group_n > 0 else W
+            group_w = min(d * group_size, span_x - 6)
+            gate_w = group_w / group_size if group_size > 0 else group_w
+            group_x = base_x + (np.arange(group_n)[:, None] + 0.5) * span_x
+            gate_ofs = (np.arange(group_size) - group_size / 2 + 0.5) * gate_w
+            gate_x = (group_x + gate_ofs).ravel()
+            y = base_y + li * h + d / 2
+
+            # Ensure we don't go out of bounds on activations
+            if li < len(self.act):
+                act = (
+                    np.array(self.act[li][case])
+                    if case < len(self.act[li])
+                    else np.zeros(gate_n)
+                )
+            else:
+                print(f"Warning: Missing activation for layer {li}")
+                act = np.zeros(gate_n)
+
+            for i, x in enumerate(gate_x):
+                a = int(act[i] * 0xA0) if i < len(act) else 0
+                col = 0xFF202020 + (a << 8)
+                p0, p1 = (x - gate_w / 2, y - d / 2), (x + gate_w / 2, y + d / 2)
+                dl.add_rect_filled(p0, p1, col, 4)
+
+                # Handle hover and click interactions
+                if is_point_in_box(p0, p1, io.mouse_pos):
+                    dl.add_rect(p0, p1, 0xA00000FF, 4, thickness=2.0)
+                    if li > 0:
+                        group_idx = i // group_size
+                        gate_idx = i % group_size
+                        if group_idx < len(self.logits[li - 1]) and gate_idx < len(
+                            self.logits[li - 1][group_idx]
+                        ):
+                            hover_gate = (
+                                x,
+                                y,
+                                self.logits[li - 1][group_idx, gate_idx],
+                            )
+                    if io.mouse_clicked[0]:
+                        if li > 0:
+                            if li < len(self.gate_mask) and i < len(self.gate_mask[li]):
+                                self.gate_mask[li][i] = 1.0 - self.gate_mask[li][i]
+                        else:
+                            self.active_case_i = self.active_case_i ^ (1 << i)
+
+                # Show masked gates
+                if (
+                    li < len(self.gate_mask)
+                    and i < len(self.gate_mask[li])
+                    and self.gate_mask[li][i] == 0.0
+                ):
+                    dl.add_rect_filled(p0, p1, 0xA00000FF, 4)
+
+            # Draw group boundaries
+            for x in group_x[:, 0]:
+                dl.add_rect(
+                    (x - group_w / 2, y - d / 2),
+                    (x + group_w / 2, y + d / 2),
+                    0x80FFFFFF,
+                    4,
+                )
+
+            # Draw wires between layers
+            if (
+                li > 0
+                and prev_gate_x is not None
+                and li - 1 < len(self.wires)
+                and li - 1 < len(self.wire_masks)
+            ):
+                wires = self.wires[li - 1].T
+                masks = self.wire_masks[li - 1].T
+                src_x = prev_gate_x[wires]
+                dst_x = (
+                    group_x
+                    + (np.arange(self.arity) + 0.5) / self.arity * group_w
+                    - group_w / 2
+                )
+                my = (prev_y + y) / 2
+
+                for x0, x1, si, m in zip(
+                    src_x.ravel(), dst_x.ravel(), wires.ravel(), masks.ravel()
+                ):
+                    if not m:
+                        continue
+                    activation_intensity = (
+                        int(prev_act[si] * 0x60) if si < len(prev_act) else 0
+                    )
+
+                    if (
+                        self.use_message_viz
+                        and self.optimization_methods[self.optimization_method_idx]
+                        != "Backprop"
+                    ):
+                        # Colorful visualization for GNN/Self-Attention
+                        import random
+
+                        r = random.randint(0, 255)
+                        g = random.randint(0, 255)
+                        b = random.randint(0, 255)
+                        alpha = random.randint(128, 255)  # Semi-transparent
+                        col = (alpha << 24) | (r << 16) | (g << 8) | b
+                    else:
+                        col = 0xFF404040 + (activation_intensity << 8)
+
+                    dl.add_bezier_cubic(
+                        (x0, prev_y + d / 2),
+                        (x0, my),
+                        (x1, my),
+                        (x1, y - d / 2),
+                        col,
+                        1.0,
+                    )
+
+            # Show LUT on hover
+            if hover_gate is not None:
+                self.draw_gate_lut(*hover_gate)
+
+            prev_gate_x = gate_x
+            prev_act = act
+            prev_y = y
 
     def draw_lut(self, name, img, tex_id):
         """Draw visualization using ImGui"""
@@ -590,6 +1074,9 @@ class CircuitOptimizationDemo:
     def gui(self):
         """Main GUI function"""
         try:
+            # Initialize ImGui textures if not already done
+            self.initialize_imgui_textures()
+
             # Perform one optimization step
             self.optimize_circuit()
 
@@ -626,6 +1113,11 @@ class CircuitOptimizationDemo:
             # Input visualization
             imgui.separator_text("Inputs")
             self.draw_lut("inputs", self.inputs_img, self.input_texture)
+
+            # Circuit visualization
+            imgui.separator_text("Circuit")
+            H = imgui.get_content_region_avail().y - 400  # Leave room for outputs below
+            self.draw_circuit(H=max(H, 300))  # Minimum height of 300
 
             # Output vs Ground Truth
             imgui.separator_text("Outputs vs Ground Truth")
@@ -800,9 +1292,25 @@ class CircuitOptimizationDemo:
             _, self.use_simple_viz = imgui.checkbox(
                 "Simple visualization", self.use_simple_viz
             )
+            _, self.use_message_viz = imgui.checkbox(
+                "Message visualization", self.use_message_viz
+            )
             _, self.auto_scale_plot = imgui.checkbox(
                 "Auto-scale plot", self.auto_scale_plot
             )
+
+            # Circuit gate mask controls
+            imgui.separator_text("Circuit Masks")
+            if imgui.button("Reset Gate Mask"):
+                self.reset_gate_mask()
+            imgui.same_line()
+            if imgui.button("Mask Unused Gates"):
+                self.mask_unused_gates()
+
+            # Show active gate count
+            if hasattr(self, "gate_mask") and len(self.gate_mask) > 0:
+                active_gate_n = int(sum(m.sum() for m in self.gate_mask))
+                imgui.text(f"Active gates: {active_gate_n}")
 
             # Status information
             imgui.separator_text("Status")
@@ -811,10 +1319,25 @@ class CircuitOptimizationDemo:
             imgui.text(f"Optimization Step: {self.step_i}")
             imgui.text(f"Active Input Case: {self.active_case_i}")
             if hasattr(self, "current_pred_hard"):
-                accuracy = float(jp.mean(jp.round(self.current_pred) == self.y0))
-                hard_accuracy = float(jp.mean(self.current_pred_hard == self.y0))
-                imgui.text(f"Soft Accuracy: {accuracy:.3f}")
-                imgui.text(f"Hard Accuracy: {hard_accuracy:.3f}")
+                try:
+                    # Check shape compatibility before calculating accuracy
+                    if (
+                        hasattr(self, "current_pred")
+                        and self.current_pred.shape == self.y0.shape
+                        and self.current_pred_hard.shape == self.y0.shape
+                    ):
+                        accuracy = float(
+                            jp.mean(jp.round(self.current_pred) == self.y0)
+                        )
+                        hard_accuracy = float(
+                            jp.mean(self.current_pred_hard == self.y0)
+                        )
+                        imgui.text(f"Soft Accuracy: {accuracy:.3f}")
+                        imgui.text(f"Hard Accuracy: {hard_accuracy:.3f}")
+                    else:
+                        imgui.text("Accuracy: Computing...")
+                except Exception as e:
+                    imgui.text(f"Accuracy: Error - {str(e)[:30]}...")
 
             imgui.end_child()
 
@@ -824,60 +1347,36 @@ class CircuitOptimizationDemo:
 
             print(f"Traceback: {traceback.format_exc()}")
 
-    def invalidate_graph_cache(self):
-        """Invalidate the cached graph structure"""
-        self.graph_cache_valid = False
-        self.cached_graph_structure = None
-        print("Graph cache invalidated - will rebuild on next optimization step")
+    def initialize_activations(self):
+        """Run circuit once to generate initial activations"""
+        try:
+            # Make sure we have input data
+            if not hasattr(self, "input_x") or not hasattr(self, "y0"):
+                # Create default input data
+                x = jp.arange(self.case_n)
+                self.input_x = unpack(x, bit_n=self.input_n)
+                self.y0 = jp.zeros((self.case_n, self.output_n))
 
-    def get_or_build_graph_structure(self):
-        """Get cached graph structure or build new one if invalid"""
-        if not self.graph_cache_valid or self.cached_graph_structure is None:
-            print("Building new graph structure...")
-            # Build the base graph structure (this is expensive)
-            self.cached_graph_structure = build_graph(
-                logits=self.logits,
-                wires=self.wires,
-                input_n=self.input_n,
-                arity=self.arity,
-                hidden_dim=self.hidden_dim,
-                loss_value=0.0,  # Placeholder, will be updated
-                update_steps=0,  # Placeholder, will be updated
-            )
-            self.graph_cache_valid = True
-            print("Graph structure cached")
+            # Run circuit to get layer-by-layer activations
+            activations = run_circuit(self.logits, self.wires, self.input_x, hard=False)
 
-        return self.cached_graph_structure
+            # Convert to format expected by visualization
+            self.act = []
+            # Add input layer
+            self.act.append(self.input_x)
+            # Add hidden and output layers (activations includes intermediate layers)
+            for layer_act in activations:
+                self.act.append(layer_act)
 
-    def update_graph_with_current_state(self, base_graph, loss_value):
-        """Update cached graph with current logits, loss, and step count"""
-        # Extract logits and flatten them to update node features
-        logits_original_shapes = [logit.shape for logit in self.logits]
+            # Generate error mask for visualization - use final output from activations
+            final_output = activations[-1] if activations else jp.zeros_like(self.y0)
+            self.err_mask = (final_output > 0.5) != self.y0
 
-        # Flatten logits to create node features (same as build_graph does)
-        flattened_logits = []
-        for logit_layer in self.logits:
-            flattened_logits.append(logit_layer.flatten())
-        all_logits = jp.concatenate(flattened_logits)
-
-        # Pad logits to hidden_dim size per node
-        n_nodes = len(all_logits)
-        if self.hidden_dim > 1:
-            # Create features of size hidden_dim per node
-            node_features = jp.zeros((n_nodes, self.hidden_dim))
-            node_features = node_features.at[:, 0].set(
-                all_logits
-            )  # Put logits in first feature
-        else:
-            node_features = all_logits.reshape(-1, 1)
-
-        # Update the graph with new node features and globals
-        updated_graph = base_graph._replace(
-            nodes={"logits": node_features},
-            globals=jp.array([loss_value, float(self.step_i)], dtype=jp.float32),
-        )
-
-        return updated_graph, logits_original_shapes
+        except Exception as e:
+            print(f"Warning: Could not generate initial circuit activations: {e}")
+            # Fallback: create empty activations
+            self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
+            self.err_mask = np.zeros((self.case_n, self.output_n), bool)
 
 
 if __name__ == "__main__":
