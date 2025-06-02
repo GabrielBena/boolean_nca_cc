@@ -21,7 +21,6 @@ from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
 from boolean_nca_cc.models import CircuitGNN, run_gnn_scan
 from boolean_nca_cc.training import (
     train_model,
-    train_step_model,
     evaluate_model_stepwise,
 )
 
@@ -43,7 +42,6 @@ __all__ = [
     "extract_logits_from_graph",
     # Training
     "train_model",
-    "train_step_model",
     "evaluate_model_stepwise",
     # Version
     "__version__",

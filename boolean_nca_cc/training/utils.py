@@ -248,6 +248,8 @@ def load_best_model_from_wandb(
     filetype="pkl",
     run_from_last=1,
     use_local_latest=False,
+    select_by_best_metric=False,
+    metric_name="hard_accuracy",
 ):
     """Load the best model from wandb artifacts.
 
@@ -260,6 +262,10 @@ def load_best_model_from_wandb(
         download_dir: Directory to download artifacts to
         filename: Filename of the best model
         filetype: Filetype of the best model
+        run_from_last: Index from the end of runs list to select (when select_by_best_metric is False)
+        use_local_latest: Whether to use the latest local checkpoint
+        select_by_best_metric: If True, select run with highest metric instead of using run_from_last
+        metric_name: Name of the metric to maximize when select_by_best_metric is True
 
     Returns:
         Tuple of (loaded_model, loaded_dict, config) containing the instantiated model,
@@ -315,9 +321,52 @@ def load_best_model_from_wandb(
         if not runs:
             raise ValueError(f"No runs found matching filters: {filters}")
 
-        print(f"Found {len(runs)} matching runs, using the most recent one.")
-        run = runs[len(runs) - run_from_last]  # Most recent run first
-        print(f"Selected run: {run.name} (ID: {run.id})")
+        print(f"Found {len(runs)} matching runs.")
+
+        if select_by_best_metric:
+            print(f"Selecting run with highest {metric_name} metric...")
+            best_run = None
+            best_metric_value = float("-inf")
+
+            for candidate_run in runs:
+                if candidate_run.state == "running":
+                    print(
+                        f"Run {candidate_run.name} (ID: {candidate_run.id}): Skipping unfinished run"
+                    )
+                    continue
+
+                # Get the summary metrics for this run
+                summary = candidate_run.summary
+
+                # Try to get the metric value
+                metric_value = summary.get(metric_name)
+                if metric_value is not None:
+                    print(
+                        f"Run {candidate_run.name} (ID: {candidate_run.id}): {metric_name} = {metric_value}"
+                    )
+                    if metric_value > best_metric_value:
+                        best_metric_value = metric_value
+                        best_run = candidate_run
+                else:
+                    print(
+                        f"Run {candidate_run.name} (ID: {candidate_run.id}): {metric_name} not found in summary"
+                    )
+
+            if best_run is None:
+                print(
+                    f"Warning: No runs found with {metric_name} metric. Falling back to run_from_last selection."
+                )
+                run = runs[len(runs) - run_from_last]
+            else:
+                run = best_run
+                print(
+                    f"Selected run with highest {metric_name} ({best_metric_value}): {run.name} (ID: {run.id})"
+                )
+        else:
+            print(f"Using run_from_last={run_from_last} to select run.")
+            run = runs[len(runs) - run_from_last]  # Most recent run first
+            print(f"Selected run: {run.name} (ID: {run.id})")
+
         run_id = run.id
 
     expected_checkpoint_path = None
