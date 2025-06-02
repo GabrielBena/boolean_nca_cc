@@ -52,7 +52,7 @@ def save_checkpoint(model, optimizer, metrics, cfg, step, output_dir, filename=N
     with open(checkpoint_path, "wb") as f:
         pickle.dump(checkpoint, f)
 
-    log.info(f"Saved checkpoint to {checkpoint_path}")
+    # log.info(f"Saved checkpoint to {checkpoint_path}")
     if hasattr(cfg, "wandb") and cfg.wandb.enabled:
         try:
             import wandb
@@ -646,3 +646,95 @@ def load_best_model_from_wandb(
         loaded_dict["config"] = config
 
     return model, loaded_dict, config
+
+
+def keypath_to_string(keypath):
+    """Convert keypath to string using JAX utilities."""
+    return "_".join(str(key).strip("()").strip("[]").strip("'") for key in keypath)
+
+
+def check_gradients(grads, verbose=True, return_zero_grad_paths=False):
+    """
+    Check gradients for zero values and optionally print detailed information.
+
+    Args:
+        grads: Gradient tree structure from nnx.value_and_grad
+        verbose: If True, print information about zero gradients
+        return_zero_grad_paths: If True, return list of parameter paths with zero gradients
+
+    Returns:
+        bool: True if any gradients are non-zero, False if all gradients are zero
+        list (optional): List of parameter paths with zero gradients if return_zero_grad_paths=True
+    """
+    # Check if any gradients are non-zero
+    has_grads = any(jax.tree.leaves(jax.tree.map(lambda x: x.any(), grads)))
+
+    if not has_grads:
+        if verbose:
+            print("WARNING: All gradients are zero!")
+        if return_zero_grad_paths:
+            return False, []
+        return False
+
+    # Get detailed information about zero gradients
+    leaves_with_paths, _ = jax.tree_util.tree_flatten_with_path(grads)
+    zero_grad_paths = []
+
+    for i, (path, leaf) in enumerate(leaves_with_paths):
+        path_str = keypath_to_string(path)
+        if not leaf.any():
+            zero_grad_paths.append(path_str)
+            if verbose:
+                print(f"{path_str}, shape: {leaf.shape} has no grads")
+
+    if verbose and zero_grad_paths:
+        print(
+            f"Found {len(zero_grad_paths)} parameters with zero gradients out of {len(leaves_with_paths)} total parameters"
+        )
+    elif verbose:
+        print(f"All {len(leaves_with_paths)} parameters have non-zero gradients")
+
+    if return_zero_grad_paths:
+        return has_grads, zero_grad_paths
+    return has_grads
+
+
+def gradient_check_step(
+    model, optimizer, loss_fn, *loss_args, verbose=True, **loss_kwargs
+):
+    """
+    Perform a gradient check step: compute gradients, update optimizer, check for zero gradients.
+
+    Args:
+        model: The model to check gradients for
+        optimizer: The optimizer to update
+        loss_fn: Loss function that takes (model, *loss_args, **loss_kwargs) and returns (loss, aux)
+        *loss_args: Positional arguments to pass to loss_fn
+        verbose: If True, print gradient information
+        **loss_kwargs: Keyword arguments to pass to loss_fn
+
+    Returns:
+        tuple: (loss, aux, has_grads, zero_grad_paths)
+            - loss: The computed loss value
+            - aux: Auxiliary outputs from loss function
+            - has_grads: True if any gradients are non-zero
+            - zero_grad_paths: List of parameter paths with zero gradients
+    """
+    # Compute gradients
+    (loss, aux), grads = nnx.value_and_grad(loss_fn, has_aux=True)(
+        model, *loss_args, **loss_kwargs
+    )
+
+    # Update optimizer
+    optimizer.update(grads)
+
+    # Check gradients
+    has_grads, zero_grad_paths = check_gradients(
+        grads, verbose=verbose, return_zero_grad_paths=True
+    )
+
+    # Assert that we have some gradients
+    if not has_grads:
+        raise RuntimeError("No gradients found - all parameters have zero gradients!")
+
+    return loss, aux, has_grads, zero_grad_paths

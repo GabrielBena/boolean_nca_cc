@@ -586,37 +586,22 @@ def train_model(
             # Store original shapes for reconstruction
             logits_original_shapes = [logit.shape for logit in logits]
 
-            # Calculate initial loss and update graphs
-            initial_loss, _ = get_loss_from_wires_logits(
-                logits, wires, x, y_target, loss_type
-            )
-
-            # Extract the current update_steps count and increment it
-            current_update_steps = 0
-            if graph.globals is not None and graph.globals.shape[-1] > 1:
-                current_update_steps = graph.globals[..., 1]
-
-            # Update the graph with the initial loss and current update_steps
-            updated_graph = graph._replace(
-                globals=jp.array([initial_loss, current_update_steps], dtype=jp.float32)
-            )
-
             # Run GNN for n_message_steps to optimize the circuit
             for step in range(n_message_steps):
-                updated_graph = gnn_model(updated_graph)
+                graph = gnn_model(graph)
 
             # Extract updated logits and run the circuit
-            updated_logits = extract_logits_from_graph(
-                updated_graph, logits_original_shapes
-            )
+            updated_logits = extract_logits_from_graph(graph, logits_original_shapes)
             loss, aux = get_loss_from_wires_logits(
                 updated_logits, wires, x, y_target, loss_type
             )
 
-            # Final update with the computed loss and incremented update_steps
-            final_update_steps = current_update_steps + n_message_steps
-            final_graph = updated_graph._replace(
-                globals=jp.array([loss, final_update_steps], dtype=jp.float32)
+            # Update the graph with the initial loss and current update_steps
+            current_update_steps = graph.globals[..., 1]
+            final_graph = graph._replace(
+                globals=jp.array(
+                    [loss, current_update_steps + n_message_steps], dtype=jp.float32
+                )
             )
 
             return loss, (aux, final_graph, updated_logits)
@@ -686,9 +671,11 @@ def train_model(
 
         # Select a random subset of data for this epoch
         rng, data_key = jax.random.split(rng)
-        idx = jax.random.permutation(data_key, len(x_data))
-        x_batch = x_data[idx]
-        y_batch = y_data[idx]
+        # idx = jax.random.permutation(data_key, len(x_data))
+        # x_batch = x_data[idx]
+        # y_batch = y_data[idx]
+        x_batch = x_data
+        y_batch = y_data
 
         # Perform pool training step
         (

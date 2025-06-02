@@ -174,6 +174,7 @@ class CircuitSelfAttention(nnx.Module):
         *,
         rngs: nnx.Rngs,
         type: str = "self_attention",
+        use_globals: bool = True,
     ):
         """
         Initialize the circuit self-attention model.
@@ -195,11 +196,15 @@ class CircuitSelfAttention(nnx.Module):
         self.dropout_rate = dropout_rate
         self.num_heads = num_heads
         self.deterministic = True
+        self.use_globals = use_globals
 
         # Compute the total feature dimension (logits + hidden + positional encodings)
-        feature_dim = (
-            self.logit_dim + hidden_dim * 3 + 2
-        )  # logits + hidden + 2 PE's + 2 globals
+        if use_globals:
+            feature_dim = (
+                self.logit_dim + hidden_dim * 3 + 2
+            )  # logits + hidden + 2 PE's + 2 globals
+        else:
+            feature_dim = self.logit_dim + hidden_dim * 3  # logits + hidden + 2 PE's
 
         # Feature projection
         self.feature_proj = nnx.Linear(feature_dim, hidden_dim * 4, rngs=rngs)
@@ -224,7 +229,12 @@ class CircuitSelfAttention(nnx.Module):
             rngs=rngs,
         )
         self.hidden_proj = nnx.Linear(
-            hidden_dim * 4, hidden_dim, kernel_init=nnx.initializers.zeros, rngs=rngs
+            hidden_dim * 4,
+            hidden_dim,
+            # kernel_init=nnx.initializers.normal(stddev=1e-4),  # Small random init
+            kernel_init=nnx.initializers.zeros,
+            bias_init=nnx.initializers.zeros,  # Keep bias at zero
+            rngs=rngs,
         )
 
     def _create_attention_mask(
@@ -263,7 +273,7 @@ class CircuitSelfAttention(nnx.Module):
         return mask[None, None, ...]
 
     def _extract_features(
-        self, nodes: Dict[str, jp.ndarray], globals_: jp.ndarray
+        self, nodes: Dict[str, jp.ndarray], globals_: jp.ndarray | None = None
     ) -> jp.ndarray:
         """
         Extract and concatenate node features for attention.
@@ -281,14 +291,19 @@ class CircuitSelfAttention(nnx.Module):
         layer_pe = nodes["layer_pe"]  # [n_node, hidden_dim]
         intra_layer_pe = nodes["intra_layer_pe"]  # [n_node, hidden_dim]
         # Global features
-        broadcasted_globals = jp.repeat(
-            jp.reshape(globals_, (1, -1)), self.n_node, axis=0
-        )
-
-        # Concatenate all features
-        features = jp.concatenate(
-            [logits, hidden, layer_pe, intra_layer_pe, broadcasted_globals], axis=-1
-        )
+        if globals_ is not None:
+            broadcasted_globals = jp.repeat(
+                jp.reshape(globals_, (1, -1)), self.n_node, axis=0
+            )
+            # Concatenate all features
+            features = jp.concatenate(
+                [logits, hidden, layer_pe, intra_layer_pe, broadcasted_globals], axis=-1
+            )
+        else:
+            # Concatenate all features
+            features = jp.concatenate(
+                [logits, hidden, layer_pe, intra_layer_pe], axis=-1
+            )
 
         return features
 
@@ -311,7 +326,7 @@ class CircuitSelfAttention(nnx.Module):
         nodes, edges, receivers, senders, globals_, n_node, n_edge = graph
 
         # Extract and concatenate node features
-        features = self._extract_features(nodes, globals_)
+        features = self._extract_features(nodes, globals_ if self.use_globals else None)
 
         # Add batch dimension [1, n_node, feature_dim]
         features = features[None, ...]

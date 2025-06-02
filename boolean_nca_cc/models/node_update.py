@@ -102,11 +102,15 @@ class NodeUpdateModule(nnx.Module):
         for i, (in_f, out_f) in enumerate(zip(mlp_features[:-1], mlp_features[1:])):
             # Special initialization for the final layer
             if i == len(mlp_features) - 2:
-                # Initialize final layer weights and biases to zero for "do nothing" start
+                # Use small random initialization for weights to ensure gradient flow
+                # Keep logit outputs close to zero initially, but allow hidden features to learn
                 final_linear = nnx.Linear(
                     in_f,
                     out_f,
-                    kernel_init=jax.nn.initializers.zeros,
+                    # kernel_init=nnx.initializers.normal(
+                    #     stddev=1e-4
+                    # ),  # Small random init
+                    kernel_init=nnx.initializers.zeros,
                     bias_init=jax.nn.initializers.zeros,
                     rngs=rngs,
                 )

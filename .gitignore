@@ -3,6 +3,7 @@ outputs/
 checkpoints/
 saves/ 
 *.ini 
+multirun 
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
