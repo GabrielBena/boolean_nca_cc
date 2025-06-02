@@ -2,7 +2,7 @@
 
 # Default parameters for experiment
 defaults:
-  - model: gnn  # Default model (gnn or self_attention)
+  - model: self_attention  # Default model (gnn or self_attention)
   - _self_  # For self-overrides
 
 # Random seed for reproducibility
@@ -29,14 +29,14 @@ circuit:
 
 # Training parameters
 training:
-  learning_rate: 3e-3
+  learning_rate: 1e-3
   weight_decay: 1e-5
   epochs: null
-  epochs_power_of_2: 12 # 2^n
+  epochs_power_of_2: 16 # 2^n
   loss_type: "l4"  # Options: "l4" or "bce"
-  wiring_mode: "fixed"  # Options: "fixed" or "random"
-  meta_batch_size: 32
-  n_message_steps: 10  # Number of message passing steps per training iteration
+  wiring_mode: "random"  # Options: "fixed" or "random"
+  meta_batch_size: 256
+  n_message_steps: 1  # Number of message passing steps per training iteration
   lr_scheduler: "linear_warmup"  # Options: "constant", "exponential", "cosine", "linear_warmup"
   
 # Pool configuration for meta-learning

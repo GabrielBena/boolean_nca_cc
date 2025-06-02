@@ -20,10 +20,6 @@ from flax import nnx
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.circuits.tasks import get_task_data
 from boolean_nca_cc import generate_layer_sizes
-from boolean_nca_cc.models import (
-    CircuitGNN,
-    CircuitSelfAttention,
-)
 from boolean_nca_cc.circuits.train import TrainState, loss_f_l4, loss_f_bce, train_step
 
 from boolean_nca_cc.training.train_loop import train_model

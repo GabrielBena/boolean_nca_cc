@@ -402,7 +402,9 @@ class Demo:
                     )
                 except ValueError as e:
                     if "No best model artifacts found" in str(e):
-                        print("No best model artifact found, trying to load final model...")
+                        print(
+                            "No best model artifact found, trying to load final model..."
+                        )
                         # Try loading final model instead
                         model, loaded_dict = load_best_model_from_wandb(
                             run_id=self.run_id,
@@ -449,38 +451,54 @@ class Demo:
                     print("Self-Attention model loaded successfully")
 
                 # Update GUI parameters from loaded config
-                if loaded_dict and 'config' in loaded_dict:
+                if loaded_dict and "config" in loaded_dict:
                     print("\nUPDATING GUI PARAMS FROM LOADED WANDB RUN CONFIG:")
-                    live_wandb_config = loaded_dict['config'] 
-                    print(f"  Raw live_wandb_config from run (type {type(live_wandb_config)}):\n{OmegaConf.to_yaml(live_wandb_config) if isinstance(live_wandb_config, DictConfig) else live_wandb_config}") # Print the raw config
+                    live_wandb_config = loaded_dict["config"]
+                    print(
+                        f"  Raw live_wandb_config from run (type {type(live_wandb_config)}):\n{OmegaConf.to_yaml(live_wandb_config) if isinstance(live_wandb_config, DictConfig) else live_wandb_config}"
+                    )  # Print the raw config
                     architecture_changed = False
 
                     # Circuit params
                     orig_input_n = self.input_n
-                    new_input_n = live_wandb_config.get('circuit', {}).get('input_bits', self.input_n)
+                    new_input_n = live_wandb_config.get("circuit", {}).get(
+                        "input_bits", self.input_n
+                    )
                     if new_input_n != self.input_n:
-                        print(f"  Updating input_n from {self.input_n} to {new_input_n}")
+                        print(
+                            f"  Updating input_n from {self.input_n} to {new_input_n}"
+                        )
                         self.input_n = new_input_n
                         architecture_changed = True
 
                     orig_output_n = self.output_n
-                    new_output_n = live_wandb_config.get('circuit', {}).get('output_bits', self.output_n)
+                    new_output_n = live_wandb_config.get("circuit", {}).get(
+                        "output_bits", self.output_n
+                    )
                     if new_output_n != self.output_n:
-                        print(f"  Updating output_n from {self.output_n} to {new_output_n}")
+                        print(
+                            f"  Updating output_n from {self.output_n} to {new_output_n}"
+                        )
                         self.output_n = new_output_n
                         architecture_changed = True
 
                     orig_arity = self.arity
-                    new_arity = live_wandb_config.get('circuit', {}).get('arity', self.arity)
+                    new_arity = live_wandb_config.get("circuit", {}).get(
+                        "arity", self.arity
+                    )
                     if new_arity != self.arity:
                         print(f"  Updating arity from {self.arity} to {new_arity}")
                         self.arity = new_arity
                         architecture_changed = True
-                    
+
                     orig_layer_n = self.layer_n
-                    new_layer_n = live_wandb_config.get('circuit', {}).get('num_layers', self.layer_n)
+                    new_layer_n = live_wandb_config.get("circuit", {}).get(
+                        "num_layers", self.layer_n
+                    )
                     if new_layer_n != self.layer_n:
-                        print(f"  Updating layer_n from {self.layer_n} to {new_layer_n}")
+                        print(
+                            f"  Updating layer_n from {self.layer_n} to {new_layer_n}"
+                        )
                         self.layer_n = new_layer_n
                         architecture_changed = True
 
@@ -488,68 +506,95 @@ class Demo:
                     # Note: cfg.training.wiring_mode and cfg.test_seed are typical paths
                     # We need to ensure live_wandb_config has these, or adjust paths.
                     # For run uuizzeb3, wiring_mode is under 'training', test_seed might be top-level or under 'job'/'experiment'.
-                    
+
                     # Attempt to get wiring_mode
-                    new_wiring_mode = live_wandb_config.get('training', {}).get('wiring_mode', self.wiring_mode)
+                    new_wiring_mode = live_wandb_config.get("training", {}).get(
+                        "wiring_mode", self.wiring_mode
+                    )
                     if self.wiring_mode != new_wiring_mode:
-                        print(f"  Updating wiring_mode from '{self.wiring_mode}' to '{new_wiring_mode}'")
+                        print(
+                            f"  Updating wiring_mode from '{self.wiring_mode}' to '{new_wiring_mode}'"
+                        )
                         self.wiring_mode = new_wiring_mode
                         # Find index for GUI
                         if new_wiring_mode in self.wiring_modes:
-                            self.wiring_mode_idx = self.wiring_modes.index(new_wiring_mode)
-                        architecture_changed = True # Requires wire regeneration
+                            self.wiring_mode_idx = self.wiring_modes.index(
+                                new_wiring_mode
+                            )
+                        architecture_changed = True  # Requires wire regeneration
 
                     # Attempt to get test_seed (assuming it might be top-level in the config)
                     # Common Hydra practice is cfg.seed or cfg.job.seed or cfg.experiment.seed
                     # For this specific run, let's check common Hydra config paths if not directly 'test_seed'
                     possible_seed_paths = [
-                        ('test_seed', None), 
-                        ('seed', None), 
-                        ('job', 'seed'), 
-                        ('experiment', 'seed'),
-                        ('training', 'wiring_fixed_key_seed') # if it was named this way
+                        ("test_seed", None),
+                        ("seed", None),
+                        ("job", "seed"),
+                        ("experiment", "seed"),
+                        (
+                            "training",
+                            "wiring_fixed_key_seed",
+                        ),  # if it was named this way
                     ]
-                    new_wires_key_seed_val = 42 # Default
+                    new_wires_key_seed_val = 42  # Default
                     seed_path_used = "default (42)"
 
                     for path_key, sub_key in possible_seed_paths:
                         if path_key in live_wandb_config:
                             if sub_key:
-                                if isinstance(live_wandb_config[path_key], dict) and sub_key in live_wandb_config[path_key]:
-                                    new_wires_key_seed_val = live_wandb_config[path_key][sub_key]
-                                    seed_path_used = f'live_wandb_config["{path_key}"]["{sub_key}"]' # Corrected f-string
+                                if (
+                                    isinstance(live_wandb_config[path_key], dict)
+                                    and sub_key in live_wandb_config[path_key]
+                                ):
+                                    new_wires_key_seed_val = live_wandb_config[
+                                        path_key
+                                    ][sub_key]
+                                    seed_path_used = f'live_wandb_config["{path_key}"]["{sub_key}"]'  # Corrected f-string
                                     break
                             else:
                                 new_wires_key_seed_val = live_wandb_config[path_key]
-                                seed_path_used = f'live_wandb_config["{path_key}"]' # Corrected f-string
+                                seed_path_used = f'live_wandb_config["{path_key}"]'  # Corrected f-string
                                 break
-                    
-                    print(f"  Attempting to use seed for wires_key from: {seed_path_used} (value: {new_wires_key_seed_val})")
+
+                    print(
+                        f"  Attempting to use seed for wires_key from: {seed_path_used} (value: {new_wires_key_seed_val})"
+                    )
                     new_wires_key = jax.random.PRNGKey(new_wires_key_seed_val)
-                    
+
                     # Convert PRNGKeys to string for comparison if they are JAX arrays, else compare directly
                     # This is a bit tricky as PRNGKeys are opaque. Comparing seeds is more robust.
                     # For now, let's assume if the seed value changed, the key changed.
                     # We'll rely on architecture_changed flag being set if critical params like layer sizes change.
                     # A more direct check: if the seed value used for self.wires_key is different from new_wires_key_seed_val.
                     # This requires storing the seed used for self.wires_key. Let's add self.current_wires_key_seed.
-                    
-                    if not hasattr(self, 'current_wires_key_seed') or self.current_wires_key_seed != new_wires_key_seed_val:
-                        print(f"  Updating wires_key using seed {new_wires_key_seed_val} (previous seed: {getattr(self, 'current_wires_key_seed', 'N/A')})")
+
+                    if (
+                        not hasattr(self, "current_wires_key_seed")
+                        or self.current_wires_key_seed != new_wires_key_seed_val
+                    ):
+                        print(
+                            f"  Updating wires_key using seed {new_wires_key_seed_val} (previous seed: {getattr(self, 'current_wires_key_seed', 'N/A')})"
+                        )
                         self.wires_key = new_wires_key
-                        self.current_wires_key_seed = new_wires_key_seed_val # Store current seed
-                        architecture_changed = True 
-                    
+                        self.current_wires_key_seed = (
+                            new_wires_key_seed_val  # Store current seed
+                        )
+                        architecture_changed = True
+
                     # GNN model params from run.config.model
                     # hidden_dim is handled separately below.
                     # Other GNN params like node/edge_mlp_features are used directly during GNN instantiation in utils.py
 
                     if architecture_changed:
-                        print("  Architecture or wiring parameters changed based on WandB config, will regenerate circuit.")
-                        self.regenerate_circuit() # This will use the updated self.wiring_mode and self.wires_key
+                        print(
+                            "  Architecture or wiring parameters changed based on WandB config, will regenerate circuit."
+                        )
+                        self.regenerate_circuit()  # This will use the updated self.wiring_mode and self.wires_key
                     else:
-                        print("  Loaded model architecture and wiring params match current GUI settings or no relevant changes found.")
-                    print("FINISHED UPDATING GUI PARAMS.\n") # Corrected newline escape
+                        print(
+                            "  Loaded model architecture and wiring params match current GUI settings or no relevant changes found."
+                        )
+                    print("FINISHED UPDATING GUI PARAMS.\n")  # Corrected newline escape
 
                 # Store the run ID we just loaded
                 if self.run_id:
@@ -568,25 +613,42 @@ class Demo:
                 if "config" in loaded_dict:
                     pickled_config = loaded_dict["config"]
                     if isinstance(pickled_config, dict):
-                        if "model" in pickled_config and isinstance(pickled_config["model"], dict) and "hidden_dim" in pickled_config["model"]:
+                        if (
+                            "model" in pickled_config
+                            and isinstance(pickled_config["model"], dict)
+                            and "hidden_dim" in pickled_config["model"]
+                        ):
                             self.hidden_dim = pickled_config["model"]["hidden_dim"]
                             hidden_dim_found = True
-                            print(f"Set hidden_dim from pickled_config: {self.hidden_dim}")
-                        elif "hidden_dim" in pickled_config: # Check if it's directly under config
+                            print(
+                                f"Set hidden_dim from pickled_config: {self.hidden_dim}"
+                            )
+                        elif (
+                            "hidden_dim" in pickled_config
+                        ):  # Check if it's directly under config
                             self.hidden_dim = pickled_config["hidden_dim"]
                             hidden_dim_found = True
-                            print(f"Set hidden_dim directly from pickled_config: {self.hidden_dim}")
-                
+                            print(
+                                f"Set hidden_dim directly from pickled_config: {self.hidden_dim}"
+                            )
+
                 if not hidden_dim_found:
                     # Fallback: if not in pickled_config, try to get it from the live WandB run config (which was used for instantiation)
                     # This assumes 'config' variable from higher up in the load_best_model_from_wandb scope is accessible or we re-fetch.
                     # For simplicity here, let's assume it might have been set during GUI param updates earlier
                     # or that the GNN's own hidden_dim is the source of truth if available.
-                    if hasattr(self.gnn, 'hidden_dim') and self.gnn.hidden_dim is not None:
-                         self.hidden_dim = self.gnn.hidden_dim
-                         print(f"Set hidden_dim from instantiated GNN model attribute: {self.hidden_dim}")
+                    if (
+                        hasattr(self.gnn, "hidden_dim")
+                        and self.gnn.hidden_dim is not None
+                    ):
+                        self.hidden_dim = self.gnn.hidden_dim
+                        print(
+                            f"Set hidden_dim from instantiated GNN model attribute: {self.hidden_dim}"
+                        )
                     else:
-                        print(f"Warning: Could not determine hidden_dim from pickled config or GNN model. Retaining current value: {self.hidden_dim}")
+                        print(
+                            f"Warning: Could not determine hidden_dim from pickled config or GNN model. Retaining current value: {self.hidden_dim}"
+                        )
 
                 # Store in cache with appropriate model type
                 self.model_cache[cache_key] = {
@@ -606,37 +668,65 @@ class Demo:
                 # Perform a one-off evaluation and print to terminal
                 print("\nPerforming one-off evaluation of loaded model...")
                 # Ensure current task data is loaded for evaluation
-                self.update_task() # This ensures self.input_x and self.y0 are correct for the current task
-                
-                eval_logits_for_print = self.logits # Start with current logits (likely NOPs if circuit was just regenerated)
-                
+                self.update_task()  # This ensures self.input_x and self.y0 are correct for the current task
+
+                eval_logits_for_print = self.logits  # Start with current logits (likely NOPs if circuit was just regenerated)
+
                 # Determine the actual model instance to use for evaluation
                 current_model_instance = None
                 if method_name == "GNN" and self.gnn:
                     current_model_instance = self.gnn
-                    print(f"GNN is loaded. Internal message_passing_steps: {getattr(current_model_instance, 'message_passing_steps', 'N/A')}")
+                    print(
+                        f"GNN is loaded. Internal message_passing_steps: {getattr(current_model_instance, 'message_passing_steps', 'N/A')}"
+                    )
                 elif method_name == "Self-Attention" and self.sa_model:
                     current_model_instance = self.sa_model
-                    print(f"Self-Attention model loaded. Num layers: {getattr(current_model_instance, 'num_layers', 'N/A')}")
-                
-                if current_model_instance:
-                    logits_original_shapes = [logit.shape for logit in eval_logits_for_print]
-                    circuit_graph = build_graph(
-                        eval_logits_for_print, self.wires, self.input_n, self.arity, self.hidden_dim
+                    print(
+                        f"Self-Attention model loaded. Num layers: {getattr(current_model_instance, 'num_layers', 'N/A')}"
                     )
-                    updated_graph = current_model_instance(circuit_graph) # Call the model (GNN or SA)
-                    final_eval_logits = extract_logits_from_graph(updated_graph, logits_original_shapes)
-                else: # Backprop or other, or model not loaded
-                    print("Evaluating with current logits (no GNN/SA processing for this printout).")
+
+                if current_model_instance:
+                    logits_original_shapes = [
+                        logit.shape for logit in eval_logits_for_print
+                    ]
+                    circuit_graph = build_graph(
+                        eval_logits_for_print,
+                        self.wires,
+                        self.input_n,
+                        self.arity,
+                        self.hidden_dim,
+                    )
+                    updated_graph = current_model_instance(
+                        circuit_graph
+                    )  # Call the model (GNN or SA)
+                    final_eval_logits = extract_logits_from_graph(
+                        updated_graph, logits_original_shapes
+                    )
+                else:  # Backprop or other, or model not loaded
+                    print(
+                        "Evaluating with current logits (no GNN/SA processing for this printout)."
+                    )
                     final_eval_logits = eval_logits_for_print
 
                 # Run circuit with these logits
-                eval_act = run_circuit_gui(final_eval_logits, self.wires, self.gate_mask, self.input_x, hard=False)
+                eval_act = run_circuit_gui(
+                    final_eval_logits,
+                    self.wires,
+                    self.gate_mask,
+                    self.input_x,
+                    hard=False,
+                )
                 eval_loss = res2loss(eval_act[-1] - self.y0)
-                
-                eval_hard_act = run_circuit_gui(final_eval_logits, self.wires, self.gate_mask, self.input_x, hard=True)
+
+                eval_hard_act = run_circuit_gui(
+                    final_eval_logits,
+                    self.wires,
+                    self.gate_mask,
+                    self.input_x,
+                    hard=True,
+                )
                 eval_hard_loss = res2loss(eval_hard_act[-1] - self.y0)
-                
+
                 print(f"INITIAL POST-LOAD EVALUATION (Terminal):")
                 print(f"  Soft Loss: {float(eval_loss):.6f}")
                 print(f"  Hard Loss: {float(eval_hard_loss):.6f}")
@@ -648,12 +738,14 @@ class Demo:
             except Exception as inner_e:
                 print(f"Error in model loading process: {inner_e}")
                 import traceback
+
                 print(f"Traceback: {traceback.format_exc()}")
                 return False
 
         except Exception as e:
             print(f"Error loading model from wandb: {e}")
             import traceback
+
             print(f"Traceback: {traceback.format_exc()}")
             return False
 
@@ -711,13 +803,15 @@ class Demo:
         self.wires = []
         # Use a fixed key for fixed wires, but allow local_noise to have an effect
         # The self.wires_key should have been set from the loaded config's test_seed
-        key_for_generation = self.wires_key 
-        print(f"    generate_fixed_wires: Using initial wires_key (from seed {self.current_wires_key_seed if hasattr(self, 'current_wires_key_seed') else 'N/A'}) for layer-wise splitting.")
+        key_for_generation = self.wires_key
+        print(
+            f"    generate_fixed_wires: Using initial wires_key (from seed {self.current_wires_key_seed if hasattr(self, 'current_wires_key_seed') else 'N/A'}) for layer-wise splitting."
+        )
 
         for i, (gate_n, group_size) in enumerate(self.layer_sizes[1:]):
             # Split the key for each layer to ensure different fixed wires per layer if noise is 0
             key_for_generation, k1 = jax.random.split(key_for_generation)
-            print(f"      Layer {i+1} fixed wires: using split key {k1}")
+            print(f"      Layer {i + 1} fixed wires: using split key {k1}")
             local_noise = self.local_noise if self.local_noise > 0.0 else None
             ws = gen_wires_with_noise(
                 k1, in_n, gate_n, self.arity, group_size, local_noise
@@ -856,12 +950,16 @@ class Demo:
         try:
             # Ensure GNN is initialized
             if not self.gnn:
-                if not self.initialize_gnn(): # This will try to load or create a new GNN
+                if (
+                    not self.initialize_gnn()
+                ):  # This will try to load or create a new GNN
                     # Fallback to backprop if GNN initialization failed catastrophically
-                    print("Critical GNN initialization failure. Falling back to Backprop.")
-                    self.optimization_method_idx = 0 # Index for Backprop
+                    print(
+                        "Critical GNN initialization failure. Falling back to Backprop."
+                    )
+                    self.optimization_method_idx = 0  # Index for Backprop
                     return self.update_circuit_backprop()
-            
+
             # Store original logit shapes for reconstruction
             logits_original_shapes = [logit.shape for logit in self.logits]
 
@@ -871,7 +969,7 @@ class Demo:
                 self.wires,
                 self.input_n,
                 self.arity,
-                self.hidden_dim, # Use the demo's current hidden_dim
+                self.hidden_dim,  # Use the demo's current hidden_dim
             )
 
             # Run GNN for the number of steps specified by the GUI slider
@@ -879,9 +977,9 @@ class Demo:
             # The loop here makes it perform self.gnn_message_steps total message passing rounds.
             # print(f"Running GNN in GUI for {self.gnn_message_steps} step(s).")
             for _ in range(self.gnn_message_steps):
-                circuit_graph = self.gnn(circuit_graph) # Update graph in place
-            
-            updated_graph = circuit_graph # Final graph after loop
+                circuit_graph = self.gnn(circuit_graph)  # Update graph in place
+
+            updated_graph = circuit_graph  # Final graph after loop
 
             # Extract updated logits if training is enabled
             if self.is_training:
@@ -1376,8 +1474,12 @@ class Demo:
     def regenerate_circuit(self):
         """Completely regenerate the circuit with current parameters"""
         print("\nREGENERATING CIRCUIT DUE TO PARAMETER CHANGE OR MANUAL REQUEST:")
-        print(f"  Using: input_n={self.input_n}, output_n={self.output_n}, arity={self.arity}, layer_n={self.layer_n}")
-        print(f"  Using: wiring_mode='{self.wiring_mode}', wires_key_seed={self.current_wires_key_seed if hasattr(self, 'current_wires_key_seed') else 'N/A'}")
+        print(
+            f"  Using: input_n={self.input_n}, output_n={self.output_n}, arity={self.arity}, layer_n={self.layer_n}"
+        )
+        print(
+            f"  Using: wiring_mode='{self.wiring_mode}', wires_key_seed={self.current_wires_key_seed if hasattr(self, 'current_wires_key_seed') else 'N/A'}"
+        )
 
         # Update derived values
         self.case_n = 1 << self.input_n
@@ -1403,7 +1505,7 @@ class Demo:
         # Regenerate wires with new key to ensure fresh connections
         # self.wires_key = jax.random.PRNGKey(42)  # Fixed seed for reproducibility
         # Use the existing self.wires_key, which might have been updated by load_best_model
-        self.update_wires() # Changed from shuffle_wires to update_wires
+        self.update_wires()  # Changed from shuffle_wires to update_wires
 
         # Initialize empty activations to ensure proper dimensions
         self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
