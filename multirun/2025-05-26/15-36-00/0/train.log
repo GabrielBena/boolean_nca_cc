@@ -1,0 +1,461 @@
+[2025-05-26 15:36:04,647][__main__][INFO] - model:
+  _target_: boolean_nca_cc.models.CircuitGNN
+  type: gnn
+  hidden_dim: 128
+  message_passing: true
+  node_mlp_features:
+  - 128
+  - 128
+  edge_mlp_features:
+  - 128
+  - 128
+  use_attention: true
+seed: 0
+test_seed: 42
+wandb:
+  enabled: true
+  project: boolean-nca-cc
+  entity: m2snn
+  run_name: null
+  tags:
+  - boolean-circuit
+  - nca
+  - meta-learning
+circuit:
+  task: binary_multiply
+  input_bits: 8
+  output_bits: 8
+  arity: 4
+  num_layers: 5
+  layer_sizes: null
+training:
+  learning_rate: 0.001
+  weight_decay: 1.0e-05
+  epochs: null
+  epochs_power_of_2: 12
+  loss_type: l4
+  wiring_mode: fixed
+  meta_batch_size: 32
+  n_message_steps: 5
+  lr_scheduler: linear_warmup
+pool:
+  size: 1024
+  reset_fraction: 0.05
+  reset_interval: 32
+  reset_strategy: combined
+  combined_weights:
+  - 0.5
+  - 0.5
+  gate_knockout:
+    active: true
+    fraction: 0.01
+    interval: 32
+    strategy: uniform
+    damage_prob: 0.1
+    combined_weights:
+    - 0.5
+    - 0.5
+  soft_lut_damage:
+    active: false
+    fraction: 0.01
+    interval: 64
+    strategy: uniform
+    damage_prob: 0.1
+    combined_weights:
+    - 0.5
+    - 0.5
+backprop:
+  enabled: false
+  epochs: 100
+  learning_rate: 1
+  weight_decay: 0.1
+  optimizer: adamw
+  beta1: 0.8
+  beta2: 0.8
+eval:
+  inner_steps: 100
+checkpoint:
+  enabled: true
+  interval: 1024
+  save_best: true
+  best_metric: hard_accuracy
+  save_stable_states: true
+logging:
+  log_interval: 10
+  level: INFO
+
+[2025-05-26 15:36:04,648][__main__][INFO] - Working directory: /home/marcello/workspace/boolean_nca_cc
+[2025-05-26 15:36:10,426][__main__][INFO] - Circuit layer sizes: [(8, 1), (64, 4), (64, 4), (64, 4), (64, 4), (32, 2), (8, 1)]
+[2025-05-26 15:36:10,426][__main__][INFO] - Number of nodes: 304
+[2025-05-26 15:36:12,573][__main__][INFO] - Starting GNN training
+[2025-05-26 15:36:14,682][boolean_nca_cc.training.train_loop][INFO] - WandB run ID: 25hz3cef
+[2025-05-26 15:36:14,683][boolean_nca_cc.training.train_loop][INFO] - Checkpoints will be saved to: /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef
+[2025-05-26 15:36:40,469][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 0 with hard_accuracy=0.5811
+[2025-05-26 15:36:40,494][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:49,089][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 139 with hard_accuracy=0.5815
+[2025-05-26 15:36:49,131][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:49,377][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 140 with hard_accuracy=0.5824
+[2025-05-26 15:36:49,410][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:49,734][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 143 with hard_accuracy=0.5907
+[2025-05-26 15:36:49,771][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:50,106][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 146 with hard_accuracy=0.5971
+[2025-05-26 15:36:50,142][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:50,423][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 148 with hard_accuracy=0.5977
+[2025-05-26 15:36:50,456][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:50,753][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 150 with hard_accuracy=0.6113
+[2025-05-26 15:36:50,793][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:51,224][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 156 with hard_accuracy=0.6148
+[2025-05-26 15:36:51,260][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:51,603][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 159 with hard_accuracy=0.6172
+[2025-05-26 15:36:51,627][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:52,055][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 160 with hard_accuracy=0.6205
+[2025-05-26 15:36:52,080][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:52,366][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 162 with hard_accuracy=0.6246
+[2025-05-26 15:36:52,404][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:52,657][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 163 with hard_accuracy=0.6300
+[2025-05-26 15:36:52,688][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:53,071][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 167 with hard_accuracy=0.6300
+[2025-05-26 15:36:53,110][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:53,389][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 168 with hard_accuracy=0.6330
+[2025-05-26 15:36:53,430][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:53,739][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 170 with hard_accuracy=0.6360
+[2025-05-26 15:36:53,779][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:54,184][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 175 with hard_accuracy=0.6422
+[2025-05-26 15:36:54,224][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:54,472][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 176 with hard_accuracy=0.6424
+[2025-05-26 15:36:54,504][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:54,756][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 177 with hard_accuracy=0.6502
+[2025-05-26 15:36:54,792][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:55,189][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 182 with hard_accuracy=0.6530
+[2025-05-26 15:36:55,229][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:55,492][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 183 with hard_accuracy=0.6534
+[2025-05-26 15:36:55,533][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:55,791][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 184 with hard_accuracy=0.6573
+[2025-05-26 15:36:55,822][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:56,093][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 185 with hard_accuracy=0.6616
+[2025-05-26 15:36:56,131][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:56,573][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 191 with hard_accuracy=0.6652
+[2025-05-26 15:36:56,603][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:57,070][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 192 with hard_accuracy=0.6686
+[2025-05-26 15:36:57,093][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:57,636][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 201 with hard_accuracy=0.6726
+[2025-05-26 15:36:57,665][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:58,171][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 209 with hard_accuracy=0.6741
+[2025-05-26 15:36:58,201][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:58,567][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 212 with hard_accuracy=0.6748
+[2025-05-26 15:36:58,599][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:58,862][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 213 with hard_accuracy=0.6761
+[2025-05-26 15:36:58,886][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:59,208][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 216 with hard_accuracy=0.6834
+[2025-05-26 15:36:59,248][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:36:59,594][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 219 with hard_accuracy=0.6856
+[2025-05-26 15:36:59,631][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:00,270][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 225 with hard_accuracy=0.6973
+[2025-05-26 15:37:00,296][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:00,712][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 231 with hard_accuracy=0.6980
+[2025-05-26 15:37:00,754][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:01,187][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 236 with hard_accuracy=0.6985
+[2025-05-26 15:37:01,227][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:01,509][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 238 with hard_accuracy=0.6988
+[2025-05-26 15:37:01,547][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:01,856][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 240 with hard_accuracy=0.7012
+[2025-05-26 15:37:01,896][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:02,211][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 242 with hard_accuracy=0.7036
+[2025-05-26 15:37:02,248][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:02,508][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 243 with hard_accuracy=0.7065
+[2025-05-26 15:37:02,538][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:02,829][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 245 with hard_accuracy=0.7104
+[2025-05-26 15:37:02,868][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:03,166][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 247 with hard_accuracy=0.7118
+[2025-05-26 15:37:03,208][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:03,496][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 249 with hard_accuracy=0.7170
+[2025-05-26 15:37:03,529][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:03,776][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 250 with hard_accuracy=0.7173
+[2025-05-26 15:37:03,808][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:04,499][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 258 with hard_accuracy=0.7198
+[2025-05-26 15:37:04,528][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:04,773][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 259 with hard_accuracy=0.7211
+[2025-05-26 15:37:04,798][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:05,153][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 263 with hard_accuracy=0.7229
+[2025-05-26 15:37:05,184][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:05,449][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 264 with hard_accuracy=0.7248
+[2025-05-26 15:37:05,488][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:05,737][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 265 with hard_accuracy=0.7251
+[2025-05-26 15:37:05,769][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:06,047][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 266 with hard_accuracy=0.7263
+[2025-05-26 15:37:06,086][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:06,344][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 267 with hard_accuracy=0.7265
+[2025-05-26 15:37:06,383][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:06,641][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 268 with hard_accuracy=0.7331
+[2025-05-26 15:37:06,677][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:07,359][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 281 with hard_accuracy=0.7375
+[2025-05-26 15:37:07,400][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:07,840][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 287 with hard_accuracy=0.7383
+[2025-05-26 15:37:07,881][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:08,544][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 295 with hard_accuracy=0.7434
+[2025-05-26 15:37:08,589][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:09,226][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 306 with hard_accuracy=0.7467
+[2025-05-26 15:37:09,274][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:09,974][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 319 with hard_accuracy=0.7509
+[2025-05-26 15:37:10,015][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:10,772][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 330 with hard_accuracy=0.7529
+[2025-05-26 15:37:10,813][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:11,087][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 331 with hard_accuracy=0.7535
+[2025-05-26 15:37:11,130][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:11,661][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 339 with hard_accuracy=0.7555
+[2025-05-26 15:37:11,700][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:11,947][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 340 with hard_accuracy=0.7561
+[2025-05-26 15:37:11,984][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:12,305][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 342 with hard_accuracy=0.7591
+[2025-05-26 15:37:12,342][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:12,596][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 343 with hard_accuracy=0.7610
+[2025-05-26 15:37:12,629][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:12,955][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 346 with hard_accuracy=0.7668
+[2025-05-26 15:37:12,994][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:13,757][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 355 with hard_accuracy=0.7691
+[2025-05-26 15:37:13,784][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:14,258][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 362 with hard_accuracy=0.7695
+[2025-05-26 15:37:14,301][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:14,656][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 365 with hard_accuracy=0.7704
+[2025-05-26 15:37:14,694][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:14,956][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 366 with hard_accuracy=0.7748
+[2025-05-26 15:37:14,995][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:15,420][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 371 with hard_accuracy=0.7781
+[2025-05-26 15:37:15,459][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:16,095][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 377 with hard_accuracy=0.7790
+[2025-05-26 15:37:16,120][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:16,508][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 381 with hard_accuracy=0.7791
+[2025-05-26 15:37:16,548][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:17,248][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 389 with hard_accuracy=0.7828
+[2025-05-26 15:37:17,290][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:17,574][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 391 with hard_accuracy=0.7838
+[2025-05-26 15:37:17,621][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:17,879][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 392 with hard_accuracy=0.7899
+[2025-05-26 15:37:17,913][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:19,782][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 429 with hard_accuracy=0.7921
+[2025-05-26 15:37:19,830][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:21,727][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 475 with hard_accuracy=0.7926
+[2025-05-26 15:37:21,768][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:22,095][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 476 with hard_accuracy=0.7928
+[2025-05-26 15:37:22,133][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:22,382][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 477 with hard_accuracy=0.7956
+[2025-05-26 15:37:22,422][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:23,722][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 501 with hard_accuracy=0.7964
+[2025-05-26 15:37:23,771][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:24,243][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 508 with hard_accuracy=0.7971
+[2025-05-26 15:37:24,286][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:25,031][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 517 with hard_accuracy=0.7972
+[2025-05-26 15:37:25,070][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:25,434][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 521 with hard_accuracy=0.7975
+[2025-05-26 15:37:25,474][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:25,732][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 522 with hard_accuracy=0.7976
+[2025-05-26 15:37:25,767][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:26,024][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 523 with hard_accuracy=0.7981
+[2025-05-26 15:37:26,058][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:26,354][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 525 with hard_accuracy=0.8002
+[2025-05-26 15:37:26,390][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:26,869][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 532 with hard_accuracy=0.8005
+[2025-05-26 15:37:26,912][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:27,220][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 533 with hard_accuracy=0.8026
+[2025-05-26 15:37:27,255][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:29,608][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 582 with hard_accuracy=0.8070
+[2025-05-26 15:37:29,656][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:32,121][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 639 with hard_accuracy=0.8078
+[2025-05-26 15:37:32,168][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:32,772][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 645 with hard_accuracy=0.8078
+[2025-05-26 15:37:32,805][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:33,409][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 656 with hard_accuracy=0.8080
+[2025-05-26 15:37:33,450][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:34,228][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 671 with hard_accuracy=0.8095
+[2025-05-26 15:37:34,258][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:34,739][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 673 with hard_accuracy=0.8107
+[2025-05-26 15:37:34,768][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:35,131][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 676 with hard_accuracy=0.8116
+[2025-05-26 15:37:35,171][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:35,839][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 688 with hard_accuracy=0.8131
+[2025-05-26 15:37:35,880][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:36,135][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 689 with hard_accuracy=0.8132
+[2025-05-26 15:37:36,175][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:36,920][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 703 with hard_accuracy=0.8144
+[2025-05-26 15:37:36,961][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:37,903][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 718 with hard_accuracy=0.8144
+[2025-05-26 15:37:37,946][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:38,271][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 720 with hard_accuracy=0.8146
+[2025-05-26 15:37:38,309][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:38,720][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 725 with hard_accuracy=0.8150
+[2025-05-26 15:37:38,762][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:39,705][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 740 with hard_accuracy=0.8152
+[2025-05-26 15:37:39,742][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:40,531][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 756 with hard_accuracy=0.8161
+[2025-05-26 15:37:40,573][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:41,202][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 766 with hard_accuracy=0.8166
+[2025-05-26 15:37:41,244][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:41,817][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 770 with hard_accuracy=0.8178
+[2025-05-26 15:37:41,844][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:44,895][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 840 with hard_accuracy=0.8190
+[2025-05-26 15:37:44,944][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:45,438][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 847 with hard_accuracy=0.8195
+[2025-05-26 15:37:45,483][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:46,780][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 872 with hard_accuracy=0.8202
+[2025-05-26 15:37:46,821][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:47,097][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 873 with hard_accuracy=0.8206
+[2025-05-26 15:37:47,136][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:47,420][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 874 with hard_accuracy=0.8208
+[2025-05-26 15:37:47,458][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:47,797][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 877 with hard_accuracy=0.8209
+[2025-05-26 15:37:47,838][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:48,243][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 882 with hard_accuracy=0.8227
+[2025-05-26 15:37:48,282][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:49,522][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 906 with hard_accuracy=0.8263
+[2025-05-26 15:37:49,567][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:50,942][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 933 with hard_accuracy=0.8271
+[2025-05-26 15:37:50,981][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:52,549][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 966 with hard_accuracy=0.8282
+[2025-05-26 15:37:52,588][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:53,212][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 978 with hard_accuracy=0.8292
+[2025-05-26 15:37:53,239][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:54,342][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 995 with hard_accuracy=0.8296
+[2025-05-26 15:37:54,366][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:55,049][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1008 with hard_accuracy=0.8323
+[2025-05-26 15:37:55,087][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:56,038][boolean_nca_cc.training.train_loop][INFO] - Saving periodic checkpoint at epoch 1024
+[2025-05-26 15:37:56,058][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/checkpoint_epoch_1024.pkl
+[2025-05-26 15:37:56,176][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1028 with hard_accuracy=0.8342
+[2025-05-26 15:37:56,214][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:56,764][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1036 with hard_accuracy=0.8376
+[2025-05-26 15:37:56,808][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:37:59,697][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1103 with hard_accuracy=0.8395
+[2025-05-26 15:37:59,743][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:00,107][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1107 with hard_accuracy=0.8403
+[2025-05-26 15:38:00,145][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:01,854][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1144 with hard_accuracy=0.8407
+[2025-05-26 15:38:01,891][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:03,081][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1166 with hard_accuracy=0.8432
+[2025-05-26 15:38:03,120][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:03,846][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1179 with hard_accuracy=0.8436
+[2025-05-26 15:38:03,887][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:04,501][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1185 with hard_accuracy=0.8443
+[2025-05-26 15:38:04,524][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:04,783][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1186 with hard_accuracy=0.8444
+[2025-05-26 15:38:04,808][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:05,572][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1201 with hard_accuracy=0.8447
+[2025-05-26 15:38:05,609][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:05,974][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1202 with hard_accuracy=0.8456
+[2025-05-26 15:38:06,006][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:07,116][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1222 with hard_accuracy=0.8456
+[2025-05-26 15:38:07,156][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:07,406][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1223 with hard_accuracy=0.8465
+[2025-05-26 15:38:07,438][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:07,854][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1228 with hard_accuracy=0.8468
+[2025-05-26 15:38:07,898][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:09,560][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1265 with hard_accuracy=0.8478
+[2025-05-26 15:38:09,604][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:10,932][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1291 with hard_accuracy=0.8480
+[2025-05-26 15:38:10,980][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:11,281][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1293 with hard_accuracy=0.8481
+[2025-05-26 15:38:11,332][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:11,732][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1298 with hard_accuracy=0.8488
+[2025-05-26 15:38:11,775][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:12,121][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1301 with hard_accuracy=0.8506
+[2025-05-26 15:38:12,167][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:13,246][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1320 with hard_accuracy=0.8508
+[2025-05-26 15:38:13,288][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:13,591][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1322 with hard_accuracy=0.8517
+[2025-05-26 15:38:13,636][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:14,103][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1329 with hard_accuracy=0.8525
+[2025-05-26 15:38:14,149][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:15,523][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1355 with hard_accuracy=0.8525
+[2025-05-26 15:38:15,572][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:15,837][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1356 with hard_accuracy=0.8539
+[2025-05-26 15:38:15,878][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:16,160][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1358 with hard_accuracy=0.8541
+[2025-05-26 15:38:16,199][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:16,762][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1367 with hard_accuracy=0.8546
+[2025-05-26 15:38:16,801][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:17,576][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1377 with hard_accuracy=0.8559
+[2025-05-26 15:38:17,602][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:17,978][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1381 with hard_accuracy=0.8579
+[2025-05-26 15:38:18,013][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:18,284][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1382 with hard_accuracy=0.8582
+[2025-05-26 15:38:18,321][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:23,686][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1505 with hard_accuracy=0.8604
+[2025-05-26 15:38:23,712][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:25,736][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1552 with hard_accuracy=0.8627
+[2025-05-26 15:38:25,775][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:30,762][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1667 with hard_accuracy=0.8630
+[2025-05-26 15:38:30,788][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:34,339][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1745 with hard_accuracy=0.8642
+[2025-05-26 15:38:34,388][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:36,906][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1799 with hard_accuracy=0.8649
+[2025-05-26 15:38:36,949][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:37,946][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1820 with hard_accuracy=0.8666
+[2025-05-26 15:38:37,984][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:39,895][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1858 with hard_accuracy=0.8667
+[2025-05-26 15:38:39,927][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:40,247][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1861 with hard_accuracy=0.8684
+[2025-05-26 15:38:40,281][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:41,857][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1894 with hard_accuracy=0.8707
+[2025-05-26 15:38:41,900][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:42,439][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1902 with hard_accuracy=0.8717
+[2025-05-26 15:38:42,482][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:46,685][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 1999 with hard_accuracy=0.8740
+[2025-05-26 15:38:46,729][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:49,073][boolean_nca_cc.training.train_loop][INFO] - Saving periodic checkpoint at epoch 2048
+[2025-05-26 15:38:49,098][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/checkpoint_epoch_2048.pkl
+[2025-05-26 15:38:50,918][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 2095 with hard_accuracy=0.8785
+[2025-05-26 15:38:50,960][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:53,472][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 2149 with hard_accuracy=0.8786
+[2025-05-26 15:38:53,505][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:54,126][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 2159 with hard_accuracy=0.8787
+[2025-05-26 15:38:54,166][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:55,615][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 2188 with hard_accuracy=0.8794
+[2025-05-26 15:38:55,660][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:56,161][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 2196 with hard_accuracy=0.8801
+[2025-05-26 15:38:56,200][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:57,081][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 2209 with hard_accuracy=0.8829
+[2025-05-26 15:38:57,107][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:38:59,823][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 2275 with hard_accuracy=0.8838
+[2025-05-26 15:38:59,851][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:39:01,699][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 2316 with hard_accuracy=0.8841
+[2025-05-26 15:39:01,741][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:39:04,253][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 2369 with hard_accuracy=0.8877
+[2025-05-26 15:39:04,275][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:39:05,889][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 2404 with hard_accuracy=0.8910
+[2025-05-26 15:39:05,923][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:39:15,510][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 2638 with hard_accuracy=0.8914
+[2025-05-26 15:39:15,553][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:39:16,728][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 2660 with hard_accuracy=0.8915
+[2025-05-26 15:39:16,763][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:39:18,256][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 2691 with hard_accuracy=0.8926
+[2025-05-26 15:39:18,294][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:39:22,588][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 2791 with hard_accuracy=0.8938
+[2025-05-26 15:39:22,633][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:39:24,076][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 2822 with hard_accuracy=0.8939
+[2025-05-26 15:39:24,106][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:39:32,054][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 3017 with hard_accuracy=0.8943
+[2025-05-26 15:39:32,099][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:39:34,717][boolean_nca_cc.training.train_loop][INFO] - Saving periodic checkpoint at epoch 3072
+[2025-05-26 15:39:34,745][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/checkpoint_epoch_3072.pkl
+[2025-05-26 15:39:35,842][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 3103 with hard_accuracy=0.8949
+[2025-05-26 15:39:35,887][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:39:37,780][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 3141 with hard_accuracy=0.8968
+[2025-05-26 15:39:37,815][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:39:39,459][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 3175 with hard_accuracy=0.8969
+[2025-05-26 15:39:39,503][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:39:40,809][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 3202 with hard_accuracy=0.8994
+[2025-05-26 15:39:40,838][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:40:06,309][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 3814 with hard_accuracy=0.9004
+[2025-05-26 15:40:06,344][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:40:13,092][boolean_nca_cc.training.train_loop][INFO] - Saving best model at epoch 3969 with hard_accuracy=0.9021
+[2025-05-26 15:40:13,120][boolean_nca_cc.training.utils][INFO] - Saved checkpoint to /home/marcello/workspace/boolean_nca_cc/checkpoints/run_25hz3cef/best_model_hard_accuracy.pkl
+[2025-05-26 15:40:19,211][__main__][INFO] - Evaluating inner loop performance
+[2025-05-26 15:40:36,735][__main__][INFO] - Training complete. Final results:
+[2025-05-26 15:40:36,735][__main__][INFO] -   Meta Loss: 9.2770
+[2025-05-26 15:40:36,735][__main__][INFO] -   Meta Hard Loss: 210.5625
+[2025-05-26 15:40:36,735][__main__][INFO] -   Meta Accuracy: 0.9865
+[2025-05-26 15:40:36,736][__main__][INFO] -   Meta Hard Accuracy: 0.8972
+[2025-05-26 15:40:36,736][__main__][INFO] -   Inner Loop Final Loss: 184.9002
+[2025-05-26 15:40:36,736][__main__][INFO] -   Inner Loop Final Hard Loss: 458.0000
+[2025-05-26 15:40:36,736][__main__][INFO] -   Inner Loop Final Accuracy: 0.8169
+[2025-05-26 15:40:36,736][__main__][INFO] -   Inner Loop Final Hard Accuracy: 0.7764
+[2025-05-26 15:40:36,736][__main__][INFO] -   Best hard_accuracy: 0.9021

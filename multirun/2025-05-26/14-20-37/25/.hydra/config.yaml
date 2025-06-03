@@ -1,0 +1,85 @@
+model:
+  _target_: boolean_nca_cc.models.CircuitGNN
+  type: gnn
+  hidden_dim: 128
+  message_passing: true
+  node_mlp_features:
+  - 128
+  - 128
+  edge_mlp_features:
+  - 128
+  - 128
+  use_attention: true
+seed: 0
+test_seed: 42
+wandb:
+  enabled: true
+  project: boolean-nca-cc
+  entity: m2snn
+  run_name: null
+  tags:
+  - boolean-circuit
+  - nca
+  - meta-learning
+circuit:
+  task: binary_multiply
+  input_bits: 8
+  output_bits: 8
+  arity: 4
+  num_layers: 5
+  layer_sizes: null
+training:
+  learning_rate: 0.0003
+  weight_decay: 1.0e-05
+  epochs: null
+  epochs_power_of_2: 10
+  loss_type: l4
+  wiring_mode: fixed
+  meta_batch_size: 32
+  n_message_steps: 5
+  lr_scheduler: linear_warmup
+pool:
+  size: 1024
+  reset_fraction: 0.05
+  reset_interval: 32
+  reset_strategy: combined
+  combined_weights:
+  - 0.5
+  - 0.5
+  gate_knockout:
+    active: true
+    fraction: 0.05
+    interval: 64
+    strategy: uniform
+    damage_prob: 0.1
+    combined_weights:
+    - 0.5
+    - 0.5
+  soft_lut_damage:
+    active: false
+    fraction: 0.01
+    interval: 64
+    strategy: uniform
+    damage_prob: 0.1
+    combined_weights:
+    - 0.5
+    - 0.5
+backprop:
+  enabled: false
+  epochs: 100
+  learning_rate: 1
+  weight_decay: 0.1
+  optimizer: adamw
+  beta1: 0.8
+  beta2: 0.8
+eval:
+  inner_steps: 100
+checkpoint:
+  enabled: true
+  interval: 1024
+  save_best: true
+  best_metric: hard_accuracy
+  save_stable_states: true
+logging:
+  log_interval: 10
+  level: INFO

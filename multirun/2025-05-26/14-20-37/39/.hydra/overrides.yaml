@@ -1,0 +1,8 @@
+- pool.gate_knockout.active=True
+- pool.soft_lut_damage.active=False
+- model=self_attention
+- pool.gate_knockout.fraction=0.01
+- pool.gate_knockout.interval=32
+- pool.gate_knockout.damage_prob=0.25
+- training.n_message_steps=10
+- training.learning_rate=0.0003
