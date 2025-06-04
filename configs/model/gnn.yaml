@@ -6,4 +6,4 @@ hidden_dim: 128
 message_passing: true
 node_mlp_features: [128, 128]
 edge_mlp_features: [128, 128]
-use_attention: true 
+use_attention: false 

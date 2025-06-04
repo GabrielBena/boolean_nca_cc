@@ -29,31 +29,65 @@ circuit:
 
 # Training parameters
 training:
-  learning_rate: 1e-4
-  weight_decay: 1e-5
-  epochs: null
-  epochs_power_of_2: 16 # 2^n
-  loss_type: "l4"  # Options: "l4" or "bce"
+  # WIRING MODE : "random" or "fixed"
   wiring_mode: "random"  # Options: "fixed" or "random"
-  meta_batch_size: 128
-  n_message_steps: 10  # Number of message passing steps per training iteration
+  # INNER LOOP
+  n_message_steps: 30  # Number of message passing steps per training iteration
+  # LOSS TYPE
+  loss_type: "bce"  # Options: "l4", "l2", or "bce"
+  random_loss_step: true  # Use random message passing step for loss computation
+  # MESSAGE STEPS CURRICULUM LEARNING
+  message_steps_schedule:
+    enabled: false  # Whether to use message steps scheduling (curriculum learning)
+    type: "linear"  # Options: "constant", "linear", "exponential", "step"
+    initial_steps: 2   # Start with fewer steps for easier gradients
+    final_steps: 50    # End with more steps for final performance
+    constant_product: null  # Constant product of (meta_batch_size * n_message_steps) to adjust batch size (if null, uses base_batch_size allways)
+    transition_epochs: null  # For linear schedule (if null, uses total training epochs)
+  # BATCH SIZE
+  meta_batch_size: 64
+  # OPTIMIZATION
+  learning_rate: 1e-3
+  weight_decay: 1e-5
+  # LEARNING RATE SCHEDULER
   lr_scheduler: "linear_warmup"  # Options: "constant", "exponential", "cosine", "linear_warmup"
-  
+  lr_scheduler_params:
+    lr_warmup_start: 1e-6
+    exponent: 10
+    alpha: 1e-2 # final lr = 1% of initial lr
+  # NUMBER OF EPOCHS
+  epochs: null
+  epochs_power_of_2: 18 # 2^n
+  # USE SCAN
+  use_scan: true
+
+
 # Pool configuration for meta-learning
 pool:
-  size: 1024
+  size: 8192
   reset_fraction: 0.1
-  reset_interval: 32  # 2^5
+  reset_interval: 64 # using reset_interval_schedule instead
   reset_strategy: "combined"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
 
+  # Reset interval scheduling (frequent early -> rare late)
+  reset_interval_schedule:
+    enabled: false
+    type: "linear"  # Options: "constant", "linear", "exponential"
+    initial_interval: 32     # Start with frequent resets (every 10 epochs)
+    final_interval: 1024      # End with rare resets (every 500 epochs) 
+    # For exponential decay
+    decay_rate: 0.95         # Exponential decay factor per epoch
+    # For linear decay  
+    transition_epochs: null  # If null, uses total training epochs
+
   # Gate knockout ("hard" LUT zeroing - resets globals)
   gate_knockout:
-    active: false
-    fraction: 0.01
+    active: True
+    fraction: 0.1
     interval: 64
     strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
-    damage_prob: 0.1  # Probability of zeroing an entire LUT in selected circuits
+    damage_prob: 0.05  # Probability of zeroing an entire LUT in selected circuits
     combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined strategy
 
   # Soft LUT damage ("soft" LUT zeroing - preserves globals)
@@ -67,7 +101,7 @@ pool:
 
 # Backpropagation baseline
 backprop:
-  enabled: true
+  enabled: false
   epochs: 100 
   learning_rate: 1
   weight_decay: 1e-1
@@ -78,7 +112,13 @@ backprop:
 # Evaluation parameters
 eval:
   inner_steps: 100  # Number of message passing steps for inner loop evaluation
-  
+  # Periodic evaluation during training
+  periodic:
+    enabled: true  # Whether to run periodic evaluation during training
+    interval: 1024  # Evaluate every N epochs
+    log_stepwise: false  # Whether to log detailed step-by-step metrics to wandb
+    batch_size: 64  # Batch size for random wiring evaluation
+
 # Checkpointing
 checkpoint:
   enabled: true
