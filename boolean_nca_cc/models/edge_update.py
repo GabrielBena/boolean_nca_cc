@@ -79,7 +79,7 @@ class EdgeUpdateModule(nnx.Module):
         edge_features: EdgeType,
         sender_node_features: NodeType,
         receiver_node_features: NodeType,
-        globals_,
+        globals_=None,  # Keep for compatibility but ignore
     ):
         """
         Generate messages to be sent along edges.
@@ -88,7 +88,7 @@ class EdgeUpdateModule(nnx.Module):
             edge_features: Features of the edge (if any)
             sender_node_features: Features of the sender node
             receiver_node_features: Features of the receiver node (unused)
-            globals_: Global features [loss, update_steps]
+            globals_: Global features (ignored, kept for compatibility)
 
         Returns:
             Message features to be sent along the edge [num_edges, logit_dim + hidden_dim]

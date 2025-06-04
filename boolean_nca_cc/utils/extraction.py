@@ -8,12 +8,11 @@ of boolean circuits after GNN processing.
 import jax
 import jax.numpy as jp
 import jraph
-from typing import List, Tuple
 
 
 def extract_logits_from_graph(
-    graph: jraph.GraphsTuple, logits_original_shapes: List[Tuple[int, int, int]]
-) -> List[jp.ndarray]:
+    graph: jraph.GraphsTuple, logits_original_shapes: list[tuple[int, int, int]]
+) -> list[jp.ndarray]:
     """
     Extract logit tensors from a graph's node features in a JIT-compatible way.
 
@@ -59,3 +58,83 @@ def extract_logits_from_graph(
         extracted_logits_list.append(layer_logits)
 
     return extracted_logits_list
+
+
+def update_output_node_loss(
+    graph: jraph.GraphsTuple,
+    layer_sizes: list[tuple[int, int]],
+    loss_values: jp.ndarray,
+) -> jraph.GraphsTuple:
+    """
+    Update the loss feature for output nodes in the graph.
+
+    Args:
+        graph: GraphsTuple containing node features
+        layer_sizes: List of (nodes, group_size) tuples for each layer
+        loss_values: Array of loss values for each output node.
+                    Expected shape: [num_output_nodes] or scalar.
+                    If shape is [case_n, output_bits], it will be averaged across cases.
+
+    Returns:
+        Updated graph with loss feature populated for output nodes
+    """
+    # Use the helper function to get output node indices
+    output_start_idx, output_end_idx = get_output_node_indices(layer_sizes)
+    num_output_nodes = output_end_idx - output_start_idx
+
+    # Handle different input shapes for loss_values
+    loss_values = jp.atleast_1d(loss_values)
+
+    # For 2D case (shape [case_n, output_bits]), average across the first dimension
+    if loss_values.ndim == 2:
+        processed_loss_values = jp.mean(loss_values, axis=0)
+    else:
+        processed_loss_values = loss_values
+
+    # If we have a single value, broadcast it to all output nodes
+    if processed_loss_values.shape[0] == 1:
+        processed_loss_values = jp.full(num_output_nodes, processed_loss_values[0])
+
+    # Ensure we have exactly the right number of values
+    # Take the first num_output_nodes values if we have more, or pad with zeros if we have fewer
+    if processed_loss_values.shape[0] != num_output_nodes:
+        processed_loss_values = jp.resize(processed_loss_values, num_output_nodes)
+
+    # Update the loss feature for output nodes
+    updated_loss = (
+        graph.nodes["loss"]
+        .at[output_start_idx:output_end_idx]
+        .set(processed_loss_values)
+    )
+
+    # Create updated nodes with the new loss values
+    updated_nodes = {**graph.nodes, "loss": updated_loss}
+
+    return graph._replace(nodes=updated_nodes)
+
+
+def get_output_node_indices(layer_sizes: list[tuple[int, int]]) -> tuple[int, int]:
+    """
+    Get the start and end indices of output nodes in the flattened graph.
+
+    Args:
+        layer_sizes: List of (nodes, group_size) tuples for each layer
+
+    Returns:
+        Tuple of (start_index, end_index) for output nodes
+    """
+    # Calculate total nodes up to the output layer
+    current_node_idx = 0
+
+    # Add input layer nodes
+    current_node_idx += layer_sizes[0][0]
+
+    # Add all gate layer nodes except the last one
+    for nodes, _ in layer_sizes[1:-1]:
+        current_node_idx += nodes
+
+    # Output layer starts here
+    output_start_idx = current_node_idx
+    output_end_idx = current_node_idx + layer_sizes[-1][0]
+
+    return output_start_idx, output_end_idx

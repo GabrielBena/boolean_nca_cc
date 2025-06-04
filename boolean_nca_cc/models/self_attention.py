@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jp
 import jraph
 from flax import nnx
-from typing import List, Optional, Tuple, Dict, Callable
+from typing import Optional, Dict, Tuple, List
 from functools import partial
 
 
@@ -174,7 +174,6 @@ class CircuitSelfAttention(nnx.Module):
         *,
         rngs: nnx.Rngs,
         type: str = "self_attention",
-        use_globals: bool = True,
     ):
         """
         Initialize the circuit self-attention model.
@@ -196,15 +195,11 @@ class CircuitSelfAttention(nnx.Module):
         self.dropout_rate = dropout_rate
         self.num_heads = num_heads
         self.deterministic = True
-        self.use_globals = use_globals
 
-        # Compute the total feature dimension (logits + hidden + positional encodings)
-        if use_globals:
-            feature_dim = (
-                self.logit_dim + hidden_dim * 3 + 2
-            )  # logits + hidden + 2 PE's + 2 globals
-        else:
-            feature_dim = self.logit_dim + hidden_dim * 3  # logits + hidden + 2 PE's
+        # Compute the total feature dimension (logits + hidden + positional encodings + loss)
+        feature_dim = (
+            self.logit_dim + hidden_dim * 3 + 1
+        )  # logits + hidden + 2 PE's + loss
 
         # Feature projection
         self.feature_proj = nnx.Linear(feature_dim, hidden_dim * 4, rngs=rngs)
@@ -272,9 +267,7 @@ class CircuitSelfAttention(nnx.Module):
         # This format matches the MultiHeadAttention mask format
         return mask[None, None, ...]
 
-    def _extract_features(
-        self, nodes: Dict[str, jp.ndarray], globals_: jp.ndarray | None = None
-    ) -> jp.ndarray:
+    def _extract_features(self, nodes: Dict[str, jp.ndarray]) -> jp.ndarray:
         """
         Extract and concatenate node features for attention.
 
@@ -290,20 +283,15 @@ class CircuitSelfAttention(nnx.Module):
         # Positional encodings
         layer_pe = nodes["layer_pe"]  # [n_node, hidden_dim]
         intra_layer_pe = nodes["intra_layer_pe"]  # [n_node, hidden_dim]
-        # Global features
-        if globals_ is not None:
-            broadcasted_globals = jp.repeat(
-                jp.reshape(globals_, (1, -1)), self.n_node, axis=0
-            )
-            # Concatenate all features
-            features = jp.concatenate(
-                [logits, hidden, layer_pe, intra_layer_pe, broadcasted_globals], axis=-1
-            )
-        else:
-            # Concatenate all features
-            features = jp.concatenate(
-                [logits, hidden, layer_pe, intra_layer_pe], axis=-1
-            )
+        # Loss feature
+        loss = nodes["loss"]  # [n_node]
+        # Add dimension to match other features: [n_node] -> [n_node, 1]
+        loss_expanded = loss[:, None]  # [n_node, 1]
+
+        # Concatenate all features including loss
+        features = jp.concatenate(
+            [logits, hidden, layer_pe, intra_layer_pe, loss_expanded], axis=-1
+        )
 
         return features
 
@@ -325,8 +313,10 @@ class CircuitSelfAttention(nnx.Module):
         """
         nodes, edges, receivers, senders, globals_, n_node, n_edge = graph
 
+        # Note: globals_ is extracted but no longer used in computations
+
         # Extract and concatenate node features
-        features = self._extract_features(nodes, globals_ if self.use_globals else None)
+        features = self._extract_features(nodes)
 
         # Add batch dimension [1, n_node, feature_dim]
         features = features[None, ...]
@@ -371,17 +361,18 @@ def run_self_attention_scan(
     model: CircuitSelfAttention,
     graph: jraph.GraphsTuple,
     num_steps: int,
-) -> jraph.GraphsTuple:
+) -> Tuple[jraph.GraphsTuple, List[jraph.GraphsTuple]]:
     """
-    Apply the self-attention iteratively for multiple steps using jax.lax.scan.
+    Apply the self-attention model iteratively for multiple steps using jax.lax.scan.
 
     Args:
         model: The CircuitSelfAttention model
         graph: The initial graph
-        num_steps: Number of attention steps to perform
+        num_steps: Number of steps to perform
 
     Returns:
-        Updated graph after num_steps of self-attention
+        final_graph: The graph after all steps
+        all_graphs: List of graphs from each step (including initial)
     """
     # --- Compute the mask *once* before the scan ---
     attention_mask = model._create_attention_mask(
@@ -390,11 +381,93 @@ def run_self_attention_scan(
     # ---------------------------------------------
 
     def scan_body(carry_graph, _):
-        # Apply one step of GNN message passing
+        # Apply one step of self-attention with precomputed mask
         updated_graph = model(carry_graph, attention_mask=attention_mask)
-        return updated_graph, None
+        return updated_graph, updated_graph
 
     # Run the scan
-    final_graph, _ = jax.lax.scan(scan_body, graph, None, length=num_steps)
+    final_graph, intermediate_graphs = jax.lax.scan(
+        scan_body, graph, None, length=num_steps
+    )
 
-    return final_graph
+    # Combine initial graph with intermediate results
+    all_graphs = [graph] + list(intermediate_graphs)
+
+    return final_graph, all_graphs
+
+
+def run_self_attention_scan_with_loss(
+    model: CircuitSelfAttention,
+    graph: jraph.GraphsTuple,
+    num_steps: int,
+    logits_original_shapes: List[Tuple],
+    wires: List[jp.ndarray],
+    x_data: jp.ndarray,
+    y_data: jp.ndarray,
+    loss_type: str,
+    layer_sizes: Tuple[Tuple[int, int], ...],
+) -> Tuple[jraph.GraphsTuple, List[jraph.GraphsTuple], jp.ndarray, List]:
+    """
+    Run the self-attention model for multiple steps with loss computation and graph updating at each step.
+
+    This function combines model application with loss computation and graph updating,
+    allowing for efficient computation of all steps and later indexing of a random step.
+
+    Args:
+        model: The CircuitSelfAttention model to apply
+        graph: Initial graph state
+        num_steps: Number of steps to run
+        logits_original_shapes: Original shapes of logits for reconstruction
+        wires: Wire connection patterns
+        x_data: Input data
+        y_data: Target output data
+        loss_type: Type of loss function to use
+        layer_sizes: List of (nodes, group_size) tuples for each layer
+
+    Returns:
+        final_graph: The graph after all steps
+        all_graphs: List of graphs from each step (including initial)
+        all_losses: Array of losses from each step [num_steps+1]
+        all_aux: List of auxiliary data from each step
+    """
+    from boolean_nca_cc.training.evaluation import get_loss_and_update_graph
+
+    # --- Compute the mask *once* before the scan ---
+    attention_mask = model._create_attention_mask(
+        graph.senders, graph.receivers, bidirectional=True
+    )
+    # ---------------------------------------------
+
+    def attention_step_with_loss(carry, _):
+        current_graph = carry
+
+        # Apply self-attention with precomputed mask
+        model_updated_graph = model(current_graph, attention_mask=attention_mask)
+
+        # Compute loss and update graph
+        updated_graph, loss, current_logits, aux = get_loss_and_update_graph(
+            model_updated_graph,
+            logits_original_shapes,
+            wires,
+            x_data,
+            y_data,
+            loss_type,
+            layer_sizes,
+        )
+
+        # Update graph globals with current update steps
+        current_update_steps = (
+            updated_graph.globals[..., 1] if updated_graph.globals is not None else 0
+        )
+        final_graph = updated_graph._replace(
+            globals=jp.array([loss, current_update_steps + 1], dtype=jp.float32)
+        )
+
+        return final_graph, (final_graph, loss, current_logits, aux)
+
+    # Run scan
+    final_graph, step_outputs = jax.lax.scan(
+        attention_step_with_loss, graph, xs=None, length=num_steps
+    )
+
+    return final_graph, step_outputs

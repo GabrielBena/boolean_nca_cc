@@ -8,19 +8,18 @@ of boolean circuits for use with graph neural networks.
 import jax
 import jax.numpy as jp
 import jraph
-from typing import List, Dict, Tuple
 
 from boolean_nca_cc.utils.positional_encoding import get_positional_encoding
 
 
 def build_graph(
-    logits: List[jp.ndarray],
-    wires: List[jp.ndarray],
+    logits: list[jp.ndarray],
+    wires: list[jp.ndarray],
     input_n: int,
     arity: int,
     hidden_dim: int,
     bidirectional_edges: bool = True,
-    loss_value: jp.ndarray | None = None,
+    loss_value: jp.ndarray | int = 0,
     update_steps: int = 0,
 ) -> jraph.GraphsTuple:
     """
@@ -67,6 +66,7 @@ def build_graph(
         "hidden": jp.zeros((input_n, hidden_dim), dtype=jp.float32),
         "layer_pe": input_layer_pe,
         "intra_layer_pe": input_intra_layer_pe,
+        "loss": jp.zeros(input_n, dtype=jp.float32),  # Loss feature for all nodes
     }
     all_nodes_features_list.append(input_nodes)
     current_global_node_idx += input_n
@@ -95,6 +95,9 @@ def build_graph(
             "gate_id": layer_global_indices,
             "logits": layer_logits.reshape(num_gates_in_layer, logit_dim),
             "hidden": jp.zeros((num_gates_in_layer, hidden_dim), dtype=jp.float32),
+            "loss": jp.zeros(
+                num_gates_in_layer, dtype=jp.float32
+            ),  # Loss feature for all nodes
         }
 
         # Add Positional Encodings
@@ -169,13 +172,8 @@ def build_graph(
     n_node = current_global_node_idx
     n_edge = len(senders)
 
-    # Ensure globals is not None
-    if loss_value is None:
-        # Default global features with loss=0 and update_steps=0
-        globals_val = jp.zeros((2,), dtype=jp.float32)
-    else:
-        # Combine loss_value and update_steps into a single globals array
-        globals_val = jp.array([loss_value, float(update_steps)], dtype=jp.float32)
+    # Combine loss_value and update_steps into a single globals array
+    globals_val = jp.array([float(loss_value), float(update_steps)], dtype=jp.float32)
 
     # Create and return the GraphsTuple
     graph = jraph.GraphsTuple(
@@ -189,58 +187,3 @@ def build_graph(
     )
 
     return graph
-
-
-def extract_logits_from_graph(
-    graph: jraph.GraphsTuple, original_shapes: List[Tuple[int, ...]]
-) -> List[jp.ndarray]:
-    """
-    Extract the list of logit tensors from the graph's node features,
-    respecting the original shapes and skipping input nodes.
-
-    Args:
-        graph: The GraphsTuple containing updated node features.
-        original_shapes: A list of the original shapes of the logit tensors
-                         for each gate layer (excluding the input layer).
-
-    Returns:
-        A list of updated logit tensors, matching the structure of the original input.
-    """
-    updated_logits_list = []
-    start_idx = 0
-
-    # Determine the number of input nodes from the graph if possible,
-    # otherwise, rely on the length difference between nodes['layer'] and original_shapes
-    # A more robust way might be needed if graph structure isn't guaranteed.
-    num_nodes = graph.nodes["layer"].shape[0]
-    num_gate_layers = len(original_shapes)
-
-    # Estimate number of input nodes. Assumes layer 0 is input.
-    input_nodes_mask = graph.nodes["layer"] == 0
-    num_input_nodes = jp.sum(input_nodes_mask).item()  # Get scalar value
-
-    current_node_idx = num_input_nodes  # Start extracting after input nodes
-
-    for shape in original_shapes:
-        # Calculate the number of nodes (gates) in this layer
-        num_layer_nodes = jp.prod(
-            jp.array(shape[:-1])
-        )  # product of group_n * group_size
-        logit_dim = shape[-1]  # 2**arity
-
-        # Ensure we don't exceed total nodes
-        end_idx = current_node_idx + num_layer_nodes
-        if end_idx > num_nodes:
-            raise ValueError("Mismatch between original shapes and graph nodes.")
-
-        # Extract logits for the current layer's nodes
-        layer_logits_flat = graph.nodes["logits"][current_node_idx:end_idx]
-
-        # Reshape to the original layer shape
-        layer_logits = layer_logits_flat.reshape(shape)
-        updated_logits_list.append(layer_logits)
-
-        # Move to the next layer's starting index
-        current_node_idx = end_idx
-
-    return updated_logits_list

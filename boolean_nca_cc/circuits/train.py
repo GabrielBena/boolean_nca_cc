@@ -115,6 +115,8 @@ def loss_f_l4(logits, wires, x, y0):
         accuracy=accuracy,
         hard_loss=hard_loss,
         hard_accuracy=hard_accuracy,
+        res=res,
+        hard_res=hard_res,
     )
 
 
@@ -133,6 +135,8 @@ def loss_f_bce(logits, wires, x, y0):
         accuracy=accuracy,
         hard_loss=hard_loss,
         hard_accuracy=hard_accuracy,
+        res=y - y0,
+        hard_res=hard_y - y0,
     )
 
 

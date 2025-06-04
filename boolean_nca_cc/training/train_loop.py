@@ -19,16 +19,23 @@ import tempfile
 from datetime import datetime
 
 from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention
-from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
 from boolean_nca_cc.training.utils import save_checkpoint, plot_training_curves
-from boolean_nca_cc.circuits.train import (
-    res2loss,
-    binary_cross_entropy,
-    compute_accuracy,
+from boolean_nca_cc.training.schedulers import (
+    should_reset_pool,
+    get_current_reset_interval,
+    get_learning_rate_schedule,
+    get_current_message_steps_and_batch_size,
 )
-from boolean_nca_cc.circuits.model import gen_circuit, run_circuit
-from boolean_nca_cc.training.pool import GraphPool, initialize_graph_pool
 
+from boolean_nca_cc.circuits.model import gen_circuit
+from boolean_nca_cc.training.pool import GraphPool, initialize_graph_pool
+from boolean_nca_cc.training.evaluation import (
+    evaluate_model_stepwise,
+    evaluate_model_stepwise_batched,
+    get_loss_and_update_graph,
+)
+
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 # Type alias for PyTree
 PyTree = Any
 
@@ -108,7 +115,7 @@ def _save_periodic_checkpoint(
         return
 
     ckpt_filename = "latest_checkpoint.pkl"
-    log.info(f"Saving periodic checkpoint at epoch {epoch}")
+    # log.info(f"Saving periodic checkpoint at epoch {epoch}")
 
     try:
         save_checkpoint(
@@ -275,31 +282,124 @@ def _log_final_wandb_metrics(wandb_run, results: Dict, epochs: int) -> None:
         log.warning(f"Error logging final metrics to wandb: {e}")
 
 
-def get_loss_from_graph(logits, wires, x, y_target, loss_type: str):
-    # --- Calculate initial loss for graph globals --- START
-    acts = run_circuit(logits, wires, x)
-    pred = acts[-1]
-    acts_hard = run_circuit(logits, wires, x, hard=True)
-    pred_hard = acts_hard[-1]
+def _run_periodic_evaluation(
+    model,
+    test_wires,
+    test_logits,
+    x_data,
+    y_data,
+    input_n,
+    arity,
+    hidden_dim,
+    n_message_steps,
+    loss_type,
+    epoch,
+    wandb_run,
+    log_stepwise=False,
+    layer_sizes: List[Tuple[int, int]] = None,
+    wiring_mode: str = "random",
+    eval_batch_size: int = 16,
+) -> Dict:
+    """
+    Run periodic evaluation on test circuits.
 
-    if loss_type == "bce":
-        loss = binary_cross_entropy(pred, y_target)
-        hard_loss = binary_cross_entropy(pred_hard, y_target)
-    elif loss_type == "l4":
-        res = pred - y_target
-        hard_res = pred_hard - y_target
-        loss = res2loss(res, power=4)
-        hard_loss = res2loss(hard_res, power=4)
-    elif loss_type == "l2":
-        res = pred - y_target
-        hard_res = pred_hard - y_target
-        loss = res2loss(res, power=2)
-        hard_loss = res2loss(hard_res, power=2)
-    else:
-        raise ValueError(f"Unknown loss_type: {loss_type}")
-    # --- Calculate initial loss for graph globals --- END
+    Args:
+        model: The model to evaluate
+        test_wires: Test circuit wires (single circuit or batch)
+        test_logits: Test circuit logits (single circuit or batch)
+        x_data: Input data
+        y_data: Target data
+        input_n: Number of input nodes
+        arity: Arity of gates
+        hidden_dim: Hidden dimension
+        n_message_steps: Number of message steps for evaluation
+        loss_type: Loss function type
+        epoch: Current epoch number
+        wandb_run: WandB run object (or None)
+        log_stepwise: Whether to log step-by-step metrics
+        layer_sizes: Circuit layer sizes
+        wiring_mode: Wiring mode ("fixed" or "random")
+        eval_batch_size: Batch size for evaluation (used only in random mode)
 
-    return loss, (hard_loss, pred, pred_hard)
+    Returns:
+        Dictionary with evaluation metrics
+    """
+    try:
+        if wiring_mode == "fixed":
+            # For fixed wiring, use single circuit evaluation
+            step_metrics = evaluate_model_stepwise(
+                model=model,
+                wires=test_wires,
+                logits=test_logits,
+                x_data=x_data,
+                y_data=y_data,
+                input_n=input_n,
+                arity=arity,
+                hidden_dim=hidden_dim,
+                n_message_steps=n_message_steps,
+                loss_type=loss_type,
+                layer_sizes=layer_sizes,
+            )
+            eval_type = "fixed"
+        else:
+            # For random wiring, use batched evaluation
+            # test_wires and test_logits should already be batched from initialization
+            step_metrics = evaluate_model_stepwise_batched(
+                model=model,
+                batch_wires=test_wires,
+                batch_logits=test_logits,
+                x_data=x_data,
+                y_data=y_data,
+                input_n=input_n,
+                arity=arity,
+                hidden_dim=hidden_dim,
+                n_message_steps=n_message_steps,
+                loss_type=loss_type,
+                layer_sizes=layer_sizes,
+            )
+            eval_type = f"random_batch_{test_wires[0].shape[0]}"
+
+        # Get final metrics (last step)
+        final_metrics = {
+            "eval/final_loss": step_metrics["soft_loss"][-1],
+            "eval/final_hard_loss": step_metrics["hard_loss"][-1],
+            "eval/final_accuracy": step_metrics["soft_accuracy"][-1],
+            "eval/final_hard_accuracy": step_metrics["hard_accuracy"][-1],
+            "eval/epoch": epoch,
+        }
+
+        # Log to wandb if enabled
+        if wandb_run:
+            wandb_run.log(final_metrics)
+
+            # Optionally log step-by-step metrics
+            if log_stepwise:
+                for step_idx in range(len(step_metrics["step"])):
+                    step_data = {
+                        f"eval_steps/step": step_metrics["step"][step_idx],
+                        f"eval_steps/loss": step_metrics["soft_loss"][step_idx],
+                        f"eval_steps/hard_loss": step_metrics["hard_loss"][step_idx],
+                        f"eval_steps/accuracy": step_metrics["soft_accuracy"][step_idx],
+                        f"eval_steps/hard_accuracy": step_metrics["hard_accuracy"][
+                            step_idx
+                        ],
+                        f"eval_steps/epoch": epoch,
+                    }
+                    wandb_run.log(step_data)
+
+        # Log summary to console
+        log.info(
+            f"Periodic Eval ({eval_type}, epoch {epoch}): "
+            f"Loss={final_metrics['eval/final_loss']:.4f}, "
+            f"Acc={final_metrics['eval/final_accuracy']:.4f}, "
+            f"Hard Acc={final_metrics['eval/final_hard_accuracy']:.4f}"
+        )
+
+        return step_metrics
+
+    except Exception as e:
+        log.warning(f"Error during periodic evaluation at epoch {epoch}: {e}")
+        return {}
 
 
 def train_model(
@@ -319,7 +419,10 @@ def train_model(
     weight_decay: float = 1e-4,
     epochs: int = 100,
     n_message_steps: int = 1,
+    use_scan: bool = False,
+    # Loss parameters
     loss_type: str = "l4",  # Options: 'l4' or 'bce'
+    random_loss_step: bool = False,  # Use random message passing step for loss computation
     # Wiring mode parameters
     wiring_mode: str = "random",  # Options: 'fixed' or 'random'
     meta_batch_size: int = 64,
@@ -332,6 +435,10 @@ def train_model(
         0.5,
         0.5,
     ),  # Weights for [loss, steps] in combined strategy
+    # Reset interval scheduling
+    reset_interval_schedule: Dict = None,  # Configuration dict for scheduling reset intervals with keys:
+    # Message steps scheduling (curriculum learning)
+    message_steps_schedule: Dict = None,  # Configuration dict for scheduling message passing steps with keys:
     # Learning rate scheduling
     lr_scheduler: str = "constant",  # Options: "constant", "exponential", "cosine", "linear_warmup"
     lr_scheduler_params: Dict = None,
@@ -350,6 +457,12 @@ def train_model(
     save_best: bool = True,
     best_metric: str = "hard_accuracy",  # Options: 'loss', 'hard_loss', 'accuracy', 'hard_accuracy'
     save_stable_states: bool = True,
+    # Periodic evaluation parameters
+    periodic_eval_enabled: bool = False,
+    periodic_eval_interval: int = 100,
+    periodic_eval_test_seed: int = 42,
+    periodic_eval_log_stepwise: bool = False,
+    periodic_eval_batch_size: int = 16,  # Batch size for random wiring evaluation
     # Wandb parameters
     wandb_logging: bool = False,
     log_interval: int = 1,
@@ -372,6 +485,7 @@ def train_model(
         epochs: Number of training epochs
         n_message_steps: Number of message passing steps per pool batch
         loss_type: Type of loss to use ('l4' for L4 norm or 'bce' for binary cross-entropy)
+        random_loss_step: Use random message passing step for loss computation
         wiring_mode: Mode for circuit wirings ('fixed' or 'random')
         meta_batch_size: Batch size for training
         pool_size: Size of the graph pool
@@ -379,6 +493,23 @@ def train_model(
         reset_pool_interval: Number of epochs between pool resets
         reset_strategy: Strategy for selecting graphs to reset ("uniform", "steps_biased", "loss_biased", or "combined")
         combined_weights: Tuple of weights (loss_weight, steps_weight) for combining factors in "combined" strategy
+        reset_interval_schedule: Configuration dict for scheduling reset intervals with keys:
+            - enabled: Whether to use scheduling
+            - type: Schedule type ("constant", "linear", "exponential")
+            - initial_interval: Starting interval (frequent resets early)
+            - final_interval: Ending interval (rare resets late)
+            - decay_rate: For exponential decay
+            - transition_epochs: For linear decay (None = use total epochs)
+        message_steps_schedule: Configuration dict for scheduling message passing steps with keys:
+            - enabled: Whether to use message steps scheduling (curriculum learning)
+            - type: Schedule type ("constant", "linear", "exponential", "step")
+            - initial_steps: Starting number of message steps (should be small for easy gradients)
+            - final_steps: Final number of message steps
+            - constant_product: Product of (meta_batch_size * n_message_steps) that should be maintained
+            - transition_epochs: For linear/step schedules (None = use total epochs)
+            - growth_rate: For exponential growth
+            - step_intervals: For step schedule - list of epochs where to increase steps
+            - step_values: For step schedule - list of step values
         key: Random seed
         wiring_fixed_key: Fixed key for generating wirings when wiring_mode='fixed'
         init_model: Optional pre-trained GNN model to continue training
@@ -392,6 +523,11 @@ def train_model(
         save_best: Whether to track and save the best model
         best_metric: Metric to use for determining the best model
         save_stable_states: Whether to save stable states (before potential NaN losses)
+        periodic_eval_enabled: Whether to enable periodic evaluation
+        periodic_eval_interval: Interval for periodic evaluation
+        periodic_eval_test_seed: Seed for periodic evaluation test circuit generation
+        periodic_eval_log_stepwise: Whether to log step-by-step evaluation metrics
+        periodic_eval_batch_size: Batch size for random wiring evaluation
         wandb_logging: Whether to log metrics to wandb
         log_interval: Interval for logging metrics
         wandb_run_config: Configuration to pass to wandb
@@ -439,44 +575,10 @@ def train_model(
 
     # Create optimizer or reuse existing optimizer
     if init_optimizer is None:
-        # Initialize scheduler parameters if None
-        if lr_scheduler_params is None:
-            lr_scheduler_params = {}
-
-        # Create the learning rate schedule
-        if lr_scheduler == "constant":
-            schedule = optax.constant_schedule(learning_rate)
-        elif lr_scheduler == "exponential":
-            schedule = optax.exponential_decay(
-                init_value=learning_rate,
-                transition_steps=lr_scheduler_params.get("transition_steps", epochs),
-                decay_rate=lr_scheduler_params.get("decay_rate", 0.9),
-            )
-        elif lr_scheduler == "cosine":
-            schedule = optax.cosine_decay_schedule(
-                init_value=learning_rate,
-                decay_steps=lr_scheduler_params.get("decay_steps", epochs),
-                alpha=lr_scheduler_params.get("alpha", 0.0),
-            )
-        elif lr_scheduler == "linear_warmup":
-            # Combine warmup with another schedule (e.g., cosine)
-            warmup_steps = lr_scheduler_params.get("warmup_steps", epochs // 10)
-            target_schedule = (
-                optax.cosine_decay_schedule(  # Default to cosine after warmup
-                    init_value=learning_rate,
-                    decay_steps=epochs - warmup_steps,
-                    alpha=lr_scheduler_params.get("alpha", 0.0),
-                )
-            )
-            schedule = optax.join_schedules(
-                [
-                    optax.linear_schedule(0.0, learning_rate, warmup_steps),
-                    target_schedule,
-                ],
-                [warmup_steps],
-            )
-        else:
-            raise ValueError(f"Unknown lr_scheduler: {lr_scheduler}")
+        # Create the learning rate schedule using our scheduler module
+        schedule = get_learning_rate_schedule(
+            lr_scheduler, learning_rate, epochs, lr_scheduler_params
+        )
 
         # Create a new optimizer with the schedule
         opt_fn = optax.chain(
@@ -488,6 +590,7 @@ def train_model(
     else:
         # Use the provided optimizer
         optimizer = init_optimizer
+        schedule = None
 
     # Initialize Graph Pool for training if using pool
     if init_pool is None:
@@ -511,39 +614,11 @@ def train_model(
         # log.info("Using provided pool for training")
         circuit_pool = init_pool
 
-    # Function to run a circuit and calculate loss
-    def get_loss_from_wires_logits(logits, wires, x, y_target, loss_type: str):
-        # Run circuit and calculate loss
-        acts = run_circuit(logits, wires, x)
-        pred = acts[-1]
-        acts_hard = run_circuit(logits, wires, x, hard=True)
-        pred_hard = acts_hard[-1]
-
-        if loss_type == "bce":
-            loss = binary_cross_entropy(pred, y_target)
-            hard_loss = binary_cross_entropy(pred_hard, y_target)
-        elif loss_type == "l4":
-            res = pred - y_target
-            hard_res = pred_hard - y_target
-            loss = res2loss(res, power=4)
-            hard_loss = res2loss(hard_res, power=4)
-        elif loss_type == "l2":
-            res = pred - y_target
-            hard_res = pred_hard - y_target
-            loss = res2loss(res, power=2)
-            hard_loss = res2loss(hard_res, power=2)
-        else:
-            raise ValueError(f"Unknown loss_type: {loss_type}")
-
-        accuracy = compute_accuracy(pred, y_target)
-        hard_accuracy = compute_accuracy(pred_hard, y_target)
-
-        return loss, (hard_loss, pred, pred_hard, accuracy, hard_accuracy)
-
     # Define pool-based training step
     @partial(
         nnx.jit,
         static_argnames=(
+            "layer_sizes",
             "n_message_steps",
             "loss_type",
         ),
@@ -558,8 +633,10 @@ def train_model(
         logits: PyTree,
         x: jp.ndarray,
         y_target: jp.ndarray,
+        layer_sizes: Tuple[Tuple[int, int], ...],
         n_message_steps: int,
         loss_type: str,
+        loss_key: jax.random.PRNGKey,
     ):
         """
         Single training step using graphs from the pool.
@@ -574,52 +651,119 @@ def train_model(
             logits: Corresponding logits for the graphs
             x: Input data
             y_target: Target output data
+            layer_sizes: Tuple of (nodes, group_size) tuples for each layer
             n_message_steps: Number of message passing steps
             loss_type: Type of loss function to use
-
+            loss_key: Random key for loss computation
         Returns:
             Tuple of (loss, auxiliary outputs, updated pool)
         """
 
         # Define loss function
-        def loss_fn(gnn_model, graph, logits, wires):
+        def loss_fn_scan(model, graph, logits, wires, loss_key):
             # Store original shapes for reconstruction
             logits_original_shapes = [logit.shape for logit in logits]
 
-            # Run GNN for n_message_steps to optimize the circuit
-            for step in range(n_message_steps):
-                graph = gnn_model(graph)
+            # Determine which scan function to use based on model type
+            if isinstance(model, CircuitGNN):
+                from boolean_nca_cc.models.gnn import run_gnn_scan_with_loss
 
-            # Extract updated logits and run the circuit
-            updated_logits = extract_logits_from_graph(graph, logits_original_shapes)
-            loss, aux = get_loss_from_wires_logits(
-                updated_logits, wires, x, y_target, loss_type
-            )
-
-            # Update the graph with the initial loss and current update_steps
-            current_update_steps = graph.globals[..., 1]
-            final_graph = graph._replace(
-                globals=jp.array(
-                    [loss, current_update_steps + n_message_steps], dtype=jp.float32
+                scan_fn = run_gnn_scan_with_loss
+            elif isinstance(model, CircuitSelfAttention):
+                from boolean_nca_cc.models.self_attention import (
+                    run_self_attention_scan_with_loss,
                 )
+
+                scan_fn = run_self_attention_scan_with_loss
+            else:
+                raise ValueError(f"Unknown model type: {type(model)}")
+
+            # Run scan for all steps, computing loss and updating graph at each step
+            final_graph, step_outputs = scan_fn(
+                model=model,
+                graph=graph,
+                num_steps=n_message_steps,
+                logits_original_shapes=logits_original_shapes,
+                wires=wires,
+                x_data=x,
+                y_data=y_target,
+                loss_type=loss_type,
+                layer_sizes=layer_sizes,
             )
 
-            return loss, (aux, final_graph, updated_logits)
+            # Choose which step to use for loss computation
+            if random_loss_step:
+                loss_step = jax.random.randint(loss_key, (1,), 0, n_message_steps)[0]
+            else:
+                loss_step = n_message_steps - 1  # Last step
 
-        def batch_loss_fn(model, graphs, logits, wires):
-            loss, (aux, updated_graphs, updated_logits) = nnx.vmap(
-                loss_fn, in_axes=(None, 0, 0, 0)
-            )(model, graphs, logits, wires)
+            final_graph, final_loss, final_logits, final_aux = jax.tree.map(
+                lambda x: x[loss_step], step_outputs
+            )
+
+            return final_loss, (final_aux, final_graph, final_logits, loss_step)
+
+        def loss_fn_no_scan(model, graph, logits, wires, loss_key):
+            # Store original shapes for reconstruction
+            logits_original_shapes = [logit.shape for logit in logits]
+            # Choose which step to use for loss computation
+            if random_loss_step:
+                loss_step = jax.random.randint(loss_key, (1,), 0, n_message_steps)[0]
+            else:
+                loss_step = n_message_steps - 1
+
+            all_results = []
+
+            for i in range(n_message_steps):
+                graph = model(graph)
+                graph, loss, logits, aux = get_loss_and_update_graph(
+                    graph=graph,
+                    logits_original_shapes=logits_original_shapes,
+                    wires=wires,
+                    x_data=x,
+                    y_data=y_target,
+                    loss_type=loss_type,
+                    layer_sizes=layer_sizes,
+                )
+                all_results.append((loss, aux, graph, logits))
+
+            # Stack all results using jax.tree_map
+            stacked_results = jax.tree.map(lambda *args: jp.stack(args), *all_results)
+
+            # Index at n_loss_step
+            final_loss, final_aux, final_graph, final_logits = jax.tree.map(
+                lambda x: x[loss_step], stacked_results
+            )
+
+            return final_loss, (final_aux, final_graph, final_logits, loss_step)
+
+        def batch_loss_fn(model, graphs, logits, wires, loss_key):
+            if use_scan:
+                loss_fn = loss_fn_scan
+            else:
+                loss_fn = loss_fn_no_scan
+
+            loss_keys = jax.random.split(loss_key, graphs.n_node.shape[0])
+            loss, (aux, updated_graphs, updated_logits, loss_steps) = nnx.vmap(
+                loss_fn, in_axes=(None, 0, 0, 0, 0)
+            )(model, graphs, logits, wires, loss_keys)
             return jp.mean(loss), (
                 jax.tree.map(lambda x: jp.mean(x, axis=0), aux),
                 updated_graphs,
                 updated_logits,
+                jp.mean(loss_steps),
             )
 
         # Compute loss and gradients
-        (loss, (aux, updated_graphs, updated_logits)), grads = nnx.value_and_grad(
-            batch_loss_fn, has_aux=True
-        )(model, graphs, logits, wires)
+        (loss, (aux, updated_graphs, updated_logits, loss_steps)), grads = (
+            nnx.value_and_grad(batch_loss_fn, has_aux=True)(
+                model=model,
+                graphs=graphs,
+                logits=logits,
+                wires=wires,
+                loss_key=loss_key,
+            )
+        )
 
         # Update GNN parameters
         optimizer.update(grads)
@@ -627,7 +771,7 @@ def train_model(
         # Update pool with the updated graphs and logits (wires stay the same)
         updated_pool = pool.update(idxs, updated_graphs, batch_of_logits=updated_logits)
 
-        return loss, aux, updated_pool
+        return loss, (aux, updated_pool, loss_steps)
 
     # Setup wandb logging if enabled
     wandb_run = _init_wandb(wandb_logging, wandb_run_config)
@@ -642,6 +786,39 @@ def train_model(
     # Create progress bar for training
     pbar = tqdm(range(epochs), desc="Training GNN")
     avg_steps_reset = 0
+
+    # Initialize reset interval scheduler if provided
+    if reset_interval_schedule is None:
+        reset_interval_schedule = {"enabled": False}
+
+    # Track last reset epoch for scheduling
+    last_reset_epoch = -1  # Initialize to -1 so first check works correctly
+
+    # Initialize test circuit for periodic evaluation if enabled
+    test_wires = None
+    test_logits = None
+    if periodic_eval_enabled:
+        test_rng = jax.random.PRNGKey(periodic_eval_test_seed)
+
+        if wiring_mode == "fixed":
+            # For fixed wiring, generate a single test circuit
+            test_wires, test_logits = gen_circuit(test_rng, layer_sizes, arity=arity)
+            log.info(
+                "Single test circuit initialized for periodic evaluation (fixed wiring)"
+            )
+        else:  # wiring_mode == "random"
+            # For random wiring, generate a batch of test circuits for batched evaluation
+            test_rngs = jax.random.split(test_rng, periodic_eval_batch_size)
+
+            # Use vmap to generate multiple circuits
+            vmap_gen_circuit = jax.vmap(
+                lambda rng: gen_circuit(rng, layer_sizes, arity=arity)
+            )
+            test_wires, test_logits = vmap_gen_circuit(test_rngs)
+
+            log.info(
+                f"Batch of {periodic_eval_batch_size} test circuits initialized for periodic evaluation (random wiring)"
+            )
 
     # Save initial stable state if needed
     last_stable_state = {
@@ -661,27 +838,33 @@ def train_model(
     result = {}
     # Training loop
     for epoch in pbar:
-        # Each epoch uses a different random key
-        rng, epoch_key = jax.random.split(rng)
+        # Get current message steps and batch size using scheduler
+        if message_steps_schedule is None:
+            message_steps_schedule = {"enabled": False}
+
+        # Calculate constant product for memory constraint
+
+        current_n_message_steps, current_meta_batch_size = (
+            get_current_message_steps_and_batch_size(
+                epoch=epoch,
+                schedule_config=message_steps_schedule,
+                total_epochs=epochs,
+                base_steps=n_message_steps,
+                base_batch_size=meta_batch_size,
+            )
+        )
 
         # Pool-based training
-        # Sample a batch from the pool
-        rng, sample_key = jax.random.split(epoch_key)
-        idxs, graphs, wires, logits = circuit_pool.sample(sample_key, meta_batch_size)
-
-        # Select a random subset of data for this epoch
-        rng, data_key = jax.random.split(rng)
-        # idx = jax.random.permutation(data_key, len(x_data))
-        # x_batch = x_data[idx]
-        # y_batch = y_data[idx]
-        x_batch = x_data
-        y_batch = y_data
+        # Sample a batch from the pool using the current (potentially dynamic) batch size
+        rng, sample_key, loss_key = jax.random.split(rng, 3)
+        idxs, graphs, wires, logits = circuit_pool.sample(
+            sample_key, current_meta_batch_size
+        )
 
         # Perform pool training step
         (
             loss,
-            (hard_loss, y_pred, y_hard_pred, accuracy, hard_accuracy),
-            circuit_pool,
+            (aux, circuit_pool, loss_steps),
         ) = pool_train_step(
             model,
             optimizer,
@@ -690,18 +873,22 @@ def train_model(
             graphs,
             wires,
             logits,
-            x_batch,
-            y_batch,
-            n_message_steps,
+            x_data,
+            y_data,
+            tuple(layer_sizes),  # Convert list to tuple for JAX static arguments
+            current_n_message_steps,
             loss_type=loss_type,
+            loss_key=loss_key,
         )
 
-        # Reset a fraction of the pool periodically
-        if (
-            epoch > 0
-            and reset_pool_interval is not None
-            and epoch % reset_pool_interval == 0
-        ):
+        *_, hard_loss, _, _, accuracy, hard_accuracy, _, _ = aux
+
+        # Reset a fraction of the pool using scheduled intervals
+        current_reset_interval = get_current_reset_interval(
+            epoch, reset_interval_schedule, epochs, reset_pool_interval
+        )
+
+        if should_reset_pool(epoch, current_reset_interval, last_reset_epoch):
             rng, reset_key, fresh_key = jax.random.split(rng, 3)
 
             # Generate fresh circuits for resetting
@@ -729,6 +916,9 @@ def train_model(
                 reset_strategy=reset_strategy,
                 combined_weights=combined_weights,
             )
+
+            # Update last reset epoch
+            last_reset_epoch = epoch
 
         if jp.isnan(loss):
             log.warning(f"Loss is NaN at epoch {epoch}, returning last stable state")
@@ -784,15 +974,20 @@ def train_model(
                 "training/hard_loss": float(hard_loss),
                 "training/accuracy": float(accuracy),
                 "training/hard_accuracy": float(hard_accuracy),
+                "scheduler/message_steps": current_n_message_steps,
+                "scheduler/batch_size": current_meta_batch_size,
+                "scheduler/pool_reset_interval": current_reset_interval,
                 "pool/reset_steps": float(avg_steps_reset),
                 "pool/avg_update_steps": float(circuit_pool.get_average_update_steps()),
+                "pool/loss_steps": loss_steps,
             }
 
             # Add learning rate if available
-            try:
-                metrics_dict["training/lr"] = optimizer.opt_fn.learning_rate.get_count()
-            except (AttributeError, TypeError):
-                pass  # Skip if learning rate not available
+            if schedule is not None:
+                schedule_value = schedule(epoch)
+            else:
+                schedule_value = learning_rate
+            metrics_dict["scheduler/learning_rate"] = schedule_value
 
             _log_to_wandb(wandb_run, metrics_dict, epoch, log_interval)
 
@@ -802,8 +997,10 @@ def train_model(
                     "Loss": f"{loss:.4f}",
                     "Accuracy": f"{accuracy:.4f}",
                     "Hard Acc": f"{hard_accuracy:.4f}",
-                    "Message Steps": f"{n_message_steps}",
+                    "Msg Steps": f"{current_n_message_steps}",
+                    "Batch Size": f"{current_meta_batch_size}",
                     "Reset Steps": f"{int(avg_steps_reset)}",
+                    "Loss Steps": f"{loss_steps}",
                 }
             )
 
@@ -854,6 +1051,33 @@ def train_model(
                 current_metric_value,
                 wandb_run,
             )
+
+            # Run periodic evaluation if enabled
+            if (
+                periodic_eval_enabled
+                and test_wires is not None
+                and test_logits is not None
+                and epoch > 0
+                and epoch % periodic_eval_interval == 0
+            ):
+                _run_periodic_evaluation(
+                    model=model,
+                    test_wires=test_wires,
+                    test_logits=test_logits,
+                    x_data=x_data,
+                    y_data=y_data,
+                    input_n=input_n,
+                    arity=arity,
+                    hidden_dim=hidden_dim,
+                    n_message_steps=current_n_message_steps,  # Use current message steps
+                    loss_type=loss_type,
+                    epoch=epoch,
+                    wandb_run=wandb_run,
+                    log_stepwise=periodic_eval_log_stepwise,
+                    layer_sizes=layer_sizes,
+                    wiring_mode=wiring_mode,
+                    eval_batch_size=periodic_eval_batch_size,
+                )
 
             # Return the trained GNN model and metrics
             result = {

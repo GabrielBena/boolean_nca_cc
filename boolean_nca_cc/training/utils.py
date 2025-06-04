@@ -9,9 +9,11 @@ import logging
 import hydra
 import jax
 import glob
+import numpy as np
 from boolean_nca_cc.circuits.model import gen_circuit, run_circuit
 from boolean_nca_cc.circuits.model import generate_layer_sizes
 from boolean_nca_cc.utils.graph_builder import build_graph
+from boolean_nca_cc.training.schedulers import get_learning_rate_schedule
 
 log = logging.getLogger(__name__)
 
@@ -235,6 +237,98 @@ def compare_with_backprop(gnn_metrics, bp_metrics, title, output_dir):
         wandb.log({f"{title} Comparison": wandb.Image(fig)})
     plt.savefig(comp_plot_path)
     plt.close(fig)
+
+
+def plot_lr_schedule(
+    lr_scheduler: str,
+    learning_rate: float,
+    epochs: int,
+    lr_scheduler_params: dict = None,
+    title: str = "Learning Rate Schedule",
+    output_dir: str = None,
+    save_plot: bool = True,
+    show_plot: bool = False,
+    eval_every_n: int = 1,
+):
+    """
+    Plot the learning rate schedule over training epochs.
+
+    Args:
+        lr_scheduler: Type of scheduler ("constant", "exponential", "cosine", "linear_warmup")
+        learning_rate: Base learning rate
+        epochs: Total number of training epochs
+        lr_scheduler_params: Optional parameters for the scheduler
+        title: Title for the plot
+        output_dir: Directory to save the plot (if save_plot=True)
+        save_plot: Whether to save the plot to disk
+        show_plot: Whether to display the plot
+
+    Returns:
+        tuple: (fig, ax, lr_values) - matplotlib figure, axis, and learning rate values
+    """
+    # Get the learning rate schedule
+    schedule_fn = get_learning_rate_schedule(
+        lr_scheduler=lr_scheduler,
+        learning_rate=learning_rate,
+        epochs=epochs,
+        lr_scheduler_params=lr_scheduler_params or {},
+    )
+
+    # Evaluate the schedule over all epochs
+    epoch_steps = np.arange(epochs)
+    lr_values = np.array(
+        [float(schedule_fn(step)) for step in range(0, epochs, eval_every_n)]
+    )
+    # lr_values = np.maximum(np.array(lr_values), 1e-6)
+
+    # Create the plot
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(epoch_steps[::eval_every_n], lr_values, linewidth=2, color="blue")
+    ax.set_xlabel("Training Epoch")
+    ax.set_ylabel("Learning Rate")
+    ax.set_title(f"{title} ({lr_scheduler})")
+    ax.grid(True, alpha=0.3)
+
+    # Add some annotations
+    if lr_scheduler != "constant":
+        ax.axhline(
+            y=learning_rate,
+            color="red",
+            linestyle="--",
+            alpha=0.7,
+            label=f"Base LR: {learning_rate}",
+        )
+        ax.legend()
+
+    # Format y-axis for better readability
+    if (
+        max(lr_values) / lr_values[lr_values > 0].min() > 100
+    ):  # Use log scale for large ranges
+        ax.set_yscale("log")
+
+    plt.tight_layout()
+
+    # Save plot if requested
+    if save_plot and output_dir:
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        plot_filename = f"lr_schedule_{lr_scheduler.lower()}.png"
+        plot_path = os.path.join(output_dir, plot_filename)
+        plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+        print(f"Learning rate schedule plot saved to: {plot_path}")
+
+        # Log to wandb if available
+        if wandb.run is not None:
+            wandb.log({f"LR Schedule ({lr_scheduler})": wandb.Image(fig)})
+
+    # Show plot if requested
+    if show_plot:
+        plt.show()
+    else:
+        plt.close(fig) if not save_plot else None
+
+    return fig, ax, lr_values
 
 
 def load_best_model_from_wandb(

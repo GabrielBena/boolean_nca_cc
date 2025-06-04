@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jp
 import jraph
 from flax import nnx
-from typing import List
+from typing import List, Tuple
 from functools import partial
 
 from boolean_nca_cc.models.node_update import NodeUpdateModule
@@ -91,6 +91,8 @@ class CircuitGNN(nnx.Module):
         """
         nodes, edge_features_in, receivers, senders, globals_, n_node, n_edge = graph
 
+        # Note: globals_ is extracted but no longer used in computations
+
         # 1. Compute messages using the edge update module
         # Get sender node features
         sender_node_features = jax.tree.map(lambda n: n[senders], nodes)
@@ -102,7 +104,7 @@ class CircuitGNN(nnx.Module):
             edge_features_in,
             sender_node_features,
             receiver_node_features,
-            globals_,
+            None,
         )
 
         # 2. Aggregate messages for each node
@@ -114,7 +116,7 @@ class CircuitGNN(nnx.Module):
             nodes,
             aggregated_messages,
             None,
-            globals_,
+            None,
         )
 
         # Return updated graph
@@ -124,35 +126,102 @@ class CircuitGNN(nnx.Module):
 @partial(nnx.jit, static_argnames=("num_steps",))
 def run_gnn_scan(
     gnn: CircuitGNN, graph: jraph.GraphsTuple, num_steps: int
-) -> jraph.GraphsTuple:
+) -> Tuple[jraph.GraphsTuple, List[jraph.GraphsTuple]]:
     """
-    Apply the GNN message passing iteratively for multiple steps using jax.lax.scan.
+    Run the GNN for multiple steps using scan for efficiency.
 
     Args:
-        gnn: The CircuitGNN model
-        graph: The initial graph
-        num_steps: Number of message passing steps to perform
+        gnn: The CircuitGNN model to apply
+        graph: Initial graph state
+        num_steps: Number of steps to run
 
     Returns:
-        Updated graph after num_steps of message passing
+        final_graph: The graph after all steps
+        all_graphs: List of graphs from each step (including initial)
     """
-    # Ensure edges field is properly initialized
-    if graph.edges is None:
-        # Initialize edges with the right shape
-        senders_count = graph.senders.shape[0] if graph.senders.shape[0] > 0 else 0
-        logit_dim = 2**gnn.arity
-        hidden_dim = gnn.hidden_dim
 
-        # Create empty edges with the right shape
-        edges = jp.zeros((senders_count, logit_dim + hidden_dim), dtype=jp.float32)
-        graph = graph._replace(edges=edges)
+    def gnn_step(carry, _):
+        graph = carry
+        new_graph = gnn(graph)
+        return new_graph, new_graph
 
-    def scan_body(carry_graph, _):
-        # Apply one step of GNN message passing
-        updated_graph = gnn(carry_graph)
-        return updated_graph, None
+    # Run scan
+    final_graph, intermediate_graphs = jax.lax.scan(
+        gnn_step, graph, xs=None, length=num_steps
+    )
 
-    # Run the scan
-    final_graph, _ = jax.lax.scan(scan_body, graph, None, length=num_steps)
+    # Combine initial graph with intermediate results
+    all_graphs = [graph] + list(intermediate_graphs)
 
-    return final_graph
+    return final_graph, all_graphs
+
+
+def run_gnn_scan_with_loss(
+    gnn: CircuitGNN,
+    graph: jraph.GraphsTuple,
+    num_steps: int,
+    logits_original_shapes: List[Tuple],
+    wires: List[jp.ndarray],
+    x_data: jp.ndarray,
+    y_data: jp.ndarray,
+    loss_type: str,
+    layer_sizes: Tuple[Tuple[int, int]],
+) -> Tuple[jraph.GraphsTuple, List[jraph.GraphsTuple], jp.ndarray, List]:
+    """
+    Run the GNN for multiple steps with loss computation and graph updating at each step.
+
+    This function combines model application with loss computation and graph updating,
+    allowing for efficient computation of all steps and later indexing of a random step.
+
+    Args:
+        gnn: The CircuitGNN model to apply
+        graph: Initial graph state
+        num_steps: Number of steps to run
+        logits_original_shapes: Original shapes of logits for reconstruction
+        wires: Wire connection patterns
+        x_data: Input data
+        y_data: Target output data
+        loss_type: Type of loss function to use
+        layer_sizes: List of (nodes, group_size) tuples for each layer
+
+    Returns:
+        final_graph: The graph after all steps
+        all_graphs: List of graphs from each step (including initial)
+        all_losses: Array of losses from each step [num_steps+1]
+        all_aux: List of auxiliary data from each step
+    """
+    from boolean_nca_cc.training.evaluation import get_loss_and_update_graph
+
+    def gnn_step_with_loss(carry, _):
+        current_graph = carry
+
+        # Apply GNN
+        model_updated_graph = gnn(current_graph)
+
+        # Compute loss and update graph
+        updated_graph, loss, current_logits, aux = get_loss_and_update_graph(
+            model_updated_graph,
+            logits_original_shapes,
+            wires,
+            x_data,
+            y_data,
+            loss_type,
+            layer_sizes,
+        )
+
+        # Update graph globals with current update steps
+        current_update_steps = (
+            updated_graph.globals[..., 1] if updated_graph.globals is not None else 0
+        )
+        final_graph = updated_graph._replace(
+            globals=jp.array([loss, current_update_steps + 1], dtype=jp.float32)
+        )
+
+        return final_graph, (final_graph, loss, current_logits, aux)
+
+    # Run scan
+    final_graph, step_outputs = jax.lax.scan(
+        gnn_step_with_loss, graph, xs=None, length=num_steps
+    )
+
+    return final_graph, step_outputs

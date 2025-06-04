@@ -48,20 +48,19 @@ class NodeUpdateModule(nnx.Module):
         pe_dim = hidden_dim  # Dimension for positional encodings
 
         # Calculate MLP input size
-        # Current features: Logits, Hidden, Layer PE, Intra-Layer PE
-        current_features_size = self.logit_dim + hidden_dim + pe_dim + pe_dim
-        global_feature_size = 2  # Assuming globals_ is [loss, update_steps]
+        # Current features: Logits, Hidden, Layer PE, Intra-Layer PE, Loss
+        current_features_size = (
+            self.logit_dim + hidden_dim + pe_dim + pe_dim + 1
+        )  # +1 for loss feature
 
         if message_passing:
             # If using message passing, include aggregated messages
             # Edge message contains logits + hidden derived features
             aggregated_message_size = self.logit_dim + hidden_dim
             mlp_input_size = current_features_size + aggregated_message_size
-            mlp_input_size += global_feature_size  # Add global feature size
         else:
             # Without message passing, only use current node features
             mlp_input_size = current_features_size
-            mlp_input_size += global_feature_size  # Add global feature size
 
         # Output needs to contain updated logits and hidden features
         mlp_output_size = self.logit_dim + hidden_dim
@@ -84,6 +83,12 @@ class NodeUpdateModule(nnx.Module):
         )
         self.intra_layer_pe_norm = nnx.LayerNorm(
             pe_dim,
+            epsilon=1e-5,
+            rngs=rngs,
+        )
+        # Add normalization for loss feature
+        self.loss_norm = nnx.LayerNorm(
+            1,  # Loss is a scalar per node
             epsilon=1e-5,
             rngs=rngs,
         )
@@ -134,7 +139,7 @@ class NodeUpdateModule(nnx.Module):
         nodes: NodeType,
         sent_attributes: jp.ndarray,
         received_attributes: jp.ndarray,
-        globals_,
+        globals_=None,  # Keep for compatibility but ignore
     ):
         """
         Update node features using incoming messages and current state.
@@ -143,7 +148,7 @@ class NodeUpdateModule(nnx.Module):
             nodes: Current node features
             sent_attributes: Aggregated messages from incoming edges
             received_attributes: Features of received messages (unused)
-            globals_: Global features [loss, update_steps]
+            globals_: Global features (ignored, kept for compatibility)
 
         Returns:
             Updated node features
@@ -153,12 +158,15 @@ class NodeUpdateModule(nnx.Module):
         current_hidden = nodes["hidden"]  # Shape: [num_nodes, hidden_dim]
         current_layer_pe = nodes["layer_pe"]  # Shape: [num_nodes, pe_dim]
         current_intra_layer_pe = nodes["intra_layer_pe"]  # Shape: [num_nodes, pe_dim]
+        current_loss = nodes["loss"]  # Shape: [num_nodes]
 
         # Normalize input features
         normalized_logits = self.logits_norm(current_logits)
         normalized_hidden = self.hidden_norm(current_hidden)
         normalized_layer_pe = self.layer_pe_norm(current_layer_pe)
         normalized_intra_layer_pe = self.intra_layer_pe_norm(current_intra_layer_pe)
+        # Add dimension for loss normalization: [num_nodes] -> [num_nodes, 1]
+        normalized_loss = self.loss_norm(current_loss[:, None])  # [num_nodes, 1]
 
         # Combine normalized features
         current_node_combined_features = jp.concatenate(
@@ -167,16 +175,9 @@ class NodeUpdateModule(nnx.Module):
                 normalized_hidden,
                 normalized_layer_pe,
                 normalized_intra_layer_pe,
+                normalized_loss,  # Include normalized loss feature
             ],
             axis=-1,
-        )
-
-        # Broadcast global feature to match the number of nodes
-        num_nodes = list(nodes.values())[0].shape[0]
-
-        # Globals are [loss, update_steps], both are used for the optimization
-        broadcasted_globals = jp.repeat(
-            jp.reshape(globals_, (1, -1)), num_nodes, axis=0
         )
 
         # Determine inputs based on message passing flag
@@ -187,15 +188,9 @@ class NodeUpdateModule(nnx.Module):
             mlp_input = jp.concatenate(
                 [current_node_combined_features, normalized_messages], axis=-1
             )
-            mlp_input = jp.concatenate(
-                [mlp_input, broadcasted_globals], axis=-1
-            )  # Add globals
         else:
             # Input = current_features only
             mlp_input = current_node_combined_features
-            mlp_input = jp.concatenate(
-                [mlp_input, broadcasted_globals], axis=-1
-            )  # Add globals
 
         # Apply MLP to get the delta (change) in features
         delta_combined_features = self.mlp(mlp_input)

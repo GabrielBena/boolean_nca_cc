@@ -9,6 +9,8 @@ from boolean_nca_cc.training.evaluation import (
     evaluate_model_stepwise,
     evaluate_model_stepwise_generator,
     StepResult,
+    get_loss_from_wires_logits,
+    get_loss_and_update_graph,
 )
 
 __all__ = [
@@ -16,4 +18,6 @@ __all__ = [
     "evaluate_model_stepwise",
     "evaluate_model_stepwise_generator",
     "StepResult",
+    "get_loss_from_wires_logits",
+    "get_loss_and_update_graph",
 ]
