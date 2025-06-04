@@ -32,10 +32,11 @@ training:
   # WIRING MODE : "random" or "fixed"
   wiring_mode: "random"  # Options: "fixed" or "random"
   # INNER LOOP
-  n_message_steps: 30  # Number of message passing steps per training iteration
+  n_message_steps: 1  # Number of message passing steps per training iteration
   # LOSS TYPE
-  loss_type: "bce"  # Options: "l4", "l2", or "bce"
-  random_loss_step: true  # Use random message passing step for loss computation
+  loss_type: "l4"  # Options: "l4", "l2", or "bce"
+  random_loss_step: false  # Use random message passing step for loss computation
+  use_beta_loss_step: true  # Use beta distribution for random loss step (varies from early to late steps through training)
   # MESSAGE STEPS CURRICULUM LEARNING
   message_steps_schedule:
     enabled: false  # Whether to use message steps scheduling (curriculum learning)
@@ -45,28 +46,29 @@ training:
     constant_product: null  # Constant product of (meta_batch_size * n_message_steps) to adjust batch size (if null, uses base_batch_size allways)
     transition_epochs: null  # For linear schedule (if null, uses total training epochs)
   # BATCH SIZE
-  meta_batch_size: 64
+  meta_batch_size: 256
   # OPTIMIZATION
   learning_rate: 1e-3
   weight_decay: 1e-5
   # LEARNING RATE SCHEDULER
-  lr_scheduler: "linear_warmup"  # Options: "constant", "exponential", "cosine", "linear_warmup"
+  lr_scheduler: "cosine"  # Options: "constant", "exponential", "cosine", "linear_warmup"
   lr_scheduler_params:
+    warmup_steps_factor: 10
     lr_warmup_start: 1e-6
-    exponent: 10
-    alpha: 1e-2 # final lr = 1% of initial lr
+    exponent: 1
+    alpha: 0.0 # final lr = 1% of initial lr
   # NUMBER OF EPOCHS
   epochs: null
-  epochs_power_of_2: 18 # 2^n
+  epochs_power_of_2: 16 # 2^n
   # USE SCAN
-  use_scan: true
+  use_scan: false
 
 
 # Pool configuration for meta-learning
 pool:
-  size: 8192
-  reset_fraction: 0.1
-  reset_interval: 64 # using reset_interval_schedule instead
+  size: 1024
+  reset_fraction: 0.075
+  reset_interval: 32 # using reset_interval_schedule instead
   reset_strategy: "combined"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
 
@@ -83,7 +85,7 @@ pool:
 
   # Gate knockout ("hard" LUT zeroing - resets globals)
   gate_knockout:
-    active: True
+    active: false
     fraction: 0.1
     interval: 64
     strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
@@ -121,7 +123,7 @@ eval:
 
 # Checkpointing
 checkpoint:
-  enabled: true
+  enabled: false
   interval: 1024  # Save checkpoints every N epochs
   save_best: true  # Whether to track and save the best model
   best_metric: "hard_accuracy"  # Metric to use for determining best model (loss, hard_loss, accuracy, hard_accuracy)

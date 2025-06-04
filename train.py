@@ -35,6 +35,8 @@ from boolean_nca_cc.training.utils import (
 # Configure logging
 log = logging.getLogger(__name__)
 
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
 
 def run_backpropagation_training(cfg, x_data, y_data, loss_type="l4"):
     """
@@ -255,8 +257,11 @@ def main(cfg: DictConfig) -> None:
         raise
 
     # Prepare checkpoint directory
-    checkpoint_dir = os.path.join(output_dir, "checkpoints")
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    if cfg.checkpoint.enabled:
+        checkpoint_dir = os.path.join(output_dir, "checkpoints")
+        os.makedirs(checkpoint_dir, exist_ok=True)
+    else:
+        checkpoint_dir = None
 
     # Train model
     log.info(f"Starting {cfg.model.type.upper()} training")
@@ -279,6 +284,7 @@ def main(cfg: DictConfig) -> None:
         # Loss parameters
         loss_type=cfg.training.loss_type,
         random_loss_step=cfg.training.random_loss_step,
+        use_beta_loss_step=cfg.training.use_beta_loss_step,
         # Wiring mode parameters
         wiring_mode=cfg.training.wiring_mode,
         meta_batch_size=cfg.training.meta_batch_size,
@@ -295,6 +301,7 @@ def main(cfg: DictConfig) -> None:
         lr_scheduler=cfg.training.lr_scheduler,
         lr_scheduler_params=cfg.training.lr_scheduler_params,
         # Checkpoint parameters
+        checkpoint_enabled=cfg.checkpoint.enabled,
         checkpoint_dir=checkpoint_dir,
         checkpoint_interval=cfg.checkpoint.interval,
         save_best=cfg.checkpoint.save_best,
@@ -355,8 +362,7 @@ def main(cfg: DictConfig) -> None:
     )
 
     if "metrics" in gnn_results:
-        for n, v in gnn_results["metrics"].items():
-            gnn_results["metrics"][n] = v
+        gnn_results.update(gnn_results["metrics"])
 
     # Plot training curves
     model_name = cfg.model.type.upper()
