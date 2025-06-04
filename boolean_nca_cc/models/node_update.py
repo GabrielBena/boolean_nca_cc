@@ -30,6 +30,7 @@ class NodeUpdateModule(nnx.Module):
         message_passing: bool = True,
         *,
         rngs: nnx.Rngs,
+        zero_init: bool = True,
     ):
         """
         Initialize the node update module.
@@ -40,6 +41,7 @@ class NodeUpdateModule(nnx.Module):
             arity: Number of inputs per gate in the boolean circuit
             message_passing: Whether to use message passing or only self-updates
             rngs: Random number generators
+            zero_init: Whether to initialize weights and biases to zero
         """
         self.arity = arity
         self.hidden_dim = hidden_dim
@@ -115,8 +117,12 @@ class NodeUpdateModule(nnx.Module):
                     # kernel_init=nnx.initializers.normal(
                     #     stddev=1e-4
                     # ),  # Small random init
-                    kernel_init=nnx.initializers.zeros,
-                    bias_init=jax.nn.initializers.zeros,
+                    kernel_init=nnx.initializers.zeros
+                    if zero_init
+                    else nnx.initializers.kaiming_normal(),
+                    bias_init=jax.nn.initializers.zeros
+                    if zero_init
+                    else nnx.initializers.normal(stddev=1e-4),
                     rngs=rngs,
                 )
                 mlp_layers.append(final_linear)

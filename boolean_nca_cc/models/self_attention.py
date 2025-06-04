@@ -174,6 +174,7 @@ class CircuitSelfAttention(nnx.Module):
         *,
         rngs: nnx.Rngs,
         type: str = "self_attention",
+        zero_init: bool = True,
     ):
         """
         Initialize the circuit self-attention model.
@@ -220,15 +221,23 @@ class CircuitSelfAttention(nnx.Module):
         self.logit_proj = nnx.Linear(
             hidden_dim * 4,
             self.logit_dim,
-            kernel_init=nnx.initializers.zeros,
+            kernel_init=nnx.initializers.zeros
+            if zero_init
+            else nnx.initializers.normal(stddev=1e-6),
+            bias_init=nnx.initializers.zeros
+            if zero_init
+            else nnx.initializers.normal(stddev=1e-6),
             rngs=rngs,
         )
         self.hidden_proj = nnx.Linear(
             hidden_dim * 4,
             hidden_dim,
-            # kernel_init=nnx.initializers.normal(stddev=1e-4),  # Small random init
-            kernel_init=nnx.initializers.zeros,
-            bias_init=nnx.initializers.zeros,  # Keep bias at zero
+            kernel_init=nnx.initializers.zeros
+            if zero_init
+            else nnx.initializers.normal(stddev=1e-6),
+            bias_init=nnx.initializers.zeros
+            if zero_init
+            else nnx.initializers.normal(stddev=1e-6),
             rngs=rngs,
         )
 
