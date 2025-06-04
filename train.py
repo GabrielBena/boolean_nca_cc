@@ -275,7 +275,10 @@ def main(cfg: DictConfig) -> None:
         weight_decay=cfg.training.weight_decay,
         epochs=cfg.training.epochs or 2**cfg.training.epochs_power_of_2,
         n_message_steps=cfg.training.n_message_steps,
+        use_scan=cfg.training.use_scan,
+        # Loss parameters
         loss_type=cfg.training.loss_type,
+        random_loss_step=cfg.training.random_loss_step,
         # Wiring mode parameters
         wiring_mode=cfg.training.wiring_mode,
         meta_batch_size=cfg.training.meta_batch_size,
@@ -285,14 +288,24 @@ def main(cfg: DictConfig) -> None:
         reset_pool_fraction=cfg.pool.reset_fraction,
         reset_pool_interval=cfg.pool.reset_interval,
         reset_strategy=cfg.pool.reset_strategy,
+        reset_interval_schedule=cfg.pool.reset_interval_schedule,
+        # Message steps scheduling (curriculum learning)
+        message_steps_schedule=cfg.training.message_steps_schedule,
         # Learning rate scheduling
         lr_scheduler=cfg.training.lr_scheduler,
+        lr_scheduler_params=cfg.training.lr_scheduler_params,
         # Checkpoint parameters
         checkpoint_dir=checkpoint_dir,
         checkpoint_interval=cfg.checkpoint.interval,
         save_best=cfg.checkpoint.save_best,
         best_metric=cfg.checkpoint.best_metric,
         save_stable_states=cfg.checkpoint.save_stable_states,
+        # Periodic evaluation parameters
+        periodic_eval_enabled=cfg.eval.periodic.enabled,
+        periodic_eval_interval=cfg.eval.periodic.interval,
+        periodic_eval_test_seed=cfg.test_seed,
+        periodic_eval_log_stepwise=cfg.eval.periodic.log_stepwise,
+        periodic_eval_batch_size=cfg.eval.periodic.batch_size,
         # WandB parameters
         wandb_logging=cfg.wandb.enabled,
         log_interval=cfg.logging.log_interval,
@@ -338,7 +351,12 @@ def main(cfg: DictConfig) -> None:
         hidden_dim=cfg.model.hidden_dim,
         n_message_steps=cfg.eval.inner_steps,
         loss_type=cfg.training.loss_type,
+        layer_sizes=layer_sizes,
     )
+
+    if "metrics" in gnn_results:
+        for n, v in gnn_results["metrics"].items():
+            gnn_results["metrics"][n] = v
 
     # Plot training curves
     model_name = cfg.model.type.upper()
