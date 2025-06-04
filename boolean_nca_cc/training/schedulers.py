@@ -5,6 +5,7 @@ This module provides various scheduling functions for dynamically adjusting
 training parameters over the course of training.
 """
 
+import jax
 import jax.numpy as jp
 import optax
 from typing import Dict, Any, Optional, Tuple
@@ -46,11 +47,15 @@ def get_learning_rate_schedule(
             init_value=learning_rate,
             decay_steps=lr_scheduler_params.get("decay_steps", epochs),
             alpha=lr_scheduler_params.get("alpha", 0.0),
+            exponent=lr_scheduler_params.get("exponent", 1.0),
         )
 
     elif lr_scheduler == "linear_warmup":
         # Combine warmup with another schedule (e.g., cosine)
-        warmup_steps = lr_scheduler_params.get("warmup_steps", epochs // 10)
+        warmup_steps = lr_scheduler_params.get(
+            "warmup_steps", epochs // lr_scheduler_params.get("warmup_steps_factor", 10)
+        )
+        print(f"Warmup steps: {warmup_steps}")
         target_schedule = optax.cosine_decay_schedule(  # Default to cosine after warmup
             init_value=learning_rate,
             decay_steps=epochs - warmup_steps,
@@ -322,3 +327,69 @@ def get_current_message_steps_and_batch_size(
     )
 
     return current_steps, current_batch_size
+
+
+def get_step_beta(
+    loss_key: jax.random.PRNGKey,
+    n_message_steps: int,
+    training_progress: float = 0.0,
+) -> jp.ndarray:
+    """
+    Sample a loss step using Beta distribution that shifts from early to late steps.
+
+    Args:
+        loss_key: JAX random key for sampling
+        n_message_steps: Total number of message passing steps
+        training_progress: Float in [0.0, 1.0] indicating training progress
+
+    Returns:
+        Selected step index as integer
+
+    Distribution evolution during training:
+
+    EARLY TRAINING (progress ≈ 0.0):          MID TRAINING (progress ≈ 0.5):
+    ████                                         ████
+    ███                                          ██████
+    ██                                           ████████
+    █                                            ████████
+    █                                            ██████
+    █                                            ████
+    0────────────────────100                     0────────────────────100
+    (favors early steps)                         (balanced)
+
+    LATE TRAINING (progress ≈ 1.0):
+
+    █
+    █
+    █
+    ██
+    ███
+    ████
+    0────────────────────100
+    (favors late steps)
+    """
+    training_progress = jp.clip(training_progress, 0.01, 0.99)  # Avoid extreme values
+
+    # Parameters for beta distribution
+    # Early: alpha > beta (left skewed, favors early steps)
+    # Late: alpha < beta (right skewed, favors later steps)
+
+    max_concentration = 4.0  # Controls how concentrated the distribution is
+    min_concentration = 0.5
+
+    beta = (
+        max_concentration * (1.0 - training_progress)
+        + min_concentration * training_progress
+    )
+    alpha = (
+        min_concentration * (1.0 - training_progress)
+        + max_concentration * training_progress
+    )
+
+    # Sample from beta distribution
+    beta_sample = jax.random.beta(loss_key, alpha, beta)
+
+    # Map to step range
+    step = beta_sample * (n_message_steps - 1)
+
+    return jp.round(step).astype(jp.int32).clip(1, n_message_steps - 1)

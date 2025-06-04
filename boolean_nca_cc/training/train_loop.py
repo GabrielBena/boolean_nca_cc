@@ -25,6 +25,7 @@ from boolean_nca_cc.training.schedulers import (
     get_current_reset_interval,
     get_learning_rate_schedule,
     get_current_message_steps_and_batch_size,
+    get_step_beta,
 )
 
 from boolean_nca_cc.circuits.model import gen_circuit
@@ -35,7 +36,6 @@ from boolean_nca_cc.training.evaluation import (
     get_loss_and_update_graph,
 )
 
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 # Type alias for PyTree
 PyTree = Any
 
@@ -423,6 +423,7 @@ def train_model(
     # Loss parameters
     loss_type: str = "l4",  # Options: 'l4' or 'bce'
     random_loss_step: bool = False,  # Use random message passing step for loss computation
+    use_beta_loss_step: bool = False,  # Use beta distribution for random loss step (varies from early to late steps through training)
     # Wiring mode parameters
     wiring_mode: str = "random",  # Options: 'fixed' or 'random'
     meta_batch_size: int = 64,
@@ -452,6 +453,7 @@ def train_model(
     init_pool: GraphPool = None,
     initial_metrics: Dict = None,
     # Checkpointing parameters
+    checkpoint_enabled: bool = False,
     checkpoint_dir: str = None,
     checkpoint_interval: int = 10,
     save_best: bool = True,
@@ -486,6 +488,7 @@ def train_model(
         n_message_steps: Number of message passing steps per pool batch
         loss_type: Type of loss to use ('l4' for L4 norm or 'bce' for binary cross-entropy)
         random_loss_step: Use random message passing step for loss computation
+        use_beta_loss_step: Use beta distribution for random loss step (varies from early to late steps through training)
         wiring_mode: Mode for circuit wirings ('fixed' or 'random')
         meta_batch_size: Batch size for training
         pool_size: Size of the graph pool
@@ -637,6 +640,7 @@ def train_model(
         n_message_steps: int,
         loss_type: str,
         loss_key: jax.random.PRNGKey,
+        epoch: int,
     ):
         """
         Single training step using graphs from the pool.
@@ -658,6 +662,19 @@ def train_model(
         Returns:
             Tuple of (loss, auxiliary outputs, updated pool)
         """
+
+        def get_loss_step(loss_key):
+            if random_loss_step:
+                if use_beta_loss_step:
+                    return get_step_beta(
+                        loss_key,
+                        n_message_steps,
+                        training_progress=epoch / (epochs - 1),
+                    )
+                else:
+                    return jax.random.randint(loss_key, (1,), 0, n_message_steps)[0]
+            else:
+                return n_message_steps - 1
 
         # Define loss function
         def loss_fn_scan(model, graph, logits, wires, loss_key):
@@ -691,11 +708,7 @@ def train_model(
                 layer_sizes=layer_sizes,
             )
 
-            # Choose which step to use for loss computation
-            if random_loss_step:
-                loss_step = jax.random.randint(loss_key, (1,), 0, n_message_steps)[0]
-            else:
-                loss_step = n_message_steps - 1  # Last step
+            loss_step = get_loss_step(loss_key)
 
             final_graph, final_loss, final_logits, final_aux = jax.tree.map(
                 lambda x: x[loss_step], step_outputs
@@ -706,16 +719,13 @@ def train_model(
         def loss_fn_no_scan(model, graph, logits, wires, loss_key):
             # Store original shapes for reconstruction
             logits_original_shapes = [logit.shape for logit in logits]
-            # Choose which step to use for loss computation
-            if random_loss_step:
-                loss_step = jax.random.randint(loss_key, (1,), 0, n_message_steps)[0]
-            else:
-                loss_step = n_message_steps - 1
+            loss_step = get_loss_step(loss_key)
 
             all_results = []
 
             for i in range(n_message_steps):
                 graph = model(graph)
+
                 graph, loss, logits, aux = get_loss_and_update_graph(
                     graph=graph,
                     logits_original_shapes=logits_original_shapes,
@@ -724,6 +734,13 @@ def train_model(
                     y_data=y_target,
                     loss_type=loss_type,
                     layer_sizes=layer_sizes,
+                )
+                # Update graph globals with current update steps
+                current_update_steps = (
+                    graph.globals[..., 1] if graph.globals is not None else 0
+                )
+                graph = graph._replace(
+                    globals=jp.array([loss, current_update_steps + 1], dtype=jp.float32)
                 )
                 all_results.append((loss, aux, graph, logits))
 
@@ -879,6 +896,7 @@ def train_model(
             current_n_message_steps,
             loss_type=loss_type,
             loss_key=loss_key,
+            epoch=epoch,
         )
 
         *_, hard_loss, _, _, accuracy, hard_accuracy, _, _ = aux
@@ -999,8 +1017,8 @@ def train_model(
                     "Hard Acc": f"{hard_accuracy:.4f}",
                     "Msg Steps": f"{current_n_message_steps}",
                     "Batch Size": f"{current_meta_batch_size}",
-                    "Reset Steps": f"{int(avg_steps_reset)}",
-                    "Loss Steps": f"{loss_steps}",
+                    "Reset Steps": f"{avg_steps_reset:.2f}",
+                    "Loss Steps": f"{loss_steps:.2f}",
                 }
             )
 
@@ -1016,41 +1034,42 @@ def train_model(
                     is_best = True
 
             # Save periodic checkpoint if needed
-            _save_periodic_checkpoint(
-                checkpoint_path,
-                model,
-                optimizer,
-                {
-                    "losses": losses,
-                    "hard_losses": hard_losses,
-                    "accuracies": accuracies,
-                    "hard_accuracies": hard_accuracies,
-                    "reset_steps": reset_steps,
-                },
-                epoch,
-                checkpoint_interval,
-                wandb_run,
-            )
+            if checkpoint_enabled:
+                _save_periodic_checkpoint(
+                    checkpoint_path,
+                    model,
+                    optimizer,
+                    {
+                        "losses": losses,
+                        "hard_losses": hard_losses,
+                        "accuracies": accuracies,
+                        "hard_accuracies": hard_accuracies,
+                        "reset_steps": reset_steps,
+                    },
+                    epoch,
+                    checkpoint_interval,
+                    wandb_run,
+                )
 
-            # Save best model if enabled and is best
-            _save_best_checkpoint(
-                checkpoint_path,
-                is_best,
-                save_best,
-                model,
-                optimizer,
-                {
-                    "losses": losses,
-                    "hard_losses": hard_losses,
-                    "accuracies": accuracies,
-                    "hard_accuracies": hard_accuracies,
-                    "reset_steps": reset_steps,
-                },
-                epoch,
-                best_metric,
-                current_metric_value,
-                wandb_run,
-            )
+                # Save best model if enabled and is best
+                _save_best_checkpoint(
+                    checkpoint_path,
+                    is_best,
+                    save_best,
+                    model,
+                    optimizer,
+                    {
+                        "losses": losses,
+                        "hard_losses": hard_losses,
+                        "accuracies": accuracies,
+                        "hard_accuracies": hard_accuracies,
+                        "reset_steps": reset_steps,
+                    },
+                    epoch,
+                    best_metric,
+                    current_metric_value,
+                    wandb_run,
+                )
 
             # Run periodic evaluation if enabled
             if (

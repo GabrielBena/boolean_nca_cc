@@ -304,13 +304,17 @@ class GraphPool(struct.PyTreeNode):
 
                 # Create probabilities proportional to update steps
                 # Add small constant to prevent zero probabilities and normalize
-                probs = update_steps + 1.0  # Add 1 to avoid zeros
-                probs = probs / jp.sum(probs)  # Normalize to sum to 1
+                probs = update_steps  # steps 0 get 0 prob
+                if not jp.any(probs):
+                    probs = jp.ones(self.size) / self.size
+                else:
+                    probs = probs / jp.sum(probs)  # Normalize to sum to 1
 
                 # Sample indices based on these probabilities
                 reset_idxs = jax.random.choice(
                     key1, self.size, shape=(num_reset,), replace=False, p=probs
                 )
+
         elif reset_strategy == "loss_biased":
             # Selection biased by loss value (higher loss = higher probability of reset)
             if self.graphs.globals is None:
@@ -324,18 +328,18 @@ class GraphPool(struct.PyTreeNode):
 
                 # Create probabilities proportional to loss values
                 # Add small constant to prevent zero probabilities and normalize
-                probs = loss_values + 1e-6  # Add small epsilon to avoid zeros
+                probs = loss_values  # Add small epsilon to avoid zeros
 
-                # Clip extreme values for numerical stability
-                probs = jp.clip(probs, 0.0, 100.0)
-
-                # Normalize to sum to 1
-                probs = probs / jp.sum(probs)
+                if not jp.any(probs):
+                    probs = jp.ones(self.size) / self.size
+                else:
+                    probs = probs / jp.sum(probs)  # Normalize to sum to 1
 
                 # Sample indices based on these probabilities
                 reset_idxs = jax.random.choice(
                     key1, self.size, shape=(num_reset,), replace=False, p=probs
                 )
+
         elif reset_strategy == "combined":
             # Combine both loss values and update steps for selection
             if self.graphs.globals is None:
@@ -351,22 +355,19 @@ class GraphPool(struct.PyTreeNode):
                 # Get weights for the combined score
                 loss_weight, steps_weight = combined_weights
 
-                # Compute normalized scores for both factors
-                # For loss: higher is worse, so higher probability
-                loss_scores = (loss_values - jp.min(loss_values)) / (
-                    jp.max(loss_values) - jp.min(loss_values) + 1e-6
-                )
+                if not jp.any(loss_values):
+                    loss_scores = jp.ones(self.size) / self.size
+                else:
+                    loss_scores = loss_values / jp.sum(loss_values)
 
-                # For steps: more steps means older circuit, so higher probability
-                step_scores = (update_steps - jp.min(update_steps)) / (
-                    jp.max(update_steps) - jp.min(update_steps) + 1e-6
-                )
+                if not jp.any(update_steps):
+                    step_scores = jp.ones(self.size) / self.size
+                else:
+                    step_scores = update_steps / jp.sum(update_steps)
 
                 # Combine the two scores with configured weights
                 combined_scores = loss_weight * loss_scores + steps_weight * step_scores
-
-                # Add small constant for numerical stability
-                probs = combined_scores + 1e-6
+                probs = combined_scores
 
                 # Normalize to sum to 1
                 probs = probs / jp.sum(probs)
