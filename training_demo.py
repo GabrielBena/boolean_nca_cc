@@ -165,7 +165,8 @@ class CircuitOptimizationDemo:
         self.wiring_modes = ["fixed", "random"]
         self.wiring_mode_idx = 0
         self.wiring_mode = self.wiring_modes[self.wiring_mode_idx]
-        self.wiring_key = jax.random.PRNGKey(42)
+        self.wiring_seed = 42  # Direct control over wiring seed
+        self.wiring_key = jax.random.PRNGKey(self.wiring_seed)
 
         # Optimization configuration
         self.loss_type = "l4"
@@ -197,6 +198,12 @@ class CircuitOptimizationDemo:
         self.frozen_model = None
         self.logit_optimizer = None  # Only for backprop
 
+        # Model configuration for consistency with training
+        self.model_hidden_dim = self.hidden_dim  # Will be updated when loading models
+        self.model_use_globals = (
+            True  # Will be updated when loading self-attention models
+        )
+
         # Step-by-step generator for GNN/Self-Attention (unified with training code)
         self.model_generator = None
         self.last_step_result = None
@@ -207,6 +214,10 @@ class CircuitOptimizationDemo:
         self.max_loss_value = 10.0
         self.min_loss_value = 1e-6
         self.auto_scale_plot = True
+
+        # Loss plot display options
+        self.loss_display_modes = ["Both", "Soft Only", "Hard Only"]
+        self.loss_display_mode_idx = 0  # Default to showing both
 
         # Gate mask management for circuit visualization
         self.gate_mask = []
@@ -416,6 +427,14 @@ class CircuitOptimizationDemo:
 
         try:
             # Use the exact same generator as training and evaluation
+            # For self-attention models, we need to use the correct hidden_dim from the model
+            hidden_dim_for_graph = getattr(self, "model_hidden_dim", self.hidden_dim)
+
+            print(f"Initializing model generator with:")
+            print(f"  - hidden_dim: {hidden_dim_for_graph}")
+            print(f"  - use_globals: {getattr(self, 'model_use_globals', True)}")
+            print(f"  - model type: {type(self.frozen_model).__name__}")
+
             self.model_generator = evaluate_model_stepwise_generator(
                 model=self.frozen_model,
                 wires=self.wires,
@@ -424,7 +443,7 @@ class CircuitOptimizationDemo:
                 y_data=self.y0,
                 input_n=self.input_n,
                 arity=self.arity,
-                hidden_dim=self.hidden_dim,
+                hidden_dim=hidden_dim_for_graph,  # Use model's hidden_dim
                 max_steps=None,  # Infinite steps for live demo
                 loss_type=self.loss_type,
                 bidirectional_edges=True,
@@ -438,6 +457,9 @@ class CircuitOptimizationDemo:
 
         except Exception as e:
             print(f"Error initializing model generator: {e}")
+            import traceback
+
+            print(f"Traceback: {traceback.format_exc()}")
             self.model_generator = None
             self.last_step_result = None
 
@@ -498,6 +520,25 @@ class CircuitOptimizationDemo:
                 self.model_hidden_dim = self.hidden_dim  # Fallback to demo default
                 print(
                     f"Could not find hidden_dim in config, using default: {self.model_hidden_dim}"
+                )
+
+            # Extract use_globals from loaded config for self-attention models
+            if method_name == "Self-Attention":
+                if hasattr(loaded_config, "model") and hasattr(
+                    loaded_config.model, "use_globals"
+                ):
+                    self.model_use_globals = loaded_config.model.use_globals
+                    print(
+                        f"Using model use_globals={self.model_use_globals} from loaded config"
+                    )
+                else:
+                    self.model_use_globals = True  # Default fallback for compatibility
+                    print(
+                        f"Could not find use_globals in config, using default: {self.model_use_globals}"
+                    )
+            else:
+                self.model_use_globals = (
+                    True  # Default for GNN models (not applicable but for consistency)
                 )
 
             return True
@@ -584,21 +625,8 @@ class CircuitOptimizationDemo:
             from boolean_nca_cc.circuits.model import run_circuit
 
             # Run circuit to get layer-by-layer activations
-            activations = run_circuit(
-                current_logits, self.wires, self.input_x, hard=False
-            )
-
-            # Convert to format expected by visualization (list of arrays for each layer)
-            self.act = []
-            # Add input layer
-            self.act.append(self.input_x)  # Input activations
-            # Add hidden and output layers
-            for layer_act in activations[
-                :-1
-            ]:  # Exclude final output as it's handled separately
-                self.act.append(layer_act)
-            # Add final output
-            self.act.append(pred)
+            # This returns [input_acts, layer1_acts, layer2_acts, ..., output_acts]
+            self.act = run_circuit(current_logits, self.wires, self.input_x, hard=False)
 
             # Generate error mask for visualization
             self.err_mask = pred_hard != self.y0
@@ -657,19 +685,10 @@ class CircuitOptimizationDemo:
                 # Generate circuit activations for visualization using the same method as backprop
                 try:
                     # Run circuit to get layer-by-layer activations
-                    activations = run_circuit(
+                    # This returns [input_acts, layer1_acts, layer2_acts, ..., output_acts]
+                    self.act = run_circuit(
                         self.logits, self.wires, self.input_x, hard=False
                     )
-
-                    # Convert to format expected by visualization
-                    self.act = []
-                    # Add input layer
-                    self.act.append(self.input_x)
-                    # Add hidden and output layers
-                    for layer_act in activations[:-1]:
-                        self.act.append(layer_act)
-                    # Add final output
-                    self.act.append(self.current_pred)
 
                     # Generate error mask for visualization
                     self.err_mask = self.current_pred_hard != self.y0
@@ -1103,11 +1122,35 @@ class CircuitOptimizationDemo:
                     implot.ImAxis_.y1.value, self.min_loss_value, self.max_loss_value
                 )
 
-                implot.plot_line("soft_loss", self.loss_log)
-                implot.plot_line("hard_loss", self.hard_log)
+                # Plot lines based on display mode
+                display_mode = self.loss_display_modes[self.loss_display_mode_idx]
+                if display_mode in ["Both", "Soft Only"]:
+                    implot.plot_line("soft_loss", self.loss_log)
+                if display_mode in ["Both", "Hard Only"]:
+                    implot.plot_line("hard_loss", self.hard_log)
+
                 implot.drag_line_x(
                     1, self.step_i % len(self.loss_log), (0.8, 0, 0, 0.5)
                 )
+
+                # Right-click context menu for loss display options
+                if implot.is_plot_hovered() and imgui.is_mouse_clicked(
+                    1
+                ):  # Right click
+                    imgui.open_popup("loss_display_menu")
+
+                if imgui.begin_popup("loss_display_menu"):
+                    imgui.text("Loss Display Options")
+                    imgui.separator()
+
+                    for i, mode in enumerate(self.loss_display_modes):
+                        selected = i == self.loss_display_mode_idx
+                        if imgui.selectable(mode, selected)[0]:
+                            self.loss_display_mode_idx = i
+                            print(f"Loss display mode changed to: {mode}")
+
+                    imgui.end_popup()
+
                 implot.end_plot()
 
             # Input visualization
@@ -1144,9 +1187,17 @@ class CircuitOptimizationDemo:
 
             # Optimization controls
             imgui.separator_text("Circuit Optimization")
-            _, self.is_optimizing = imgui.checkbox(
-                "Enable Optimization", self.is_optimizing
-            )
+
+            # Play/Pause button for optimization
+            if self.is_optimizing:
+                if imgui.button("⏸️ Pause", (120, 0)):
+                    self.is_optimizing = False
+            else:
+                if imgui.button("▶️ Play", (120, 0)):
+                    self.is_optimizing = True
+
+            imgui.same_line()
+            imgui.text("Optimization" if self.is_optimizing else "Paused")
 
             if imgui.button("Reset Circuit"):
                 self.reset_circuit()
@@ -1252,8 +1303,25 @@ class CircuitOptimizationDemo:
                 self.wiring_mode = self.wiring_modes[self.wiring_mode_idx]
                 self.regenerate_circuit()  # This will invalidate cache
 
+            # Wiring seed control
+            seed_changed, new_seed = imgui.input_int("Wiring Seed", self.wiring_seed)
+            if seed_changed:
+                self.wiring_seed = max(0, new_seed)  # Ensure non-negative
+                self.wiring_key = jax.random.PRNGKey(self.wiring_seed)
+                self.regenerate_circuit()
+
+            if imgui.button("Reset Seed (42)"):
+                self.wiring_seed = 42
+                self.wiring_key = jax.random.PRNGKey(self.wiring_seed)
+                self.regenerate_circuit()
+
+            imgui.same_line()
             if imgui.button("Shuffle Wires"):
-                self.wiring_key = jax.random.split(self.wiring_key)[0]
+                # Generate a random seed
+                import random
+
+                self.wiring_seed = random.randint(0, 99999)
+                self.wiring_key = jax.random.PRNGKey(self.wiring_seed)
                 self.regenerate_circuit()  # This will invalidate cache
 
             # Task selection
@@ -1318,6 +1386,19 @@ class CircuitOptimizationDemo:
             imgui.text(f"Circuit Parameters: {sum(l.size for l in self.logits0)}")
             imgui.text(f"Optimization Step: {self.step_i}")
             imgui.text(f"Active Input Case: {self.active_case_i}")
+            imgui.text(f"Wiring Seed: {self.wiring_seed}")
+            imgui.text(f"Wiring Mode: {self.wiring_mode}")
+            imgui.text(
+                f"Loss Display: {self.loss_display_modes[self.loss_display_mode_idx]}"
+            )
+
+            # Model-specific status
+            if method_name == "Self-Attention" and self.frozen_model is not None:
+                imgui.text(f"Model hidden_dim: {self.model_hidden_dim}")
+                imgui.text(f"Model use_globals: {self.model_use_globals}")
+            elif method_name == "GNN" and self.frozen_model is not None:
+                imgui.text(f"Model hidden_dim: {self.model_hidden_dim}")
+
             if hasattr(self, "current_pred_hard"):
                 try:
                     # Check shape compatibility before calculating accuracy
@@ -1358,18 +1439,11 @@ class CircuitOptimizationDemo:
                 self.y0 = jp.zeros((self.case_n, self.output_n))
 
             # Run circuit to get layer-by-layer activations
-            activations = run_circuit(self.logits, self.wires, self.input_x, hard=False)
-
-            # Convert to format expected by visualization
-            self.act = []
-            # Add input layer
-            self.act.append(self.input_x)
-            # Add hidden and output layers (activations includes intermediate layers)
-            for layer_act in activations:
-                self.act.append(layer_act)
+            # This returns [input_acts, layer1_acts, layer2_acts, ..., output_acts]
+            self.act = run_circuit(self.logits, self.wires, self.input_x, hard=False)
 
             # Generate error mask for visualization - use final output from activations
-            final_output = activations[-1] if activations else jp.zeros_like(self.y0)
+            final_output = self.act[-1] if self.act else jp.zeros_like(self.y0)
             self.err_mask = (final_output > 0.5) != self.y0
 
         except Exception as e:
