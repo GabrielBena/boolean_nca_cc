@@ -341,11 +341,33 @@ def load_best_model_from_wandb(
     filename="best_model_hard_accuracy",
     filetype="pkl",
     run_from_last=1,
-    use_local_latest=False,
+    use_cache=True,
+    force_download=False,
     select_by_best_metric=False,
     metric_name="hard_accuracy",
 ):
     """Load the best model from wandb artifacts.
+
+    Cache System Behavior:
+    - use_cache=True, force_download=False (default): Use local cache if available, otherwise download
+    - use_cache=True, force_download=True: Always download fresh from wandb, update cache
+    - use_cache=False: Always download from wandb, don't use or update cache
+
+    Examples:
+        # Normal usage - use cache if available
+        model, loaded_dict, config = load_best_model_from_wandb(run_id="abc123")
+
+        # Force fresh download (e.g., if wandb has new artifacts)
+        model, loaded_dict, config = load_best_model_from_wandb(
+            run_id="abc123",
+            force_download=True
+        )
+
+        # Disable caching entirely
+        model, loaded_dict, config = load_best_model_from_wandb(
+            run_id="abc123",
+            use_cache=False
+        )
 
     Args:
         run_id: Optional specific run ID to load from
@@ -357,7 +379,8 @@ def load_best_model_from_wandb(
         filename: Filename of the best model
         filetype: Filetype of the best model
         run_from_last: Index from the end of runs list to select (when select_by_best_metric is False)
-        use_local_latest: Whether to use the latest local checkpoint
+        use_cache: Whether to use locally cached artifacts if available
+        force_download: If True, always download from wandb even if local cache exists
         select_by_best_metric: If True, select run with highest metric instead of using run_from_last
         metric_name: Name of the metric to maximize when select_by_best_metric is True
 
@@ -470,8 +493,14 @@ def load_best_model_from_wandb(
             local_artifact_dir, f"{filename}.{filetype}"
         )
         print(f"Checking for local checkpoint at: {expected_checkpoint_path}")
-        if os.path.exists(expected_checkpoint_path) and not use_local_latest:
-            print(f"Found local checkpoint for run {run_id}. Loading from disk.")
+
+        # Check if we should use local cache
+        if (
+            use_cache
+            and not force_download
+            and os.path.exists(expected_checkpoint_path)
+        ):
+            print(f"Found cached checkpoint for run {run_id}. Loading from disk.")
             try:
                 with open(expected_checkpoint_path, "rb") as f:
                     loaded_dict = pickle.load(f)
@@ -535,63 +564,10 @@ def load_best_model_from_wandb(
                     f"Error loading model from local checkpoint {expected_checkpoint_path}: {e}"
                 )
                 print("Proceeding to download from WandB.")
-
-        elif use_local_latest:
-            print("Loading latest model from local directory.")
-            # Get all checkpoint files in the download directory
-            checkpoint_file = glob.glob(
-                os.path.join(download_dir, "**", "*.pkl"), recursive=True
-            )
-            checkpoint_file.sort(key=os.path.getmtime, reverse=True)
-            latest_checkpoint = checkpoint_file[0]
-            print(f"Loading latest checkpoint: {latest_checkpoint}")
-
-            with open(latest_checkpoint, "rb") as f:
-                loaded_dict = pickle.load(f)
-
-            api = wandb.Api()
-            run_config = api.run(f"{entity}/{project}/{run_id}").config
-            config = OmegaConf.create(run_config)
-            print(
-                f"Instantiating model using config from run {run_id}: {config.model._target_}"
-            )
-
-            rng = nnx.Rngs(params=jax.random.PRNGKey(seed))
-            model = hydra.utils.instantiate(
-                config.model, arity=config.circuit.arity, rngs=rng
-            )
-
-            if "model" in loaded_dict:
-                try:
-                    nnx.update(model, loaded_dict["model"])
-                except (AttributeError, TypeError) as e:
-                    print(f"Direct update failed with error: {e}")
-                    print("Trying alternative update approach for local load...")
-                    model_state = loaded_dict["model"]
-                    if hasattr(model_state, "_state_dict"):
-                        model_state = model_state._state_dict
-                    for collection_name, collection in model_state.items():
-                        for var_name, value in collection.items():
-                            try:
-                                path = f"{collection_name}.{var_name}"
-                                model.put(path, value)
-                            except Exception as inner_e:
-                                print(
-                                    f"Warning: Failed to update {path} during local load: {inner_e}"
-                                )
-            else:
-                print("Warning: No 'model' key found in local loaded dictionary")
-                model = None
-
-            # Ensure essential keys are present in loaded_dict
-            if "run_id" not in loaded_dict:
-                loaded_dict["run_id"] = run_id
-            if "config" not in loaded_dict:
-                loaded_dict["config"] = config  # Add config if not present
-
-            return model, loaded_dict
-
-            # Sort by modification time (newest first)
+        elif force_download:
+            print("Force download enabled, skipping local cache.")
+        elif not use_cache:
+            print("Cache disabled, downloading from WandB.")
 
     # Get artifacts and find best model
     print("Retrieving artifacts...")
@@ -740,6 +716,228 @@ def load_best_model_from_wandb(
         loaded_dict["config"] = config
 
     return model, loaded_dict, config
+
+
+def cleanup_redundant_wandb_artifacts(
+    run_id=None,
+    filters=None,
+    project="boolean-nca-cc",
+    entity="m2snn",
+    artifact_name_pattern=None,
+    keep_tags=["best", "latest"],
+    keep_recent_count=3,
+    dry_run=True,
+    verbose=True,
+):
+    """Clean up redundant wandb artifacts, keeping only those with important tags.
+
+    This function identifies and optionally deletes artifact versions that don't have
+    important tags like "best" or "latest", helping to reduce storage usage in wandb.
+
+    Args:
+        run_id: Optional specific run ID to clean up artifacts from
+        filters: Optional dictionary of filters to find runs
+        project: WandB project name
+        entity: WandB entity/username
+        artifact_name_pattern: Pattern to match artifact names (e.g. "best_model", "latest_checkpoint")
+                              If None, will clean all artifacts
+        keep_tags: List of tags that should be preserved (artifacts with these tags won't be deleted)
+        keep_recent_count: Number of most recent artifacts to keep regardless of tags
+        dry_run: If True, only show what would be deleted without actually deleting
+        verbose: If True, print detailed information about the cleanup process
+
+    Returns:
+        Dictionary with cleanup statistics including:
+        - total_artifacts: Total number of artifacts found
+        - artifacts_to_delete: Number of artifacts marked for deletion
+        - artifacts_kept: Number of artifacts kept
+        - deleted_artifacts: List of deleted artifact names (empty if dry_run=True)
+    """
+    import wandb
+    from collections import defaultdict
+    from datetime import datetime
+
+    # Initialize WandB API
+    api = wandb.Api()
+
+    # Find runs to clean up
+    runs_to_process = []
+
+    if run_id:
+        if verbose:
+            print(f"Looking for run with ID: {run_id}")
+        run = api.run(f"{entity}/{project}/{run_id}")
+        runs_to_process = [run]
+        if verbose:
+            print(f"Found run: {run.name}")
+    else:
+        if not filters:
+            filters = {}
+        if verbose:
+            print(f"Looking for runs with filters: {filters}")
+        runs = api.runs(f"{entity}/{project}", filters=filters)
+
+        if not runs:
+            raise ValueError(f"No runs found matching filters: {filters}")
+
+        runs_to_process = list(runs)
+        if verbose:
+            print(f"Found {len(runs_to_process)} matching runs.")
+
+    # Statistics tracking
+    total_stats = {
+        "total_artifacts": 0,
+        "artifacts_to_delete": 0,
+        "artifacts_kept": 0,
+        "deleted_artifacts": [],
+        "errors": [],
+    }
+
+    # Process each run
+    for run in runs_to_process:
+        if verbose:
+            print(f"\n=== Processing run: {run.name} (ID: {run.id}) ===")
+
+        try:
+            # Get all artifacts for this run
+            artifacts = run.logged_artifacts()
+
+            if not artifacts:
+                if verbose:
+                    print("No artifacts found for this run")
+                continue
+
+            # Group artifacts by name (without version)
+            artifact_groups = defaultdict(list)
+
+            for artifact in artifacts:
+                # Extract base name without version
+                base_name = (
+                    artifact.name.split(":")[0]
+                    if ":" in artifact.name
+                    else artifact.name
+                )
+
+                # Apply artifact name pattern filter if specified
+                if artifact_name_pattern and artifact_name_pattern not in base_name:
+                    continue
+
+                artifact_groups[base_name].append(artifact)
+
+            if verbose:
+                print(f"Found {len(artifact_groups)} artifact groups")
+                for group_name, group_artifacts in artifact_groups.items():
+                    print(f"  - {group_name}: {len(group_artifacts)} versions")
+
+            # Process each artifact group
+            for group_name, group_artifacts in artifact_groups.items():
+                if verbose:
+                    print(f"\n--- Processing artifact group: {group_name} ---")
+
+                total_stats["total_artifacts"] += len(group_artifacts)
+
+                # Sort artifacts by creation time (newest first)
+                try:
+                    group_artifacts.sort(key=lambda x: x.created_at, reverse=True)
+                except Exception as e:
+                    if verbose:
+                        print(
+                            f"Warning: Could not sort artifacts by creation time: {e}"
+                        )
+                    # Fallback: try to sort by version if available
+                    try:
+                        group_artifacts.sort(key=lambda x: x.version, reverse=True)
+                    except:
+                        pass  # Keep original order if sorting fails
+
+                artifacts_to_keep = []
+                artifacts_to_delete = []
+
+                # Categorize artifacts
+                for i, artifact in enumerate(group_artifacts):
+                    should_keep = False
+                    keep_reason = []
+
+                    # Check if artifact has important tags
+                    artifact_tags = getattr(artifact, "tags", []) or []
+                    if any(tag in artifact_tags for tag in keep_tags):
+                        should_keep = True
+                        matching_tags = [
+                            tag for tag in artifact_tags if tag in keep_tags
+                        ]
+                        keep_reason.append(f"has important tags: {matching_tags}")
+
+                    # Keep recent artifacts regardless of tags
+                    if i < keep_recent_count:
+                        should_keep = True
+                        keep_reason.append(f"among {keep_recent_count} most recent")
+
+                    if should_keep:
+                        artifacts_to_keep.append(artifact)
+                        if verbose:
+                            print(f"  KEEP: {artifact.name} ({', '.join(keep_reason)})")
+                    else:
+                        artifacts_to_delete.append(artifact)
+                        if verbose:
+                            print(
+                                f"  DELETE: {artifact.name} (no important tags, not recent)"
+                            )
+
+                # Update statistics
+                total_stats["artifacts_kept"] += len(artifacts_to_keep)
+                total_stats["artifacts_to_delete"] += len(artifacts_to_delete)
+
+                # Perform deletion if not dry run
+                if not dry_run and artifacts_to_delete:
+                    if verbose:
+                        print(f"Deleting {len(artifacts_to_delete)} artifacts...")
+
+                    for artifact in artifacts_to_delete:
+                        try:
+                            if verbose:
+                                print(f"  Deleting: {artifact.name}")
+                            artifact.delete()
+                            total_stats["deleted_artifacts"].append(
+                                f"{run.id}:{artifact.name}"
+                            )
+                        except Exception as e:
+                            error_msg = f"Failed to delete {artifact.name}: {e}"
+                            total_stats["errors"].append(error_msg)
+                            if verbose:
+                                print(f"  ERROR: {error_msg}")
+                elif artifacts_to_delete:
+                    if verbose:
+                        print(
+                            f"DRY RUN: Would delete {len(artifacts_to_delete)} artifacts"
+                        )
+                        for artifact in artifacts_to_delete:
+                            print(f"  Would delete: {artifact.name}")
+
+        except Exception as e:
+            error_msg = f"Error processing run {run.id}: {e}"
+            total_stats["errors"].append(error_msg)
+            if verbose:
+                print(f"ERROR: {error_msg}")
+
+    # Print summary
+    if verbose:
+        print(f"\n=== Cleanup Summary ===")
+        print(f"Total artifacts found: {total_stats['total_artifacts']}")
+        print(f"Artifacts kept: {total_stats['artifacts_kept']}")
+        print(f"Artifacts marked for deletion: {total_stats['artifacts_to_delete']}")
+        if not dry_run:
+            print(
+                f"Artifacts actually deleted: {len(total_stats['deleted_artifacts'])}"
+            )
+        else:
+            print("DRY RUN: No artifacts were actually deleted")
+
+        if total_stats["errors"]:
+            print(f"Errors encountered: {len(total_stats['errors'])}")
+            for error in total_stats["errors"]:
+                print(f"  - {error}")
+
+    return total_stats
 
 
 def keypath_to_string(keypath):

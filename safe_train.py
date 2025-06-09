@@ -263,6 +263,7 @@ class TrainingMonitor:
             r"loss is nan",  # Exact match from train_loop.py
             r"hard.*loss.*nan",  # "hard_loss: nan"
             r"accuracy.*nan",  # NaN accuracy values
+            r"Loss is NaN at epoch",  # Exact match from train_loop.py
         ]
 
         for pattern in nan_patterns:

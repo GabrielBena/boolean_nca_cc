@@ -1,0 +1,153 @@
+2025-06-04 19:45:05,698 - INFO - Safe training started with config: configs/config.yaml
+2025-06-04 19:45:05,698 - INFO - Max retries: 10
+2025-06-04 19:45:05,698 - INFO - Min learning rate: 1.00e-06
+2025-06-04 19:45:05,698 - INFO - Min batch size: 1
+2025-06-04 19:45:05,698 - INFO - Delete failed wandb runs: False
+2025-06-04 19:45:05,698 - INFO - Starting training attempt 1/11
+2025-06-04 19:45:05,698 - INFO - Command: /home/gb21/miniconda3/envs/nca/bin/python train.py --config-path configs --config-name config
+2025-06-04 19:45:05,698 - INFO - Using config: configs/config.yaml
+2025-06-04 19:46:00,551 - INFO - Detected wandb run ID: 0juasv8s
+2025-06-04 19:46:00,552 - WARNING - Training failed with return code 1
+2025-06-04 19:46:00,552 - WARNING - Training failed. Detected failure type: oom
+2025-06-04 19:46:00,565 - INFO - Out of memory detected. Reducing meta_batch_size: 64 -> 42
+2025-06-04 19:46:00,569 - INFO - Created temporary config: /home/gb21/code/boolean_nca_cc/configs/config_retry_1_5tfkuihz.yaml
+2025-06-04 19:46:00,569 - INFO - Retrying training with adjusted parameters...
+2025-06-04 19:46:02,569 - INFO - Starting training attempt 2/11
+2025-06-04 19:46:02,569 - INFO - Command: /home/gb21/miniconda3/envs/nca/bin/python train.py --config-path /home/gb21/code/boolean_nca_cc/configs --config-name config_retry_1_5tfkuihz
+2025-06-04 19:46:02,570 - INFO - Using config: /home/gb21/code/boolean_nca_cc/configs/config_retry_1_5tfkuihz.yaml
+2025-06-04 19:46:56,381 - INFO - Detected wandb run ID: 6tuzrbpv
+2025-06-04 19:46:56,381 - WARNING - Training failed with return code 1
+2025-06-04 19:46:56,381 - WARNING - Training failed. Detected failure type: oom
+2025-06-04 19:46:56,395 - INFO - Out of memory detected. Reducing meta_batch_size: 42 -> 28
+2025-06-04 19:46:56,399 - INFO - Created temporary config: /home/gb21/code/boolean_nca_cc/configs/config_retry_1_5tfkuihz_retry_2_e6_oz45w.yaml
+2025-06-04 19:46:56,399 - INFO - Retrying training with adjusted parameters...
+2025-06-04 19:46:58,400 - INFO - Starting training attempt 3/11
+2025-06-04 19:46:58,400 - INFO - Command: /home/gb21/miniconda3/envs/nca/bin/python train.py --config-path /home/gb21/code/boolean_nca_cc/configs --config-name config_retry_1_5tfkuihz_retry_2_e6_oz45w
+2025-06-04 19:46:58,400 - INFO - Using config: /home/gb21/code/boolean_nca_cc/configs/config_retry_1_5tfkuihz_retry_2_e6_oz45w.yaml
+2025-06-05 10:54:49,889 - INFO - Received signal 2, cleaning up...
+2025-06-05 10:54:49,890 - INFO - Terminating training process...
+2025-06-05 10:54:49,890 - INFO - Terminating process group 2541904
+2025-06-05 10:54:50,054 - INFO - Training process group terminated gracefully
+2025-06-05 10:54:50,054 - INFO - Cleaning up 2 temporary config files...
+2025-06-05 10:54:50,055 - INFO - Temporary config file cleanup completed
+2025-06-05 10:54:50,055 - INFO - Cleaned up temporary config files
+2025-06-05 10:55:15,304 - INFO - Safe training started with config: configs/config.yaml
+2025-06-05 10:55:15,304 - INFO - Max retries: 10
+2025-06-05 10:55:15,304 - INFO - Min learning rate: 1.00e-06
+2025-06-05 10:55:15,304 - INFO - Min batch size: 1
+2025-06-05 10:55:15,304 - INFO - Delete failed wandb runs: False
+2025-06-05 10:55:15,304 - INFO - Starting training attempt 1/11
+2025-06-05 10:55:15,304 - INFO - Command: /home/gb21/miniconda3/envs/nca/bin/python train.py --config-path configs --config-name config
+2025-06-05 10:55:15,304 - INFO - Using config: configs/config.yaml
+2025-06-05 10:56:10,350 - INFO - Detected wandb run ID: zb5rcssn
+2025-06-05 10:56:10,350 - WARNING - Training failed with return code 1
+2025-06-05 10:56:10,352 - WARNING - Training failed. Detected failure type: oom
+2025-06-05 10:56:10,383 - INFO - Out of memory detected. Reducing meta_batch_size: 64 -> 42
+2025-06-05 10:56:10,391 - INFO - Created temporary config: /home/gb21/code/boolean_nca_cc/configs/config_retry_1_ze2r_n0j.yaml
+2025-06-05 10:56:10,391 - INFO - Retrying training with adjusted parameters...
+2025-06-05 10:56:12,391 - INFO - Starting training attempt 2/11
+2025-06-05 10:56:12,392 - INFO - Command: /home/gb21/miniconda3/envs/nca/bin/python train.py --config-path /home/gb21/code/boolean_nca_cc/configs --config-name config_retry_1_ze2r_n0j
+2025-06-05 10:56:12,392 - INFO - Using config: /home/gb21/code/boolean_nca_cc/configs/config_retry_1_ze2r_n0j.yaml
+2025-06-05 10:56:18,226 - INFO - Received signal 2, cleaning up...
+2025-06-05 10:56:18,226 - INFO - Terminating training process...
+2025-06-05 10:56:18,226 - INFO - Terminating process group 2658662
+2025-06-05 10:56:18,341 - INFO - Training process group terminated gracefully
+2025-06-05 10:56:18,341 - INFO - Cleaning up 1 temporary config files...
+2025-06-05 10:56:18,341 - INFO - Temporary config file cleanup completed
+2025-06-05 10:56:18,341 - INFO - Cleaned up temporary config files
+2025-06-05 10:56:33,645 - INFO - Safe training started with config: configs/config.yaml
+2025-06-05 10:56:33,645 - INFO - Max retries: 10
+2025-06-05 10:56:33,645 - INFO - Min learning rate: 1.00e-06
+2025-06-05 10:56:33,645 - INFO - Min batch size: 1
+2025-06-05 10:56:33,645 - INFO - Delete failed wandb runs: False
+2025-06-05 10:56:33,645 - INFO - Starting training attempt 1/11
+2025-06-05 10:56:33,645 - INFO - Command: /home/gb21/miniconda3/envs/nca/bin/python train.py --config-path configs --config-name config
+2025-06-05 10:56:33,645 - INFO - Using config: configs/config.yaml
+2025-06-05 10:57:29,262 - INFO - Detected wandb run ID: va2larfw
+2025-06-05 10:57:29,262 - WARNING - Training failed with return code 1
+2025-06-05 10:57:29,263 - WARNING - Training failed. Detected failure type: oom
+2025-06-05 10:57:29,275 - INFO - Out of memory detected. Reducing meta_batch_size: 64 -> 42
+2025-06-05 10:57:29,279 - INFO - Created temporary config: /home/gb21/code/boolean_nca_cc/configs/config_retry_1_6cfnzhui.yaml
+2025-06-05 10:57:29,279 - INFO - Retrying training with adjusted parameters...
+2025-06-05 10:57:30,610 - INFO - Received signal 2, cleaning up...
+2025-06-05 10:57:30,610 - INFO - Cleaning up 1 temporary config files...
+2025-06-05 10:57:30,610 - INFO - Temporary config file cleanup completed
+2025-06-05 10:57:30,610 - INFO - Cleaned up temporary config files
+2025-06-05 10:57:42,082 - INFO - Safe training started with config: configs/config.yaml
+2025-06-05 10:57:42,082 - INFO - Max retries: 10
+2025-06-05 10:57:42,082 - INFO - Min learning rate: 1.00e-06
+2025-06-05 10:57:42,082 - INFO - Min batch size: 1
+2025-06-05 10:57:42,082 - INFO - Delete failed wandb runs: False
+2025-06-05 10:57:42,082 - INFO - Starting training attempt 1/11
+2025-06-05 10:57:42,082 - INFO - Command: /home/gb21/miniconda3/envs/nca/bin/python train.py --config-path configs --config-name config
+2025-06-05 10:57:42,082 - INFO - Using config: configs/config.yaml
+2025-06-05 10:58:35,950 - INFO - Received signal 2, cleaning up...
+2025-06-05 10:58:35,950 - INFO - Terminating training process...
+2025-06-05 10:58:35,950 - INFO - Terminating process group 2659774
+2025-06-05 10:58:36,115 - INFO - Training process group terminated gracefully
+2025-06-05 10:58:36,115 - INFO - Cleaned up temporary config files
+2025-06-05 10:58:58,993 - INFO - Safe training started with config: configs/config.yaml
+2025-06-05 10:58:58,993 - INFO - Max retries: 10
+2025-06-05 10:58:58,993 - INFO - Min learning rate: 1.00e-06
+2025-06-05 10:58:58,993 - INFO - Min batch size: 1
+2025-06-05 10:58:58,993 - INFO - Delete failed wandb runs: False
+2025-06-05 10:58:58,993 - INFO - Starting training attempt 1/11
+2025-06-05 10:58:58,993 - INFO - Command: /home/gb21/miniconda3/envs/nca/bin/python train.py --config-path configs --config-name config
+2025-06-05 10:58:58,993 - INFO - Using config: configs/config.yaml
+2025-06-05 10:59:53,890 - INFO - Detected wandb run ID: yxxlzuaj
+2025-06-05 10:59:53,890 - WARNING - Training failed with return code 1
+2025-06-05 10:59:53,892 - WARNING - Training failed. Detected failure type: oom
+2025-06-05 10:59:53,916 - INFO - Out of memory detected. Reducing meta_batch_size: 42 -> 28
+2025-06-05 10:59:53,924 - INFO - Created temporary config: /home/gb21/code/boolean_nca_cc/configs/config_retry_1_fkcq1o24.yaml
+2025-06-05 10:59:53,925 - INFO - Retrying training with adjusted parameters...
+2025-06-05 10:59:55,743 - INFO - Received signal 2, cleaning up...
+2025-06-05 10:59:55,743 - INFO - Cleaning up 1 temporary config files...
+2025-06-05 10:59:55,744 - INFO - Temporary config file cleanup completed
+2025-06-05 10:59:55,744 - INFO - Cleaned up temporary config files
+2025-06-05 11:00:57,517 - INFO - Safe training started with config: configs/config.yaml
+2025-06-05 11:00:57,518 - INFO - Max retries: 10
+2025-06-05 11:00:57,518 - INFO - Min learning rate: 1.00e-06
+2025-06-05 11:00:57,518 - INFO - Min batch size: 1
+2025-06-05 11:00:57,518 - INFO - Delete failed wandb runs: False
+2025-06-05 11:00:57,518 - INFO - Starting training attempt 1/11
+2025-06-05 11:00:57,518 - INFO - Command: /home/gb21/miniconda3/envs/nca/bin/python train.py --config-path configs --config-name config
+2025-06-05 11:00:57,518 - INFO - Using config: configs/config.yaml
+2025-06-05 11:01:51,337 - INFO - Detected wandb run ID: htl31we8
+2025-06-05 11:01:51,338 - WARNING - Training failed with return code 1
+2025-06-05 11:01:51,338 - WARNING - Training failed. Detected failure type: oom
+2025-06-05 11:01:51,351 - INFO - Out of memory detected. Reducing meta_batch_size: 64 -> 42
+2025-06-05 11:01:51,355 - INFO - Created temporary config: /home/gb21/code/boolean_nca_cc/configs/config_retry_1_wq2i08bm.yaml
+2025-06-05 11:01:51,355 - INFO - Retrying training with adjusted parameters...
+2025-06-05 11:01:52,406 - INFO - Received signal 2, cleaning up...
+2025-06-05 11:01:52,407 - INFO - Cleaning up 1 temporary config files...
+2025-06-05 11:01:52,407 - INFO - Temporary config file cleanup completed
+2025-06-05 11:01:52,407 - INFO - Cleaned up temporary config files
+2025-06-05 11:29:42,802 - INFO - Safe training started with config: configs/config.yaml
+2025-06-05 11:29:42,802 - INFO - Max retries: 10
+2025-06-05 11:29:42,802 - INFO - Min learning rate: 1.00e-06
+2025-06-05 11:29:42,803 - INFO - Min batch size: 1
+2025-06-05 11:29:42,803 - INFO - Delete failed wandb runs: False
+2025-06-05 11:29:42,803 - INFO - Starting training attempt 1/11
+2025-06-05 11:29:42,803 - INFO - Command: /home/gb21/miniconda3/envs/nca/bin/python train.py --config-path configs --config-name config
+2025-06-05 11:29:42,803 - INFO - Using config: configs/config.yaml
+2025-06-05 15:04:44,730 - WARNING - NaN loss detected in real-time!
+2025-06-05 15:05:02,421 - INFO - Detected wandb run ID: vnktbjt4
+2025-06-05 15:05:02,421 - INFO - Training completed successfully!
+2025-06-05 15:05:02,422 - INFO - Training completed successfully!
+2025-06-05 15:05:02,422 - INFO - No parameter adjustments were needed.
+2025-06-05 15:05:02,422 - INFO - Safe training completed after 0 retries.
+2025-06-05 15:05:02,422 - INFO - Original config file unchanged: configs/config.yaml
+2025-06-05 15:12:23,703 - INFO - Safe training started with config: configs/config.yaml
+2025-06-05 15:12:23,703 - INFO - Max retries: 10
+2025-06-05 15:12:23,703 - INFO - Min learning rate: 1.00e-06
+2025-06-05 15:12:23,703 - INFO - Min batch size: 1
+2025-06-05 15:12:23,703 - INFO - Delete failed wandb runs: False
+2025-06-05 15:12:23,703 - INFO - Starting training attempt 1/11
+2025-06-05 15:12:23,703 - INFO - Command: /home/gb21/miniconda3/envs/nca/bin/python train.py --config-path configs --config-name config
+2025-06-05 15:12:23,703 - INFO - Using config: configs/config.yaml
+2025-06-06 12:15:01,464 - INFO - Detected wandb run ID: lvti1g3r
+2025-06-06 12:15:01,464 - INFO - Training completed successfully!
+2025-06-06 12:15:01,469 - INFO - Training completed successfully!
+2025-06-06 12:15:01,469 - INFO - No parameter adjustments were needed.
+2025-06-06 12:15:01,469 - INFO - Safe training completed after 0 retries.
+2025-06-06 12:15:01,469 - INFO - Original config file unchanged: configs/config.yaml

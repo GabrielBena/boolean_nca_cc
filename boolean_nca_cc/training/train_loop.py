@@ -35,6 +35,7 @@ from boolean_nca_cc.training.evaluation import (
     evaluate_model_stepwise_batched,
     get_loss_and_update_graph,
 )
+import wandb
 
 # Type alias for PyTree
 PyTree = Any
@@ -282,8 +283,20 @@ def _log_final_wandb_metrics(wandb_run, results: Dict, epochs: int) -> None:
         log.warning(f"Error logging final metrics to wandb: {e}")
 
 
+def _log_pool_scatter(pool, epoch, wandb_run):
+    """Log pool scatterplot to wandb."""
+    if wandb_run is None:
+        return
+
+    all_loss, all_steps = pool.graphs.globals[..., 0], pool.graphs.globals[..., 1]
+    data = list(zip(all_steps, all_loss))
+    table = wandb.Table(data=data, columns=["steps", "loss"])
+    wandb_run.log({"pool/scatter": wandb.plot.scatter(table, "steps", "loss")})
+
+
 def _run_periodic_evaluation(
     model,
+    pool,
     test_wires,
     test_logits,
     x_data,
@@ -297,8 +310,8 @@ def _run_periodic_evaluation(
     wandb_run,
     log_stepwise=False,
     layer_sizes: List[Tuple[int, int]] = None,
+    log_pool_scatter: bool = False,
     wiring_mode: str = "random",
-    eval_batch_size: int = 16,
 ) -> Dict:
     """
     Run periodic evaluation on test circuits.
@@ -318,6 +331,7 @@ def _run_periodic_evaluation(
         wandb_run: WandB run object (or None)
         log_stepwise: Whether to log step-by-step metrics
         layer_sizes: Circuit layer sizes
+        log_pool_scatter: Whether to log pool scatterplot (loss vs steps)
         wiring_mode: Wiring mode ("fixed" or "random")
         eval_batch_size: Batch size for evaluation (used only in random mode)
 
@@ -371,6 +385,9 @@ def _run_periodic_evaluation(
         # Log to wandb if enabled
         if wandb_run:
             wandb_run.log(final_metrics)
+
+            if log_pool_scatter:
+                _log_pool_scatter(pool, epoch, wandb_run)
 
             # Optionally log step-by-step metrics
             if log_stepwise:
@@ -465,6 +482,7 @@ def train_model(
     periodic_eval_test_seed: int = 42,
     periodic_eval_log_stepwise: bool = False,
     periodic_eval_batch_size: int = 16,  # Batch size for random wiring evaluation
+    periodic_eval_log_pool_scatter: bool = False,
     # Wandb parameters
     wandb_logging: bool = False,
     log_interval: int = 1,
@@ -1076,11 +1094,12 @@ def train_model(
                 periodic_eval_enabled
                 and test_wires is not None
                 and test_logits is not None
-                and epoch > 0
+                # and epoch > 0
                 and epoch % periodic_eval_interval == 0
             ):
                 _run_periodic_evaluation(
                     model=model,
+                    pool=circuit_pool,
                     test_wires=test_wires,
                     test_logits=test_logits,
                     x_data=x_data,
@@ -1095,7 +1114,7 @@ def train_model(
                     log_stepwise=periodic_eval_log_stepwise,
                     layer_sizes=layer_sizes,
                     wiring_mode=wiring_mode,
-                    eval_batch_size=periodic_eval_batch_size,
+                    log_pool_scatter=periodic_eval_log_pool_scatter,
                 )
 
             # Return the trained GNN model and metrics

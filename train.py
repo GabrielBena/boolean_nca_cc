@@ -30,12 +30,13 @@ from boolean_nca_cc.training.utils import (
     save_checkpoint,
     plot_inner_loop_metrics,
     compare_with_backprop,
+    cleanup_redundant_wandb_artifacts,
 )
 
 # Configure logging
 log = logging.getLogger(__name__)
 
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+# os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 
 def run_backpropagation_training(cfg, x_data, y_data, loss_type="l4"):
@@ -313,6 +314,7 @@ def main(cfg: DictConfig) -> None:
         periodic_eval_test_seed=cfg.test_seed,
         periodic_eval_log_stepwise=cfg.eval.periodic.log_stepwise,
         periodic_eval_batch_size=cfg.eval.periodic.batch_size,
+        periodic_eval_log_pool_scatter=cfg.eval.periodic.log_pool_scatter,
         # WandB parameters
         wandb_logging=cfg.wandb.enabled,
         log_interval=cfg.logging.log_interval,
@@ -418,6 +420,11 @@ def main(cfg: DictConfig) -> None:
 
     # Close wandb if enabled
     if cfg.wandb.enabled:
+        cleanup_redundant_wandb_artifacts(
+            run_id=wandb_run.id,
+            dry_run=False,
+            verbose=True,
+        )
         wandb.finish()
 
 
