@@ -228,34 +228,35 @@ def evaluate_model_stepwise_generator(
         # Note: training does multiple steps in a batch, but we do one at a time for live demo
         updated_graph = model(graph)
 
-        # Extract current logits using the EXACT same function as training
-        current_logits = extract_logits_from_graph(
-            updated_graph, logits_original_shapes
+        # Use the unified get_loss_and_update_graph function for consistency
+        updated_graph, loss, current_logits, aux = get_loss_and_update_graph(
+            updated_graph,
+            logits_original_shapes,
+            wires,
+            x_data,
+            y_data,
+            loss_type,
+            layer_sizes,
         )
 
-        # Get loss and metrics using the EXACT same function as training
+        # Extract auxiliary data
         (
-            loss,
-            (
-                hard_loss,
-                pred,
-                pred_hard,
-                accuracy,
-                hard_accuracy,
-                res,
-                hard_res,
-            ),
-        ) = get_loss_from_wires_logits(current_logits, wires, x_data, y_data, loss_type)
-
-        # Update output node loss with the mean of the residuals
-        updated_graph = update_output_node_loss(
-            updated_graph, layer_sizes, res.mean(axis=0)
-        )
+            hard_loss,
+            pred,
+            pred_hard,
+            accuracy,
+            hard_accuracy,
+            res,
+            hard_res,
+        ) = aux
 
         # Update with the computed loss and incremented update_steps (EXACTLY like training)
         updated_graph = updated_graph._replace(
             globals=jp.array([loss, current_update_steps + 1], dtype=jp.float32)
         )
+
+        # Update the graph variable for next iteration
+        graph = updated_graph
 
         # Yield current state
         yield StepResult(
@@ -267,7 +268,7 @@ def evaluate_model_stepwise_generator(
             predictions=pred,
             hard_predictions=pred_hard,
             logits=current_logits,
-            graph=updated_graph,
+            graph=graph,
         )
 
 

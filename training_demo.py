@@ -23,10 +23,10 @@ from boolean_nca_cc.circuits.tasks import get_task_data, TASKS
 from boolean_nca_cc import generate_layer_sizes
 
 # Import training loop functions
-from boolean_nca_cc.training.train_loop import get_loss_from_graph
 from boolean_nca_cc.training.utils import load_best_model_from_wandb
 from boolean_nca_cc.training.evaluation import (
     evaluate_model_stepwise_generator,
+    get_loss_from_wires_logits,
 )
 
 # Import model components
@@ -447,6 +447,7 @@ class CircuitOptimizationDemo:
                 max_steps=None,  # Infinite steps for live demo
                 loss_type=self.loss_type,
                 bidirectional_edges=True,
+                layer_sizes=self.layer_sizes,
             )
 
             # Get the initial state (step 0)
@@ -589,8 +590,19 @@ class CircuitOptimizationDemo:
         # Get current logits
         current_logits = self.logits
 
-        # Calculate loss and get predictions for visualization
-        loss, (hard_loss, pred, pred_hard) = get_loss_from_graph(
+        # Calculate loss using the unified function for consistency
+        (
+            loss,
+            (
+                hard_loss,
+                pred,
+                pred_hard,
+                accuracy,
+                hard_accuracy,
+                res,
+                hard_res,
+            ),
+        ) = get_loss_from_wires_logits(
             current_logits, self.wires, self.input_x, self.y0, self.loss_type
         )
 
@@ -601,7 +613,7 @@ class CircuitOptimizationDemo:
         ):
             # Compute gradients with respect to logits
             def loss_fn(logits):
-                loss, _ = get_loss_from_graph(
+                loss, _ = get_loss_from_wires_logits(
                     logits, self.wires, self.input_x, self.y0, self.loss_type
                 )
                 return loss
@@ -706,7 +718,18 @@ class CircuitOptimizationDemo:
                 return self.last_step_result.loss, self.last_step_result.hard_loss
             else:
                 # No result yet, return current state
-                loss, (hard_loss, pred, pred_hard) = get_loss_from_graph(
+                (
+                    loss,
+                    (
+                        hard_loss,
+                        pred,
+                        pred_hard,
+                        accuracy,
+                        hard_accuracy,
+                        res,
+                        hard_res,
+                    ),
+                ) = get_loss_from_wires_logits(
                     self.logits, self.wires, self.input_x, self.y0, self.loss_type
                 )
                 self.current_pred = pred
