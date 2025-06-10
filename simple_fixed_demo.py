@@ -13,7 +13,7 @@ from typing import List, Tuple, Dict
 # Circuits
 from boolean_nca_cc.circuits.model import make_nops, run_layer
 from boolean_nca_cc.circuits import tasks
-from boolean_nca_cc.circuits.training import binary_cross_entropy, compute_accuracy
+from boolean_nca_cc.circuits.train import binary_cross_entropy, compute_accuracy
 
 # GNN Models
 from boolean_nca_cc.models.gnn import CircuitGNN, run_gnn_scan
@@ -125,7 +125,7 @@ def build_fixed_topology_graph(
     return jraph.GraphsTuple(
         nodes=node_features, edges=None, senders=senders, receivers=receivers,
         n_node=jp.array([num_total_nodes]), n_edge=jp.array([len(senders)]),
-        globals=jp.array(current_circuit_loss, dtype=jp.float32)
+        globals=jp.array([current_circuit_loss, 0.0], dtype=jp.float32)  # [loss, placeholder_for_update_steps]
     )
 
 def extract_final_lut_logits(
