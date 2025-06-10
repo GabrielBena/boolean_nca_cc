@@ -36,7 +36,7 @@ from boolean_nca_cc.training.utils import (
 # Configure logging
 log = logging.getLogger(__name__)
 
-# os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 
 def run_backpropagation_training(cfg, x_data, y_data, loss_type="l4"):

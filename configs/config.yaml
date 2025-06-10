@@ -42,11 +42,11 @@ training:
     enabled: false  # Whether to use message steps scheduling (curriculum learning)
     type: "linear"  # Options: "constant", "linear", "exponential", "step"
     initial_steps: 2   # Start with fewer steps for easier gradients
-    final_steps: 50    # End with more steps for final performance
+    final_steps: ${training.n_message_steps}    # End with more steps for final performance
     constant_product: null  # Constant product of (meta_batch_size * n_message_steps) to adjust batch size (if null, uses base_batch_size allways)
     transition_epochs: null  # For linear schedule (if null, uses total training epochs)
   # BATCH SIZE
-  meta_batch_size: 16
+  meta_batch_size: 32
   # OPTIMIZATION
   learning_rate: 1e-4
   weight_decay: 1e-5
@@ -59,7 +59,7 @@ training:
     alpha: 1e-2 # final lr = 1% of initial lr
   # NUMBER OF EPOCHS
   epochs: null
-  epochs_power_of_2: 17 # 2^n
+  epochs_power_of_2: 18 # 2^n
   # USE SCAN
   use_scan: true
 
