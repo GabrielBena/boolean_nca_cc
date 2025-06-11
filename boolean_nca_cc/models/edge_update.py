@@ -29,6 +29,7 @@ class EdgeUpdateModule(nnx.Module):
         arity: int,
         *,
         rngs: nnx.Rngs,
+        zero_init: bool = True,
     ):
         """
         Initialize the edge update module.
@@ -60,7 +61,19 @@ class EdgeUpdateModule(nnx.Module):
         for i, (in_f, out_f) in enumerate(
             zip(self.mlp_features[:-1], self.mlp_features[1:])
         ):
-            edge_mlp_layers.append(nnx.Linear(in_f, out_f, rngs=rngs))
+            edge_mlp_layers.append(
+                nnx.Linear(
+                    in_f,
+                    out_f,
+                    rngs=rngs,
+                    kernel_init=nnx.initializers.zeros
+                    if zero_init
+                    else nnx.initializers.xavier_normal(),
+                    bias_init=jax.nn.initializers.zeros
+                    if zero_init
+                    else nnx.initializers.normal(stddev=1e-4),
+                )
+            )
             # Add BatchNorm and ReLU except for the last layer
             if i < len(self.mlp_features) - 2:
                 edge_mlp_layers.append(

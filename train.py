@@ -7,6 +7,9 @@ when training boolean circuits, using either Graph Neural Networks or Self-Atten
 """
 
 import os
+
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
 import logging
 import jax
 import optax
@@ -35,8 +38,6 @@ from boolean_nca_cc.training.utils import (
 
 # Configure logging
 log = logging.getLogger(__name__)
-
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 
 def run_backpropagation_training(cfg, x_data, y_data, loss_type="l4"):
@@ -184,7 +185,7 @@ def main(cfg: DictConfig) -> None:
             dir=output_dir,
             config=OmegaConf.to_container(cfg, resolve=True),
         )
-        wandb_run = wandb
+        wandb_run = wandb.run
 
     # Generate circuit layer sizes
     input_n, output_n = cfg.circuit.input_bits, cfg.circuit.output_bits

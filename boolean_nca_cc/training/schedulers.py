@@ -333,6 +333,9 @@ def get_step_beta(
     loss_key: jax.random.PRNGKey,
     n_message_steps: int,
     training_progress: float = 0.0,
+    beta_max: float = 10,
+    beta_min: float = 0.1,
+    min_step: int = 1,
 ) -> jp.ndarray:
     """
     Sample a loss step using Beta distribution that shifts from early to late steps.
@@ -374,8 +377,8 @@ def get_step_beta(
     # Early: alpha > beta (left skewed, favors early steps)
     # Late: alpha < beta (right skewed, favors later steps)
 
-    max_concentration = 4.0  # Controls how concentrated the distribution is
-    min_concentration = 0.5
+    max_concentration = beta_max  # Controls how concentrated the distribution is
+    min_concentration = beta_min
 
     beta = (
         max_concentration * (1.0 - training_progress)
@@ -390,6 +393,6 @@ def get_step_beta(
     beta_sample = jax.random.beta(loss_key, alpha, beta)
 
     # Map to step range
-    step = beta_sample * (n_message_steps - 1)
+    step = beta_sample * (n_message_steps - min_step) + min_step
 
-    return jp.round(step).astype(jp.int32).clip(1, n_message_steps - 1)
+    return jp.round(step).astype(jp.int32).clip(min_step, n_message_steps - 1)

@@ -35,6 +35,7 @@ class CircuitGNN(nnx.Module):
         *,
         rngs: nnx.Rngs,
         type: str = "gnn",
+        zero_init: bool = True,
     ):
         """
         Initialize the Circuit GNN.
@@ -59,6 +60,7 @@ class CircuitGNN(nnx.Module):
             arity=arity,
             message_passing=message_passing,
             rngs=rngs,
+            zero_init=zero_init,
         )
 
         self.edge_update = EdgeUpdateModule(
@@ -66,6 +68,7 @@ class CircuitGNN(nnx.Module):
             hidden_dim=hidden_dim,
             arity=arity,
             rngs=rngs,
+            zero_init=zero_init,
         )
 
         # Configure the aggregation function
@@ -157,7 +160,7 @@ def run_gnn_scan(
 
 
 def run_gnn_scan_with_loss(
-    gnn: CircuitGNN,
+    model: CircuitGNN,
     graph: jraph.GraphsTuple,
     num_steps: int,
     logits_original_shapes: List[Tuple],
@@ -196,7 +199,7 @@ def run_gnn_scan_with_loss(
         current_graph = carry
 
         # Apply GNN
-        model_updated_graph = gnn(current_graph)
+        model_updated_graph = model(current_graph)
 
         # Compute loss and update graph
         updated_graph, loss, current_logits, aux = get_loss_and_update_graph(

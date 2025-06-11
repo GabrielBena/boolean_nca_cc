@@ -2,7 +2,7 @@
 
 # Default parameters for experiment
 defaults:
-  - model: self_attention  # Default model (gnn or self_attention)
+  - model: gnn  # Default model (gnn or self_attention)
   - _self_  # For self-overrides
 
 # Random seed for reproducibility
@@ -20,11 +20,11 @@ wandb:
 
 # Circuit configuration
 circuit:
-  task: "binary_multiply"
-  input_bits: 8
-  output_bits: 8
-  arity: 4
-  num_layers: 3
+  task: "reverse"
+  input_bits: 3
+  output_bits: 3
+  arity: 2
+  num_layers: 2
   layer_sizes: null  # Auto-generate if null 
 
 # Training parameters
@@ -32,7 +32,7 @@ training:
   # WIRING MODE : "random" or "fixed"
   wiring_mode: "random"  # Options: "fixed" or "random"
   # INNER LOOP
-  n_message_steps: 30  # Number of message passing steps per training iteration
+  n_message_steps: 50  # Number of message passing steps per training iteration
   # LOSS TYPE
   loss_type: "l4"  # Options: "l4", "l2", or "bce"
   random_loss_step: true  # Use random message passing step for loss computation
@@ -46,9 +46,9 @@ training:
     constant_product: null  # Constant product of (meta_batch_size * n_message_steps) to adjust batch size (if null, uses base_batch_size allways)
     transition_epochs: null  # For linear schedule (if null, uses total training epochs)
   # BATCH SIZE
-  meta_batch_size: 32
+  meta_batch_size: 128
   # OPTIMIZATION
-  learning_rate: 1e-4
+  learning_rate: 1e-3
   weight_decay: 1e-5
   # LEARNING RATE SCHEDULER
   lr_scheduler: "linear_warmup"  # Options: "constant", "exponential", "cosine", "linear_warmup"
@@ -56,18 +56,17 @@ training:
     warmup_steps_factor: 50
     lr_warmup_start: 1e-6
     exponent: 1
-    alpha: 1e-2 # final lr = 1% of initial lr
+    alpha: 1e-1 # final lr = 1% of initial lr
   # NUMBER OF EPOCHS
   epochs: null
-  epochs_power_of_2: 18 # 2^n
+  epochs_power_of_2: 14 # 2^n
   # USE SCAN
   use_scan: true
-
 
 # Pool configuration for meta-learning
 pool:
   size: 1024
-  reset_fraction: 0.05
+  reset_fraction: 0.5
   reset_interval: 16 # using reset_interval_schedule instead
   reset_strategy: "combined"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
