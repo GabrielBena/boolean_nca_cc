@@ -249,6 +249,90 @@ class GraphPool(struct.PyTreeNode):
         update_steps = self.graphs.globals[indices, 1]
         return float(jp.mean(update_steps))
 
+    def get_wiring_diversity(self, layer_sizes: List[Tuple[int, int]] = None) -> float:
+        """
+        Calculate the wiring diversity of the pool using entropy-based measurement.
+
+        Returns a value between 0 and 1:
+        - 0: All circuits have identical wiring (fixed mode)
+        - 1: Circuits have maximally diverse wiring (random mode)
+        - 0 to 1: Varying diversity (genetic mode evolving over time)
+
+        Args:
+            layer_sizes: List of (nodes, group_size) tuples for each layer.
+                        If None, attempts to infer from circuit structure.
+
+        Returns:
+            Float between 0 and 1 representing wiring diversity
+        """
+        if self.wires is None:
+            return 0.0
+
+        total_entropy = 0.0
+        total_max_entropy = 0.0
+
+        # Iterate through each layer's wires
+        for layer_idx, layer_wires in enumerate(self.wires):
+            if layer_wires.size == 0:
+                continue
+
+            # Get the shape: [pool_size, arity, group_n]
+            pool_size, arity, group_n = layer_wires.shape
+
+            # Determine the number of possible values for connections in this layer
+            # Connections in layer i point to nodes in layer i-1
+            if layer_sizes is not None and layer_idx < len(layer_sizes):
+                # Use provided layer sizes to get the previous layer size
+                prev_layer_nodes = layer_sizes[layer_idx][
+                    0
+                ]  # layer_idx corresponds to previous layer
+            else:
+                # Fallback: infer from the actual connection values
+                # Find the maximum connection value in this layer across all circuits
+                max_connection_value = jp.max(layer_wires)
+                prev_layer_nodes = int(max_connection_value) + 1
+
+            # Maximum entropy for this layer is log(prev_layer_nodes)
+            # since connections can take values 0 to prev_layer_nodes-1
+            layer_max_entropy = jp.log(float(prev_layer_nodes))
+
+            # For each connection position (arity, group_n), calculate entropy across pool
+            for a in range(arity):
+                for g in range(group_n):
+                    # Get values for this connection position across all circuits in pool
+                    connection_values = layer_wires[:, a, g]  # Shape: [pool_size]
+
+                    # Calculate entropy of this connection position
+                    unique_values, counts = jp.unique(
+                        connection_values, return_counts=True, size=prev_layer_nodes
+                    )
+
+                    # Filter out padded zeros from unique (JAX pads unique to specified size)
+                    valid_mask = counts > 0
+                    valid_counts = counts[valid_mask]
+
+                    if valid_counts.size == 0:
+                        continue
+
+                    # Calculate probabilities
+                    probs = valid_counts / jp.sum(valid_counts)
+
+                    # Calculate entropy: -sum(p * log(p))
+                    # Use jp.where to avoid log(0)
+                    log_probs = jp.where(probs > 0, jp.log(probs), 0.0)
+                    entropy = -jp.sum(probs * log_probs)
+
+                    total_entropy += entropy
+                    total_max_entropy += layer_max_entropy
+
+        if total_max_entropy == 0.0:
+            return 0.0
+
+        # Normalize by the total maximum possible entropy
+        normalized_diversity = total_entropy / total_max_entropy
+
+        return float(jp.clip(normalized_diversity, 0.0, 1.0))
+
     def reset_fraction(
         self,
         key: Array,

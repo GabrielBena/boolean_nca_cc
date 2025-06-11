@@ -1011,6 +1011,8 @@ def train_model(
             else:
                 raise ValueError(f"Unknown best_metric: {best_metric}")
 
+            diversity = circuit_pool.get_wiring_diversity(layer_sizes)
+            avg_steps = circuit_pool.get_average_update_steps()
             # Log to wandb if enabled
             metrics_dict = {
                 "training/epoch": epoch,
@@ -1019,10 +1021,11 @@ def train_model(
                 "training/accuracy": float(accuracy),
                 "training/hard_accuracy": float(hard_accuracy),
                 "scheduler/pool_reset_interval": current_reset_interval,
+                "pool/wiring_diversity": float(diversity),
                 "pool/reset_steps": float(avg_steps_reset),
-                "pool/avg_update_steps": float(circuit_pool.get_average_update_steps()),
+                "pool/avg_update_steps": float(avg_steps),
                 "pool/loss_steps": loss_steps,
-            }
+            }       
 
             # Add learning rate if available
             if schedule is not None:
@@ -1034,11 +1037,13 @@ def train_model(
             _log_to_wandb(wandb_run, metrics_dict, epoch, log_interval)
 
             # Update progress bar with current metrics
+
             pbar.set_postfix(
                 {
                     "Loss": f"{loss:.4f}",
                     "Accuracy": f"{accuracy:.4f}",
                     "Hard Acc": f"{hard_accuracy:.4f}",
+                    "Diversity": f"{diversity:.3f}",
                     "Reset Steps": f"{avg_steps_reset:.2f}",
                     "Loss Steps": f"{loss_steps:.2f}",
                 }

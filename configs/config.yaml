@@ -30,7 +30,7 @@ circuit:
 # Training parameters
 training:
   # WIRING MODE : "random" or "fixed"
-  wiring_mode: "fixed"  # Options: "fixed" or "random"
+  wiring_mode: "fixed"  # Options: "fixed", "genetic", or "random"
   # INNER LOOP
   n_message_steps: 50  # Number of message passing steps per training iteration
   # LOSS TYPE
@@ -70,6 +70,7 @@ pool:
   reset_interval: 16 # using reset_interval_schedule instead
   reset_strategy: "combined"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
+  mutation_rate: 0.1
 
   # Reset interval scheduling (frequent early -> rare late)
   reset_interval_schedule:
