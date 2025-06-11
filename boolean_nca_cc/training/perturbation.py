@@ -11,7 +11,10 @@ from typing import List, Tuple, Dict, Any
 
 
 def mutate_wires_swap(
-    wires: List[jp.ndarray], key: jax.random.PRNGKey, mutation_rate: float = 0.1
+    wires: List[jp.ndarray],
+    key: jax.random.PRNGKey,
+    mutation_rate: float = 0.1,
+    n_swaps_per_layer: int = None,
 ) -> List[jp.ndarray]:
     """
     Mutate circuit wires by swapping connections within each layer.
@@ -21,13 +24,14 @@ def mutate_wires_swap(
 
     Args:
         wires: List of wire arrays for each layer, shape [(arity, group_n), ...]
-        mutation_rate: Fraction of connections to swap (0.0 to 1.0)
+        mutation_rate: Fraction of connections to swap (0.0 to 1.0) - ignored if n_swaps_per_layer is provided
         key: Random key for reproducible mutations
+        n_swaps_per_layer: If provided, use this exact number of swaps per layer instead of calculating from mutation_rate
 
     Returns:
         List of mutated wire arrays with same structure as input
     """
-    if mutation_rate <= 0.0:
+    if mutation_rate <= 0.0 and n_swaps_per_layer is None:
         return wires
 
     mutated_wires = []
@@ -49,9 +53,12 @@ def mutate_wires_swap(
             continue
 
         # Calculate number of swaps to perform
-        n_swaps = jp.maximum(
-            1, jp.round(mutation_rate * n_connections / 2).astype(jp.int32)
-        )
+        if n_swaps_per_layer is not None:
+            n_swaps = jp.minimum(n_swaps_per_layer, n_connections // 2)
+        else:
+            n_swaps = jp.maximum(
+                1, jp.round(mutation_rate * n_connections / 2).astype(jp.int32)
+            )
 
         # Generate random pairs of indices to swap
         layer_key = keys[layer_idx]
@@ -76,20 +83,24 @@ def mutate_wires_swap(
 
 
 def mutate_wires_batch(
-    batch_wires: List[jp.ndarray], key: jax.random.PRNGKey, mutation_rate: float = 0.1
+    batch_wires: List[jp.ndarray],
+    key: jax.random.PRNGKey,
+    mutation_rate: float = 0.1,
+    n_swaps_per_layer: int = None,
 ) -> List[jp.ndarray]:
     """
     Apply wire mutation to a batch of circuits.
 
     Args:
         batch_wires: List of batched wire arrays, shape [(batch_size, arity, group_n), ...]
-        mutation_rate: Fraction of connections to swap per circuit
+        mutation_rate: Fraction of connections to swap per circuit - ignored if n_swaps_per_layer is provided
         key: Random key for mutations
+        n_swaps_per_layer: If provided, use this exact number of swaps per layer instead of calculating from mutation_rate
 
     Returns:
         List of mutated batched wire arrays
     """
-    if not batch_wires or mutation_rate <= 0.0:
+    if not batch_wires or (mutation_rate <= 0.0 and n_swaps_per_layer is None):
         return batch_wires
 
     batch_size = batch_wires[0].shape[0]
@@ -99,8 +110,10 @@ def mutate_wires_batch(
     def mutate_single_circuit(circuit_key, *circuit_wires):
         # Unbatch the wires for this single circuit
         single_wires = [w for w in circuit_wires]
-        # Apply mutation (correct argument order: wires, key, mutation_rate)
-        mutated_single = mutate_wires_swap(single_wires, circuit_key, mutation_rate)
+        # Apply mutation (correct argument order: wires, key, mutation_rate, n_swaps_per_layer)
+        mutated_single = mutate_wires_swap(
+            single_wires, circuit_key, mutation_rate, n_swaps_per_layer
+        )
         return mutated_single
 
     # Apply vmap across the batch dimension

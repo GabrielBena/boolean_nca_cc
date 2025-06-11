@@ -193,6 +193,9 @@ class CircuitOptimizationDemo:
         self.loss_log = np.zeros(max_trainstep_n, np.float32)
         self.hard_log = np.zeros(max_trainstep_n, np.float32)
 
+        # Mutation settings
+        self.mutation_rate = 0.05
+
         # Optimization method configuration
         self.optimization_methods = ["Backprop", "GNN", "Self-Attention"]
         self.optimization_method_idx = 0
@@ -800,8 +803,11 @@ class CircuitOptimizationDemo:
 
         print("Circuit regenerated successfully")
 
-    def mutate_wires(self, mutation_rate=0.05):
-        """Mutate current circuit wires using genetic mutation"""
+    def mutate_wires_random(self, mutation_rate=None):
+        """Mutate current circuit wires using genetic mutation with specified rate"""
+        if mutation_rate is None:
+            mutation_rate = self.mutation_rate
+
         try:
             # Generate a random key for mutation
             import random
@@ -840,6 +846,77 @@ class CircuitOptimizationDemo:
 
         except Exception as e:
             print(f"Error mutating wires: {e}")
+            import traceback
+
+            print(f"Traceback: {traceback.format_exc()}")
+
+    def mutate_one_wire(self):
+        """Mutate exactly one wire in one randomly selected layer"""
+        try:
+            # Generate a random key for mutation
+            import random
+
+            mutation_seed = random.randint(0, 99999)
+            mutation_key = jax.random.PRNGKey(mutation_seed)
+
+            # Pick a random layer to mutate (skip if no layers have enough connections)
+            available_layers = []
+            for i, wire_layer in enumerate(self.wires):
+                if wire_layer.size >= 2:  # Need at least 2 connections to swap
+                    available_layers.append(i)
+
+            if not available_layers:
+                print(
+                    "No layers available for mutation (need at least 2 connections per layer)"
+                )
+                return
+
+            # Choose random layer
+            layer_to_mutate = random.choice(available_layers)
+
+            # Create a copy of wires
+            mutated_wires = [w.copy() for w in self.wires]
+
+            # Mutate only the selected layer with exactly 1 swap
+            layer_key = jax.random.PRNGKey(mutation_seed + layer_to_mutate)
+            mutated_layer = mutate_wires_swap(
+                [self.wires[layer_to_mutate]],
+                layer_key,
+                mutation_rate=0.0,
+                n_swaps_per_layer=1,
+            )
+            mutated_wires[layer_to_mutate] = mutated_layer[0]
+
+            # Update the circuit with mutated wires
+            self.wires = mutated_wires
+
+            # Reset optimization state but keep the same task
+            self.step_i = 0
+            self.loss_log = np.zeros(max_trainstep_n, np.float32)
+            self.hard_log = np.zeros(max_trainstep_n, np.float32)
+
+            # Reset logits to initial state for fair comparison
+            self.logits = self.logits0
+
+            # Reset the model generator when wires change
+            self.model_generator = None
+            self.last_step_result = None
+
+            # Reinitialize optimization method for new circuit
+            self.initialize_optimization_method()
+
+            # Update gate masks for new wiring
+            self.reset_gate_mask()
+
+            # Refresh activations
+            self.initialize_activations()
+
+            print(
+                f"Mutated exactly one wire in layer {layer_to_mutate} (seed: {mutation_seed})"
+            )
+
+        except Exception as e:
+            print(f"Error mutating one wire: {e}")
             import traceback
 
             print(f"Traceback: {traceback.format_exc()}")
@@ -1394,14 +1471,23 @@ class CircuitOptimizationDemo:
                 self.wiring_key = jax.random.PRNGKey(self.wiring_seed)
                 self.regenerate_circuit()  # This will invalidate cache
 
-            if imgui.button("Mutate Wires"):
-                # Apply genetic mutation to current wires (low rate for single connection changes)
-                self.mutate_wires(mutation_rate=0.05)  # ~5% of connections mutated
+            # Mutation controls
+            imgui.separator()
+
+            # Mutation rate slider
+            _, self.mutation_rate = imgui.slider_float(
+                "Mutation Rate", self.mutation_rate, 0.01, 0.5, "%.3f"
+            )
+
+            # Mutation buttons
+            if imgui.button("Mutate Random"):
+                # Apply genetic mutation to current wires using the slider value
+                self.mutate_wires_random()
 
             imgui.same_line()
-            if imgui.button("Mutate Few"):
-                # Even lower mutation rate for very conservative changes
-                self.mutate_wires(mutation_rate=0.02)  # ~2% of connections mutated
+            if imgui.button("Mutate One"):
+                # Mutate exactly one wire in one random layer
+                self.mutate_one_wire()
 
             # Task selection
             imgui.separator_text("Task")
