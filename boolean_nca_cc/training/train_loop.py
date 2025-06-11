@@ -442,8 +442,10 @@ def train_model(
     random_loss_step: bool = False,  # Use random message passing step for loss computation
     use_beta_loss_step: bool = False,  # Use beta distribution for random loss step (varies from early to late steps through training)
     # Wiring mode parameters
-    wiring_mode: str = "random",  # Options: 'fixed' or 'random'
+    wiring_mode: str = "random",  # Options: 'fixed', 'random', or 'genetic'
     meta_batch_size: int = 64,
+    # Genetic mutation parameters (only used when wiring_mode='genetic')
+    genetic_mutation_rate: float = 0.1,  # Fraction of connections to mutate (0.0 to 1.0)
     # Pool parameters
     pool_size: int = 1024,
     reset_pool_fraction: float = 0.05,
@@ -478,7 +480,8 @@ def train_model(
     save_stable_states: bool = True,
     # Periodic evaluation parameters
     periodic_eval_enabled: bool = False,
-    periodic_eval_interval: int = 100,
+    periodic_eval_inner_steps: int = 100,
+    periodic_eval_interval: int = 1024,
     periodic_eval_test_seed: int = 42,
     periodic_eval_log_stepwise: bool = False,
     periodic_eval_batch_size: int = 16,  # Batch size for random wiring evaluation
@@ -507,8 +510,9 @@ def train_model(
         loss_type: Type of loss to use ('l4' for L4 norm or 'bce' for binary cross-entropy)
         random_loss_step: Use random message passing step for loss computation
         use_beta_loss_step: Use beta distribution for random loss step (varies from early to late steps through training)
-        wiring_mode: Mode for circuit wirings ('fixed' or 'random')
+        wiring_mode: Mode for circuit wirings ('fixed', 'random', or 'genetic')
         meta_batch_size: Batch size for training
+        genetic_mutation_rate: Fraction of connections to mutate (0.0 to 1.0)
         pool_size: Size of the graph pool
         reset_pool_fraction: Fraction of pool to reset periodically
         reset_pool_interval: Number of epochs between pool resets
@@ -545,6 +549,7 @@ def train_model(
         best_metric: Metric to use for determining the best model
         save_stable_states: Whether to save stable states (before potential NaN losses)
         periodic_eval_enabled: Whether to enable periodic evaluation
+        periodic_eval_inner_steps: Number of inner steps for periodic evaluation
         periodic_eval_interval: Interval for periodic evaluation
         periodic_eval_test_seed: Seed for periodic evaluation test circuit generation
         periodic_eval_log_stepwise: Whether to log step-by-step evaluation metrics
@@ -615,7 +620,7 @@ def train_model(
 
     # Initialize Graph Pool for training if using pool
     if init_pool is None:
-        if wiring_mode != "fixed":
+        if wiring_mode not in ["fixed", "genetic"]:
             rng, pool_rng = jax.random.split(rng)
         else:
             pool_rng = wiring_fixed_key
@@ -877,24 +882,10 @@ def train_model(
         if message_steps_schedule is None:
             message_steps_schedule = {"enabled": False}
 
-        # Calculate constant product for memory constraint
-
-        current_n_message_steps, current_meta_batch_size = (
-            get_current_message_steps_and_batch_size(
-                epoch=epoch,
-                schedule_config=message_steps_schedule,
-                total_epochs=epochs,
-                base_steps=n_message_steps,
-                base_batch_size=meta_batch_size,
-            )
-        )
-
         # Pool-based training
         # Sample a batch from the pool using the current (potentially dynamic) batch size
         rng, sample_key, loss_key = jax.random.split(rng, 3)
-        idxs, graphs, wires, logits = circuit_pool.sample(
-            sample_key, current_meta_batch_size
-        )
+        idxs, graphs, wires, logits = circuit_pool.sample(sample_key, meta_batch_size)
 
         # Perform pool training step
         (
@@ -911,7 +902,7 @@ def train_model(
             x_data,
             y_data,
             tuple(layer_sizes),  # Convert list to tuple for JAX static arguments
-            current_n_message_steps,
+            n_message_steps,
             loss_type=loss_type,
             loss_key=loss_key,
             epoch=epoch,
@@ -927,31 +918,48 @@ def train_model(
         if should_reset_pool(epoch, current_reset_interval, last_reset_epoch):
             rng, reset_key, fresh_key = jax.random.split(rng, 3)
 
-            # Generate fresh circuits for resetting
-            if wiring_mode == "fixed":
-                # Use the fixed key for generating wirings
-                fresh_key = wiring_fixed_key
+            if wiring_mode == "genetic":
+                # Use genetic mutations instead of completely fresh circuits
+                circuit_pool, avg_steps_reset = (
+                    circuit_pool.reset_with_genetic_mutation(
+                        key=reset_key,
+                        fraction=reset_pool_fraction,
+                        layer_sizes=layer_sizes,
+                        input_n=input_n,
+                        arity=arity,
+                        hidden_dim=hidden_dim,
+                        mutation_rate=genetic_mutation_rate,
+                        reset_strategy=reset_strategy,
+                        combined_weights=combined_weights,
+                    )
+                )
+            else:
+                # Original logic for fixed and random wiring modes
+                # Generate fresh circuits for resetting
+                if wiring_mode == "fixed":
+                    # Use the fixed key for generating wirings
+                    fresh_key = wiring_fixed_key
 
-            fresh_pool = initialize_graph_pool(
-                rng=fresh_key,
-                layer_sizes=layer_sizes,
-                pool_size=pool_size,  # Use same size as circuit_pool
-                input_n=input_n,
-                arity=arity,
-                hidden_dim=hidden_dim,
-                wiring_mode=wiring_mode,
-            )
+                fresh_pool = initialize_graph_pool(
+                    rng=fresh_key,
+                    layer_sizes=layer_sizes,
+                    pool_size=pool_size,  # Use same size as circuit_pool
+                    input_n=input_n,
+                    arity=arity,
+                    hidden_dim=hidden_dim,
+                    wiring_mode=wiring_mode,
+                )
 
-            # Reset a fraction of the pool and get avg steps of reset graphs
-            circuit_pool, avg_steps_reset = circuit_pool.reset_fraction(
-                reset_key,
-                reset_pool_fraction,
-                fresh_pool.graphs,
-                fresh_pool.wires,
-                fresh_pool.logits,
-                reset_strategy=reset_strategy,
-                combined_weights=combined_weights,
-            )
+                # Reset a fraction of the pool and get avg steps of reset graphs
+                circuit_pool, avg_steps_reset = circuit_pool.reset_fraction(
+                    reset_key,
+                    reset_pool_fraction,
+                    fresh_pool.graphs,
+                    fresh_pool.wires,
+                    fresh_pool.logits,
+                    reset_strategy=reset_strategy,
+                    combined_weights=combined_weights,
+                )
 
             # Update last reset epoch
             last_reset_epoch = epoch
@@ -1010,8 +1018,6 @@ def train_model(
                 "training/hard_loss": float(hard_loss),
                 "training/accuracy": float(accuracy),
                 "training/hard_accuracy": float(hard_accuracy),
-                "scheduler/message_steps": current_n_message_steps,
-                "scheduler/batch_size": current_meta_batch_size,
                 "scheduler/pool_reset_interval": current_reset_interval,
                 "pool/reset_steps": float(avg_steps_reset),
                 "pool/avg_update_steps": float(circuit_pool.get_average_update_steps()),
@@ -1033,8 +1039,6 @@ def train_model(
                     "Loss": f"{loss:.4f}",
                     "Accuracy": f"{accuracy:.4f}",
                     "Hard Acc": f"{hard_accuracy:.4f}",
-                    "Msg Steps": f"{current_n_message_steps}",
-                    "Batch Size": f"{current_meta_batch_size}",
                     "Reset Steps": f"{avg_steps_reset:.2f}",
                     "Loss Steps": f"{loss_steps:.2f}",
                 }
@@ -1107,7 +1111,7 @@ def train_model(
                     input_n=input_n,
                     arity=arity,
                     hidden_dim=hidden_dim,
-                    n_message_steps=current_n_message_steps,  # Use current message steps
+                    n_message_steps=periodic_eval_inner_steps,  # Use current message steps
                     loss_type=loss_type,
                     epoch=epoch,
                     wandb_run=wandb_run,

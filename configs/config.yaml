@@ -30,7 +30,7 @@ circuit:
 # Training parameters
 training:
   # WIRING MODE : "random" or "fixed"
-  wiring_mode: "random"  # Options: "fixed" or "random"
+  wiring_mode: "fixed"  # Options: "fixed" or "random"
   # INNER LOOP
   n_message_steps: 50  # Number of message passing steps per training iteration
   # LOSS TYPE
@@ -48,7 +48,7 @@ training:
   # BATCH SIZE
   meta_batch_size: 128
   # OPTIMIZATION
-  learning_rate: 1e-3
+  learning_rate: 4e-4
   weight_decay: 1e-5
   # LEARNING RATE SCHEDULER
   lr_scheduler: "linear_warmup"  # Options: "constant", "exponential", "cosine", "linear_warmup"

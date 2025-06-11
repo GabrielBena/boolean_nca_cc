@@ -1,0 +1,39 @@
+# Test configuration for genetic wiring mutations
+defaults:
+  - config
+  - _self_
+
+# Override specific parameters for genetic testing
+circuit:
+  task: "binary_multiply"
+  input_bits: 4
+  output_bits: 4
+  arity: 2
+  num_layers: 2
+
+training:
+  wiring_mode: "genetic"
+  genetic_mutation_rate: 0.15  # Start with a bit higher mutation rate for testing
+  epochs: 100
+  learning_rate: 1e-3
+  n_message_steps: 1
+  meta_batch_size: 32
+
+pool:
+  size: 256  # Smaller pool for testing
+  reset_fraction: 0.1  # Reset 10% every interval
+  reset_interval: 10
+  reset_strategy: "combined"  # Use combined strategy
+
+model:
+  _target_: boolean_nca_cc.models.CircuitGNN
+  type: "gnn"
+  hidden_dim: 64
+  node_mlp_features: [32, 16]
+  edge_mlp_features: [32, 16]
+
+wandb:
+  enabled: false  # Disable for initial testing
+
+checkpoint:
+  enabled: false  # Disable for initial testing

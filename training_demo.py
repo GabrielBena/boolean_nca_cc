@@ -29,6 +29,9 @@ from boolean_nca_cc.training.evaluation import (
     get_loss_from_wires_logits,
 )
 
+# Import genetic mutation functions
+from boolean_nca_cc.training.perturbation import mutate_wires_swap
+
 # Import model components
 
 from imgui_bundle import (
@@ -797,6 +800,50 @@ class CircuitOptimizationDemo:
 
         print("Circuit regenerated successfully")
 
+    def mutate_wires(self, mutation_rate=0.05):
+        """Mutate current circuit wires using genetic mutation"""
+        try:
+            # Generate a random key for mutation
+            import random
+
+            mutation_seed = random.randint(0, 99999)
+            mutation_key = jax.random.PRNGKey(mutation_seed)
+
+            # Apply mutation to current wires
+            mutated_wires = mutate_wires_swap(self.wires, mutation_key, mutation_rate)
+
+            # Update the circuit with mutated wires
+            self.wires = mutated_wires
+
+            # Reset optimization state but keep the same task
+            self.step_i = 0
+            self.loss_log = np.zeros(max_trainstep_n, np.float32)
+            self.hard_log = np.zeros(max_trainstep_n, np.float32)
+
+            # Reset logits to initial state for fair comparison
+            self.logits = self.logits0
+
+            # Reset the model generator when wires change
+            self.model_generator = None
+            self.last_step_result = None
+
+            # Reinitialize optimization method for new circuit
+            self.initialize_optimization_method()
+
+            # Update gate masks for new wiring
+            self.reset_gate_mask()
+
+            # Refresh activations
+            self.initialize_activations()
+
+            print(f"Wires mutated with rate {mutation_rate} (seed: {mutation_seed})")
+
+        except Exception as e:
+            print(f"Error mutating wires: {e}")
+            import traceback
+
+            print(f"Traceback: {traceback.format_exc()}")
+
     def reset_circuit(self):
         """Reset circuit to initial state"""
         self.logits = self.logits0
@@ -1346,6 +1393,15 @@ class CircuitOptimizationDemo:
                 self.wiring_seed = random.randint(0, 99999)
                 self.wiring_key = jax.random.PRNGKey(self.wiring_seed)
                 self.regenerate_circuit()  # This will invalidate cache
+
+            if imgui.button("Mutate Wires"):
+                # Apply genetic mutation to current wires (low rate for single connection changes)
+                self.mutate_wires(mutation_rate=0.05)  # ~5% of connections mutated
+
+            imgui.same_line()
+            if imgui.button("Mutate Few"):
+                # Even lower mutation rate for very conservative changes
+                self.mutate_wires(mutation_rate=0.02)  # ~2% of connections mutated
 
             # Task selection
             imgui.separator_text("Task")

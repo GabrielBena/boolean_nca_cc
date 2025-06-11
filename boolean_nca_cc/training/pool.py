@@ -16,6 +16,7 @@ import jraph
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.utils.graph_builder import build_graph
 from boolean_nca_cc.utils.extraction import extract_logits_from_graph
+from boolean_nca_cc.training.perturbation import mutate_wires_batch
 
 PyTree = Any
 
@@ -280,113 +281,18 @@ class GraphPool(struct.PyTreeNode):
         Returns:
             Updated pool with reset elements and the average update steps of reset graphs
         """
-        # Calculate number of elements to reset
-        num_reset = jp.maximum(1, jp.round(fraction * self.size).astype(jp.int32))
-
         # Split the key for different random operations
-        key1, key2 = jax.random.split(key)
+        selection_key, sampling_key = jax.random.split(key)
 
-        # Select elements to reset based on the reset strategy
-        if reset_strategy == "uniform":
-            reset_idxs = jax.random.choice(
-                key1, self.size, shape=(num_reset,), replace=False
-            )
-        elif reset_strategy == "steps_biased":
-            # Selection biased by update steps
-            if self.graphs.globals is None:
-                # Fallback to uniform selection if no update steps
-                reset_idxs = jax.random.choice(
-                    key1, self.size, shape=(num_reset,), replace=False
-                )
-            else:
-                # Extract update steps for each graph
-                update_steps = self.graphs.globals[..., 1]
+        # Use the refactored selection logic
+        reset_idxs, avg_steps_reset = self.get_reset_indices(
+            selection_key, fraction, reset_strategy, combined_weights
+        )
 
-                # Create probabilities proportional to update steps
-                # Add small constant to prevent zero probabilities and normalize
-                probs = update_steps  # steps 0 get 0 prob
-                if not jp.any(probs):
-                    probs = jp.ones(self.size) / self.size
-                else:
-                    probs = probs / jp.sum(probs)  # Normalize to sum to 1
-
-                # Sample indices based on these probabilities
-                reset_idxs = jax.random.choice(
-                    key1, self.size, shape=(num_reset,), replace=False, p=probs
-                )
-
-        elif reset_strategy == "loss_biased":
-            # Selection biased by loss value (higher loss = higher probability of reset)
-            if self.graphs.globals is None:
-                # Fallback to uniform selection if no loss values
-                reset_idxs = jax.random.choice(
-                    key1, self.size, shape=(num_reset,), replace=False
-                )
-            else:
-                # Extract loss values for each graph
-                loss_values = self.graphs.globals[..., 0]
-
-                # Create probabilities proportional to loss values
-                # Add small constant to prevent zero probabilities and normalize
-                probs = loss_values  # Add small epsilon to avoid zeros
-
-                if not jp.any(probs):
-                    probs = jp.ones(self.size) / self.size
-                else:
-                    probs = probs / jp.sum(probs)  # Normalize to sum to 1
-
-                # Sample indices based on these probabilities
-                reset_idxs = jax.random.choice(
-                    key1, self.size, shape=(num_reset,), replace=False, p=probs
-                )
-
-        elif reset_strategy == "combined":
-            # Combine both loss values and update steps for selection
-            if self.graphs.globals is None:
-                # Fallback to uniform selection if no globals
-                reset_idxs = jax.random.choice(
-                    key1, self.size, shape=(num_reset,), replace=False
-                )
-            else:
-                # Extract loss values and update steps
-                loss_values = self.graphs.globals[..., 0]
-                update_steps = self.graphs.globals[..., 1]
-
-                # Get weights for the combined score
-                loss_weight, steps_weight = combined_weights
-
-                if not jp.any(loss_values):
-                    loss_scores = jp.ones(self.size) / self.size
-                else:
-                    loss_scores = loss_values / jp.sum(loss_values)
-
-                if not jp.any(update_steps):
-                    step_scores = jp.ones(self.size) / self.size
-                else:
-                    step_scores = update_steps / jp.sum(update_steps)
-
-                # Combine the two scores with configured weights
-                combined_scores = loss_weight * loss_scores + steps_weight * step_scores
-                probs = combined_scores
-
-                # Normalize to sum to 1
-                probs = probs / jp.sum(probs)
-
-                # Sample indices based on combined probabilities
-                reset_idxs = jax.random.choice(
-                    key1, self.size, shape=(num_reset,), replace=False, p=probs
-                )
-        else:
-            raise ValueError(
-                f"Unknown reset_strategy: {reset_strategy}. "
-                f"Must be 'uniform', 'steps_biased', 'loss_biased', or 'combined'."
-            )
-
-        # Calculate average update steps of graphs being reset
-        avg_steps_reset = self.get_average_update_steps_for_indices(reset_idxs)
+        num_reset = len(reset_idxs)
 
         # Create key for sampling new graphs and wires
-        key_sample = jax.random.fold_in(key2, 0)
+        key_sample = jax.random.fold_in(sampling_key, 0)
 
         # Sample elements to reset from the new graphs
         sample_idxs = jax.random.choice(
@@ -416,6 +322,218 @@ class GraphPool(struct.PyTreeNode):
 
         return reset_pool, avg_steps_reset
 
+    def get_reset_indices(
+        self,
+        key: Array,
+        fraction: float,
+        reset_strategy: str = "uniform",
+        combined_weights: Tuple[float, float] = (0.5, 0.5),
+    ) -> Tuple[Array, float]:
+        """
+        Get indices of circuits to reset based on the specified strategy.
+
+        This separates the selection logic from the update logic for more flexibility.
+
+        Args:
+            key: Random key for selection
+            fraction: Fraction of pool to reset (between 0 and 1)
+            reset_strategy: Strategy for selecting graphs to reset
+            combined_weights: Weights for loss and steps in combined strategy
+
+        Returns:
+            Tuple of (reset_indices, avg_steps_of_reset_circuits)
+        """
+        # Calculate number of elements to reset
+        num_reset = jp.maximum(1, jp.round(fraction * self.size).astype(jp.int32))
+
+        # Select elements to reset based on the reset strategy
+        if reset_strategy == "uniform":
+            reset_idxs = jax.random.choice(
+                key, self.size, shape=(num_reset,), replace=False
+            )
+        elif reset_strategy == "steps_biased":
+            # Selection biased by update steps
+            if self.graphs.globals is None:
+                # Fallback to uniform selection if no update steps
+                reset_idxs = jax.random.choice(
+                    key, self.size, shape=(num_reset,), replace=False
+                )
+            else:
+                # Extract update steps for each graph
+                update_steps = self.graphs.globals[..., 1]
+
+                # Create probabilities proportional to update steps
+                probs = update_steps
+                if not jp.any(probs):
+                    probs = jp.ones(self.size) / self.size
+                else:
+                    probs = probs / jp.sum(probs)
+
+                # Sample indices based on these probabilities
+                reset_idxs = jax.random.choice(
+                    key, self.size, shape=(num_reset,), replace=False, p=probs
+                )
+
+        elif reset_strategy == "loss_biased":
+            # Selection biased by loss value (higher loss = higher probability of reset)
+            if self.graphs.globals is None:
+                # Fallback to uniform selection if no loss values
+                reset_idxs = jax.random.choice(
+                    key, self.size, shape=(num_reset,), replace=False
+                )
+            else:
+                # Extract loss values for each graph
+                loss_values = self.graphs.globals[..., 0]
+
+                # Create probabilities proportional to loss values
+                probs = loss_values
+                if not jp.any(probs):
+                    probs = jp.ones(self.size) / self.size
+                else:
+                    probs = probs / jp.sum(probs)
+
+                # Sample indices based on these probabilities
+                reset_idxs = jax.random.choice(
+                    key, self.size, shape=(num_reset,), replace=False, p=probs
+                )
+
+        elif reset_strategy == "combined":
+            # Combine both loss values and update steps for selection
+            if self.graphs.globals is None:
+                # Fallback to uniform selection if no globals
+                reset_idxs = jax.random.choice(
+                    key, self.size, shape=(num_reset,), replace=False
+                )
+            else:
+                # Extract loss values and update steps
+                loss_values = self.graphs.globals[..., 0]
+                update_steps = self.graphs.globals[..., 1]
+
+                # Get weights for the combined score
+                loss_weight, steps_weight = combined_weights
+
+                if not jp.any(loss_values):
+                    loss_scores = jp.ones(self.size) / self.size
+                else:
+                    loss_scores = loss_values / jp.sum(loss_values)
+
+                if not jp.any(update_steps):
+                    step_scores = jp.ones(self.size) / self.size
+                else:
+                    step_scores = update_steps / jp.sum(update_steps)
+
+                # Combine the two scores with configured weights
+                combined_scores = loss_weight * loss_scores + steps_weight * step_scores
+                probs = combined_scores / jp.sum(combined_scores)
+
+                # Sample indices based on combined probabilities
+                reset_idxs = jax.random.choice(
+                    key, self.size, shape=(num_reset,), replace=False, p=probs
+                )
+        else:
+            raise ValueError(
+                f"Unknown reset_strategy: {reset_strategy}. "
+                f"Must be 'uniform', 'steps_biased', 'loss_biased', or 'combined'."
+            )
+
+        # Calculate average update steps of graphs being reset
+        avg_steps_reset = self.get_average_update_steps_for_indices(reset_idxs)
+
+        return reset_idxs, avg_steps_reset
+
+    def reset_with_genetic_mutation(
+        self,
+        key: Array,
+        fraction: float,
+        layer_sizes: List[Tuple[int, int]],
+        input_n: int,
+        arity: int,
+        hidden_dim: int,
+        mutation_rate: float = 0.1,
+        reset_strategy: str = "uniform",
+        combined_weights: Tuple[float, float] = (0.5, 0.5),
+    ) -> Tuple["GraphPool", float]:
+        """
+        Reset a fraction of the pool using genetic mutation of existing circuits.
+
+        This method:
+        1. Selects circuits to reset using the specified strategy
+        2. Takes existing circuits from the pool and mutates their wiring
+        3. Generates fresh logits for the mutated circuits
+        4. Updates the pool with the mutated circuits
+
+        Args:
+            key: Random key for mutations and selection
+            fraction: Fraction of pool to reset
+            layer_sizes: Circuit layer sizes for logit generation
+            input_n: Number of input nodes
+            arity: Number of inputs per gate
+            hidden_dim: Hidden dimension for graphs
+            mutation_rate: Rate of wire mutations (0.0 to 1.0)
+            reset_strategy: Strategy for selecting circuits to reset
+            combined_weights: Weights for combined reset strategy
+
+        Returns:
+            Tuple of (updated_pool, avg_steps_of_reset_circuits)
+        """
+        # Split keys for different operations
+        selection_key, mutation_key, logit_key = jax.random.split(key, 3)
+
+        # Get indices of circuits to reset
+        reset_idxs, avg_steps_reset = self.get_reset_indices(
+            selection_key, fraction, reset_strategy, combined_weights
+        )
+
+        num_reset = len(reset_idxs)
+
+        # Sample existing circuits from the pool for mutation
+        # We'll mutate random circuits from the pool, not necessarily the ones being reset
+        source_idxs = jax.random.choice(
+            mutation_key, self.size, shape=(num_reset,), replace=True
+        )
+
+        # Extract wires from the source circuits
+        source_wires = jax.tree.map(lambda leaf: leaf[source_idxs], self.wires)
+
+        # Apply genetic mutations to the source wires
+        mutated_wires = mutate_wires_batch(source_wires, mutation_key, mutation_rate)
+
+        # Generate fresh logits for the mutated circuits
+        from boolean_nca_cc.circuits.model import make_nops
+
+        fresh_logits = []
+        for out_n, group_size in layer_sizes[1:]:  # Skip input layer
+            layer_logits = make_nops(out_n, arity, group_size)
+            # Repeat for batch
+            batched_logits = jp.repeat(layer_logits[None, ...], num_reset, axis=0)
+            fresh_logits.append(batched_logits)
+
+        # Build new graphs with mutated wires and fresh logits
+        vmap_build_graph = jax.vmap(
+            lambda logit, wires: build_graph(
+                logits=logit,
+                wires=wires,
+                input_n=input_n,
+                arity=arity,
+                hidden_dim=hidden_dim,
+                loss_value=0.0,  # Reset loss
+                update_steps=0,  # Reset update steps
+            )
+        )
+        mutated_graphs = vmap_build_graph(fresh_logits, mutated_wires)
+
+        # Update the pool with mutated circuits
+        updated_pool = self.update(
+            reset_idxs, mutated_graphs, mutated_wires, fresh_logits
+        )
+
+        # Increment the reset counter for all elements
+        if updated_pool.reset_counter is not None:
+            new_counter = updated_pool.reset_counter + 1
+            updated_pool = updated_pool.replace(reset_counter=new_counter)
+
+        return updated_pool, avg_steps_reset
+
 
 def initialize_graph_pool(
     rng: jax.random.PRNGKey,
@@ -438,14 +556,17 @@ def initialize_graph_pool(
         arity: Number of inputs per gate
         hidden_dim: Dimension of hidden features
         loss_value: Initial loss value for graph globals
-        wiring_mode: Mode for generating wirings ("random" or "fixed")
+        wiring_mode: Mode for generating wirings ("random", "fixed", or "genetic")
+                    Note: "genetic" mode initializes the same as "fixed" mode -
+                    genetic mutations are applied during pool resets
 
     Returns:
         Initialized GraphPool
     """
     # Generate circuit wirings based on wiring mode
-    if wiring_mode == "fixed":
-        # In fixed mode, generate a single wiring and repeat it
+    # For genetic mode, start with fixed wiring (mutations happen during resets)
+    if wiring_mode in ["fixed", "genetic"]:
+        # In fixed/genetic mode, generate a single wiring and repeat it
         single_wires, single_logits = gen_circuit(rng, layer_sizes, arity=arity)
         # print(f"INIT WITH RNG {rng}")
 

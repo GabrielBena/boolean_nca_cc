@@ -311,6 +311,7 @@ def main(cfg: DictConfig) -> None:
         save_stable_states=cfg.checkpoint.save_stable_states,
         # Periodic evaluation parameters
         periodic_eval_enabled=cfg.eval.periodic.enabled,
+        periodic_eval_inner_steps=cfg.eval.periodic.inner_steps,
         periodic_eval_interval=cfg.eval.periodic.interval,
         periodic_eval_test_seed=cfg.test_seed,
         periodic_eval_log_stepwise=cfg.eval.periodic.log_stepwise,
