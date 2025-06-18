@@ -297,6 +297,10 @@ def main(cfg: DictConfig) -> None:
         reset_pool_interval=cfg.pool.reset_interval,
         reset_strategy=cfg.pool.reset_strategy,
         reset_interval_schedule=cfg.pool.reset_interval_schedule,
+        # Genetic mutation parameters
+        genetic_mutation_rate=cfg.pool.mutation_rate,
+        genetic_swaps_per_layer=cfg.pool.n_swaps_per_layer,
+        initial_diversity=cfg.pool.initial_diversity,
         # Message steps scheduling (curriculum learning)
         message_steps_schedule=cfg.training.message_steps_schedule,
         # Learning rate scheduling
@@ -308,15 +312,16 @@ def main(cfg: DictConfig) -> None:
         checkpoint_interval=cfg.checkpoint.interval,
         save_best=cfg.checkpoint.save_best,
         best_metric=cfg.checkpoint.best_metric,
+        best_metric_source=cfg.checkpoint.best_metric_source,
         save_stable_states=cfg.checkpoint.save_stable_states,
         # Periodic evaluation parameters
         periodic_eval_enabled=cfg.eval.periodic.enabled,
-        periodic_eval_inner_steps=cfg.eval.periodic.inner_steps,
         periodic_eval_interval=cfg.eval.periodic.interval,
+        periodic_eval_inner_steps=cfg.eval.inner_steps,
         periodic_eval_test_seed=cfg.test_seed,
-        periodic_eval_log_stepwise=cfg.eval.periodic.log_stepwise,
-        periodic_eval_batch_size=cfg.eval.periodic.batch_size,
-        periodic_eval_log_pool_scatter=cfg.eval.periodic.log_pool_scatter,
+        periodic_eval_log_stepwise=cfg.eval.log_stepwise,
+        periodic_eval_batch_size=cfg.eval.batch_size,
+        periodic_eval_log_pool_scatter=cfg.eval.log_pool_scatter,
         # WandB parameters
         wandb_logging=cfg.wandb.enabled,
         log_interval=cfg.logging.log_interval,
