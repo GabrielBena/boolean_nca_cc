@@ -24,9 +24,10 @@ def mutate_wires_swap(
 
     Args:
         wires: List of wire arrays for each layer, shape [(arity, group_n), ...]
-        mutation_rate: Fraction of connections to swap (0.0 to 1.0) - ignored if n_swaps_per_layer is provided
+        mutation_rate: Probability for each connection to be involved in a swap (0.0 to 1.0)
+                      Ignored if n_swaps_per_layer is provided
         key: Random key for reproducible mutations
-        n_swaps_per_layer: If provided, use this exact number of swaps per layer instead of calculating from mutation_rate
+        n_swaps_per_layer: If provided, use this exact number of swaps per layer instead of using mutation_rate
 
     Returns:
         List of mutated wire arrays with same structure as input
@@ -52,28 +53,53 @@ def mutate_wires_swap(
             mutated_wires.append(layer_wires)
             continue
 
+        layer_key = keys[layer_idx]
+
+        # Calculate maximum possible swaps for this layer
+        max_swaps = n_connections // 2
+
         # Calculate number of swaps to perform
         if n_swaps_per_layer is not None:
-            n_swaps = jp.minimum(n_swaps_per_layer, n_connections // 2)
+            # Use the specified number of swaps (but cap at max_swaps)
+            n_swaps = jp.minimum(n_swaps_per_layer, max_swaps)
         else:
-            n_swaps = jp.maximum(
-                1, jp.round(mutation_rate * n_connections / 2).astype(jp.int32)
+            # Use mutation_rate as Bernoulli probability for each connection
+            bernoulli_key, layer_key = jax.random.split(layer_key)
+            mutation_mask = (
+                jax.random.uniform(bernoulli_key, (n_connections,)) < mutation_rate
             )
 
-        # Generate random pairs of indices to swap
-        layer_key = keys[layer_idx]
+            # Count how many connections are selected for mutation
+            n_to_mutate = jp.sum(mutation_mask)
+
+            # We need pairs for swapping, so take the floor of half the selected connections
+            n_swaps = jp.minimum(n_to_mutate // 2, max_swaps)
+
+        # Always generate max_swaps worth of swap indices to avoid shape issues
+        # We'll use masking to only apply the first n_swaps
         swap_indices = jax.random.choice(
-            layer_key, n_connections, shape=(n_swaps, 2), replace=False
+            layer_key, n_connections, shape=(max_swaps, 2), replace=False
         )
 
-        # Perform swaps
-        new_connections = flat_connections
-        for i in range(n_swaps):
+        # Create a mask for which swaps to actually apply
+        swap_mask = jp.arange(max_swaps) < n_swaps
+
+        # Apply swaps using vectorized operations
+        def apply_swap(i, connections):
             idx1, idx2 = swap_indices[i]
-            # Swap values at idx1 and idx2
-            val1, val2 = new_connections[idx1], new_connections[idx2]
-            new_connections = new_connections.at[idx1].set(val2)
-            new_connections = new_connections.at[idx2].set(val1)
+            val1, val2 = connections[idx1], connections[idx2]
+
+            # Only apply swap if mask is True for this swap
+            should_apply = swap_mask[i]
+            new_val1 = jp.where(should_apply, val2, val1)
+            new_val2 = jp.where(should_apply, val1, val2)
+
+            connections = connections.at[idx1].set(new_val1)
+            connections = connections.at[idx2].set(new_val2)
+            return connections
+
+        # Apply all swaps (masked ones will be no-ops)
+        new_connections = jax.lax.fori_loop(0, max_swaps, apply_swap, flat_connections)
 
         # Reshape back to original shape
         mutated_layer = new_connections.reshape(original_shape)
@@ -93,9 +119,10 @@ def mutate_wires_batch(
 
     Args:
         batch_wires: List of batched wire arrays, shape [(batch_size, arity, group_n), ...]
-        mutation_rate: Fraction of connections to swap per circuit - ignored if n_swaps_per_layer is provided
+        mutation_rate: Probability for each connection to be involved in a swap (0.0 to 1.0)
+                      Ignored if n_swaps_per_layer is provided
         key: Random key for mutations
-        n_swaps_per_layer: If provided, use this exact number of swaps per layer instead of calculating from mutation_rate
+        n_swaps_per_layer: If provided, use this exact number of swaps per layer instead of using mutation_rate
 
     Returns:
         List of mutated batched wire arrays

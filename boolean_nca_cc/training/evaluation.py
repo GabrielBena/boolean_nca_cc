@@ -285,6 +285,7 @@ def evaluate_model_stepwise(
     loss_type: str = "l4",
     bidirectional_edges: bool = True,
     layer_sizes: List[Tuple[int, int]] = None,
+    use_tqdm: bool = False,
 ) -> Dict:
     """
     Evaluate GNN performance by running message passing steps one by one
@@ -336,7 +337,10 @@ def evaluate_model_stepwise(
     )
 
     # Create progress bar for evaluation
-    pbar = tqdm(generator, total=n_message_steps + 1, desc="Evaluating model steps")
+    if use_tqdm:
+        pbar = tqdm(generator, total=n_message_steps + 1, desc="Evaluating model steps")
+    else:
+        pbar = generator
 
     # Collect all results
     for result in pbar:
@@ -347,14 +351,15 @@ def evaluate_model_stepwise(
         step_metrics["hard_accuracy"].append(result.hard_accuracy)
         step_metrics["logits_mean"].append(float(result.graph.nodes["logits"].mean()))
 
-        # Update progress bar
-        pbar.set_postfix(
-            {
-                "Loss": f"{result.loss:.4f}",
-                "Accuracy": f"{result.accuracy:.4f}",
-                "Hard Acc": f"{result.hard_accuracy:.4f}",
-            }
-        )
+        if use_tqdm:
+            # Update progress bar
+            pbar.set_postfix(
+                {
+                    "Loss": f"{result.loss:.4f}",
+                    "Accuracy": f"{result.accuracy:.4f}",
+                    "Hard Acc": f"{result.hard_accuracy:.4f}",
+                }
+            )
 
     return step_metrics
 
