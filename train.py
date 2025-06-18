@@ -267,7 +267,7 @@ def main(cfg: DictConfig) -> None:
 
     # Train model
     log.info(f"Starting {cfg.model.type.upper()} training")
-    gnn_results = train_model(
+    model_results = train_model(
         # Initialization parameters
         key=cfg.seed,
         init_model=model,
@@ -328,14 +328,14 @@ def main(cfg: DictConfig) -> None:
     if cfg.checkpoint.enabled and not cfg.wandb.enabled:
         # If wandb is enabled, checkpoints are already being saved during training
         save_checkpoint(
-            gnn_results["model"],
-            gnn_results["optimizer"],
+            model_results["model"],
+            model_results["optimizer"],
             {
-                "losses": gnn_results["losses"],
-                "hard_losses": gnn_results["hard_losses"],
-                "accuracies": gnn_results["accuracies"],
-                "hard_accuracies": gnn_results["hard_accuracies"],
-                "reset_steps": gnn_results.get("reset_steps", []),
+                "losses": model_results["losses"],
+                "hard_losses": model_results["hard_losses"],
+                "accuracies": model_results["accuracies"],
+                "hard_accuracies": model_results["hard_accuracies"],
+                "reset_steps": model_results.get("reset_steps", []),
             },
             cfg,
             cfg.training.epochs or 2**cfg.training.epochs_power_of_2,
@@ -353,7 +353,7 @@ def main(cfg: DictConfig) -> None:
 
     # Run stepwise evaluation
     step_metrics = evaluate_model_stepwise(
-        model=gnn_results["model"],
+        model=model_results["model"],
         wires=test_wires,
         logits=test_logits,
         x_data=x,
@@ -366,18 +366,18 @@ def main(cfg: DictConfig) -> None:
         layer_sizes=layer_sizes,
     )
 
-    if "metrics" in gnn_results:
-        gnn_results.update(gnn_results["metrics"])
+    if "metrics" in model_results:
+        model_results.update(model_results["metrics"])
 
     # Plot training curves
     model_name = cfg.model.type.upper()
     if not cfg.wandb.enabled:
         plot_training_curves(
             {
-                "losses": gnn_results["losses"],
-                "hard_losses": gnn_results["hard_losses"],
-                "accuracies": gnn_results["accuracies"],
-                "hard_accuracies": gnn_results["hard_accuracies"],
+                "losses": model_results["losses"],
+                "hard_losses": model_results["hard_losses"],
+                "accuracies": model_results["accuracies"],
+                "hard_accuracies": model_results["hard_accuracies"],
             },
             f"{model_name} Training",
             os.path.join(output_dir, "plots"),
@@ -404,10 +404,10 @@ def main(cfg: DictConfig) -> None:
 
     # Final log
     log.info(f"Training complete. Final results:")
-    log.info(f"  Meta Loss: {gnn_results['losses'][-1]:.4f}")
-    log.info(f"  Meta Hard Loss: {gnn_results['hard_losses'][-1]:.4f}")
-    log.info(f"  Meta Accuracy: {gnn_results['accuracies'][-1]:.4f}")
-    log.info(f"  Meta Hard Accuracy: {gnn_results['hard_accuracies'][-1]:.4f}")
+    log.info(f"  Meta Loss: {model_results['losses'][-1]:.4f}")
+    log.info(f"  Meta Hard Loss: {model_results['hard_losses'][-1]:.4f}")
+    log.info(f"  Meta Accuracy: {model_results['accuracies'][-1]:.4f}")
+    log.info(f"  Meta Hard Accuracy: {model_results['hard_accuracies'][-1]:.4f}")
     log.info(f"  Inner Loop Final Loss: {step_metrics['soft_loss'][-1]:.4f}")
     log.info(f"  Inner Loop Final Hard Loss: {step_metrics['hard_loss'][-1]:.4f}")
     log.info(f"  Inner Loop Final Accuracy: {step_metrics['soft_accuracy'][-1]:.4f}")
@@ -416,9 +416,9 @@ def main(cfg: DictConfig) -> None:
     )
 
     # Display best model performance if applicable
-    if cfg.checkpoint.save_best and "best_metric_value" in gnn_results:
+    if cfg.checkpoint.save_best and "best_metric_value" in model_results:
         log.info(
-            f"  Best {gnn_results.get('best_metric', 'metric')}: {gnn_results['best_metric_value']:.4f}"
+            f"  Best {model_results.get('best_metric', 'metric')}: {model_results['best_metric_value']:.4f}"
         )
 
     # Close wandb if enabled
