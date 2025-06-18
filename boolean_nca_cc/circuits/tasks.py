@@ -100,8 +100,15 @@ def popcount(case_n, input_bits=8, output_bits=None):
     return unpack(x, input_bits), unpack(y, output_bits)
 
 
+def identity(case_n, input_bits=8, output_bits=8):
+    """Identity function - output equals input"""
+    x = jp.arange(case_n)
+    return unpack(x, input_bits), unpack(x, output_bits)
+
+
 # Task lookup dictionary
 TASKS = {
+    "identity": identity,
     "binary_multiply": binary_multiply,
     "and": bitwise_and,
     "xor": bitwise_xor,
