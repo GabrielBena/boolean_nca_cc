@@ -24,7 +24,6 @@ from boolean_nca_cc.training.schedulers import (
     should_reset_pool,
     get_current_reset_interval,
     get_learning_rate_schedule,
-    get_current_message_steps_and_batch_size,
     get_step_beta,
 )
 
@@ -283,6 +282,41 @@ def _log_final_wandb_metrics(wandb_run, results: Dict, epochs: int) -> None:
         log.warning(f"Error logging final metrics to wandb: {e}")
 
 
+def _get_metric_value(
+    metric_name: str,
+    metric_source: str,
+    training_metrics: Dict,
+    eval_metrics: Dict = None,
+) -> float:
+    """
+    Get metric value from the appropriate source.
+
+    Args:
+        metric_name: Name of the metric ('loss', 'hard_loss', 'accuracy', 'hard_accuracy')
+        metric_source: Source of the metric ('training' or 'eval')
+        training_metrics: Dictionary with training metrics
+        eval_metrics: Dictionary with evaluation metrics (optional)
+
+    Returns:
+        The metric value as a float
+    """
+    if metric_source == "training":
+        return training_metrics[metric_name]
+    elif metric_source == "eval":
+        if eval_metrics is None:
+            raise ValueError("Evaluation metrics not available for eval source")
+        # Map to evaluation metric keys (use fixed seed evaluation for consistency)
+        eval_key_map = {
+            "loss": "eval_seed/final_loss",
+            "hard_loss": "eval_seed/final_hard_loss",
+            "accuracy": "eval_seed/final_accuracy",
+            "hard_accuracy": "eval_seed/final_hard_accuracy",
+        }
+        return eval_metrics[eval_key_map[metric_name]]
+    else:
+        raise ValueError(f"Unknown metric source: {metric_source}")
+
+
 def _log_pool_scatter(pool, epoch, wandb_run):
     """Log pool scatterplot to wandb."""
     if wandb_run is None:
@@ -292,6 +326,177 @@ def _log_pool_scatter(pool, epoch, wandb_run):
     data = list(zip(all_steps, all_loss))
     table = wandb.Table(data=data, columns=["steps", "loss"])
     wandb_run.log({"pool/scatter": wandb.plot.scatter(table, "steps", "loss")})
+
+
+def _run_periodic_evaluation_dual(
+    model,
+    pool,
+    test_seed_wires,
+    test_seed_logits,
+    test_random_wires,
+    test_random_logits,
+    x_data,
+    y_data,
+    input_n,
+    arity,
+    hidden_dim,
+    n_message_steps,
+    loss_type,
+    epoch,
+    wandb_run,
+    log_stepwise=False,
+    layer_sizes: List[Tuple[int, int]] = None,
+    log_pool_scatter: bool = False,
+) -> Dict:
+    """
+    Run dual periodic evaluation: both fixed seed and random batch (OOD).
+
+    Args:
+        model: The model to evaluate
+        test_seed_wires: Test circuit wires (single circuit with fixed seed)
+        test_seed_logits: Test circuit logits (single circuit with fixed seed)
+        test_random_wires: Test circuit wires (batch of random circuits)
+        test_random_logits: Test circuit logits (batch of random circuits)
+        x_data: Input data
+        y_data: Target data
+        input_n: Number of input nodes
+        arity: Arity of gates
+        hidden_dim: Hidden dimension
+        n_message_steps: Number of message steps for evaluation
+        loss_type: Loss function type
+        epoch: Current epoch number
+        wandb_run: WandB run object (or None)
+        log_stepwise: Whether to log step-by-step metrics
+        layer_sizes: Circuit layer sizes
+        log_pool_scatter: Whether to log pool scatterplot (loss vs steps)
+
+    Returns:
+        Dictionary with evaluation metrics from both fixed seed and random evaluations
+    """
+    try:
+        # 1. Run fixed seed evaluation (single circuit)
+        step_metrics_seed = evaluate_model_stepwise(
+            model=model,
+            wires=test_seed_wires,
+            logits=test_seed_logits,
+            x_data=x_data,
+            y_data=y_data,
+            input_n=input_n,
+            arity=arity,
+            hidden_dim=hidden_dim,
+            n_message_steps=n_message_steps,
+            loss_type=loss_type,
+            layer_sizes=layer_sizes,
+        )
+
+        # Get final metrics (last step) for fixed seed
+        final_metrics_seed = {
+            "eval_seed/final_loss": step_metrics_seed["soft_loss"][-1],
+            "eval_seed/final_hard_loss": step_metrics_seed["hard_loss"][-1],
+            "eval_seed/final_accuracy": step_metrics_seed["soft_accuracy"][-1],
+            "eval_seed/final_hard_accuracy": step_metrics_seed["hard_accuracy"][-1],
+            "eval_seed/epoch": epoch,
+        }
+
+        # 2. Run random batch evaluation (OOD testing)
+        step_metrics_random = evaluate_model_stepwise_batched(
+            model=model,
+            batch_wires=test_random_wires,
+            batch_logits=test_random_logits,
+            x_data=x_data,
+            y_data=y_data,
+            input_n=input_n,
+            arity=arity,
+            hidden_dim=hidden_dim,
+            n_message_steps=n_message_steps,
+            loss_type=loss_type,
+            layer_sizes=layer_sizes,
+        )
+
+        # Get final metrics (last step) for random batch
+        final_metrics_random = {
+            "eval_ood/final_loss": step_metrics_random["soft_loss"][-1],
+            "eval_ood/final_hard_loss": step_metrics_random["hard_loss"][-1],
+            "eval_ood/final_accuracy": step_metrics_random["soft_accuracy"][-1],
+            "eval_ood/final_hard_accuracy": step_metrics_random["hard_accuracy"][-1],
+            "eval_ood/epoch": epoch,
+        }
+
+        # Combine all metrics for logging
+        combined_metrics = {**final_metrics_seed, **final_metrics_random}
+
+        # Log to wandb if enabled
+        if wandb_run:
+            wandb_run.log(combined_metrics)
+
+            if log_pool_scatter:
+                _log_pool_scatter(pool, epoch, wandb_run)
+
+            # Optionally log step-by-step metrics for both evaluations
+            if log_stepwise:
+                # Fixed seed step-wise metrics
+                for step_idx in range(len(step_metrics_seed["step"])):
+                    step_data_seed = {
+                        f"eval_seed_steps/step": step_metrics_seed["step"][step_idx],
+                        f"eval_seed_steps/loss": step_metrics_seed["soft_loss"][
+                            step_idx
+                        ],
+                        f"eval_seed_steps/hard_loss": step_metrics_seed["hard_loss"][
+                            step_idx
+                        ],
+                        f"eval_seed_steps/accuracy": step_metrics_seed["soft_accuracy"][
+                            step_idx
+                        ],
+                        f"eval_seed_steps/hard_accuracy": step_metrics_seed[
+                            "hard_accuracy"
+                        ][step_idx],
+                        f"eval_seed_steps/epoch": epoch,
+                    }
+                    wandb_run.log(step_data_seed)
+
+                # Random batch step-wise metrics
+                for step_idx in range(len(step_metrics_random["step"])):
+                    step_data_random = {
+                        f"eval_ood_steps/step": step_metrics_random["step"][step_idx],
+                        f"eval_ood_steps/loss": step_metrics_random["soft_loss"][
+                            step_idx
+                        ],
+                        f"eval_ood_steps/hard_loss": step_metrics_random["hard_loss"][
+                            step_idx
+                        ],
+                        f"eval_ood_steps/accuracy": step_metrics_random[
+                            "soft_accuracy"
+                        ][step_idx],
+                        f"eval_ood_steps/hard_accuracy": step_metrics_random[
+                            "hard_accuracy"
+                        ][step_idx],
+                        f"eval_ood_steps/epoch": epoch,
+                    }
+                    wandb_run.log(step_data_random)
+
+        # Log summary to console
+        batch_size = test_random_wires[0].shape[0]
+        log.info(
+            f"Periodic Eval (epoch {epoch}):\n"
+            f"  Fixed Seed: Loss={final_metrics_seed['eval_seed/final_loss']:.4f}, "
+            f"Acc={final_metrics_seed['eval_seed/final_accuracy']:.4f}, "
+            f"Hard Acc={final_metrics_seed['eval_seed/final_hard_accuracy']:.4f}\n"
+            f"  OOD (batch {batch_size}): Loss={final_metrics_random['eval_ood/final_loss']:.4f}, "
+            f"Acc={final_metrics_random['eval_ood/final_accuracy']:.4f}, "
+            f"Hard Acc={final_metrics_random['eval_ood/final_hard_accuracy']:.4f}"
+        )
+
+        # Return both step metrics and final metrics for best model tracking
+        return {
+            "step_metrics_seed": step_metrics_seed,
+            "step_metrics_random": step_metrics_random,
+            "final_metrics_seed": final_metrics_seed,
+            "final_metrics_random": final_metrics_random,
+        }
+
+    except Exception as e:
+        log.warning(f"Error during periodic evaluation at epoch {epoch}: {e}")
+        return {}
 
 
 def _run_periodic_evaluation(
@@ -333,10 +538,9 @@ def _run_periodic_evaluation(
         layer_sizes: Circuit layer sizes
         log_pool_scatter: Whether to log pool scatterplot (loss vs steps)
         wiring_mode: Wiring mode ("fixed" or "random")
-        eval_batch_size: Batch size for evaluation (used only in random mode)
 
     Returns:
-        Dictionary with evaluation metrics
+        Dictionary with evaluation metrics including final values for best model tracking
     """
     try:
         if wiring_mode == "fixed":
@@ -412,7 +616,11 @@ def _run_periodic_evaluation(
             f"Hard Acc={final_metrics['eval/final_hard_accuracy']:.4f}"
         )
 
-        return step_metrics
+        # Return both step metrics and final metrics for best model tracking
+        return {
+            "step_metrics": step_metrics,
+            "final_metrics": final_metrics,
+        }
 
     except Exception as e:
         log.warning(f"Error during periodic evaluation at epoch {epoch}: {e}")
@@ -445,7 +653,9 @@ def train_model(
     wiring_mode: str = "random",  # Options: 'fixed', 'random', or 'genetic'
     meta_batch_size: int = 64,
     # Genetic mutation parameters (only used when wiring_mode='genetic')
-    genetic_mutation_rate: float = 0.1,  # Fraction of connections to mutate (0.0 to 1.0)
+    genetic_mutation_rate: float = 0.0,  # Fraction of connections to mutate (0.0 to 1.0)
+    genetic_swaps_per_layer: int = 1,  # Number of swaps per layer for genetic mutation
+    initial_diversity: int = 1,  # Number of initial wires for genetic mutation
     # Pool parameters
     pool_size: int = 1024,
     reset_pool_fraction: float = 0.05,
@@ -477,6 +687,7 @@ def train_model(
     checkpoint_interval: int = 10,
     save_best: bool = True,
     best_metric: str = "hard_accuracy",  # Options: 'loss', 'hard_loss', 'accuracy', 'hard_accuracy'
+    best_metric_source: str = "training",  # Options: 'training' or 'eval'
     save_stable_states: bool = True,
     # Periodic evaluation parameters
     periodic_eval_enabled: bool = False,
@@ -513,6 +724,7 @@ def train_model(
         wiring_mode: Mode for circuit wirings ('fixed', 'random', or 'genetic')
         meta_batch_size: Batch size for training
         genetic_mutation_rate: Fraction of connections to mutate (0.0 to 1.0)
+        genetic_swaps_per_layer: Number of swaps per layer for genetic mutation
         pool_size: Size of the graph pool
         reset_pool_fraction: Fraction of pool to reset periodically
         reset_pool_interval: Number of epochs between pool resets
@@ -547,6 +759,7 @@ def train_model(
         checkpoint_interval: How often to save periodic checkpoints
         save_best: Whether to track and save the best model
         best_metric: Metric to use for determining the best model
+        best_metric_source: Source of the metric ('training' or 'eval')
         save_stable_states: Whether to save stable states (before potential NaN losses)
         periodic_eval_enabled: Whether to enable periodic evaluation
         periodic_eval_inner_steps: Number of inner steps for periodic evaluation
@@ -634,6 +847,7 @@ def train_model(
             hidden_dim=hidden_dim,
             loss_value=0.0,  # Initial loss will be calculated properly in first step
             wiring_mode=wiring_mode,
+            initial_diversity=initial_diversity,
         )
     else:
         # Use the provided pool
@@ -834,31 +1048,37 @@ def train_model(
     # Track last reset epoch for scheduling
     last_reset_epoch = -1  # Initialize to -1 so first check works correctly
 
-    # Initialize test circuit for periodic evaluation if enabled
-    test_wires = None
-    test_logits = None
+    # Initialize test circuits for periodic evaluation if enabled
+    test_seed_wires = None
+    test_seed_logits = None
+    test_random_wires = None
+    test_random_logits = None
+
     if periodic_eval_enabled:
-        test_rng = jax.random.PRNGKey(periodic_eval_test_seed)
+        # Always initialize both types of test circuits
 
-        if wiring_mode == "fixed":
-            # For fixed wiring, generate a single test circuit
-            test_wires, test_logits = gen_circuit(test_rng, layer_sizes, arity=arity)
-            log.info(
-                "Single test circuit initialized for periodic evaluation (fixed wiring)"
-            )
-        else:  # wiring_mode == "random"
-            # For random wiring, generate a batch of test circuits for batched evaluation
-            test_rngs = jax.random.split(test_rng, periodic_eval_batch_size)
+        # 1. Fixed test seed circuit (for consistent evaluation)
+        test_seed_rng = jax.random.PRNGKey(periodic_eval_test_seed)
+        test_seed_wires, test_seed_logits = gen_circuit(
+            test_seed_rng, layer_sizes, arity=arity
+        )
+        log.info("Fixed test seed circuit initialized for periodic evaluation")
 
-            # Use vmap to generate multiple circuits
-            vmap_gen_circuit = jax.vmap(
-                lambda rng: gen_circuit(rng, layer_sizes, arity=arity)
-            )
-            test_wires, test_logits = vmap_gen_circuit(test_rngs)
+        # 2. Batch of random test circuits (for OOD evaluation)
+        test_random_rng = jax.random.PRNGKey(
+            periodic_eval_test_seed + 1000
+        )  # Different seed for random batch
+        test_random_rngs = jax.random.split(test_random_rng, periodic_eval_batch_size)
 
-            log.info(
-                f"Batch of {periodic_eval_batch_size} test circuits initialized for periodic evaluation (random wiring)"
-            )
+        # Use vmap to generate multiple circuits
+        vmap_gen_circuit = jax.vmap(
+            lambda rng: gen_circuit(rng, layer_sizes, arity=arity)
+        )
+        test_random_wires, test_random_logits = vmap_gen_circuit(test_random_rngs)
+
+        log.info(
+            f"Batch of {periodic_eval_batch_size} random test circuits initialized for periodic evaluation (OOD testing)"
+        )
 
     # Save initial stable state if needed
     last_stable_state = {
@@ -875,272 +1095,317 @@ def train_model(
         "epoch": 0,
     }
 
+    diversity = 0.0
     result = {}
     # Training loop
-    for epoch in pbar:
-        # Get current message steps and batch size using scheduler
-        if message_steps_schedule is None:
-            message_steps_schedule = {"enabled": False}
+    try:
+        for epoch in pbar:
+            # Get current message steps and batch size using scheduler
+            if message_steps_schedule is None:
+                message_steps_schedule = {"enabled": False}
 
-        # Pool-based training
-        # Sample a batch from the pool using the current (potentially dynamic) batch size
-        rng, sample_key, loss_key = jax.random.split(rng, 3)
-        idxs, graphs, wires, logits = circuit_pool.sample(sample_key, meta_batch_size)
+            # Pool-based training
+            # Sample a batch from the pool using the current (potentially dynamic) batch size
+            rng, sample_key, loss_key = jax.random.split(rng, 3)
+            idxs, graphs, wires, logits = circuit_pool.sample(
+                sample_key, meta_batch_size
+            )
 
-        # Perform pool training step
-        (
-            loss,
-            (aux, circuit_pool, loss_steps),
-        ) = pool_train_step(
-            model,
-            optimizer,
-            circuit_pool,
-            idxs,
-            graphs,
-            wires,
-            logits,
-            x_data,
-            y_data,
-            tuple(layer_sizes),  # Convert list to tuple for JAX static arguments
-            n_message_steps,
-            loss_type=loss_type,
-            loss_key=loss_key,
-            epoch=epoch,
-        )
+            # Perform pool training step
+            (
+                loss,
+                (aux, circuit_pool, loss_steps),
+            ) = pool_train_step(
+                model,
+                optimizer,
+                circuit_pool,
+                idxs,
+                graphs,
+                wires,
+                logits,
+                x_data,
+                y_data,
+                tuple(layer_sizes),  # Convert list to tuple for JAX static arguments
+                n_message_steps,
+                loss_type=loss_type,
+                loss_key=loss_key,
+                epoch=epoch,
+            )
 
-        *_, hard_loss, _, _, accuracy, hard_accuracy, _, _ = aux
+            *_, hard_loss, _, _, accuracy, hard_accuracy, _, _ = aux
 
-        # Reset a fraction of the pool using scheduled intervals
-        current_reset_interval = get_current_reset_interval(
-            epoch, reset_interval_schedule, epochs, reset_pool_interval
-        )
+            # Reset a fraction of the pool using scheduled intervals
+            current_reset_interval = get_current_reset_interval(
+                epoch, reset_interval_schedule, epochs, reset_pool_interval
+            )
 
-        if should_reset_pool(epoch, current_reset_interval, last_reset_epoch):
-            rng, reset_key, fresh_key = jax.random.split(rng, 3)
+            if should_reset_pool(epoch, current_reset_interval, last_reset_epoch):
+                rng, reset_key, fresh_key = jax.random.split(rng, 3)
 
-            if wiring_mode == "genetic":
-                # Use genetic mutations instead of completely fresh circuits
-                circuit_pool, avg_steps_reset = (
-                    circuit_pool.reset_with_genetic_mutation(
-                        key=reset_key,
-                        fraction=reset_pool_fraction,
+                if wiring_mode == "genetic":
+                    # Use genetic mutations instead of completely fresh circuits
+                    circuit_pool, avg_steps_reset = (
+                        circuit_pool.reset_with_genetic_mutation(
+                            key=reset_key,
+                            fraction=reset_pool_fraction,
+                            layer_sizes=layer_sizes,
+                            input_n=input_n,
+                            arity=arity,
+                            hidden_dim=hidden_dim,
+                            mutation_rate=genetic_mutation_rate,
+                            n_swaps_per_layer=genetic_swaps_per_layer,
+                            reset_strategy=reset_strategy,
+                            combined_weights=combined_weights,
+                        )
+                    )
+                else:
+                    # Original logic for fixed and random wiring modes
+                    # Generate fresh circuits for resetting
+                    if wiring_mode == "fixed":
+                        # Use the fixed key for generating wirings
+                        fresh_key = wiring_fixed_key
+
+                    fresh_pool = initialize_graph_pool(
+                        rng=fresh_key,
                         layer_sizes=layer_sizes,
+                        pool_size=pool_size,  # Use same size as circuit_pool
                         input_n=input_n,
                         arity=arity,
                         hidden_dim=hidden_dim,
-                        mutation_rate=genetic_mutation_rate,
+                        wiring_mode=wiring_mode,
+                        initial_diversity=initial_diversity,
+                    )
+
+                    # Reset a fraction of the pool and get avg steps of reset graphs
+                    circuit_pool, avg_steps_reset = circuit_pool.reset_fraction(
+                        reset_key,
+                        reset_pool_fraction,
+                        fresh_pool.graphs,
+                        fresh_pool.wires,
+                        fresh_pool.logits,
                         reset_strategy=reset_strategy,
                         combined_weights=combined_weights,
                     )
+
+                # Update last reset epoch
+                last_reset_epoch = epoch
+                diversity = circuit_pool.get_wiring_diversity(layer_sizes)
+
+            if jp.isnan(loss):
+                log.warning(
+                    f"Loss is NaN at epoch {epoch}, returning last stable state"
                 )
-            else:
-                # Original logic for fixed and random wiring modes
-                # Generate fresh circuits for resetting
-                if wiring_mode == "fixed":
-                    # Use the fixed key for generating wirings
-                    fresh_key = wiring_fixed_key
-
-                fresh_pool = initialize_graph_pool(
-                    rng=fresh_key,
-                    layer_sizes=layer_sizes,
-                    pool_size=pool_size,  # Use same size as circuit_pool
-                    input_n=input_n,
-                    arity=arity,
-                    hidden_dim=hidden_dim,
-                    wiring_mode=wiring_mode,
+                # Save the last stable state if enabled
+                _save_stable_state(
+                    checkpoint_path,
+                    save_stable_states,
+                    last_stable_state,
+                    epoch,
+                    wandb_run,
                 )
-
-                # Reset a fraction of the pool and get avg steps of reset graphs
-                circuit_pool, avg_steps_reset = circuit_pool.reset_fraction(
-                    reset_key,
-                    reset_pool_fraction,
-                    fresh_pool.graphs,
-                    fresh_pool.wires,
-                    fresh_pool.logits,
-                    reset_strategy=reset_strategy,
-                    combined_weights=combined_weights,
-                )
-
-            # Update last reset epoch
-            last_reset_epoch = epoch
-
-        if jp.isnan(loss):
-            log.warning(f"Loss is NaN at epoch {epoch}, returning last stable state")
-            # Save the last stable state if enabled
-            _save_stable_state(
-                checkpoint_path,
-                save_stable_states,
-                last_stable_state,
-                epoch,
-                wandb_run,
-            )
-            return last_stable_state
-        else:
-            # Update last stable state
-            last_stable_state = {
-                "model": model,
-                "optimizer": optimizer,
-                "pool": circuit_pool,
-                "metrics": {
-                    "losses": losses.copy(),
-                    "hard_losses": hard_losses.copy(),
-                    "accuracies": accuracies.copy(),
-                    "hard_accuracies": hard_accuracies.copy(),
-                    "reset_steps": reset_steps.copy(),
-                },
-                "epoch": epoch,
-            }
-
-            # Record metrics
-            losses.append(float(loss))
-            hard_losses.append(float(hard_loss))
-            accuracies.append(float(accuracy))
-            hard_accuracies.append(float(hard_accuracy))
-            reset_steps.append(float(avg_steps_reset))
-
-            # Get current metric value for best model tracking
-            current_metric_value = None
-            if best_metric == "loss":
-                current_metric_value = float(loss)
-            elif best_metric == "hard_loss":
-                current_metric_value = float(hard_loss)
-            elif best_metric == "accuracy":
-                current_metric_value = float(accuracy)
-            elif best_metric == "hard_accuracy":
-                current_metric_value = float(hard_accuracy)
+                return last_stable_state
             else:
-                raise ValueError(f"Unknown best_metric: {best_metric}")
-
-            diversity = circuit_pool.get_wiring_diversity(layer_sizes)
-            avg_steps = circuit_pool.get_average_update_steps()
-            # Log to wandb if enabled
-            metrics_dict = {
-                "training/epoch": epoch,
-                "training/loss": float(loss),
-                "training/hard_loss": float(hard_loss),
-                "training/accuracy": float(accuracy),
-                "training/hard_accuracy": float(hard_accuracy),
-                "scheduler/pool_reset_interval": current_reset_interval,
-                "pool/wiring_diversity": float(diversity),
-                "pool/reset_steps": float(avg_steps_reset),
-                "pool/avg_update_steps": float(avg_steps),
-                "pool/loss_steps": loss_steps,
-            }       
-
-            # Add learning rate if available
-            if schedule is not None:
-                schedule_value = schedule(epoch)
-            else:
-                schedule_value = learning_rate
-            metrics_dict["scheduler/learning_rate"] = schedule_value
-
-            _log_to_wandb(wandb_run, metrics_dict, epoch, log_interval)
-
-            # Update progress bar with current metrics
-
-            pbar.set_postfix(
-                {
-                    "Loss": f"{loss:.4f}",
-                    "Accuracy": f"{accuracy:.4f}",
-                    "Hard Acc": f"{hard_accuracy:.4f}",
-                    "Diversity": f"{diversity:.3f}",
-                    "Reset Steps": f"{avg_steps_reset:.2f}",
-                    "Loss Steps": f"{loss_steps:.2f}",
+                # Update last stable state
+                last_stable_state = {
+                    "model": model,
+                    "optimizer": optimizer,
+                    "pool": circuit_pool,
+                    "metrics": {
+                        "losses": losses.copy(),
+                        "hard_losses": hard_losses.copy(),
+                        "accuracies": accuracies.copy(),
+                        "hard_accuracies": hard_accuracies.copy(),
+                        "reset_steps": reset_steps.copy(),
+                    },
+                    "epoch": epoch,
                 }
-            )
 
-            # Check if this is the best model based on the specified metric
-            is_best = False
-            if "accuracy" in best_metric:  # For accuracy metrics, higher is better
-                if current_metric_value > best_metric_value:
-                    best_metric_value = current_metric_value
-                    is_best = True
-            else:  # For loss metrics, lower is better
-                if current_metric_value < best_metric_value:
-                    best_metric_value = current_metric_value
-                    is_best = True
+                # Record metrics
+                losses.append(float(loss))
+                hard_losses.append(float(hard_loss))
+                accuracies.append(float(accuracy))
+                hard_accuracies.append(float(hard_accuracy))
+                reset_steps.append(float(avg_steps_reset))
 
-            # Save periodic checkpoint if needed
-            if checkpoint_enabled:
-                _save_periodic_checkpoint(
-                    checkpoint_path,
-                    model,
-                    optimizer,
+                # Prepare training metrics for best model tracking
+                training_metrics = {
+                    "loss": float(loss),
+                    "hard_loss": float(hard_loss),
+                    "accuracy": float(accuracy),
+                    "hard_accuracy": float(hard_accuracy),
+                }
+
+                # Initialize evaluation metrics as None (will be set if periodic eval runs)
+                current_eval_metrics = None
+
+                avg_steps = circuit_pool.get_average_update_steps()
+                # Log to wandb if enabled
+                metrics_dict = {
+                    "training/epoch": epoch,
+                    "training/loss": float(loss),
+                    "training/hard_loss": float(hard_loss),
+                    "training/accuracy": float(accuracy),
+                    "training/hard_accuracy": float(hard_accuracy),
+                    "scheduler/pool_reset_interval": current_reset_interval,
+                    "pool/wiring_diversity": float(diversity),
+                    "pool/reset_steps": float(avg_steps_reset),
+                    "pool/avg_update_steps": float(avg_steps),
+                    "pool/loss_steps": loss_steps,
+                }
+
+                # Add learning rate if available
+                if schedule is not None:
+                    schedule_value = schedule(epoch)
+                else:
+                    schedule_value = learning_rate
+                metrics_dict["scheduler/learning_rate"] = schedule_value
+
+                _log_to_wandb(wandb_run, metrics_dict, epoch, log_interval)
+
+                # Update progress bar with current metrics
+                pbar.set_postfix(
                     {
-                        "losses": losses,
-                        "hard_losses": hard_losses,
-                        "accuracies": accuracies,
-                        "hard_accuracies": hard_accuracies,
-                        "reset_steps": reset_steps,
-                    },
-                    epoch,
-                    checkpoint_interval,
-                    wandb_run,
+                        "Loss": f"{loss:.4f}",
+                        "Accuracy": f"{accuracy:.4f}",
+                        "Hard Acc": f"{hard_accuracy:.4f}",
+                        "Diversity": f"{diversity:.3f}",
+                        "Reset Steps": f"{avg_steps_reset:.2f}",
+                        "Loss Steps": f"{loss_steps:.2f}",
+                    }
                 )
 
-                # Save best model if enabled and is best
-                _save_best_checkpoint(
-                    checkpoint_path,
-                    is_best,
-                    save_best,
-                    model,
-                    optimizer,
-                    {
-                        "losses": losses,
-                        "hard_losses": hard_losses,
-                        "accuracies": accuracies,
-                        "hard_accuracies": hard_accuracies,
-                        "reset_steps": reset_steps,
-                    },
-                    epoch,
-                    best_metric,
-                    current_metric_value,
-                    wandb_run,
-                )
+                # Step 2: Run periodic evaluation if enabled (BEFORE best model tracking)
+                if (
+                    periodic_eval_enabled
+                    and test_seed_wires is not None
+                    and test_seed_logits is not None
+                    and test_random_wires is not None
+                    and test_random_logits is not None
+                    and epoch % periodic_eval_interval == 0
+                ):
+                    # Run both evaluations: fixed seed and random batch (OOD)
+                    eval_results = _run_periodic_evaluation_dual(
+                        model=model,
+                        pool=circuit_pool,
+                        test_seed_wires=test_seed_wires,
+                        test_seed_logits=test_seed_logits,
+                        test_random_wires=test_random_wires,
+                        test_random_logits=test_random_logits,
+                        x_data=x_data,
+                        y_data=y_data,
+                        input_n=input_n,
+                        arity=arity,
+                        hidden_dim=hidden_dim,
+                        n_message_steps=periodic_eval_inner_steps,  # Use fixed message steps
+                        loss_type=loss_type,
+                        epoch=epoch,
+                        wandb_run=wandb_run,
+                        log_stepwise=periodic_eval_log_stepwise,
+                        layer_sizes=layer_sizes,
+                        log_pool_scatter=periodic_eval_log_pool_scatter,
+                    )
+                    # Extract final metrics for best model tracking (use fixed seed metrics)
+                    current_eval_metrics = eval_results.get("final_metrics_seed", None)
 
-            # Run periodic evaluation if enabled
-            if (
-                periodic_eval_enabled
-                and test_wires is not None
-                and test_logits is not None
-                # and epoch > 0
-                and epoch % periodic_eval_interval == 0
-            ):
-                _run_periodic_evaluation(
-                    model=model,
-                    pool=circuit_pool,
-                    test_wires=test_wires,
-                    test_logits=test_logits,
-                    x_data=x_data,
-                    y_data=y_data,
-                    input_n=input_n,
-                    arity=arity,
-                    hidden_dim=hidden_dim,
-                    n_message_steps=periodic_eval_inner_steps,  # Use current message steps
-                    loss_type=loss_type,
-                    epoch=epoch,
-                    wandb_run=wandb_run,
-                    log_stepwise=periodic_eval_log_stepwise,
-                    layer_sizes=layer_sizes,
-                    wiring_mode=wiring_mode,
-                    log_pool_scatter=periodic_eval_log_pool_scatter,
-                )
+                # Step 3: Get current metric value for best model tracking using modular approach
+                try:
+                    current_metric_value = _get_metric_value(
+                        best_metric,
+                        best_metric_source,
+                        training_metrics,
+                        current_eval_metrics,
+                    )
+                except (ValueError, KeyError) as e:
+                    if best_metric_source == "eval" and not periodic_eval_enabled:
+                        log.warning(
+                            f"Best metric source is 'eval' but periodic evaluation is disabled. "
+                            f"Falling back to training metrics for {best_metric}."
+                        )
+                        current_metric_value = _get_metric_value(
+                            best_metric,
+                            "training",
+                            training_metrics,
+                            current_eval_metrics,
+                        )
+                    elif best_metric_source == "eval" and current_eval_metrics is None:
+                        # Evaluation is enabled but hasn't run yet this epoch, skip best model check
+                        current_metric_value = None
+                    else:
+                        raise e
 
-            # Return the trained GNN model and metrics
-            result = {
-                "model": model,
-                "optimizer": optimizer,
-                "losses": losses,
-                "hard_losses": hard_losses,
-                "accuracies": accuracies,
-                "hard_accuracies": hard_accuracies,
-                "reset_steps": reset_steps,
-                "best_metric_value": best_metric_value,
-                "best_metric": best_metric,
-            }
+                # Check if this is the best model based on the specified metric
+                is_best = False
+                if current_metric_value is not None:
+                    if (
+                        "accuracy" in best_metric
+                    ):  # For accuracy metrics, higher is better
+                        if current_metric_value > best_metric_value:
+                            best_metric_value = current_metric_value
+                            is_best = True
+                    else:  # For loss metrics, lower is better
+                        if current_metric_value < best_metric_value:
+                            best_metric_value = current_metric_value
+                            is_best = True
 
-            # Add pool to result if used
-            result["pool"] = circuit_pool
+                # Step 4: Save checkpoints (periodic always, best if improvement detected)
+                if checkpoint_enabled:
+                    _save_periodic_checkpoint(
+                        checkpoint_path,
+                        model,
+                        optimizer,
+                        {
+                            "losses": losses,
+                            "hard_losses": hard_losses,
+                            "accuracies": accuracies,
+                            "hard_accuracies": hard_accuracies,
+                            "reset_steps": reset_steps,
+                        },
+                        epoch,
+                        checkpoint_interval,
+                        wandb_run,
+                    )
+
+                    # Save best model if enabled and is best
+                    _save_best_checkpoint(
+                        checkpoint_path,
+                        is_best,
+                        save_best,
+                        model,
+                        optimizer,
+                        {
+                            "losses": losses,
+                            "hard_losses": hard_losses,
+                            "accuracies": accuracies,
+                            "hard_accuracies": hard_accuracies,
+                            "reset_steps": reset_steps,
+                        },
+                        epoch,
+                        f"{best_metric_source}_{best_metric}",  # Include source in metric name
+                        current_metric_value
+                        if current_metric_value is not None
+                        else best_metric_value,
+                        wandb_run,
+                    )
+
+                # Return the trained GNN model and metrics
+                result = {
+                    "model": model,
+                    "optimizer": optimizer,
+                    "losses": losses,
+                    "hard_losses": hard_losses,
+                    "accuracies": accuracies,
+                    "hard_accuracies": hard_accuracies,
+                    "reset_steps": reset_steps,
+                    "best_metric_value": best_metric_value,
+                    "best_metric": best_metric,
+                }
+
+                # Add pool to result if used
+                result["pool"] = circuit_pool
+    except KeyboardInterrupt:
+        log.info(f"Training interrupted by user at epoch {epoch}/{epochs}")
+        # Ensure progress bar is properly closed
+        pbar.close()
 
     # Log final results to wandb
     _log_final_wandb_metrics(wandb_run, result, epochs)
