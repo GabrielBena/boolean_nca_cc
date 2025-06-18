@@ -28,7 +28,7 @@ from boolean_nca_cc.training.schedulers import (
 )
 
 from boolean_nca_cc.circuits.model import gen_circuit
-from boolean_nca_cc.training.pool import GraphPool, initialize_graph_pool
+from boolean_nca_cc.training.pool.pool import GraphPool, initialize_graph_pool
 from boolean_nca_cc.training.evaluation import (
     evaluate_model_stepwise,
     evaluate_model_stepwise_batched,
@@ -347,16 +347,19 @@ def _run_periodic_evaluation_dual(
     log_stepwise=False,
     layer_sizes: List[Tuple[int, int]] = None,
     log_pool_scatter: bool = False,
+    initial_diversity: int = 1,
+    eval_batch_size: int = 16,
+    eval_rng_key: jax.random.PRNGKey = None,
 ) -> Dict:
     """
-    Run dual periodic evaluation: both fixed seed and random batch (OOD).
+    Run dual periodic evaluation: both fixed seed and in-distribution/OOD batch evaluations.
 
     Args:
         model: The model to evaluate
         test_seed_wires: Test circuit wires (single circuit with fixed seed)
         test_seed_logits: Test circuit logits (single circuit with fixed seed)
-        test_random_wires: Test circuit wires (batch of random circuits)
-        test_random_logits: Test circuit logits (batch of random circuits)
+        test_random_wires: Test circuit wires (batch of random circuits for OOD)
+        test_random_logits: Test circuit logits (batch of random circuits for OOD)
         x_data: Input data
         y_data: Target data
         input_n: Number of input nodes
@@ -369,9 +372,12 @@ def _run_periodic_evaluation_dual(
         log_stepwise: Whether to log step-by-step metrics
         layer_sizes: Circuit layer sizes
         log_pool_scatter: Whether to log pool scatterplot (loss vs steps)
+        initial_diversity: Number of initial diverse circuits in the pool
+        eval_batch_size: Batch size for pool sampling evaluation
+        eval_rng_key: Random key for evaluation sampling
 
     Returns:
-        Dictionary with evaluation metrics from both fixed seed and random evaluations
+        Dictionary with evaluation metrics from fixed seed, in-distribution, and OOD evaluations
     """
     try:
         # 1. Run fixed seed evaluation (single circuit)
@@ -398,7 +404,46 @@ def _run_periodic_evaluation_dual(
             "eval_seed/epoch": epoch,
         }
 
-        # 2. Run random batch evaluation (OOD testing)
+        # 2. Run in-distribution evaluation if diversity > 1 (sample from pool)
+        final_metrics_pool = {}
+        step_metrics_pool = None
+        if initial_diversity > 1 and eval_rng_key is not None:
+            # Sample circuits from the current pool for in-distribution evaluation
+            pool_sample_key, eval_rng_key = jax.random.split(eval_rng_key)
+            _, pool_graphs, pool_wires, pool_logits = pool.sample(
+                pool_sample_key, eval_batch_size
+            )
+
+            # Reset the pool circuits to initial state for fair evaluation
+            # (remove any accumulated update steps and set loss to 0)
+            pool_graphs = pool_graphs._replace(
+                globals=jp.zeros_like(pool_graphs.globals)
+            )
+
+            step_metrics_pool = evaluate_model_stepwise_batched(
+                model=model,
+                batch_wires=pool_wires,
+                batch_logits=pool_logits,
+                x_data=x_data,
+                y_data=y_data,
+                input_n=input_n,
+                arity=arity,
+                hidden_dim=hidden_dim,
+                n_message_steps=n_message_steps,
+                loss_type=loss_type,
+                layer_sizes=layer_sizes,
+            )
+
+            # Get final metrics (last step) for pool sample
+            final_metrics_pool = {
+                "eval_pool/final_loss": step_metrics_pool["soft_loss"][-1],
+                "eval_pool/final_hard_loss": step_metrics_pool["hard_loss"][-1],
+                "eval_pool/final_accuracy": step_metrics_pool["soft_accuracy"][-1],
+                "eval_pool/final_hard_accuracy": step_metrics_pool["hard_accuracy"][-1],
+                "eval_pool/epoch": epoch,
+            }
+
+        # 3. Run random batch evaluation (OOD testing)
         step_metrics_random = evaluate_model_stepwise_batched(
             model=model,
             batch_wires=test_random_wires,
@@ -423,7 +468,11 @@ def _run_periodic_evaluation_dual(
         }
 
         # Combine all metrics for logging
-        combined_metrics = {**final_metrics_seed, **final_metrics_random}
+        combined_metrics = {
+            **final_metrics_seed,
+            **final_metrics_pool,
+            **final_metrics_random,
+        }
 
         # Log to wandb if enabled
         if wandb_run:
@@ -432,7 +481,7 @@ def _run_periodic_evaluation_dual(
             if log_pool_scatter:
                 _log_pool_scatter(pool, epoch, wandb_run)
 
-            # Optionally log step-by-step metrics for both evaluations
+            # Optionally log step-by-step metrics for all evaluations
             if log_stepwise:
                 # Fixed seed step-wise metrics
                 for step_idx in range(len(step_metrics_seed["step"])):
@@ -453,6 +502,29 @@ def _run_periodic_evaluation_dual(
                         f"eval_seed_steps/epoch": epoch,
                     }
                     wandb_run.log(step_data_seed)
+
+                # Pool sample step-wise metrics (if available)
+                if step_metrics_pool is not None:
+                    for step_idx in range(len(step_metrics_pool["step"])):
+                        step_data_pool = {
+                            f"eval_pool_steps/step": step_metrics_pool["step"][
+                                step_idx
+                            ],
+                            f"eval_pool_steps/loss": step_metrics_pool["soft_loss"][
+                                step_idx
+                            ],
+                            f"eval_pool_steps/hard_loss": step_metrics_pool[
+                                "hard_loss"
+                            ][step_idx],
+                            f"eval_pool_steps/accuracy": step_metrics_pool[
+                                "soft_accuracy"
+                            ][step_idx],
+                            f"eval_pool_steps/hard_accuracy": step_metrics_pool[
+                                "hard_accuracy"
+                            ][step_idx],
+                            f"eval_pool_steps/epoch": epoch,
+                        }
+                        wandb_run.log(step_data_pool)
 
                 # Random batch step-wise metrics
                 for step_idx in range(len(step_metrics_random["step"])):
@@ -476,23 +548,43 @@ def _run_periodic_evaluation_dual(
 
         # Log summary to console
         batch_size = test_random_wires[0].shape[0]
-        log.info(
+        log_message = (
             f"Periodic Eval (epoch {epoch}):\n"
             f"  Fixed Seed: Loss={final_metrics_seed['eval_seed/final_loss']:.4f}, "
             f"Acc={final_metrics_seed['eval_seed/final_accuracy']:.4f}, "
             f"Hard Acc={final_metrics_seed['eval_seed/final_hard_accuracy']:.4f}\n"
+        )
+
+        # Add pool evaluation if available
+        if final_metrics_pool:
+            log_message += (
+                f"  Pool Sample (batch {eval_batch_size}): Loss={final_metrics_pool['eval_pool/final_loss']:.4f}, "
+                f"Acc={final_metrics_pool['eval_pool/final_accuracy']:.4f}, "
+                f"Hard Acc={final_metrics_pool['eval_pool/final_hard_accuracy']:.4f}\n"
+            )
+
+        log_message += (
             f"  OOD (batch {batch_size}): Loss={final_metrics_random['eval_ood/final_loss']:.4f}, "
             f"Acc={final_metrics_random['eval_ood/final_accuracy']:.4f}, "
             f"Hard Acc={final_metrics_random['eval_ood/final_hard_accuracy']:.4f}"
         )
 
-        # Return both step metrics and final metrics for best model tracking
-        return {
+        log.info(log_message)
+
+        # Return all step metrics and final metrics for best model tracking
+        result = {
             "step_metrics_seed": step_metrics_seed,
             "step_metrics_random": step_metrics_random,
             "final_metrics_seed": final_metrics_seed,
             "final_metrics_random": final_metrics_random,
         }
+
+        # Add pool metrics if available
+        if step_metrics_pool is not None:
+            result["step_metrics_pool"] = step_metrics_pool
+            result["final_metrics_pool"] = final_metrics_pool
+
+        return result
 
     except Exception as e:
         log.warning(f"Error during periodic evaluation at epoch {epoch}: {e}")
@@ -665,10 +757,6 @@ def train_model(
         0.5,
         0.5,
     ),  # Weights for [loss, steps] in combined strategy
-    # Reset interval scheduling
-    reset_interval_schedule: Dict = None,  # Configuration dict for scheduling reset intervals with keys:
-    # Message steps scheduling (curriculum learning)
-    message_steps_schedule: Dict = None,  # Configuration dict for scheduling message passing steps with keys:
     # Learning rate scheduling
     lr_scheduler: str = "constant",  # Options: "constant", "exponential", "cosine", "linear_warmup"
     lr_scheduler_params: Dict = None,
@@ -730,23 +818,6 @@ def train_model(
         reset_pool_interval: Number of epochs between pool resets
         reset_strategy: Strategy for selecting graphs to reset ("uniform", "steps_biased", "loss_biased", or "combined")
         combined_weights: Tuple of weights (loss_weight, steps_weight) for combining factors in "combined" strategy
-        reset_interval_schedule: Configuration dict for scheduling reset intervals with keys:
-            - enabled: Whether to use scheduling
-            - type: Schedule type ("constant", "linear", "exponential")
-            - initial_interval: Starting interval (frequent resets early)
-            - final_interval: Ending interval (rare resets late)
-            - decay_rate: For exponential decay
-            - transition_epochs: For linear decay (None = use total epochs)
-        message_steps_schedule: Configuration dict for scheduling message passing steps with keys:
-            - enabled: Whether to use message steps scheduling (curriculum learning)
-            - type: Schedule type ("constant", "linear", "exponential", "step")
-            - initial_steps: Starting number of message steps (should be small for easy gradients)
-            - final_steps: Final number of message steps
-            - constant_product: Product of (meta_batch_size * n_message_steps) that should be maintained
-            - transition_epochs: For linear/step schedules (None = use total epochs)
-            - growth_rate: For exponential growth
-            - step_intervals: For step schedule - list of epochs where to increase steps
-            - step_values: For step schedule - list of step values
         key: Random seed
         wiring_fixed_key: Fixed key for generating wirings when wiring_mode='fixed'
         init_model: Optional pre-trained GNN model to continue training
@@ -1041,10 +1112,6 @@ def train_model(
     pbar = tqdm(range(epochs), desc="Training GNN")
     avg_steps_reset = 0
 
-    # Initialize reset interval scheduler if provided
-    if reset_interval_schedule is None:
-        reset_interval_schedule = {"enabled": False}
-
     # Track last reset epoch for scheduling
     last_reset_epoch = -1  # Initialize to -1 so first check works correctly
 
@@ -1100,10 +1167,6 @@ def train_model(
     # Training loop
     try:
         for epoch in pbar:
-            # Get current message steps and batch size using scheduler
-            if message_steps_schedule is None:
-                message_steps_schedule = {"enabled": False}
-
             # Pool-based training
             # Sample a batch from the pool using the current (potentially dynamic) batch size
             rng, sample_key, loss_key = jax.random.split(rng, 3)
@@ -1135,11 +1198,8 @@ def train_model(
             *_, hard_loss, _, _, accuracy, hard_accuracy, _, _ = aux
 
             # Reset a fraction of the pool using scheduled intervals
-            current_reset_interval = get_current_reset_interval(
-                epoch, reset_interval_schedule, epochs, reset_pool_interval
-            )
 
-            if should_reset_pool(epoch, current_reset_interval, last_reset_epoch):
+            if should_reset_pool(epoch, reset_pool_interval, last_reset_epoch):
                 rng, reset_key, fresh_key = jax.random.split(rng, 3)
 
                 if wiring_mode == "genetic":
@@ -1246,7 +1306,6 @@ def train_model(
                     "training/hard_loss": float(hard_loss),
                     "training/accuracy": float(accuracy),
                     "training/hard_accuracy": float(hard_accuracy),
-                    "scheduler/pool_reset_interval": current_reset_interval,
                     "pool/wiring_diversity": float(diversity),
                     "pool/reset_steps": float(avg_steps_reset),
                     "pool/avg_update_steps": float(avg_steps),
@@ -1283,7 +1342,8 @@ def train_model(
                     and test_random_logits is not None
                     and epoch % periodic_eval_interval == 0
                 ):
-                    # Run both evaluations: fixed seed and random batch (OOD)
+                    # Run enhanced evaluations: fixed seed, pool sample (if diversity > 1), and OOD
+                    rng, eval_key = jax.random.split(rng)
                     eval_results = _run_periodic_evaluation_dual(
                         model=model,
                         pool=circuit_pool,
@@ -1303,6 +1363,9 @@ def train_model(
                         log_stepwise=periodic_eval_log_stepwise,
                         layer_sizes=layer_sizes,
                         log_pool_scatter=periodic_eval_log_pool_scatter,
+                        initial_diversity=initial_diversity,
+                        eval_batch_size=periodic_eval_batch_size,
+                        eval_rng_key=eval_key,
                     )
                     # Extract final metrics for best model tracking (use fixed seed metrics)
                     current_eval_metrics = eval_results.get("final_metrics_seed", None)

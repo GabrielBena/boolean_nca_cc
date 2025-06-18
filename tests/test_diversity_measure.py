@@ -11,7 +11,7 @@ across various circuit architectures to verify that the metric behaves correctly
 
 import jax
 import jax.numpy as jp
-from boolean_nca_cc.training.pool import initialize_graph_pool
+from boolean_nca_cc.training.pool.pool import initialize_graph_pool
 from boolean_nca_cc.circuits.model import generate_layer_sizes
 
 

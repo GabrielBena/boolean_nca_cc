@@ -26,9 +26,9 @@ class CircuitGNN(nnx.Module):
 
     def __init__(
         self,
-        node_mlp_features: List[int] = [64, 32],
-        edge_mlp_features: List[int] = [64, 32],
         hidden_dim: int = 16,
+        mlp_dim: int = 32,
+        mlp_n_layers: int = 2,
         arity: int = 2,
         message_passing: bool = True,
         use_attention: bool = False,
@@ -42,9 +42,9 @@ class CircuitGNN(nnx.Module):
         Initialize the Circuit GNN.
 
         Args:
-            node_mlp_features: Hidden layer sizes for the node MLP
-            edge_mlp_features: Hidden layer sizes for the edge MLP
             hidden_dim: Dimension of hidden features
+            mlp_dim: Hidden layer size for the MLP
+            mlp_n_layers: Number of layers for the MLP
             arity: Number of inputs per gate in the boolean circuit
             message_passing: Whether to use message passing or only self-updates
             use_attention: Whether to use attention-based message aggregation
@@ -56,10 +56,12 @@ class CircuitGNN(nnx.Module):
         self.arity = arity
         self.message_passing = message_passing
         self.hidden_dim = hidden_dim
+        self.mlp_dim = mlp_dim
+        self.mlp_n_layers = mlp_n_layers
 
         # Create the node and edge update modules
         self.node_update = NodeUpdateModule(
-            node_mlp_features=node_mlp_features,
+            node_mlp_features=[mlp_dim] * mlp_n_layers,
             hidden_dim=hidden_dim,
             arity=arity,
             message_passing=message_passing,
@@ -69,7 +71,7 @@ class CircuitGNN(nnx.Module):
         )
 
         self.edge_update = EdgeUpdateModule(
-            edge_mlp_features=edge_mlp_features,
+            edge_mlp_features=[mlp_dim] * mlp_n_layers,
             hidden_dim=hidden_dim,
             arity=arity,
             rngs=rngs,

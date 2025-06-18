@@ -37,17 +37,9 @@ training:
   # LOSS TYPE
   loss_type: "l4"  # Options: "l4", "l2", or "bce"
   random_loss_step: false  # Use random message passing step for loss computation
-  use_beta_loss_step: true  # Use beta distribution for random loss step (varies from early to late steps through training)
-  # MESSAGE STEPS CURRICULUM LEARNING
-  message_steps_schedule:
-    enabled: false  # Whether to use message steps scheduling (curriculum learning)
-    type: "linear"  # Options: "constant", "linear", "exponential", "step"
-    initial_steps: 2   # Start with fewer steps for easier gradients
-    final_steps: ${training.n_message_steps}    # End with more steps for final performance
-    constant_product: null  # Constant product of (meta_batch_size * n_message_steps) to adjust batch size (if null, uses base_batch_size allways)
-    transition_epochs: null  # For linear schedule (if null, uses total training epochs)
+  use_beta_loss_step: false  # Use beta distribution for random loss step (varies from early to late steps through training)
   # BATCH SIZE
-  meta_batch_size: 64
+  meta_batch_size: 256
   # OPTIMIZATION
   learning_rate: 1e-4
   weight_decay: 1e-5
@@ -66,7 +58,7 @@ training:
 
 # Pool configuration for meta-learning
 pool:
-  size: 2048
+  size: 8192
   reset_fraction: 0.1
   reset_interval: 128
   reset_strategy: "combined"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
@@ -75,17 +67,6 @@ pool:
   mutation_rate: 1e-3 # For genetic mutation rate
   n_swaps_per_layer: null # For genetic mutation number of swaps per layer
   initial_diversity: ${training.initial_diversity} # For genetic mutation number of initial wires
-
-  # Reset interval scheduling (frequent early -> rare late)
-  reset_interval_schedule:
-    enabled: false
-    type: "linear"  # Options: "constant", "linear", "exponential"
-    initial_interval: 32     # Start with frequent resets (every 10 epochs)
-    final_interval: 1024      # End with rare resets (every 500 epochs) 
-    # For exponential decay
-    decay_rate: 0.95         # Exponential decay factor per epoch
-    # For linear decay  
-    transition_epochs: null  # If null, uses total training epochs
 
   # Gate knockout ("hard" LUT zeroing - resets globals)
   gate_knockout:

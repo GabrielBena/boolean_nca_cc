@@ -8,7 +8,7 @@ the number of different initial wirings in genetic mode.
 
 import jax
 import jax.numpy as jp
-from boolean_nca_cc.training.pool import initialize_graph_pool
+from boolean_nca_cc.training.pool.pool import initialize_graph_pool
 
 
 def test_initial_diversity():

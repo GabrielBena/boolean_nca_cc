@@ -1,0 +1,10 @@
+# Define parameter sweeps
+defaults:
+  - override hydra/launcher: basic
+
+sweep:
+  grid:  # parameters to combine in all possible ways
+    # seed: [1, 2, 3]
+    model: [self_attention, gnn]
+    model.hidden_dim: [32, 64, 128, 256, 512]
+    training.initial_diversity: [1, 4, 8, 32, 64, 256, 1024, 8192]

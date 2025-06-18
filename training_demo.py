@@ -30,7 +30,7 @@ from boolean_nca_cc.training.evaluation import (
 )
 
 # Import genetic mutation functions
-from boolean_nca_cc.training.perturbation import mutate_wires_swap
+from boolean_nca_cc.training.pool.perturbation import mutate_wires_swap
 
 # Import model components
 

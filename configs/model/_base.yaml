@@ -1,0 +1,7 @@
+defaults:
+  - _self_
+
+hidden_dim: 128
+mlp_dim: 32
+zero_init: false
+re_zero_update: true

@@ -294,15 +294,11 @@ def main(cfg: DictConfig) -> None:
         # Pool parameters
         pool_size=cfg.pool.size,
         reset_pool_fraction=cfg.pool.reset_fraction,
-        reset_pool_interval=cfg.pool.reset_interval,
         reset_strategy=cfg.pool.reset_strategy,
-        reset_interval_schedule=cfg.pool.reset_interval_schedule,
         # Genetic mutation parameters
         genetic_mutation_rate=cfg.pool.mutation_rate,
         genetic_swaps_per_layer=cfg.pool.n_swaps_per_layer,
         initial_diversity=cfg.pool.initial_diversity,
-        # Message steps scheduling (curriculum learning)
-        message_steps_schedule=cfg.training.message_steps_schedule,
         # Learning rate scheduling
         lr_scheduler=cfg.training.lr_scheduler,
         lr_scheduler_params=cfg.training.lr_scheduler_params,

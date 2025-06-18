@@ -16,7 +16,7 @@ import jraph
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.utils.graph_builder import build_graph
 from boolean_nca_cc.utils.extraction import extract_logits_from_graph
-from boolean_nca_cc.training.perturbation import mutate_wires_batch
+from boolean_nca_cc.training.pool.perturbation import mutate_wires_batch
 
 PyTree = Any
 
