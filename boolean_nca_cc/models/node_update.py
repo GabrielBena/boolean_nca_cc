@@ -31,6 +31,7 @@ class NodeUpdateModule(nnx.Module):
         *,
         rngs: nnx.Rngs,
         zero_init: bool = True,
+        re_zero_update: bool = False,
     ):
         """
         Initialize the node update module.
@@ -42,6 +43,7 @@ class NodeUpdateModule(nnx.Module):
             message_passing: Whether to use message passing or only self-updates
             rngs: Random number generators
             zero_init: Whether to initialize weights and biases to zero
+            re_zero_update: Whether to use learnable update residual rate
         """
         self.arity = arity
         self.hidden_dim = hidden_dim
@@ -140,6 +142,27 @@ class NodeUpdateModule(nnx.Module):
 
         self.mlp = nnx.Sequential(*mlp_layers)
 
+        # Re-zero learnable scaling parameters
+        self.logit_scale = (
+            nnx.Param(
+                jp.zeros(1),
+                name="logit_scale",
+                rngs=rngs,
+            )
+            if re_zero_update
+            else 1.0
+        )
+
+        self.hidden_scale = (
+            nnx.Param(
+                jp.zeros(1),
+                name="hidden_scale",
+                rngs=rngs,
+            )
+            if re_zero_update
+            else 1.0
+        )
+
     def __call__(
         self,
         nodes: NodeType,
@@ -205,6 +228,10 @@ class NodeUpdateModule(nnx.Module):
         delta_logits = delta_combined_features[..., : self.logit_dim]
         delta_hidden = delta_combined_features[..., self.logit_dim :]
 
+        # Apply re-zero scaling to deltas
+        scaled_delta_logits = self.logit_scale * delta_logits
+        scaled_delta_hidden = self.hidden_scale * delta_hidden
+
         # Apply residual update only to non-input nodes (layer > 0)
         is_gate_node = nodes["layer"] > 0
         # Ensure mask matches feature dimensions for broadcasting
@@ -212,10 +239,14 @@ class NodeUpdateModule(nnx.Module):
         is_gate_node_hidden_mask = is_gate_node[:, None]
 
         updated_logits = jp.where(
-            is_gate_node_logits_mask, current_logits + delta_logits, current_logits
+            is_gate_node_logits_mask,
+            current_logits + scaled_delta_logits,
+            current_logits,
         )
         updated_hidden = jp.where(
-            is_gate_node_hidden_mask, current_hidden + delta_hidden, current_hidden
+            is_gate_node_hidden_mask,
+            current_hidden + scaled_delta_hidden,
+            current_hidden,
         )
 
         # Update only the 'logits' and 'hidden' fields, preserving others

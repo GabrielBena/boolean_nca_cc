@@ -175,6 +175,7 @@ class CircuitSelfAttention(nnx.Module):
         rngs: nnx.Rngs,
         type: str = "self_attention",
         zero_init: bool = True,
+        re_zero_update: bool = False,
     ):
         """
         Initialize the circuit self-attention model.
@@ -188,6 +189,9 @@ class CircuitSelfAttention(nnx.Module):
             mlp_dim: Dimension of feed-forward network
             dropout_rate: Dropout rate
             rngs: Random number generators
+            type: Type of model
+            zero_init: Whether to initialize weights to zero
+            re_zero_update: Wether to use learnable update residual rate
         """
         self.n_node = int(n_node)
         self.arity = arity
@@ -223,22 +227,41 @@ class CircuitSelfAttention(nnx.Module):
             self.logit_dim,
             kernel_init=nnx.initializers.zeros
             if zero_init
-            else nnx.initializers.normal(stddev=1e-6),
+            else nnx.initializers.kaiming_normal(),
             bias_init=nnx.initializers.zeros
             if zero_init
-            else nnx.initializers.normal(stddev=1e-6),
+            else nnx.initializers.normal(stddev=1e-4),
             rngs=rngs,
         )
+        self.logit_scale = (
+            nnx.Param(
+                jp.zeros(1),
+                name="logit_scale",
+                rngs=rngs,
+            )
+            if re_zero_update
+            else 1.0
+        )
+
         self.hidden_proj = nnx.Linear(
             hidden_dim * 4,
             hidden_dim,
             kernel_init=nnx.initializers.zeros
             if zero_init
-            else nnx.initializers.normal(stddev=1e-6),
+            else nnx.initializers.kaiming_normal(),
             bias_init=nnx.initializers.zeros
             if zero_init
-            else nnx.initializers.normal(stddev=1e-6),
+            else nnx.initializers.normal(stddev=1e-4),
             rngs=rngs,
+        )
+        self.hidden_scale = (
+            nnx.Param(
+                jp.zeros(1),
+                name="hidden_scale",
+                rngs=rngs,
+            )
+            if re_zero_update
+            else 1.0
         )
 
     def _create_attention_mask(
@@ -355,8 +378,8 @@ class CircuitSelfAttention(nnx.Module):
         hidden_updates = hidden_updates[0]
 
         # Update logits and hidden features in a residual manner
-        updated_logits = nodes["logits"] + logit_updates
-        updated_hidden = nodes["hidden"] + hidden_updates
+        updated_logits = nodes["logits"] + self.logit_scale * logit_updates
+        updated_hidden = nodes["hidden"] + self.hidden_scale * hidden_updates
 
         # Create updated nodes dictionary
         updated_nodes = {**nodes, "logits": updated_logits, "hidden": updated_hidden}

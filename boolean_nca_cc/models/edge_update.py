@@ -29,7 +29,6 @@ class EdgeUpdateModule(nnx.Module):
         arity: int,
         *,
         rngs: nnx.Rngs,
-        zero_init: bool = True,
     ):
         """
         Initialize the edge update module.
@@ -39,6 +38,8 @@ class EdgeUpdateModule(nnx.Module):
             hidden_dim: Dimension of hidden features
             arity: Number of inputs per gate in the boolean circuit
             rngs: Random number generators
+            zero_init: Whether to initialize weights and biases to zero
+            re_zero_update: Whether to use learnable update residual rate
         """
         self.hidden_dim = hidden_dim
         self.arity = arity
@@ -66,12 +67,8 @@ class EdgeUpdateModule(nnx.Module):
                     in_f,
                     out_f,
                     rngs=rngs,
-                    kernel_init=nnx.initializers.zeros
-                    if zero_init
-                    else nnx.initializers.xavier_normal(),
-                    bias_init=jax.nn.initializers.zeros
-                    if zero_init
-                    else nnx.initializers.normal(stddev=1e-4),
+                    kernel_init=nnx.initializers.xavier_normal(),
+                    bias_init=jax.nn.initializers.random_normal(stddev=1e-4),
                 )
             )
             # Add BatchNorm and ReLU except for the last layer
@@ -120,4 +117,5 @@ class EdgeUpdateModule(nnx.Module):
 
         # Apply edge MLP to generate the message
         message = self.edge_mlp(sender_combined_features)
+
         return message  # Shape: [num_edges, logit_dim + hidden_dim]

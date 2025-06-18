@@ -36,6 +36,7 @@ class CircuitGNN(nnx.Module):
         rngs: nnx.Rngs,
         type: str = "gnn",
         zero_init: bool = True,
+        re_zero_update: bool = False,
     ):
         """
         Initialize the Circuit GNN.
@@ -48,6 +49,9 @@ class CircuitGNN(nnx.Module):
             message_passing: Whether to use message passing or only self-updates
             use_attention: Whether to use attention-based message aggregation
             rngs: Random number generators
+            type: Type of model
+            zero_init: Whether to initialize weights to zero
+            re_zero_update: Whether to use learnable update residual rate
         """
         self.arity = arity
         self.message_passing = message_passing
@@ -61,6 +65,7 @@ class CircuitGNN(nnx.Module):
             message_passing=message_passing,
             rngs=rngs,
             zero_init=zero_init,
+            re_zero_update=re_zero_update,
         )
 
         self.edge_update = EdgeUpdateModule(
@@ -68,7 +73,6 @@ class CircuitGNN(nnx.Module):
             hidden_dim=hidden_dim,
             arity=arity,
             rngs=rngs,
-            zero_init=zero_init,
         )
 
         # Configure the aggregation function
