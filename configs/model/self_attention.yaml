@@ -3,8 +3,9 @@ _target_: boolean_nca_cc.models.CircuitSelfAttention
 
 type: "self_attention"
 hidden_dim: 128
-num_heads: 4
-num_layers: 3
-mlp_dim: 256
+num_heads: 8
+num_layers: 1
+mlp_dim: 64
 dropout_rate: 0.0 
 zero_init: false
+re_zero_update: true

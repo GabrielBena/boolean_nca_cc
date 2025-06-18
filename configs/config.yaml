@@ -2,7 +2,7 @@
 
 # Default parameters for experiment
 defaults:
-  - model: gnn  # Default model (gnn or self_attention)
+  - model: self_attention  # Default model (gnn or self_attention)
   - _self_  # For self-overrides
 
 # Random seed for reproducibility
@@ -21,21 +21,22 @@ wandb:
 # Circuit configuration
 circuit:
   task: "reverse"
-  input_bits: 3
-  output_bits: 3
-  arity: 2
-  num_layers: 2
+  input_bits: 8
+  output_bits: 8
+  arity: 4
+  num_layers: 3
   layer_sizes: null  # Auto-generate if null 
 
 # Training parameters
 training:
   # WIRING MODE : "random" or "fixed"
   wiring_mode: "fixed"  # Options: "fixed", "genetic", or "random"
+  initial_diversity: 256
   # INNER LOOP
-  n_message_steps: 50  # Number of message passing steps per training iteration
+  n_message_steps: 5  # Number of message passing steps per training iteration
   # LOSS TYPE
   loss_type: "l4"  # Options: "l4", "l2", or "bce"
-  random_loss_step: true  # Use random message passing step for loss computation
+  random_loss_step: false  # Use random message passing step for loss computation
   use_beta_loss_step: true  # Use beta distribution for random loss step (varies from early to late steps through training)
   # MESSAGE STEPS CURRICULUM LEARNING
   message_steps_schedule:
@@ -46,9 +47,9 @@ training:
     constant_product: null  # Constant product of (meta_batch_size * n_message_steps) to adjust batch size (if null, uses base_batch_size allways)
     transition_epochs: null  # For linear schedule (if null, uses total training epochs)
   # BATCH SIZE
-  meta_batch_size: 128
+  meta_batch_size: 64
   # OPTIMIZATION
-  learning_rate: 4e-4
+  learning_rate: 1e-4
   weight_decay: 1e-5
   # LEARNING RATE SCHEDULER
   lr_scheduler: "linear_warmup"  # Options: "constant", "exponential", "cosine", "linear_warmup"
@@ -59,18 +60,21 @@ training:
     alpha: 1e-1 # final lr = 1% of initial lr
   # NUMBER OF EPOCHS
   epochs: null
-  epochs_power_of_2: 14 # 2^n
+  epochs_power_of_2: 17 # 2^n
   # USE SCAN
   use_scan: true
 
 # Pool configuration for meta-learning
 pool:
-  size: 1024
-  reset_fraction: 0.5
-  reset_interval: 16 # using reset_interval_schedule instead
+  size: 2048
+  reset_fraction: 0.1
+  reset_interval: 128
   reset_strategy: "combined"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
-  mutation_rate: 0.1
+  # Genetic mutation parameters
+  mutation_rate: 1e-3 # For genetic mutation rate
+  n_swaps_per_layer: null # For genetic mutation number of swaps per layer
+  initial_diversity: ${training.initial_diversity} # For genetic mutation number of initial wires
 
   # Reset interval scheduling (frequent early -> rare late)
   reset_interval_schedule:
@@ -115,19 +119,20 @@ backprop:
 eval:
   inner_steps: 100  # Number of message passing steps for inner loop evaluation
   # Periodic evaluation during training
+  log_stepwise: false  # Whether to log detailed step-by-step metrics to wandb
+  batch_size: 64  # Batch size for random wiring evaluation
+  log_pool_scatter: true
   periodic:
     enabled: true  # Whether to run periodic evaluation during training
-    interval: 256  # Evaluate every N epochs
-    log_stepwise: false  # Whether to log detailed step-by-step metrics to wandb
-    batch_size: 64  # Batch size for random wiring evaluation
-    log_pool_scatter: true
-
+    interval: 1024  # Evaluate every N epochs
+    
 # Checkpointing
 checkpoint:
   enabled: true
-  interval: 1024  # Save checkpoints every N epochs
+  interval: 1031  # Save checkpoints every N epochs (prime number to avoid rest pool before)
   save_best: true  # Whether to track and save the best model
   best_metric: "hard_accuracy"  # Metric to use for determining best model (loss, hard_loss, accuracy, hard_accuracy)
+  best_metric_source: "eval"  # Source of the metric ('training' or 'eval')
   save_stable_states: false  # Whether to save a checkpoint before potential NaN losses
 
 # Logging configuration

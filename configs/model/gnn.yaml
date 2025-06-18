@@ -8,3 +8,4 @@ node_mlp_features: [128, 128]
 edge_mlp_features: [128, 128]
 use_attention: false 
 zero_init: false
+re_zero_update: true
