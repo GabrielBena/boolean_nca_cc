@@ -16,7 +16,7 @@ wandb:
   entity: m2snn  # Your wandb username or team name
   run_name: null  # Auto-generated if null
   tags: ["boolean-circuit", "nca", "meta-learning"]
-
+  group: null
 
 # Circuit configuration
 circuit:
@@ -52,13 +52,13 @@ training:
     alpha: 1e-1 # final lr = 1% of initial lr
   # NUMBER OF EPOCHS
   epochs: null
-  epochs_power_of_2: 17 # 2^n
+  epochs_power_of_2: 16 # 2^n
   # USE SCAN
   use_scan: true
 
 # Pool configuration for meta-learning
 pool:
-  size: 8192
+  size: 2048
   reset_fraction: 0.1
   reset_interval: 128
   reset_strategy: "combined"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
