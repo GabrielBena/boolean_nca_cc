@@ -72,10 +72,9 @@ def create_evaluation_datasets(
     layer_sizes: List[Tuple[int, int]],
     arity: int,
     ood_batch_size: int,
-    pool: Optional[GraphPool] = None,
-    pool_batch_size: int = 16,
-    pool_rng_key: Optional[jax.random.PRNGKey] = None,
     initial_diversity: int = 1,
+    pool_diversity_size: int = 16,
+    wiring_mode: str = "random",
 ) -> EvaluationDatasets:
     """
     Create standardized evaluation datasets for consistent evaluation.
@@ -85,10 +84,9 @@ def create_evaluation_datasets(
         layer_sizes: Circuit layer configuration
         arity: Number of inputs per gate
         ood_batch_size: Number of random circuits for OOD evaluation
-        pool: Optional GraphPool for in-distribution evaluation
-        pool_batch_size: Number of circuits to sample from pool
-        pool_rng_key: Random key for pool sampling (required if pool is provided)
         initial_diversity: Initial diversity setting (determines if pool evaluation is used)
+        pool_diversity_size: Number of circuits to create for pool evaluation (when diversity > 1)
+        wiring_mode: Wiring mode for pool circuits ("random", "fixed", or "genetic")
 
     Returns:
         EvaluationDatasets object containing all evaluation circuits
@@ -110,28 +108,105 @@ def create_evaluation_datasets(
     log.info(f"Created {ood_batch_size} OOD circuits (generalization)")
 
     # 3. Pool circuits (in-distribution evaluation if diversity > 1)
+    # Replicate the same logic as initialize_graph_pool for consistency
     pool_wires = None
     pool_logits = None
 
-    if initial_diversity > 1 and pool is not None and pool_rng_key is not None:
-        try:
-            # Sample circuits from the current pool for in-distribution evaluation
-            _, pool_graphs, sampled_pool_wires, sampled_pool_logits = pool.sample(
-                pool_rng_key, pool_batch_size
-            )
-            pool_wires = sampled_pool_wires
-            pool_logits = sampled_pool_logits
-            log.info(f"Created {pool_batch_size} pool circuits (in-distribution)")
-        except Exception as e:
-            log.warning(f"Failed to sample from pool for evaluation: {e}")
-            log.info("Pool evaluation will be skipped")
+    if initial_diversity > 1:
+        # Use a different seed for pool circuits (test_seed + 2000)
+        pool_rng = jax.random.PRNGKey(test_seed + 2000)
+
+        # Generate circuit wirings based on wiring mode (same logic as initialize_graph_pool)
+        if wiring_mode in ["fixed", "genetic"]:
+            # Clamp initial_diversity to valid range
+            effective_diversity = jp.clip(initial_diversity, 1, pool_diversity_size)
+
+            if effective_diversity == 1:
+                # Single wiring repeated for all circuits
+                single_wires, single_logits = gen_circuit(
+                    pool_rng, layer_sizes, arity=arity
+                )
+
+                # Replicate the same wiring for all circuits
+                pool_wires = jax.tree.map(
+                    lambda leaf: jp.repeat(
+                        leaf[None, ...], pool_diversity_size, axis=0
+                    ),
+                    single_wires,
+                )
+                pool_logits = jax.tree.map(
+                    lambda leaf: jp.repeat(
+                        leaf[None, ...], pool_diversity_size, axis=0
+                    ),
+                    single_logits,
+                )
+            elif effective_diversity >= pool_diversity_size:
+                # Each circuit gets a unique wiring (same as random mode)
+                pool_rngs = jax.random.split(pool_rng, pool_diversity_size)
+                pool_wires, pool_logits = vmap_gen_circuit(pool_rngs)
+            else:
+                # Generate N different wirings and repeat them across the pool
+                diversity_rngs = jax.random.split(pool_rng, effective_diversity)
+                diverse_wires, diverse_logits = vmap_gen_circuit(diversity_rngs)
+
+                # Calculate how many times to repeat each diverse wiring
+                base_repeats = pool_diversity_size // effective_diversity
+                extra_repeats = pool_diversity_size % effective_diversity
+
+                # Create repeat counts: first 'extra_repeats' get one extra copy
+                repeat_counts = jp.concatenate(
+                    [
+                        jp.full(extra_repeats, base_repeats + 1),
+                        jp.full(effective_diversity - extra_repeats, base_repeats),
+                    ]
+                )
+
+                # Repeat each diverse wiring according to repeat_counts
+                pool_wires = []
+                pool_logits = []
+
+                for layer_idx in range(len(diverse_wires)):
+                    layer_wires = []
+                    layer_logits = []
+
+                    for diversity_idx in range(effective_diversity):
+                        n_repeats = repeat_counts[diversity_idx]
+
+                        # Repeat this wiring n_repeats times
+                        repeated_wire = jp.repeat(
+                            diverse_wires[layer_idx][diversity_idx : diversity_idx + 1],
+                            n_repeats,
+                            axis=0,
+                        )
+                        repeated_logit = jp.repeat(
+                            diverse_logits[layer_idx][
+                                diversity_idx : diversity_idx + 1
+                            ],
+                            n_repeats,
+                            axis=0,
+                        )
+
+                        layer_wires.append(repeated_wire)
+                        layer_logits.append(repeated_logit)
+
+                    # Concatenate all repeats for this layer
+                    pool_wires.append(jp.concatenate(layer_wires, axis=0))
+                    pool_logits.append(jp.concatenate(layer_logits, axis=0))
+        else:  # wiring_mode == "random"
+            # In random mode, generate different wirings for each circuit (ignore initial_diversity)
+            pool_rngs = jax.random.split(pool_rng, pool_diversity_size)
+            pool_wires, pool_logits = vmap_gen_circuit(pool_rngs)
+
+        effective_diversity_log = (
+            effective_diversity
+            if wiring_mode in ["fixed", "genetic"]
+            else pool_diversity_size
+        )
+        log.info(
+            f"Created {pool_diversity_size} pool circuits (in-distribution, diversity={effective_diversity_log})"
+        )
     else:
-        if initial_diversity <= 1:
-            log.info("Pool evaluation skipped (diversity = 1)")
-        elif pool is None:
-            log.info("Pool evaluation skipped (no pool provided)")
-        else:
-            log.info("Pool evaluation skipped (no pool_rng_key provided)")
+        log.info("Pool evaluation skipped (diversity = 1)")
 
     datasets = EvaluationDatasets(
         test_seed_wires=test_seed_wires,

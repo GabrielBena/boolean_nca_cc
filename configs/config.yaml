@@ -9,6 +9,10 @@ defaults:
 seed: 0
 test_seed: 42
 
+# Output configuration
+output:
+  dir: null  # Output directory (null means use current working directory)
+
 # Wandb configuration
 wandb:
   enabled: true
@@ -113,7 +117,7 @@ stop_accuracy:
   threshold: 0.995  # Accuracy threshold to trigger early stopping
   metric: "hard_accuracy"  # Which accuracy metric to use ("accuracy" or "hard_accuracy")
   source: "training"  # Source of the metric ("training" or "eval")
-  patience: 5  # Number of epochs to wait after reaching threshold before stopping
+  patience: 10  # Number of epochs to wait after reaching threshold before stopping
   min_epochs: 1024  # Minimum number of epochs before early stopping can occur
 
 # Checkpointing
@@ -127,5 +131,5 @@ checkpoint:
 
 # Logging configuration
 logging:
-  log_interval: 64  # Log metrics every N epochs
+  log_interval: 16  # Log metrics every N epochs
   level: "INFO" 

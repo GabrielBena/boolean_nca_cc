@@ -375,29 +375,6 @@ def _log_final_wandb_metrics(wandb_run, results: Dict, epochs: int) -> None:
             }
         )
 
-        # Create and log final summary plots
-        with tempfile.TemporaryDirectory() as tmpdir:
-            plot_training_curves(
-                {
-                    "losses": results["losses"],
-                    "hard_losses": results["hard_losses"],
-                    "accuracies": results["accuracies"],
-                    "hard_accuracies": results["hard_accuracies"],
-                },
-                "Training Summary",
-                tmpdir,
-            )
-            # Log the plots to wandb
-            wandb_run.log(
-                {
-                    "summary/loss_curve": wandb_run.Image(
-                        os.path.join(tmpdir, "training_summary_loss.png")
-                    ),
-                    "summary/accuracy_curve": wandb_run.Image(
-                        os.path.join(tmpdir, "training_summary_accuracy.png")
-                    ),
-                }
-            )
     except Exception as e:
         log.warning(f"Error logging final metrics to wandb: {e}")
 
@@ -539,6 +516,16 @@ def run_periodic_evaluation_with_datasets(
                 "eval_pool/final_hard_accuracy": step_metrics_pool["hard_accuracy"][-1],
                 "eval_pool/epoch": epoch,
             }
+        else:
+            # pool data is just fixed seed evaluation
+            # Used to compare models that don't use pool data
+            final_metrics_pool = {
+                "eval_pool/final_loss": step_metrics_seed["soft_loss"][-1],
+                "eval_pool/final_hard_loss": step_metrics_seed["hard_loss"][-1],
+                "eval_pool/final_accuracy": step_metrics_seed["soft_accuracy"][-1],
+                "eval_pool/final_hard_accuracy": step_metrics_seed["hard_accuracy"][-1],
+                "eval_pool/epoch": epoch,
+            }
 
         # 3. Run OOD evaluation (random batch testing)
         step_metrics_random = evaluate_model_stepwise_batched(
@@ -583,20 +570,20 @@ def run_periodic_evaluation_with_datasets(
                 # Fixed seed step-wise metrics
                 for step_idx in range(len(step_metrics_seed["step"])):
                     step_data_seed = {
-                        f"eval_seed_steps/step": step_metrics_seed["step"][step_idx],
-                        f"eval_seed_steps/loss": step_metrics_seed["soft_loss"][
+                        "eval_seed_steps/step": step_metrics_seed["step"][step_idx],
+                        "eval_seed_steps/loss": step_metrics_seed["soft_loss"][
                             step_idx
                         ],
-                        f"eval_seed_steps/hard_loss": step_metrics_seed["hard_loss"][
+                        "eval_seed_steps/hard_loss": step_metrics_seed["hard_loss"][
                             step_idx
                         ],
-                        f"eval_seed_steps/accuracy": step_metrics_seed["soft_accuracy"][
+                        "eval_seed_steps/accuracy": step_metrics_seed["soft_accuracy"][
                             step_idx
                         ],
-                        f"eval_seed_steps/hard_accuracy": step_metrics_seed[
+                        "eval_seed_steps/hard_accuracy": step_metrics_seed[
                             "hard_accuracy"
                         ][step_idx],
-                        f"eval_seed_steps/epoch": epoch,
+                        "eval_seed_steps/epoch": epoch,
                     }
                     wandb_run.log(step_data_seed)
 
@@ -604,42 +591,40 @@ def run_periodic_evaluation_with_datasets(
                 if step_metrics_pool is not None:
                     for step_idx in range(len(step_metrics_pool["step"])):
                         step_data_pool = {
-                            f"eval_pool_steps/step": step_metrics_pool["step"][
+                            "eval_pool_steps/step": step_metrics_pool["step"][step_idx],
+                            "eval_pool_steps/loss": step_metrics_pool["soft_loss"][
                                 step_idx
                             ],
-                            f"eval_pool_steps/loss": step_metrics_pool["soft_loss"][
+                            "eval_pool_steps/hard_loss": step_metrics_pool["hard_loss"][
                                 step_idx
                             ],
-                            f"eval_pool_steps/hard_loss": step_metrics_pool[
-                                "hard_loss"
-                            ][step_idx],
-                            f"eval_pool_steps/accuracy": step_metrics_pool[
+                            "eval_pool_steps/accuracy": step_metrics_pool[
                                 "soft_accuracy"
                             ][step_idx],
-                            f"eval_pool_steps/hard_accuracy": step_metrics_pool[
+                            "eval_pool_steps/hard_accuracy": step_metrics_pool[
                                 "hard_accuracy"
                             ][step_idx],
-                            f"eval_pool_steps/epoch": epoch,
+                            "eval_pool_steps/epoch": epoch,
                         }
                         wandb_run.log(step_data_pool)
 
                 # Random batch step-wise metrics
                 for step_idx in range(len(step_metrics_random["step"])):
                     step_data_random = {
-                        f"eval_ood_steps/step": step_metrics_random["step"][step_idx],
-                        f"eval_ood_steps/loss": step_metrics_random["soft_loss"][
+                        "eval_ood_steps/step": step_metrics_random["step"][step_idx],
+                        "eval_ood_steps/loss": step_metrics_random["soft_loss"][
                             step_idx
                         ],
-                        f"eval_ood_steps/hard_loss": step_metrics_random["hard_loss"][
+                        "eval_ood_steps/hard_loss": step_metrics_random["hard_loss"][
                             step_idx
                         ],
-                        f"eval_ood_steps/accuracy": step_metrics_random[
-                            "soft_accuracy"
-                        ][step_idx],
-                        f"eval_ood_steps/hard_accuracy": step_metrics_random[
+                        "eval_ood_steps/accuracy": step_metrics_random["soft_accuracy"][
+                            step_idx
+                        ],
+                        "eval_ood_steps/hard_accuracy": step_metrics_random[
                             "hard_accuracy"
                         ][step_idx],
-                        f"eval_ood_steps/epoch": epoch,
+                        "eval_ood_steps/epoch": epoch,
                     }
                     wandb_run.log(step_data_random)
 
@@ -1116,10 +1101,9 @@ def train_model(
             layer_sizes=layer_sizes,
             arity=arity,
             ood_batch_size=periodic_eval_batch_size,
-            pool=None,  # Pool will be provided dynamically during evaluation
-            pool_batch_size=periodic_eval_batch_size,
-            pool_rng_key=None,  # Will be generated dynamically
             initial_diversity=initial_diversity,
+            pool_diversity_size=periodic_eval_batch_size,
+            wiring_mode=wiring_mode,
         )
 
         log.info(eval_datasets.get_summary())
@@ -1337,17 +1321,9 @@ def train_model(
                     # Run enhanced evaluations: fixed seed, pool sample (if diversity > 1), and OOD
                     rng, eval_key = jax.random.split(rng)
 
-                    # Create datasets with current pool for periodic evaluation
-                    current_datasets = create_evaluation_datasets(
-                        test_seed=periodic_eval_test_seed,
-                        layer_sizes=layer_sizes,
-                        arity=arity,
-                        ood_batch_size=periodic_eval_batch_size,
-                        pool=circuit_pool,
-                        pool_batch_size=periodic_eval_batch_size,
-                        pool_rng_key=eval_key,
-                        initial_diversity=initial_diversity,
-                    )
+                    # Use the same datasets created during initialization
+                    # The pool evaluation circuits are recreated with the same logic as training
+                    current_datasets = eval_datasets
 
                     eval_results = run_periodic_evaluation_with_datasets(
                         model=model,

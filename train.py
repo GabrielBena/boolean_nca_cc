@@ -179,8 +179,12 @@ def main(cfg: DictConfig) -> None:
     rng = jax.random.PRNGKey(cfg.seed)
 
     # Create output directory
-    output_dir = os.getcwd()
-    log.info(f"Working directory: {output_dir}")
+    if cfg.output.dir is not None:
+        output_dir = cfg.output.dir
+        os.makedirs(output_dir, exist_ok=True)
+    else:
+        output_dir = os.getcwd()
+    log.info(f"Output directory: {output_dir}")
 
     # Initialize wandb if enabled
     wandb_run = None
@@ -303,7 +307,7 @@ def main(cfg: DictConfig) -> None:
         pool_size=cfg.pool.size,
         reset_pool_fraction=cfg.pool.reset_fraction,
         reset_strategy=cfg.pool.reset_strategy,
-        reset_pool_interval=cfg.pool.reset_pool_interval,
+        reset_pool_interval=cfg.pool.reset_interval,
         # Genetic mutation parameters
         genetic_mutation_rate=cfg.pool.mutation_rate,
         genetic_swaps_per_layer=cfg.pool.n_swaps_per_layer,
@@ -371,10 +375,9 @@ def main(cfg: DictConfig) -> None:
         layer_sizes=layer_sizes,
         arity=cfg.circuit.arity,
         ood_batch_size=cfg.eval.batch_size,
-        pool=model_results.get("pool", None),
-        pool_batch_size=cfg.eval.batch_size,
-        pool_rng_key=pool_rng,
         initial_diversity=cfg.pool.initial_diversity,
+        pool_diversity_size=cfg.eval.batch_size,
+        wiring_mode=cfg.training.wiring_mode,
     )
 
     # Run comprehensive evaluation using standardized datasets
