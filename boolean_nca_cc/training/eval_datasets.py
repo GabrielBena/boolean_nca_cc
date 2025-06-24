@@ -1,8 +1,9 @@
 """
-Evaluation dataset creation utilities for standardized circuit generation.
+Unified evaluation dataset creation utilities for standardized circuit generation.
 
 This module provides functions to create consistent evaluation datasets
-across different parts of the codebase, ensuring reproducible evaluation.
+that exactly match the training distribution patterns, ensuring reproducible evaluation
+with proper IN-distribution and OUT-of-distribution testing.
 """
 
 import jax
@@ -11,281 +12,327 @@ from typing import List, Tuple, Optional, Dict, Any
 import logging
 
 from boolean_nca_cc.circuits.model import gen_circuit
-from boolean_nca_cc.training.pool.pool import GraphPool
 
 log = logging.getLogger(__name__)
 
 PyTree = Any
 
 
-class EvaluationDatasets:
+class UnifiedEvaluationDatasets:
     """
-    Container for standardized evaluation datasets.
+    Container for unified evaluation datasets with consistent IN/OUT-of-distribution testing.
 
     Attributes:
-        test_seed_wires: Single circuit wires for consistent reference evaluation
-        test_seed_logits: Single circuit logits for consistent reference evaluation
-        pool_wires: Batch of wires from training pool (if diversity > 1)
-        pool_logits: Batch of logits from training pool (if diversity > 1)
-        ood_wires: Batch of random circuit wires for OOD evaluation
-        ood_logits: Batch of random circuit logits for OOD evaluation
-        ood_batch_size: Size of OOD batch
-        has_pool_data: Whether pool evaluation data is available
+        in_distribution_wires: Wires matching the training distribution pattern
+        in_distribution_logits: Logits matching the training distribution pattern
+        out_of_distribution_wires: Wires for OOD evaluation (always random)
+        out_of_distribution_logits: Logits for OOD evaluation (always random)
+        target_batch_size: Target batch size requested
+        in_actual_batch_size: Actual IN-distribution batch size (may exceed target for full diversity)
+        out_actual_batch_size: Actual OUT-of-distribution batch size
+        training_config: Dictionary containing the training configuration used
     """
 
     def __init__(
         self,
-        test_seed_wires: List[jp.ndarray],
-        test_seed_logits: List[jp.ndarray],
-        ood_wires: List[jp.ndarray],
-        ood_logits: List[jp.ndarray],
-        ood_batch_size: int,
-        pool_wires: Optional[List[jp.ndarray]] = None,
-        pool_logits: Optional[List[jp.ndarray]] = None,
+        in_distribution_wires: List[jp.ndarray],
+        in_distribution_logits: List[jp.ndarray],
+        out_of_distribution_wires: List[jp.ndarray],
+        out_of_distribution_logits: List[jp.ndarray],
+        target_batch_size: int,
+        in_actual_batch_size: int,
+        out_actual_batch_size: int,
+        training_config: Dict[str, Any],
     ):
-        self.test_seed_wires = test_seed_wires
-        self.test_seed_logits = test_seed_logits
-        self.ood_wires = ood_wires
-        self.ood_logits = ood_logits
-        self.ood_batch_size = ood_batch_size
-        self.pool_wires = pool_wires
-        self.pool_logits = pool_logits
-        self.has_pool_data = pool_wires is not None and pool_logits is not None
+        self.in_distribution_wires = in_distribution_wires
+        self.in_distribution_logits = in_distribution_logits
+        self.out_of_distribution_wires = out_of_distribution_wires
+        self.out_of_distribution_logits = out_of_distribution_logits
+        self.target_batch_size = target_batch_size
+        self.in_actual_batch_size = in_actual_batch_size
+        self.out_actual_batch_size = out_actual_batch_size
+        self.training_config = training_config
 
     def get_summary(self) -> str:
         """Get a summary string of the evaluation datasets."""
         summary = (
-            f"Evaluation Datasets:\n"
-            f"  - Test seed: 1 circuit (reference)\n"
-            f"  - OOD: {self.ood_batch_size} circuits (generalization)\n"
+            f"Unified Evaluation Datasets:\n"
+            f"  - IN-distribution: {self.in_actual_batch_size} circuits (matches training: "
+            f"mode={self.training_config['wiring_mode']}, "
+            f"diversity={self.training_config['initial_diversity']})\n"
+            f"  - OUT-of-distribution: {self.out_actual_batch_size} circuits (random wiring)\n"
         )
-        if self.has_pool_data:
-            pool_batch_size = self.pool_wires[0].shape[0] if self.pool_wires else 0
-            summary += f"  - Pool: {pool_batch_size} circuits (in-distribution)\n"
-        else:
-            summary += f"  - Pool: not available (diversity = 1)\n"
+        if self.in_actual_batch_size > self.target_batch_size:
+            summary += (
+                f"  - Note: IN-distribution size exceeds target ({self.target_batch_size}) "
+                f"to ensure full diversity coverage\n"
+            )
         return summary
 
 
-def create_evaluation_datasets(
-    test_seed: int,
+def create_unified_evaluation_datasets(
+    evaluation_base_seed: int,
+    training_wiring_mode: str,
+    training_initial_diversity: int,
     layer_sizes: List[Tuple[int, int]],
     arity: int,
-    ood_batch_size: int,
-    initial_diversity: int = 1,
-    pool_diversity_size: int = 16,
-    wiring_mode: str = "random",
-) -> EvaluationDatasets:
+    eval_batch_size: int,
+) -> UnifiedEvaluationDatasets:
     """
-    Create standardized evaluation datasets for consistent evaluation.
+    Create unified evaluation datasets that properly match training patterns.
+
+    This function creates exactly two types of evaluation circuits:
+    1. IN-distribution: Matches the training wiring pattern exactly
+    2. OUT-of-distribution: Always uses random wiring regardless of training mode
 
     Args:
-        test_seed: Seed for generating test circuits
+        evaluation_base_seed: Base seed for generating all evaluation circuits
+        training_wiring_mode: The wiring mode used in training ("fixed", "random", "genetic")
+        training_initial_diversity: The initial diversity used in training
         layer_sizes: Circuit layer configuration
         arity: Number of inputs per gate
-        ood_batch_size: Number of random circuits for OOD evaluation
-        initial_diversity: Initial diversity setting (determines if pool evaluation is used)
-        pool_diversity_size: Number of circuits to create for pool evaluation (when diversity > 1)
-        wiring_mode: Wiring mode for pool circuits ("random", "fixed", or "genetic")
+        eval_batch_size: Number of circuits in each evaluation set
 
     Returns:
-        EvaluationDatasets object containing all evaluation circuits
+        UnifiedEvaluationDatasets object containing IN and OUT distribution circuits
     """
-    log.info(f"Creating standardized evaluation datasets (test_seed={test_seed})")
+    log.info(f"Creating unified evaluation datasets (base_seed={evaluation_base_seed})")
+    log.info(
+        f"Training config: mode={training_wiring_mode}, diversity={training_initial_diversity}"
+    )
 
-    # 1. Test seed circuit (single reference circuit)
-    test_key = jax.random.PRNGKey(test_seed)
-    test_seed_wires, test_seed_logits = gen_circuit(test_key, layer_sizes, arity=arity)
-    log.info("Created test seed circuit (reference)")
+    # Create deterministic keys for IN and OUT distribution
+    in_distribution_key = jax.random.PRNGKey(evaluation_base_seed)
+    out_of_distribution_key = jax.random.PRNGKey(
+        evaluation_base_seed + 10000
+    )  # Clearly separated
 
-    # 2. OOD circuits (batch of random circuits for generalization)
-    ood_rng = jax.random.PRNGKey(test_seed + 1000)  # Different seed for OOD
-    ood_rngs = jax.random.split(ood_rng, ood_batch_size)
-
-    # Use vmap to generate multiple circuits efficiently
-    vmap_gen_circuit = jax.vmap(lambda rng: gen_circuit(rng, layer_sizes, arity=arity))
-    ood_wires, ood_logits = vmap_gen_circuit(ood_rngs)
-    log.info(f"Created {ood_batch_size} OOD circuits (generalization)")
-
-    # 3. Pool circuits (in-distribution evaluation if diversity > 1)
-    # Replicate the same logic as initialize_graph_pool for consistency
-    pool_wires = None
-    pool_logits = None
-
-    if initial_diversity > 1:
-        # Use a different seed for pool circuits (test_seed + 2000)
-        pool_rng = jax.random.PRNGKey(test_seed + 2000)
-
-        # Generate circuit wirings based on wiring mode (same logic as initialize_graph_pool)
-        if wiring_mode in ["fixed", "genetic"]:
-            # Clamp initial_diversity to valid range
-            effective_diversity = jp.clip(initial_diversity, 1, pool_diversity_size)
-
-            if effective_diversity == 1:
-                # Single wiring repeated for all circuits
-                single_wires, single_logits = gen_circuit(
-                    pool_rng, layer_sizes, arity=arity
-                )
-
-                # Replicate the same wiring for all circuits
-                pool_wires = jax.tree.map(
-                    lambda leaf: jp.repeat(
-                        leaf[None, ...], pool_diversity_size, axis=0
-                    ),
-                    single_wires,
-                )
-                pool_logits = jax.tree.map(
-                    lambda leaf: jp.repeat(
-                        leaf[None, ...], pool_diversity_size, axis=0
-                    ),
-                    single_logits,
-                )
-            elif effective_diversity >= pool_diversity_size:
-                # Each circuit gets a unique wiring (same as random mode)
-                pool_rngs = jax.random.split(pool_rng, pool_diversity_size)
-                pool_wires, pool_logits = vmap_gen_circuit(pool_rngs)
-            else:
-                # Generate N different wirings and repeat them across the pool
-                diversity_rngs = jax.random.split(pool_rng, effective_diversity)
-                diverse_wires, diverse_logits = vmap_gen_circuit(diversity_rngs)
-
-                # Calculate how many times to repeat each diverse wiring
-                base_repeats = pool_diversity_size // effective_diversity
-                extra_repeats = pool_diversity_size % effective_diversity
-
-                # Create repeat counts: first 'extra_repeats' get one extra copy
-                repeat_counts = jp.concatenate(
-                    [
-                        jp.full(extra_repeats, base_repeats + 1),
-                        jp.full(effective_diversity - extra_repeats, base_repeats),
-                    ]
-                )
-
-                # Repeat each diverse wiring according to repeat_counts
-                pool_wires = []
-                pool_logits = []
-
-                for layer_idx in range(len(diverse_wires)):
-                    layer_wires = []
-                    layer_logits = []
-
-                    for diversity_idx in range(effective_diversity):
-                        n_repeats = repeat_counts[diversity_idx]
-
-                        # Repeat this wiring n_repeats times
-                        repeated_wire = jp.repeat(
-                            diverse_wires[layer_idx][diversity_idx : diversity_idx + 1],
-                            n_repeats,
-                            axis=0,
-                        )
-                        repeated_logit = jp.repeat(
-                            diverse_logits[layer_idx][
-                                diversity_idx : diversity_idx + 1
-                            ],
-                            n_repeats,
-                            axis=0,
-                        )
-
-                        layer_wires.append(repeated_wire)
-                        layer_logits.append(repeated_logit)
-
-                    # Concatenate all repeats for this layer
-                    pool_wires.append(jp.concatenate(layer_wires, axis=0))
-                    pool_logits.append(jp.concatenate(layer_logits, axis=0))
-        else:  # wiring_mode == "random"
-            # In random mode, generate different wirings for each circuit (ignore initial_diversity)
-            pool_rngs = jax.random.split(pool_rng, pool_diversity_size)
-            pool_wires, pool_logits = vmap_gen_circuit(pool_rngs)
-
-        effective_diversity_log = (
-            effective_diversity
-            if wiring_mode in ["fixed", "genetic"]
-            else pool_diversity_size
+    # 1. Create IN-distribution circuits (matching training pattern)
+    log.info("Creating IN-distribution evaluation circuits...")
+    in_distribution_wires, in_distribution_logits, in_actual_batch_size = (
+        _create_circuit_batch_with_pattern(
+            rng=in_distribution_key,
+            layer_sizes=layer_sizes,
+            arity=arity,
+            batch_size=eval_batch_size,
+            wiring_mode=training_wiring_mode,
+            initial_diversity=training_initial_diversity,
         )
-        log.info(
-            f"Created {pool_diversity_size} pool circuits (in-distribution, diversity={effective_diversity_log})"
-        )
-    else:
-        log.info("Pool evaluation skipped (diversity = 1)")
+    )
 
-    datasets = EvaluationDatasets(
-        test_seed_wires=test_seed_wires,
-        test_seed_logits=test_seed_logits,
-        ood_wires=ood_wires,
-        ood_logits=ood_logits,
-        ood_batch_size=ood_batch_size,
-        pool_wires=pool_wires,
-        pool_logits=pool_logits,
+    # 2. Create OUT-of-distribution circuits (always random)
+    log.info("Creating OUT-of-distribution evaluation circuits...")
+    out_distribution_wires, out_distribution_logits, out_actual_batch_size = (
+        _create_circuit_batch_with_pattern(
+            rng=out_of_distribution_key,
+            layer_sizes=layer_sizes,
+            arity=arity,
+            batch_size=eval_batch_size,
+            wiring_mode="random",  # Always random for OOD
+            initial_diversity=eval_batch_size,  # Full diversity for OOD
+        )
+    )
+
+    # Store training configuration for reference
+    training_config = {
+        "wiring_mode": training_wiring_mode,
+        "initial_diversity": training_initial_diversity,
+        "layer_sizes": layer_sizes,
+        "arity": arity,
+        "evaluation_base_seed": evaluation_base_seed,
+    }
+
+    datasets = UnifiedEvaluationDatasets(
+        in_distribution_wires=in_distribution_wires,
+        in_distribution_logits=in_distribution_logits,
+        out_of_distribution_wires=out_distribution_wires,
+        out_of_distribution_logits=out_distribution_logits,
+        target_batch_size=eval_batch_size,
+        in_actual_batch_size=in_actual_batch_size,
+        out_actual_batch_size=out_actual_batch_size,
+        training_config=training_config,
     )
 
     log.info(datasets.get_summary())
     return datasets
 
 
-def get_evaluation_rng_keys(
-    base_rng: jax.random.PRNGKey, num_keys: int = 3
-) -> Tuple[jax.random.PRNGKey, ...]:
-    """
-    Generate evaluation random keys for consistent key splitting.
-
-    Args:
-        base_rng: Base random key
-        num_keys: Number of keys to generate (default: 3 for eval, pool, future)
-
-    Returns:
-        Tuple of random keys
-    """
-    return tuple(jax.random.split(base_rng, num_keys))
-
-
-def reset_pool_circuits_for_evaluation(
-    pool_wires: List[jp.ndarray],
-    pool_logits: List[jp.ndarray],
-    input_n: int,
+def _create_circuit_batch_with_pattern(
+    rng: jax.random.PRNGKey,
+    layer_sizes: List[Tuple[int, int]],
     arity: int,
-    hidden_dim: int,
-) -> Tuple[Any, List[jp.ndarray], List[jp.ndarray]]:
+    batch_size: int,
+    wiring_mode: str,
+    initial_diversity: int,
+) -> Tuple[List[jp.ndarray], List[jp.ndarray], int]:
     """
-    Reset pool circuits to initial state for fair evaluation.
+    Create a batch of circuits using the exact same logic as initialize_graph_pool.
 
-    This removes any accumulated update steps and resets loss to 0
-    for consistent evaluation comparison.
+    This ensures perfect consistency between training pool initialization and evaluation.
+    When diversity exceeds batch_size, this function will return ALL unique wirings
+    (not just a subset), allowing for comprehensive evaluation across the full diversity.
 
     Args:
-        pool_wires: Pool circuit wires
-        pool_logits: Pool circuit logits
-        input_n: Number of input nodes
-        arity: Gate arity
-        hidden_dim: Hidden dimension
+        rng: Random key for generation
+        layer_sizes: Circuit layer configuration
+        arity: Number of inputs per gate
+        batch_size: Target batch size (may be exceeded to cover all unique wirings)
+        wiring_mode: Wiring generation mode ("fixed", "random", "genetic")
+        initial_diversity: Number of unique wirings to start with
 
     Returns:
-        Tuple of (reset_graphs, pool_wires, pool_logits)
+        Tuple of (batch_wires, batch_logits, actual_batch_size) lists
+        Note: actual_batch_size may exceed batch_size to ensure full diversity coverage
     """
-    from boolean_nca_cc.utils.graph_builder import build_graph
-    import jraph
+    # Use the exact same logic as initialize_graph_pool for consistency
+    if wiring_mode in ["fixed", "genetic"]:
+        # Don't clamp diversity to batch_size - we want to cover ALL unique wirings
+        effective_diversity = jp.clip(initial_diversity, 1, jp.inf).astype(jp.int32)
+        effective_diversity = min(effective_diversity, initial_diversity)
 
-    # Build fresh graphs from the pool circuits
-    batch_size = pool_wires[0].shape[0]
-    reset_graphs = []
+        if effective_diversity == 1:
+            # Single wiring repeated for all circuits
+            single_wires, single_logits = gen_circuit(rng, layer_sizes, arity=arity)
 
-    for i in range(batch_size):
-        # Extract single circuit
-        single_wires = [w[i] for w in pool_wires]
-        single_logits = [l[i] for l in pool_logits]
+            # Replicate the same wiring for all circuits
+            batch_wires = jax.tree.map(
+                lambda leaf: jp.repeat(leaf[None, ...], batch_size, axis=0),
+                single_wires,
+            )
+            batch_logits = jax.tree.map(
+                lambda leaf: jp.repeat(leaf[None, ...], batch_size, axis=0),
+                single_logits,
+            )
+            actual_batch_size = batch_size
+        elif effective_diversity >= batch_size:
+            # Generate ALL unique wirings (not just a subset)
+            # This ensures comprehensive evaluation across the full diversity
+            rngs = jax.random.split(rng, effective_diversity)
+            vmap_gen_circuit = jax.vmap(
+                lambda rng: gen_circuit(rng, layer_sizes, arity=arity)
+            )
+            batch_wires, batch_logits = vmap_gen_circuit(rngs)
+            actual_batch_size = effective_diversity
+        else:
+            # Generate N different wirings and repeat them across the batch
+            diversity_rngs = jax.random.split(rng, effective_diversity)
+            vmap_gen_circuit = jax.vmap(
+                lambda rng: gen_circuit(rng, layer_sizes, arity=arity)
+            )
+            diverse_wires, diverse_logits = vmap_gen_circuit(diversity_rngs)
 
-        # Build graph with reset state (loss=0, steps=0)
-        graph = build_graph(
-            wires=single_wires,
-            logits=single_logits,
-            input_n=input_n,
-            arity=arity,
-            hidden_dim=hidden_dim,
+            # Calculate how many times to repeat each diverse wiring
+            base_repeats = batch_size // effective_diversity
+            extra_repeats = batch_size % effective_diversity
+
+            # Create repeat counts: first 'extra_repeats' get one extra copy
+            repeat_counts = jp.concatenate(
+                [
+                    jp.full(extra_repeats, base_repeats + 1),
+                    jp.full(effective_diversity - extra_repeats, base_repeats),
+                ]
+            )
+
+            # Repeat each diverse wiring according to repeat_counts
+            batch_wires = []
+            batch_logits = []
+
+            for layer_idx in range(len(diverse_wires)):
+                layer_wires = []
+                layer_logits = []
+
+                for diversity_idx in range(effective_diversity):
+                    n_repeats = repeat_counts[diversity_idx]
+
+                    # Repeat this wiring n_repeats times
+                    repeated_wire = jp.repeat(
+                        diverse_wires[layer_idx][diversity_idx : diversity_idx + 1],
+                        n_repeats,
+                        axis=0,
+                    )
+                    repeated_logit = jp.repeat(
+                        diverse_logits[layer_idx][diversity_idx : diversity_idx + 1],
+                        n_repeats,
+                        axis=0,
+                    )
+
+                    layer_wires.append(repeated_wire)
+                    layer_logits.append(repeated_logit)
+
+                # Concatenate all repeats for this layer
+                batch_wires.append(jp.concatenate(layer_wires, axis=0))
+                batch_logits.append(jp.concatenate(layer_logits, axis=0))
+            actual_batch_size = batch_size
+    else:  # wiring_mode == "random"
+        # In random mode, generate different wirings for each circuit
+        rngs = jax.random.split(rng, batch_size)
+        vmap_gen_circuit = jax.vmap(
+            lambda rng: gen_circuit(rng, layer_sizes, arity=arity)
         )
-        # Ensure globals are reset to [0.0, 0.0] (loss, steps)
-        graph = graph._replace(globals=jp.array([0.0, 0.0], dtype=jp.float32))
-        reset_graphs.append(graph)
+        batch_wires, batch_logits = vmap_gen_circuit(rngs)
+        actual_batch_size = batch_size
 
-    # Stack graphs into a batch
-    reset_batch_graphs = jraph.batch(reset_graphs)
+    return batch_wires, batch_logits, actual_batch_size
 
-    return reset_batch_graphs, pool_wires, pool_logits
+
+def evaluate_circuits_in_chunks(
+    eval_fn,
+    wires: List[jp.ndarray],
+    logits: List[jp.ndarray],
+    target_chunk_size: int,
+    **eval_kwargs,
+) -> Dict:
+    """
+    Evaluate circuits in chunks to handle cases where diversity exceeds target batch size.
+
+    Args:
+        eval_fn: Evaluation function to apply to each chunk
+        wires: List of wire arrays for all circuits
+        logits: List of logit arrays for all circuits
+        target_chunk_size: Target size for each evaluation chunk
+        **eval_kwargs: Additional keyword arguments to pass to eval_fn
+
+    Returns:
+        Dictionary with averaged metrics across all chunks
+    """
+    total_circuits = wires[0].shape[0]
+
+    if total_circuits <= target_chunk_size:
+        # No need to chunk, evaluate all at once
+        return eval_fn(batch_wires=wires, batch_logits=logits, **eval_kwargs)
+
+    # Split into chunks and evaluate each
+    num_chunks = (total_circuits + target_chunk_size - 1) // target_chunk_size
+    chunk_results = []
+
+    for chunk_idx in range(num_chunks):
+        start_idx = chunk_idx * target_chunk_size
+        end_idx = min(start_idx + target_chunk_size, total_circuits)
+
+        # Extract chunk
+        chunk_wires = [w[start_idx:end_idx] for w in wires]
+        chunk_logits = [l[start_idx:end_idx] for l in logits]
+
+        # Evaluate chunk
+        chunk_result = eval_fn(
+            batch_wires=chunk_wires, batch_logits=chunk_logits, **eval_kwargs
+        )
+        chunk_results.append(chunk_result)
+
+    # Average results across chunks
+    # Assume all chunk results have the same structure
+    averaged_result = {}
+    for key in chunk_results[0].keys():
+        if isinstance(chunk_results[0][key], list):
+            # For step-wise metrics, average at each step
+            step_averages = []
+            for step_idx in range(len(chunk_results[0][key])):
+                step_values = [chunk[key][step_idx] for chunk in chunk_results]
+                step_averages.append(float(jp.mean(jp.array(step_values))))
+            averaged_result[key] = step_averages
+        else:
+            # For scalar metrics, simple average
+            values = [chunk[key] for chunk in chunk_results]
+            averaged_result[key] = float(jp.mean(jp.array(values)))
+
+    return averaged_result

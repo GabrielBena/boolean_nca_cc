@@ -15,29 +15,25 @@ from functools import partial
 from tqdm.auto import tqdm
 import os
 import logging
-import tempfile
 from datetime import datetime
 
 from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention
-from boolean_nca_cc.training.utils import save_checkpoint, plot_training_curves
+from boolean_nca_cc.training.utils import save_checkpoint
 from boolean_nca_cc.training.schedulers import (
     should_reset_pool,
-    get_current_reset_interval,
     get_learning_rate_schedule,
     get_step_beta,
 )
 
-from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.training.pool.pool import GraphPool, initialize_graph_pool
 from boolean_nca_cc.training.evaluation import (
-    evaluate_model_stepwise,
     evaluate_model_stepwise_batched,
     get_loss_and_update_graph,
 )
 from boolean_nca_cc.training.eval_datasets import (
-    create_evaluation_datasets,
-    get_evaluation_rng_keys,
-    EvaluationDatasets,
+    create_unified_evaluation_datasets,
+    evaluate_circuits_in_chunks,
+    UnifiedEvaluationDatasets,
 )
 import wandb
 
@@ -262,11 +258,7 @@ def _check_early_stopping(
         Tuple of (should_break, early_stop_triggered, epochs_above_threshold,
                  first_threshold_epoch, updated_current_eval_metrics, updated_rng)
     """
-    if (
-        not stop_accuracy_enabled
-        or epoch < stop_accuracy_min_epochs
-        or early_stop_triggered
-    ):
+    if not stop_accuracy_enabled or early_stop_triggered:
         return (
             False,
             early_stop_triggered,
@@ -317,8 +309,11 @@ def _check_early_stopping(
             )
         epochs_above_threshold += 1
 
-        # Check if we should stop
-        if epochs_above_threshold >= stop_accuracy_patience:
+        # Check if we should stop (only after minimum epochs requirement is met)
+        if (
+            epochs_above_threshold >= stop_accuracy_patience
+            and epoch >= stop_accuracy_min_epochs
+        ):
             early_stop_triggered = True
             log.info(
                 f"Early stopping triggered! "
@@ -335,6 +330,17 @@ def _check_early_stopping(
                 first_threshold_epoch,
                 current_eval_metrics,
                 rng,
+            )
+        elif (
+            epochs_above_threshold >= stop_accuracy_patience
+            and epoch < stop_accuracy_min_epochs
+        ):
+            # Log that we would stop but are waiting for minimum epochs
+            log.info(
+                f"Early stopping condition met "
+                f"(accuracy {stop_accuracy_source}_{stop_accuracy_metric}={stop_accuracy_value:.4f} "
+                f"above threshold {stop_accuracy_threshold:.4f} for {stop_accuracy_patience} epochs), "
+                f"but waiting until minimum epoch {stop_accuracy_min_epochs} (currently at epoch {epoch})."
             )
     else:
         # Reset counter if accuracy drops below threshold
@@ -402,12 +408,12 @@ def _get_metric_value(
     elif metric_source == "eval":
         if eval_metrics is None:
             raise ValueError("Evaluation metrics not available for eval source")
-        # Map to evaluation metric keys (use fixed seed evaluation for consistency)
+        # Map to evaluation metric keys (use IN-distribution evaluation for consistency)
         eval_key_map = {
-            "loss": "eval_seed/final_loss",
-            "hard_loss": "eval_seed/final_hard_loss",
-            "accuracy": "eval_seed/final_accuracy",
-            "hard_accuracy": "eval_seed/final_hard_accuracy",
+            "loss": "eval_in/final_loss",
+            "hard_loss": "eval_in/final_hard_loss",
+            "accuracy": "eval_in/final_accuracy",
+            "hard_accuracy": "eval_in/final_hard_accuracy",
         }
         return eval_metrics[eval_key_map[metric_name]]
     else:
@@ -425,9 +431,9 @@ def _log_pool_scatter(pool, epoch, wandb_run):
     wandb_run.log({"pool/scatter": wandb.plot.scatter(table, "steps", "loss")})
 
 
-def run_periodic_evaluation_with_datasets(
+def run_unified_periodic_evaluation(
     model,
-    datasets: EvaluationDatasets,
+    datasets: UnifiedEvaluationDatasets,
     pool,
     x_data,
     y_data,
@@ -443,11 +449,11 @@ def run_periodic_evaluation_with_datasets(
     log_pool_scatter: bool = False,
 ) -> Dict:
     """
-    Run comprehensive periodic evaluation using standardized datasets.
+    Run unified periodic evaluation with only IN-distribution and OUT-of-distribution testing.
 
     Args:
         model: The model to evaluate
-        datasets: EvaluationDatasets object containing all test circuits
+        datasets: UnifiedEvaluationDatasets object containing IN and OUT distribution circuits
         pool: GraphPool for logging scatter plot
         x_data: Input data
         y_data: Target data
@@ -463,75 +469,25 @@ def run_periodic_evaluation_with_datasets(
         log_pool_scatter: Whether to log pool scatterplot (loss vs steps)
 
     Returns:
-        Dictionary with evaluation metrics from fixed seed, in-distribution, and OOD evaluations
+        Dictionary with evaluation metrics from IN-distribution and OUT-of-distribution evaluations
     """
     try:
-        # 1. Run fixed seed evaluation (single circuit)
-        step_metrics_seed = evaluate_model_stepwise(
-            model=model,
-            wires=datasets.test_seed_wires,
-            logits=datasets.test_seed_logits,
-            x_data=x_data,
-            y_data=y_data,
-            input_n=input_n,
-            arity=arity,
-            hidden_dim=hidden_dim,
-            n_message_steps=n_message_steps,
-            loss_type=loss_type,
-            layer_sizes=layer_sizes,
+        # 1. Run IN-distribution evaluation (matches training pattern)
+        # Use chunked evaluation to handle cases where diversity exceeds target batch size
+        log.info(
+            f"Running IN-distribution evaluation ({datasets.in_actual_batch_size} circuits)..."
         )
-
-        # Get final metrics (last step) for fixed seed
-        final_metrics_seed = {
-            "eval_seed/final_loss": step_metrics_seed["soft_loss"][-1],
-            "eval_seed/final_hard_loss": step_metrics_seed["hard_loss"][-1],
-            "eval_seed/final_accuracy": step_metrics_seed["soft_accuracy"][-1],
-            "eval_seed/final_hard_accuracy": step_metrics_seed["hard_accuracy"][-1],
-            "eval_seed/epoch": epoch,
-        }
-
-        # 2. Run in-distribution evaluation if pool data available
-        final_metrics_pool = {}
-        step_metrics_pool = None
-        if datasets.has_pool_data:
-            step_metrics_pool = evaluate_model_stepwise_batched(
-                model=model,
-                batch_wires=datasets.pool_wires,
-                batch_logits=datasets.pool_logits,
-                x_data=x_data,
-                y_data=y_data,
-                input_n=input_n,
-                arity=arity,
-                hidden_dim=hidden_dim,
-                n_message_steps=n_message_steps,
-                loss_type=loss_type,
-                layer_sizes=layer_sizes,
+        if datasets.in_actual_batch_size > datasets.target_batch_size:
+            log.info(
+                f"Using chunked evaluation (chunks of {datasets.target_batch_size})"
             )
 
-            # Get final metrics (last step) for pool sample
-            final_metrics_pool = {
-                "eval_pool/final_loss": step_metrics_pool["soft_loss"][-1],
-                "eval_pool/final_hard_loss": step_metrics_pool["hard_loss"][-1],
-                "eval_pool/final_accuracy": step_metrics_pool["soft_accuracy"][-1],
-                "eval_pool/final_hard_accuracy": step_metrics_pool["hard_accuracy"][-1],
-                "eval_pool/epoch": epoch,
-            }
-        else:
-            # pool data is just fixed seed evaluation
-            # Used to compare models that don't use pool data
-            final_metrics_pool = {
-                "eval_pool/final_loss": step_metrics_seed["soft_loss"][-1],
-                "eval_pool/final_hard_loss": step_metrics_seed["hard_loss"][-1],
-                "eval_pool/final_accuracy": step_metrics_seed["soft_accuracy"][-1],
-                "eval_pool/final_hard_accuracy": step_metrics_seed["hard_accuracy"][-1],
-                "eval_pool/epoch": epoch,
-            }
-
-        # 3. Run OOD evaluation (random batch testing)
-        step_metrics_random = evaluate_model_stepwise_batched(
+        step_metrics_in = evaluate_circuits_in_chunks(
+            eval_fn=evaluate_model_stepwise_batched,
+            wires=datasets.in_distribution_wires,
+            logits=datasets.in_distribution_logits,
+            target_chunk_size=datasets.target_batch_size,
             model=model,
-            batch_wires=datasets.ood_wires,
-            batch_logits=datasets.ood_logits,
             x_data=x_data,
             y_data=y_data,
             input_n=input_n,
@@ -542,20 +498,53 @@ def run_periodic_evaluation_with_datasets(
             layer_sizes=layer_sizes,
         )
 
-        # Get final metrics (last step) for random batch
-        final_metrics_random = {
-            "eval_ood/final_loss": step_metrics_random["soft_loss"][-1],
-            "eval_ood/final_hard_loss": step_metrics_random["hard_loss"][-1],
-            "eval_ood/final_accuracy": step_metrics_random["soft_accuracy"][-1],
-            "eval_ood/final_hard_accuracy": step_metrics_random["hard_accuracy"][-1],
-            "eval_ood/epoch": epoch,
+        # Get final metrics (last step) for IN-distribution
+        final_metrics_in = {
+            "eval_in/final_loss": step_metrics_in["soft_loss"][-1],
+            "eval_in/final_hard_loss": step_metrics_in["hard_loss"][-1],
+            "eval_in/final_accuracy": step_metrics_in["soft_accuracy"][-1],
+            "eval_in/final_hard_accuracy": step_metrics_in["hard_accuracy"][-1],
+            "eval_in/epoch": epoch,
+        }
+
+        # 2. Run OUT-of-distribution evaluation (always random)
+        log.info(
+            f"Running OUT-of-distribution evaluation ({datasets.out_actual_batch_size} circuits)..."
+        )
+        if datasets.out_actual_batch_size > datasets.target_batch_size:
+            log.info(
+                f"Using chunked evaluation (chunks of {datasets.target_batch_size})"
+            )
+
+        step_metrics_out = evaluate_circuits_in_chunks(
+            eval_fn=evaluate_model_stepwise_batched,
+            wires=datasets.out_of_distribution_wires,
+            logits=datasets.out_of_distribution_logits,
+            target_chunk_size=datasets.target_batch_size,
+            model=model,
+            x_data=x_data,
+            y_data=y_data,
+            input_n=input_n,
+            arity=arity,
+            hidden_dim=hidden_dim,
+            n_message_steps=n_message_steps,
+            loss_type=loss_type,
+            layer_sizes=layer_sizes,
+        )
+
+        # Get final metrics (last step) for OUT-of-distribution
+        final_metrics_out = {
+            "eval_out/final_loss": step_metrics_out["soft_loss"][-1],
+            "eval_out/final_hard_loss": step_metrics_out["hard_loss"][-1],
+            "eval_out/final_accuracy": step_metrics_out["soft_accuracy"][-1],
+            "eval_out/final_hard_accuracy": step_metrics_out["hard_accuracy"][-1],
+            "eval_out/epoch": epoch,
         }
 
         # Combine all metrics for logging
         combined_metrics = {
-            **final_metrics_seed,
-            **final_metrics_pool,
-            **final_metrics_random,
+            **final_metrics_in,
+            **final_metrics_out,
         }
 
         # Log to wandb if enabled
@@ -565,114 +554,106 @@ def run_periodic_evaluation_with_datasets(
             if log_pool_scatter:
                 _log_pool_scatter(pool, epoch, wandb_run)
 
-            # Optionally log step-by-step metrics for all evaluations
+            # Optionally log step-by-step metrics for both evaluations
             if log_stepwise:
-                # Fixed seed step-wise metrics
-                for step_idx in range(len(step_metrics_seed["step"])):
-                    step_data_seed = {
-                        "eval_seed_steps/step": step_metrics_seed["step"][step_idx],
-                        "eval_seed_steps/loss": step_metrics_seed["soft_loss"][
+                # IN-distribution step-wise metrics
+                for step_idx in range(len(step_metrics_in["step"])):
+                    step_data_in = {
+                        "eval_in_steps/step": step_metrics_in["step"][step_idx],
+                        "eval_in_steps/loss": step_metrics_in["soft_loss"][step_idx],
+                        "eval_in_steps/hard_loss": step_metrics_in["hard_loss"][
                             step_idx
                         ],
-                        "eval_seed_steps/hard_loss": step_metrics_seed["hard_loss"][
+                        "eval_in_steps/accuracy": step_metrics_in["soft_accuracy"][
                             step_idx
                         ],
-                        "eval_seed_steps/accuracy": step_metrics_seed["soft_accuracy"][
+                        "eval_in_steps/hard_accuracy": step_metrics_in["hard_accuracy"][
                             step_idx
                         ],
-                        "eval_seed_steps/hard_accuracy": step_metrics_seed[
+                        "eval_in_steps/epoch": epoch,
+                    }
+                    wandb_run.log(step_data_in)
+
+                # OUT-of-distribution step-wise metrics
+                for step_idx in range(len(step_metrics_out["step"])):
+                    step_data_out = {
+                        "eval_out_steps/step": step_metrics_out["step"][step_idx],
+                        "eval_out_steps/loss": step_metrics_out["soft_loss"][step_idx],
+                        "eval_out_steps/hard_loss": step_metrics_out["hard_loss"][
+                            step_idx
+                        ],
+                        "eval_out_steps/accuracy": step_metrics_out["soft_accuracy"][
+                            step_idx
+                        ],
+                        "eval_out_steps/hard_accuracy": step_metrics_out[
                             "hard_accuracy"
                         ][step_idx],
-                        "eval_seed_steps/epoch": epoch,
+                        "eval_out_steps/epoch": epoch,
                     }
-                    wandb_run.log(step_data_seed)
-
-                # Pool sample step-wise metrics (if available)
-                if step_metrics_pool is not None:
-                    for step_idx in range(len(step_metrics_pool["step"])):
-                        step_data_pool = {
-                            "eval_pool_steps/step": step_metrics_pool["step"][step_idx],
-                            "eval_pool_steps/loss": step_metrics_pool["soft_loss"][
-                                step_idx
-                            ],
-                            "eval_pool_steps/hard_loss": step_metrics_pool["hard_loss"][
-                                step_idx
-                            ],
-                            "eval_pool_steps/accuracy": step_metrics_pool[
-                                "soft_accuracy"
-                            ][step_idx],
-                            "eval_pool_steps/hard_accuracy": step_metrics_pool[
-                                "hard_accuracy"
-                            ][step_idx],
-                            "eval_pool_steps/epoch": epoch,
-                        }
-                        wandb_run.log(step_data_pool)
-
-                # Random batch step-wise metrics
-                for step_idx in range(len(step_metrics_random["step"])):
-                    step_data_random = {
-                        "eval_ood_steps/step": step_metrics_random["step"][step_idx],
-                        "eval_ood_steps/loss": step_metrics_random["soft_loss"][
-                            step_idx
-                        ],
-                        "eval_ood_steps/hard_loss": step_metrics_random["hard_loss"][
-                            step_idx
-                        ],
-                        "eval_ood_steps/accuracy": step_metrics_random["soft_accuracy"][
-                            step_idx
-                        ],
-                        "eval_ood_steps/hard_accuracy": step_metrics_random[
-                            "hard_accuracy"
-                        ][step_idx],
-                        "eval_ood_steps/epoch": epoch,
-                    }
-                    wandb_run.log(step_data_random)
+                    wandb_run.log(step_data_out)
 
         # Log summary to console
-        ood_batch_size = datasets.ood_batch_size
+        training_config = datasets.training_config
+
+        # Add chunking info if used
+        in_chunk_info = ""
+        if datasets.in_actual_batch_size > datasets.target_batch_size:
+            num_in_chunks = (
+                datasets.in_actual_batch_size + datasets.target_batch_size - 1
+            ) // datasets.target_batch_size
+            in_chunk_info = f", {num_in_chunks} chunks"
+
+        out_chunk_info = ""
+        if datasets.out_actual_batch_size > datasets.target_batch_size:
+            num_out_chunks = (
+                datasets.out_actual_batch_size + datasets.target_batch_size - 1
+            ) // datasets.target_batch_size
+            out_chunk_info = f", {num_out_chunks} chunks"
+
         log_message = (
-            f"Periodic Eval (epoch {epoch}):\n"
-            f"  Fixed Seed: Loss={final_metrics_seed['eval_seed/final_loss']:.4f}, "
-            f"Acc={final_metrics_seed['eval_seed/final_accuracy']:.4f}, "
-            f"Hard Acc={final_metrics_seed['eval_seed/final_hard_accuracy']:.4f}\n"
-        )
-
-        # Add pool evaluation if available
-        if final_metrics_pool:
-            pool_batch_size = (
-                datasets.pool_wires[0].shape[0] if datasets.pool_wires else 0
-            )
-            log_message += (
-                f"  Pool Sample (batch {pool_batch_size}): Loss={final_metrics_pool['eval_pool/final_loss']:.4f}, "
-                f"Acc={final_metrics_pool['eval_pool/final_accuracy']:.4f}, "
-                f"Hard Acc={final_metrics_pool['eval_pool/final_hard_accuracy']:.4f}\n"
-            )
-
-        log_message += (
-            f"  OOD (batch {ood_batch_size}): Loss={final_metrics_random['eval_ood/final_loss']:.4f}, "
-            f"Acc={final_metrics_random['eval_ood/final_accuracy']:.4f}, "
-            f"Hard Acc={final_metrics_random['eval_ood/final_hard_accuracy']:.4f}"
+            f"Unified Eval (epoch {epoch}):\n"
+            f"  IN-distribution ({datasets.in_actual_batch_size} circuits{in_chunk_info}, "
+            f"mode={training_config['wiring_mode']}, diversity={training_config['initial_diversity']}): "
+            f"Loss={final_metrics_in['eval_in/final_loss']:.4f}, "
+            f"Acc={final_metrics_in['eval_in/final_accuracy']:.4f}, "
+            f"Hard Acc={final_metrics_in['eval_in/final_hard_accuracy']:.4f}\n"
+            f"  OUT-of-distribution ({datasets.out_actual_batch_size} circuits{out_chunk_info}, random): "
+            f"Loss={final_metrics_out['eval_out/final_loss']:.4f}, "
+            f"Acc={final_metrics_out['eval_out/final_accuracy']:.4f}, "
+            f"Hard Acc={final_metrics_out['eval_out/final_hard_accuracy']:.4f}"
         )
 
         log.info(log_message)
 
         # Return all step metrics and final metrics for best model tracking
         result = {
-            "step_metrics_seed": step_metrics_seed,
-            "step_metrics_random": step_metrics_random,
-            "final_metrics_seed": final_metrics_seed,
-            "final_metrics_random": final_metrics_random,
+            "step_metrics_in": step_metrics_in,
+            "step_metrics_out": step_metrics_out,
+            "final_metrics_in": final_metrics_in,
+            "final_metrics_out": final_metrics_out,
+            # Add datasets information for comprehensive result reporting
+            "datasets_info": {
+                "in_actual_batch_size": datasets.in_actual_batch_size,
+                "out_actual_batch_size": datasets.out_actual_batch_size,
+                "target_batch_size": datasets.target_batch_size,
+                "in_used_chunking": datasets.in_actual_batch_size
+                > datasets.target_batch_size,
+                "out_used_chunking": datasets.out_actual_batch_size
+                > datasets.target_batch_size,
+                "training_wiring_mode": datasets.training_config["wiring_mode"],
+                "training_initial_diversity": datasets.training_config[
+                    "initial_diversity"
+                ],
+                "evaluation_base_seed": datasets.training_config[
+                    "evaluation_base_seed"
+                ],
+            },
         }
-
-        # Add pool metrics if available
-        if step_metrics_pool is not None:
-            result["step_metrics_pool"] = step_metrics_pool
-            result["final_metrics_pool"] = final_metrics_pool
 
         return result
 
     except Exception as e:
-        log.warning(f"Error during periodic evaluation at epoch {epoch}: {e}")
+        log.warning(f"Error during unified periodic evaluation at epoch {epoch}: {e}")
         return {}
 
 
@@ -724,7 +705,6 @@ def train_model(
     ),  # Fixed key for generating wirings when wiring_mode='fixed'
     init_model: CircuitGNN | CircuitSelfAttention = None,
     init_optimizer: nnx.Optimizer = None,
-    init_pool: GraphPool = None,
     initial_metrics: Dict = None,
     # Checkpointing parameters
     checkpoint_enabled: bool = False,
@@ -786,7 +766,6 @@ def train_model(
         wiring_fixed_key: Fixed key for generating wirings when wiring_mode='fixed'
         init_model: Optional pre-trained GNN model to continue training
         init_optimizer: Optional pre-trained optimizer to continue training
-        init_pool: Optional pre-initialized GraphPool to continue training with
         initial_metrics: Optional dictionary of metrics from previous training
         lr_scheduler: Learning rate scheduler type
         lr_scheduler_params: Dictionary of parameters for the scheduler
@@ -872,28 +851,25 @@ def train_model(
         optimizer = init_optimizer
         schedule = None
 
-    # Initialize Graph Pool for training if using pool
-    if init_pool is None:
-        if wiring_mode not in ["fixed", "genetic"]:
-            rng, pool_rng = jax.random.split(rng)
-        else:
-            pool_rng = wiring_fixed_key
-        # Initialize a fresh pool
-        circuit_pool = initialize_graph_pool(
-            rng=pool_rng,
-            layer_sizes=layer_sizes,
-            pool_size=pool_size,
-            input_n=input_n,
-            arity=arity,
-            hidden_dim=hidden_dim,
-            loss_value=0.0,  # Initial loss will be calculated properly in first step
-            wiring_mode=wiring_mode,
-            initial_diversity=initial_diversity,
-        )
+    # Initialize Graph Pool for training
+    # Use consistent key generation: wiring_fixed_key for fixed/genetic modes, dynamic for random
+    if wiring_mode in ["fixed", "genetic"]:
+        training_pool_key = wiring_fixed_key
     else:
-        # Use the provided pool
-        # log.info("Using provided pool for training")
-        circuit_pool = init_pool
+        # For random mode, use a portion of the main RNG to maintain consistency
+        rng, training_pool_key = jax.random.split(rng)
+
+    circuit_pool = initialize_graph_pool(
+        rng=training_pool_key,
+        layer_sizes=layer_sizes,
+        pool_size=pool_size,
+        input_n=input_n,
+        arity=arity,
+        hidden_dim=hidden_dim,
+        loss_value=0.0,  # Initial loss will be calculated properly in first step
+        wiring_mode=wiring_mode,
+        initial_diversity=initial_diversity,
+    )
 
     # Define pool-based training step
     @partial(
@@ -1095,15 +1071,14 @@ def train_model(
     if periodic_eval_enabled:
         log.info("Creating standardized evaluation datasets for periodic evaluation")
 
-        # Create standardized evaluation datasets
-        eval_datasets = create_evaluation_datasets(
-            test_seed=periodic_eval_test_seed,
+        # Create unified evaluation datasets
+        eval_datasets = create_unified_evaluation_datasets(
+            evaluation_base_seed=periodic_eval_test_seed,
+            training_wiring_mode=wiring_mode,
+            training_initial_diversity=initial_diversity,
             layer_sizes=layer_sizes,
             arity=arity,
-            ood_batch_size=periodic_eval_batch_size,
-            initial_diversity=initial_diversity,
-            pool_diversity_size=periodic_eval_batch_size,
-            wiring_mode=wiring_mode,
+            eval_batch_size=periodic_eval_batch_size,
         )
 
         log.info(eval_datasets.get_summary())
@@ -1182,12 +1157,15 @@ def train_model(
                 else:
                     # Original logic for fixed and random wiring modes
                     # Generate fresh circuits for resetting
-                    if wiring_mode == "fixed":
-                        # Use the fixed key for generating wirings
-                        fresh_key = wiring_fixed_key
+
+                    # Use consistent key generation for pool resets
+                    if wiring_mode in ["fixed", "genetic"]:
+                        reset_pool_key = wiring_fixed_key
+                    else:
+                        reset_pool_key = fresh_key
 
                     fresh_pool = initialize_graph_pool(
-                        rng=fresh_key,
+                        rng=reset_pool_key,
                         layer_sizes=layer_sizes,
                         pool_size=pool_size,  # Use same size as circuit_pool
                         input_n=input_n,
@@ -1325,7 +1303,7 @@ def train_model(
                     # The pool evaluation circuits are recreated with the same logic as training
                     current_datasets = eval_datasets
 
-                    eval_results = run_periodic_evaluation_with_datasets(
+                    eval_results = run_unified_periodic_evaluation(
                         model=model,
                         datasets=current_datasets,
                         pool=circuit_pool,
@@ -1342,8 +1320,8 @@ def train_model(
                         layer_sizes=layer_sizes,
                         log_pool_scatter=periodic_eval_log_pool_scatter,
                     )
-                    # Extract final metrics for best model tracking (use fixed seed metrics)
-                    current_eval_metrics = eval_results.get("final_metrics_seed", None)
+                    # Extract final metrics for best model tracking (use IN-distribution metrics)
+                    current_eval_metrics = eval_results.get("final_metrics_in", None)
 
                 # Step 3: Get current metric value for best model tracking using modular approach
                 try:
@@ -1465,6 +1443,7 @@ def train_model(
                     "best_metric": best_metric,
                     "early_stopped": early_stop_triggered,
                     "early_stop_epoch": epoch if early_stop_triggered else None,
+                    "first_threshold_epoch": first_threshold_epoch,
                 }
 
                 # Add pool to result if used

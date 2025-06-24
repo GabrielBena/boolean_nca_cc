@@ -676,6 +676,7 @@ def initialize_graph_pool(
             )
         elif effective_diversity >= pool_size:
             # Each circuit gets a unique wiring (same as random mode)
+            # We however need to make sure we are not always generating the same wirings
             rngs = jax.random.split(rng, pool_size)
             vmap_gen_circuit = jax.vmap(
                 lambda rng: gen_circuit(rng, layer_sizes, arity=arity)
