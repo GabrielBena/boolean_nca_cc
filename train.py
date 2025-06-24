@@ -34,7 +34,6 @@ from boolean_nca_cc.training.eval_datasets import (
     create_evaluation_datasets,
     get_evaluation_rng_keys,
 )
-from boolean_nca_cc.training.evaluation import evaluate_model_stepwise
 from boolean_nca_cc.utils.graph_builder import build_graph
 from boolean_nca_cc.training.utils import (
     plot_training_curves,
@@ -192,6 +191,7 @@ def main(cfg: DictConfig) -> None:
             name=cfg.wandb.run_name,
             dir=output_dir,
             config=OmegaConf.to_container(cfg, resolve=True),
+            group=cfg.wandb.group,
         )
         wandb_run = wandb.run
 
@@ -303,6 +303,7 @@ def main(cfg: DictConfig) -> None:
         pool_size=cfg.pool.size,
         reset_pool_fraction=cfg.pool.reset_fraction,
         reset_strategy=cfg.pool.reset_strategy,
+        reset_pool_interval=cfg.pool.reset_pool_interval,
         # Genetic mutation parameters
         genetic_mutation_rate=cfg.pool.mutation_rate,
         genetic_swaps_per_layer=cfg.pool.n_swaps_per_layer,

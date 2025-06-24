@@ -59,8 +59,8 @@ training:
 # Pool configuration for meta-learning
 pool:
   size: 2048
-  reset_fraction: 0.05
-  reset_interval: 256
+  reset_fraction: 0.1
+  reset_interval: 128
   reset_strategy: "combined"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
   # Genetic mutation parameters
@@ -127,5 +127,5 @@ checkpoint:
 
 # Logging configuration
 logging:
-  log_interval: 128  # Log metrics every N epochs
+  log_interval: 64  # Log metrics every N epochs
   level: "INFO" 
