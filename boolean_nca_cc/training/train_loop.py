@@ -253,25 +253,6 @@ def _check_early_stopping(
     first_threshold_epoch: Optional[int],
     epochs_above_threshold: int,
     stop_accuracy_patience: int,
-    # Periodic evaluation parameters
-    periodic_eval_enabled: bool,
-    eval_datasets,
-    periodic_eval_test_seed: int,
-    model,
-    circuit_pool,
-    x_data,
-    y_data,
-    input_n: int,
-    arity: int,
-    hidden_dim: int,
-    periodic_eval_inner_steps: int,
-    loss_type: str,
-    wandb_run,
-    periodic_eval_log_stepwise: bool,
-    layer_sizes,
-    periodic_eval_log_pool_scatter: bool,
-    initial_diversity: int,
-    periodic_eval_batch_size: int,
     rng: jax.random.PRNGKey,
 ) -> Tuple[bool, bool, int, Optional[int], Optional[Dict], jax.random.PRNGKey]:
     """
@@ -347,76 +328,6 @@ def _check_early_stopping(
                 f"Stopping at epoch {epoch}."
             )
 
-            # Run final periodic evaluation before stopping
-            if periodic_eval_enabled and eval_datasets is not None:
-                log.info("Running final periodic evaluation before early stopping...")
-                rng, final_eval_key = jax.random.split(rng)
-
-                # Create datasets with current pool for final evaluation
-                final_datasets = create_evaluation_datasets(
-                    test_seed=periodic_eval_test_seed,
-                    layer_sizes=layer_sizes,
-                    arity=arity,
-                    ood_batch_size=periodic_eval_batch_size,
-                    pool=circuit_pool,
-                    pool_batch_size=periodic_eval_batch_size,
-                    pool_rng_key=final_eval_key,
-                    initial_diversity=initial_diversity,
-                )
-
-                final_eval_results = run_periodic_evaluation_with_datasets(
-                    model=model,
-                    datasets=final_datasets,
-                    pool=circuit_pool,
-                    x_data=x_data,
-                    y_data=y_data,
-                    input_n=input_n,
-                    arity=arity,
-                    hidden_dim=hidden_dim,
-                    n_message_steps=periodic_eval_inner_steps,
-                    loss_type=loss_type,
-                    epoch=epoch,
-                    wandb_run=wandb_run,
-                    log_stepwise=periodic_eval_log_stepwise,
-                    layer_sizes=layer_sizes,
-                    log_pool_scatter=periodic_eval_log_pool_scatter,
-                )
-                # Update current_eval_metrics with final evaluation results
-                current_eval_metrics = final_eval_results.get(
-                    "final_metrics_seed", current_eval_metrics
-                )
-
-            # Log early stopping info to wandb
-            if wandb_run:
-                early_stop_log_dict = {
-                    "early_stop/triggered": True,
-                    "early_stop/epoch": epoch,
-                    "early_stop/threshold": stop_accuracy_threshold,
-                    "early_stop/metric": f"{stop_accuracy_source}_{stop_accuracy_metric}",
-                    "early_stop/final_value": stop_accuracy_value,
-                    "early_stop/first_threshold_epoch": first_threshold_epoch,
-                    "early_stop/patience": stop_accuracy_patience,
-                }
-                # Add final evaluation metrics if available
-                if current_eval_metrics is not None:
-                    early_stop_log_dict.update(
-                        {
-                            "early_stop/final_eval_loss": current_eval_metrics.get(
-                                "eval_seed/final_loss"
-                            ),
-                            "early_stop/final_eval_hard_loss": current_eval_metrics.get(
-                                "eval_seed/final_hard_loss"
-                            ),
-                            "early_stop/final_eval_accuracy": current_eval_metrics.get(
-                                "eval_seed/final_accuracy"
-                            ),
-                            "early_stop/final_eval_hard_accuracy": current_eval_metrics.get(
-                                "eval_seed/final_hard_accuracy"
-                            ),
-                        }
-                    )
-                wandb_run.log(early_stop_log_dict)
-
             return (
                 True,
                 early_stop_triggered,
@@ -429,7 +340,7 @@ def _check_early_stopping(
         # Reset counter if accuracy drops below threshold
         if epochs_above_threshold > 0:
             log.info(
-                f"Accuracy dropped below threshold. Resetting early stopping counter."
+                "Accuracy dropped below threshold. Resetting early stopping counter."
             )
         epochs_above_threshold = 0
         first_threshold_epoch = None
@@ -812,7 +723,7 @@ def train_model(
     # Pool parameters
     pool_size: int = 1024,
     reset_pool_fraction: float = 0.05,
-    reset_pool_interval: int = 10,
+    reset_pool_interval: int = 128,
     reset_strategy: str = "uniform",  # Options: "uniform", "steps_biased", "loss_biased", or "combined"
     combined_weights: Tuple[float, float] = (
         0.5,
@@ -1559,25 +1470,6 @@ def train_model(
                     first_threshold_epoch=first_threshold_epoch,
                     epochs_above_threshold=epochs_above_threshold,
                     stop_accuracy_patience=stop_accuracy_patience,
-                    # Periodic evaluation parameters
-                    periodic_eval_enabled=periodic_eval_enabled,
-                    eval_datasets=eval_datasets,
-                    periodic_eval_test_seed=periodic_eval_test_seed,
-                    model=model,
-                    circuit_pool=circuit_pool,
-                    x_data=x_data,
-                    y_data=y_data,
-                    input_n=input_n,
-                    arity=arity,
-                    hidden_dim=hidden_dim,
-                    periodic_eval_inner_steps=periodic_eval_inner_steps,
-                    loss_type=loss_type,
-                    wandb_run=wandb_run,
-                    periodic_eval_log_stepwise=periodic_eval_log_stepwise,
-                    layer_sizes=layer_sizes,
-                    periodic_eval_log_pool_scatter=periodic_eval_log_pool_scatter,
-                    initial_diversity=initial_diversity,
-                    periodic_eval_batch_size=periodic_eval_batch_size,
                     rng=rng,
                 )
 
