@@ -28,18 +28,15 @@ from boolean_nca_cc.circuits.train import TrainState, loss_f_l4, loss_f_bce, tra
 
 from boolean_nca_cc.training.train_loop import (
     train_model,
-    run_periodic_evaluation_with_datasets,
+    run_unified_periodic_evaluation,
 )
 from boolean_nca_cc.training.eval_datasets import (
-    create_evaluation_datasets,
-    get_evaluation_rng_keys,
+    create_unified_evaluation_datasets,
 )
 from boolean_nca_cc.utils.graph_builder import build_graph
 from boolean_nca_cc.training.utils import (
     plot_training_curves,
     save_checkpoint,
-    plot_inner_loop_metrics,
-    compare_with_backprop,
     cleanup_redundant_wandb_artifacts,
 )
 
@@ -164,6 +161,209 @@ def run_backpropagation_training(cfg, x_data, y_data, loss_type="l4"):
     return results
 
 
+def create_and_save_final_results(
+    cfg,
+    model_results,
+    eval_results,
+    layer_sizes,
+    output_dir,
+    wandb_run=None,
+    total_params=None,
+):
+    """
+    Create comprehensive final results dictionary, save as CSV, and log results.
+
+    Args:
+        cfg: Configuration object
+        model_results: Results from model training
+        eval_results: Results from evaluation
+        layer_sizes: Circuit layer sizes
+        output_dir: Directory to save results
+        wandb_run: WandB run object (optional)
+
+    Returns:
+        dict: Final results dictionary
+    """
+    # Collect comprehensive final results
+    final_results = {
+        # Model and training configuration
+        "model_type": cfg.model.type,
+        "wiring_mode": cfg.training.wiring_mode,
+        "loss_type": cfg.training.loss_type,
+        "learning_rate": cfg.training.learning_rate,
+        "epochs_completed": len(model_results["losses"]),
+        "total_epochs_planned": cfg.training.epochs
+        or 2**cfg.training.epochs_power_of_2,
+        "early_stopped": model_results.get("early_stopped", False),
+        "early_stop_epoch": model_results.get("early_stop_epoch", None),
+        "first_threshold_epoch": model_results.get("first_threshold_epoch", None),
+        # Meta-learning metrics (final training values)
+        "meta_loss": model_results["losses"][-1],
+        "meta_hard_loss": model_results["hard_losses"][-1],
+        "meta_accuracy": model_results["accuracies"][-1],
+        "meta_hard_accuracy": model_results["hard_accuracies"][-1],
+        # Best model performance
+        "best_metric": model_results.get("best_metric", None),
+        "best_metric_value": model_results.get("best_metric_value", None),
+    }
+
+    # Add unified evaluation metrics (IN-distribution and OUT-of-distribution)
+    if eval_results:
+        # IN-distribution evaluation (matches training pattern)
+        final_in_metrics = eval_results.get("final_metrics_in", {})
+        final_results.update(
+            {
+                "eval_in_final_loss": final_in_metrics.get("eval_in/final_loss", None),
+                "eval_in_final_hard_loss": final_in_metrics.get(
+                    "eval_in/final_hard_loss", None
+                ),
+                "eval_in_final_accuracy": final_in_metrics.get(
+                    "eval_in/final_accuracy", None
+                ),
+                "eval_in_final_hard_accuracy": final_in_metrics.get(
+                    "eval_in/final_hard_accuracy", None
+                ),
+            }
+        )
+
+        # OUT-of-distribution evaluation (always random)
+        final_out_metrics = eval_results.get("final_metrics_out", {})
+        final_results.update(
+            {
+                "eval_out_final_loss": final_out_metrics.get(
+                    "eval_out/final_loss", None
+                ),
+                "eval_out_final_hard_loss": final_out_metrics.get(
+                    "eval_out/final_hard_loss", None
+                ),
+                "eval_out_final_accuracy": final_out_metrics.get(
+                    "eval_out/final_accuracy", None
+                ),
+                "eval_out_final_hard_accuracy": final_out_metrics.get(
+                    "eval_out/final_hard_accuracy", None
+                ),
+            }
+        )
+
+    # Circuit and model architecture info
+    final_results.update(
+        {
+            "input_bits": cfg.circuit.input_bits,
+            "output_bits": cfg.circuit.output_bits,
+            "num_layers": len(layer_sizes),
+            "total_nodes": sum(size[0] for size in layer_sizes),
+            "circuit_hidden_dim": cfg.model.circuit_hidden_dim,
+            "total_parameters": total_params,
+            "message_steps": cfg.training.n_message_steps,
+            "eval_target_batch_size": cfg.eval.batch_size,
+            "pool_size": cfg.pool.size,
+            "pool_initial_diversity": cfg.pool.initial_diversity,
+        }
+    )
+
+    # Add unified evaluation specific information if available
+    if eval_results:
+        # Check if datasets information is available (from UnifiedEvaluationDatasets)
+        eval_datasets_info = eval_results.get("datasets_info", {})
+        if eval_datasets_info:
+            final_results.update(
+                {
+                    "eval_in_actual_batch_size": eval_datasets_info.get(
+                        "in_actual_batch_size", None
+                    ),
+                    "eval_out_actual_batch_size": eval_datasets_info.get(
+                        "out_actual_batch_size", None
+                    ),
+                    "eval_in_used_chunking": eval_datasets_info.get(
+                        "in_used_chunking", False
+                    ),
+                    "eval_out_used_chunking": eval_datasets_info.get(
+                        "out_used_chunking", False
+                    ),
+                    "eval_training_wiring_mode": eval_datasets_info.get(
+                        "training_wiring_mode", None
+                    ),
+                    "eval_training_initial_diversity": eval_datasets_info.get(
+                        "training_initial_diversity", None
+                    ),
+                }
+            )
+
+    # Create pandas DataFrame
+    results_df = pd.DataFrame([final_results])
+
+    # Save DataFrame to CSV
+    results_csv_path = os.path.join(output_dir, "final_results.csv")
+    results_df.to_csv(results_csv_path, index=False)
+    log.info(f"Final results saved to: {results_csv_path}")
+
+    # Display the DataFrame
+    log.info("Final Results Summary:")
+    pd.set_option("display.max_columns", None)
+    pd.set_option("display.width", None)
+    log.info("\n" + str(results_df.T))  # Transpose for better readability
+
+    # Log to wandb if enabled
+    if cfg.wandb.enabled and wandb_run:
+        # Log the DataFrame as a table
+        wandb.log({"final_results_table": wandb.Table(dataframe=results_df)})
+        # Also log individual final metrics for easy access
+        wandb.log({f"final/{k}": v for k, v in final_results.items() if v is not None})
+
+    # Final log (traditional format for backward compatibility)
+    log.info(f"Training complete. Final results:")
+    log.info(f"  Meta Loss: {model_results['losses'][-1]:.4f}")
+    log.info(f"  Meta Hard Loss: {model_results['hard_losses'][-1]:.4f}")
+    log.info(f"  Meta Accuracy: {model_results['accuracies'][-1]:.4f}")
+    log.info(f"  Meta Hard Accuracy: {model_results['hard_accuracies'][-1]:.4f}")
+
+    if eval_results:
+        final_in_metrics = eval_results.get("final_metrics_in", {})
+        if final_in_metrics:
+            log.info(
+                f"  Eval IN-distribution Final Loss: {final_in_metrics.get('eval_in/final_loss', 'N/A'):.4f}"
+            )
+            log.info(
+                f"  Eval IN-distribution Final Hard Accuracy: {final_in_metrics.get('eval_in/final_hard_accuracy', 'N/A'):.4f}"
+            )
+
+        final_out_metrics = eval_results.get("final_metrics_out", {})
+        if final_out_metrics:
+            log.info(
+                f"  Eval OUT-of-distribution Final Loss: {final_out_metrics.get('eval_out/final_loss', 'N/A'):.4f}"
+            )
+            log.info(
+                f"  Eval OUT-of-distribution Final Hard Accuracy: {final_out_metrics.get('eval_out/final_hard_accuracy', 'N/A'):.4f}"
+            )
+
+    # Display best model performance if applicable
+    if cfg.checkpoint.save_best and "best_metric_value" in model_results:
+        log.info(
+            f"  Best {model_results.get('best_metric', 'metric')}: {model_results['best_metric_value']:.4f}"
+        )
+
+    # Display early stopping and threshold information if applicable
+    first_threshold_epoch = model_results.get("first_threshold_epoch", None)
+    if first_threshold_epoch is not None:
+        log.info(
+            f"  Accuracy threshold {cfg.stop_accuracy.threshold} first reached at epoch {first_threshold_epoch}"
+        )
+
+    if model_results.get("early_stopped", False):
+        log.info(
+            f"  Training stopped early at epoch {model_results.get('early_stop_epoch', 'unknown')}"
+        )
+        log.info(
+            f"  Early stopping was triggered by {cfg.stop_accuracy.source}_{cfg.stop_accuracy.metric} >= {cfg.stop_accuracy.threshold}"
+        )
+    else:
+        log.info(
+            f"  Training completed all {cfg.training.epochs or 2**cfg.training.epochs_power_of_2} epochs"
+        )
+
+    return final_results
+
+
 @hydra.main(version_base=None, config_path="configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     """
@@ -223,7 +423,7 @@ def main(cfg: DictConfig) -> None:
         logits=logits,
         input_n=input_n,
         arity=arity,
-        hidden_dim=cfg.model.hidden_dim,
+        circuit_hidden_dim=cfg.model.circuit_hidden_dim,
     )
     n_nodes = int(graph.n_node[0])
 
@@ -270,6 +470,33 @@ def main(cfg: DictConfig) -> None:
         )
         raise
 
+    # Count and log model parameters with detailed breakdown
+    log.info(f"Model instantiated: {cfg.model.type}")
+
+    params = nnx.state(model, nnx.Param)
+    module_param_counts = {}
+
+    # Count parameters per module
+    for module_name, module_params in params.items():
+        num_params = jax.tree.reduce(lambda x, y: x + y.size, module_params, 0)
+        module_param_counts[module_name] = num_params
+        log.info(f"Number of params in {module_name}: {num_params:,}")
+
+    # Calculate total parameters
+    total_params = jax.tree.reduce(lambda x, y: x + y.size, params, 0)
+    log.info(f"Total number of params: {total_params:,}")
+
+    # Log to wandb if enabled
+    if cfg.wandb.enabled:
+        wandb_metrics = {
+            "model/parameter_count": total_params,
+        }
+        # Log per-module counts as well
+        for module_name, count in module_param_counts.items():
+            wandb_metrics[f"model/params_{module_name}"] = count
+
+        wandb.log(wandb_metrics)
+
     # Prepare checkpoint directory
     if cfg.checkpoint.enabled:
         checkpoint_dir = os.path.join(output_dir, "checkpoints")
@@ -287,7 +514,7 @@ def main(cfg: DictConfig) -> None:
         x_data=x,
         y_data=y0,
         layer_sizes=layer_sizes,
-        hidden_dim=cfg.model.hidden_dim,
+        circuit_hidden_dim=cfg.model.circuit_hidden_dim,
         arity=arity,
         # Training hyperparameters
         learning_rate=cfg.training.learning_rate,
@@ -366,22 +593,18 @@ def main(cfg: DictConfig) -> None:
     # Create standardized evaluation datasets
     log.info("Creating standardized evaluation datasets (seed + pool + OOD)")
 
-    # Get evaluation random keys for consistent splitting
-    eval_rng, pool_rng, _ = get_evaluation_rng_keys(rng, num_keys=3)
-
     # Create evaluation datasets using standardized approach
-    datasets = create_evaluation_datasets(
-        test_seed=cfg.test_seed,
+    datasets = create_unified_evaluation_datasets(
+        evaluation_base_seed=cfg.test_seed,
+        training_wiring_mode=cfg.training.wiring_mode,
+        training_initial_diversity=cfg.pool.initial_diversity,
         layer_sizes=layer_sizes,
         arity=cfg.circuit.arity,
-        ood_batch_size=cfg.eval.batch_size,
-        initial_diversity=cfg.pool.initial_diversity,
-        pool_diversity_size=cfg.eval.batch_size,
-        wiring_mode=cfg.training.wiring_mode,
+        eval_batch_size=cfg.eval.batch_size,
     )
 
     # Run comprehensive evaluation using standardized datasets
-    eval_results = run_periodic_evaluation_with_datasets(
+    eval_results = run_unified_periodic_evaluation(
         model=model_results["model"],
         datasets=datasets,
         pool=model_results.get("pool", None),
@@ -389,7 +612,7 @@ def main(cfg: DictConfig) -> None:
         y_data=y0,
         input_n=input_n,
         arity=arity,
-        hidden_dim=cfg.model.hidden_dim,
+        circuit_hidden_dim=cfg.model.circuit_hidden_dim,
         n_message_steps=cfg.eval.inner_steps,
         loss_type=cfg.training.loss_type,
         epoch=-1,  # Final evaluation marker
@@ -399,219 +622,19 @@ def main(cfg: DictConfig) -> None:
         log_pool_scatter=False,
     )
 
-    # Extract step metrics for backward compatibility (use seed evaluation)
-    step_metrics = eval_results.get("step_metrics_seed", {})
-
     if "metrics" in model_results:
         model_results.update(model_results["metrics"])
 
-    # Plot training curves
-    model_name = cfg.model.type.upper()
-    if not cfg.wandb.enabled:
-        plot_training_curves(
-            {
-                "losses": model_results["losses"],
-                "hard_losses": model_results["hard_losses"],
-                "accuracies": model_results["accuracies"],
-                "hard_accuracies": model_results["hard_accuracies"],
-            },
-            f"{model_name} Training",
-            os.path.join(output_dir, "plots"),
-        )
-
-    # Plot inner loop metrics
-    plot_inner_loop_metrics(
-        step_metrics, f"{model_name} Inner Loop", os.path.join(output_dir, "plots")
-    )
-
-    # Compare with backpropagation if available
-    if bp_results is not None:
-        compare_with_backprop(
-            {
-                "losses": step_metrics["soft_loss"],
-                "hard_losses": step_metrics["hard_loss"],
-                "accuracies": step_metrics["soft_accuracy"],
-                "hard_accuracies": step_metrics["hard_accuracy"],
-            },
-            bp_results,
-            f"{model_name} vs Backprop",
-            os.path.join(output_dir, "plots"),
-        )
-
     # Collect comprehensive final results
-    final_results = {
-        # Model and training configuration
-        "model_type": cfg.model.type,
-        "wiring_mode": cfg.training.wiring_mode,
-        "loss_type": cfg.training.loss_type,
-        "learning_rate": cfg.training.learning_rate,
-        "epochs_completed": len(model_results["losses"]),
-        "total_epochs_planned": cfg.training.epochs
-        or 2**cfg.training.epochs_power_of_2,
-        "early_stopped": model_results.get("early_stopped", False),
-        "early_stop_epoch": model_results.get("early_stop_epoch", None),
-        # Meta-learning metrics (final training values)
-        "meta_loss": model_results["losses"][-1],
-        "meta_hard_loss": model_results["hard_losses"][-1],
-        "meta_accuracy": model_results["accuracies"][-1],
-        "meta_hard_accuracy": model_results["hard_accuracies"][-1],
-        # Best model performance
-        "best_metric": model_results.get("best_metric", None),
-        "best_metric_value": model_results.get("best_metric_value", None),
-    }
-
-    # Add evaluation metrics from all sources
-    if eval_results:
-        # Fixed seed evaluation
-        final_seed_metrics = eval_results.get("final_metrics_seed", {})
-        final_results.update(
-            {
-                "eval_seed_final_loss": final_seed_metrics.get(
-                    "eval_seed/final_loss", None
-                ),
-                "eval_seed_final_hard_loss": final_seed_metrics.get(
-                    "eval_seed/final_hard_loss", None
-                ),
-                "eval_seed_final_accuracy": final_seed_metrics.get(
-                    "eval_seed/final_accuracy", None
-                ),
-                "eval_seed_final_hard_accuracy": final_seed_metrics.get(
-                    "eval_seed/final_hard_accuracy", None
-                ),
-            }
-        )
-
-        # Pool evaluation (if available)
-        final_pool_metrics = eval_results.get("final_metrics_pool", {})
-        if final_pool_metrics:
-            final_results.update(
-                {
-                    "eval_pool_final_loss": final_pool_metrics.get(
-                        "eval_pool/final_loss", None
-                    ),
-                    "eval_pool_final_hard_loss": final_pool_metrics.get(
-                        "eval_pool/final_hard_loss", None
-                    ),
-                    "eval_pool_final_accuracy": final_pool_metrics.get(
-                        "eval_pool/final_accuracy", None
-                    ),
-                    "eval_pool_final_hard_accuracy": final_pool_metrics.get(
-                        "eval_pool/final_hard_accuracy", None
-                    ),
-                }
-            )
-
-        # OOD evaluation
-        final_ood_metrics = eval_results.get("final_metrics_random", {})
-        final_results.update(
-            {
-                "eval_ood_final_loss": final_ood_metrics.get(
-                    "eval_ood/final_loss", None
-                ),
-                "eval_ood_final_hard_loss": final_ood_metrics.get(
-                    "eval_ood/final_hard_loss", None
-                ),
-                "eval_ood_final_accuracy": final_ood_metrics.get(
-                    "eval_ood/final_accuracy", None
-                ),
-                "eval_ood_final_hard_accuracy": final_ood_metrics.get(
-                    "eval_ood/final_hard_accuracy", None
-                ),
-            }
-        )
-
-    # Circuit and model architecture info
-    final_results.update(
-        {
-            "input_bits": cfg.circuit.input_bits,
-            "output_bits": cfg.circuit.output_bits,
-            "num_layers": len(layer_sizes),
-            "total_nodes": sum(size[0] for size in layer_sizes),
-            "hidden_dim": cfg.model.hidden_dim,
-            "message_steps": cfg.training.n_message_steps,
-            "eval_batch_size": cfg.eval.batch_size,
-            "pool_size": cfg.pool.size,
-            "pool_initial_diversity": cfg.pool.initial_diversity,
-        }
+    final_results = create_and_save_final_results(
+        cfg,
+        model_results,
+        eval_results,
+        layer_sizes,
+        output_dir,
+        wandb_run,
+        total_params,
     )
-
-    # Create pandas DataFrame
-    results_df = pd.DataFrame([final_results])
-
-    # Save DataFrame to CSV
-    results_csv_path = os.path.join(output_dir, "final_results.csv")
-    results_df.to_csv(results_csv_path, index=False)
-    log.info(f"Final results saved to: {results_csv_path}")
-
-    # Display the DataFrame
-    log.info("Final Results Summary:")
-    pd.set_option("display.max_columns", None)
-    pd.set_option("display.width", None)
-    log.info("\n" + str(results_df.T))  # Transpose for better readability
-
-    # Log to wandb if enabled
-    if cfg.wandb.enabled:
-        # Log the DataFrame as a table
-        wandb.log({"final_results_table": wandb.Table(dataframe=results_df)})
-
-        # Also log individual final metrics for easy access
-        wandb.log({f"final/{k}": v for k, v in final_results.items() if v is not None})
-
-    # Final log (traditional format for backward compatibility)
-    log.info(f"Training complete. Final results:")
-    log.info(f"  Meta Loss: {model_results['losses'][-1]:.4f}")
-    log.info(f"  Meta Hard Loss: {model_results['hard_losses'][-1]:.4f}")
-    log.info(f"  Meta Accuracy: {model_results['accuracies'][-1]:.4f}")
-    log.info(f"  Meta Hard Accuracy: {model_results['hard_accuracies'][-1]:.4f}")
-
-    # Log evaluation results if available
-    if step_metrics and len(step_metrics.get("soft_loss", [])) > 0:
-        log.info(f"  Inner Loop Final Loss: {step_metrics['soft_loss'][-1]:.4f}")
-        log.info(f"  Inner Loop Final Hard Loss: {step_metrics['hard_loss'][-1]:.4f}")
-        log.info(
-            f"  Inner Loop Final Accuracy: {step_metrics['soft_accuracy'][-1]:.4f}"
-        )
-        log.info(
-            f"  Inner Loop Final Hard Accuracy: {step_metrics['hard_accuracy'][-1]:.4f}"
-        )
-
-    if eval_results:
-        final_seed_metrics = eval_results.get("final_metrics_seed", {})
-        if final_seed_metrics:
-            log.info(
-                f"  Eval Seed Final Loss: {final_seed_metrics.get('eval_seed/final_loss', 'N/A'):.4f}"
-            )
-            log.info(
-                f"  Eval Seed Final Hard Accuracy: {final_seed_metrics.get('eval_seed/final_hard_accuracy', 'N/A'):.4f}"
-            )
-
-        final_ood_metrics = eval_results.get("final_metrics_random", {})
-        if final_ood_metrics:
-            log.info(
-                f"  Eval OOD Final Loss: {final_ood_metrics.get('eval_ood/final_loss', 'N/A'):.4f}"
-            )
-            log.info(
-                f"  Eval OOD Final Hard Accuracy: {final_ood_metrics.get('eval_ood/final_hard_accuracy', 'N/A'):.4f}"
-            )
-
-    # Display best model performance if applicable
-    if cfg.checkpoint.save_best and "best_metric_value" in model_results:
-        log.info(
-            f"  Best {model_results.get('best_metric', 'metric')}: {model_results['best_metric_value']:.4f}"
-        )
-
-    # Display early stopping information if applicable
-    if model_results.get("early_stopped", False):
-        log.info(
-            f"  Training stopped early at epoch {model_results.get('early_stop_epoch', 'unknown')}"
-        )
-        log.info(
-            f"  Early stopping was triggered by {cfg.stop_accuracy.source}_{cfg.stop_accuracy.metric} >= {cfg.stop_accuracy.threshold}"
-        )
-    else:
-        log.info(
-            f"  Training completed all {cfg.training.epochs or 2**cfg.training.epochs_power_of_2} epochs"
-        )
 
     # Close wandb if enabled
     if cfg.wandb.enabled:
@@ -621,6 +644,8 @@ def main(cfg: DictConfig) -> None:
             verbose=True,
         )
         wandb.finish()
+
+    return final_results
 
 
 if __name__ == "__main__":
