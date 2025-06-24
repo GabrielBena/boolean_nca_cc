@@ -19,13 +19,21 @@ import wandb
 from tqdm.auto import tqdm
 from functools import partial
 from flax import nnx
+import pandas as pd
 
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.circuits.tasks import get_task_data
 from boolean_nca_cc import generate_layer_sizes
 from boolean_nca_cc.circuits.train import TrainState, loss_f_l4, loss_f_bce, train_step
 
-from boolean_nca_cc.training.train_loop import train_model
+from boolean_nca_cc.training.train_loop import (
+    train_model,
+    run_periodic_evaluation_with_datasets,
+)
+from boolean_nca_cc.training.eval_datasets import (
+    create_evaluation_datasets,
+    get_evaluation_rng_keys,
+)
 from boolean_nca_cc.training.evaluation import evaluate_model_stepwise
 from boolean_nca_cc.utils.graph_builder import build_graph
 from boolean_nca_cc.training.utils import (
@@ -322,6 +330,13 @@ def main(cfg: DictConfig) -> None:
         wandb_logging=cfg.wandb.enabled,
         log_interval=cfg.logging.log_interval,
         wandb_run_config=OmegaConf.to_container(cfg, resolve=True),
+        # Early stopping parameters
+        stop_accuracy_enabled=cfg.stop_accuracy.enabled,
+        stop_accuracy_threshold=cfg.stop_accuracy.threshold,
+        stop_accuracy_metric=cfg.stop_accuracy.metric,
+        stop_accuracy_source=cfg.stop_accuracy.source,
+        stop_accuracy_patience=cfg.stop_accuracy.patience,
+        stop_accuracy_min_epochs=cfg.stop_accuracy.min_epochs,
     )
 
     # Save final model if checkpointing is enabled
@@ -343,19 +358,29 @@ def main(cfg: DictConfig) -> None:
             filename="final_model.pkl",
         )
 
-    # Evaluate inner loop (message passing steps)
-    log.info("Evaluating inner loop performance")
+    # Create standardized evaluation datasets
+    log.info("Creating standardized evaluation datasets (seed + pool + OOD)")
 
-    # Get a representative circuit for inner loop evaluation
-    test_wires, test_logits = gen_circuit(
-        test_key, cfg.circuit.layer_sizes, arity=cfg.circuit.arity
+    # Get evaluation random keys for consistent splitting
+    eval_rng, pool_rng, _ = get_evaluation_rng_keys(rng, num_keys=3)
+
+    # Create evaluation datasets using standardized approach
+    datasets = create_evaluation_datasets(
+        test_seed=cfg.test_seed,
+        layer_sizes=layer_sizes,
+        arity=cfg.circuit.arity,
+        ood_batch_size=cfg.eval.batch_size,
+        pool=model_results.get("pool", None),
+        pool_batch_size=cfg.eval.batch_size,
+        pool_rng_key=pool_rng,
+        initial_diversity=cfg.pool.initial_diversity,
     )
 
-    # Run stepwise evaluation
-    step_metrics = evaluate_model_stepwise(
+    # Run comprehensive evaluation using standardized datasets
+    eval_results = run_periodic_evaluation_with_datasets(
         model=model_results["model"],
-        wires=test_wires,
-        logits=test_logits,
+        datasets=datasets,
+        pool=model_results.get("pool", None),
         x_data=x,
         y_data=y0,
         input_n=input_n,
@@ -363,8 +388,15 @@ def main(cfg: DictConfig) -> None:
         hidden_dim=cfg.model.hidden_dim,
         n_message_steps=cfg.eval.inner_steps,
         loss_type=cfg.training.loss_type,
+        epoch=-1,  # Final evaluation marker
+        wandb_run=wandb_run,
+        log_stepwise=False,
         layer_sizes=layer_sizes,
+        log_pool_scatter=False,
     )
+
+    # Extract step metrics for backward compatibility (use seed evaluation)
+    step_metrics = eval_results.get("step_metrics_seed", {})
 
     if "metrics" in model_results:
         model_results.update(model_results["metrics"])
@@ -402,23 +434,179 @@ def main(cfg: DictConfig) -> None:
             os.path.join(output_dir, "plots"),
         )
 
-    # Final log
+    # Collect comprehensive final results
+    final_results = {
+        # Model and training configuration
+        "model_type": cfg.model.type,
+        "wiring_mode": cfg.training.wiring_mode,
+        "loss_type": cfg.training.loss_type,
+        "learning_rate": cfg.training.learning_rate,
+        "epochs_completed": len(model_results["losses"]),
+        "total_epochs_planned": cfg.training.epochs
+        or 2**cfg.training.epochs_power_of_2,
+        "early_stopped": model_results.get("early_stopped", False),
+        "early_stop_epoch": model_results.get("early_stop_epoch", None),
+        # Meta-learning metrics (final training values)
+        "meta_loss": model_results["losses"][-1],
+        "meta_hard_loss": model_results["hard_losses"][-1],
+        "meta_accuracy": model_results["accuracies"][-1],
+        "meta_hard_accuracy": model_results["hard_accuracies"][-1],
+        # Best model performance
+        "best_metric": model_results.get("best_metric", None),
+        "best_metric_value": model_results.get("best_metric_value", None),
+    }
+
+    # Add evaluation metrics from all sources
+    if eval_results:
+        # Fixed seed evaluation
+        final_seed_metrics = eval_results.get("final_metrics_seed", {})
+        final_results.update(
+            {
+                "eval_seed_final_loss": final_seed_metrics.get(
+                    "eval_seed/final_loss", None
+                ),
+                "eval_seed_final_hard_loss": final_seed_metrics.get(
+                    "eval_seed/final_hard_loss", None
+                ),
+                "eval_seed_final_accuracy": final_seed_metrics.get(
+                    "eval_seed/final_accuracy", None
+                ),
+                "eval_seed_final_hard_accuracy": final_seed_metrics.get(
+                    "eval_seed/final_hard_accuracy", None
+                ),
+            }
+        )
+
+        # Pool evaluation (if available)
+        final_pool_metrics = eval_results.get("final_metrics_pool", {})
+        if final_pool_metrics:
+            final_results.update(
+                {
+                    "eval_pool_final_loss": final_pool_metrics.get(
+                        "eval_pool/final_loss", None
+                    ),
+                    "eval_pool_final_hard_loss": final_pool_metrics.get(
+                        "eval_pool/final_hard_loss", None
+                    ),
+                    "eval_pool_final_accuracy": final_pool_metrics.get(
+                        "eval_pool/final_accuracy", None
+                    ),
+                    "eval_pool_final_hard_accuracy": final_pool_metrics.get(
+                        "eval_pool/final_hard_accuracy", None
+                    ),
+                }
+            )
+
+        # OOD evaluation
+        final_ood_metrics = eval_results.get("final_metrics_random", {})
+        final_results.update(
+            {
+                "eval_ood_final_loss": final_ood_metrics.get(
+                    "eval_ood/final_loss", None
+                ),
+                "eval_ood_final_hard_loss": final_ood_metrics.get(
+                    "eval_ood/final_hard_loss", None
+                ),
+                "eval_ood_final_accuracy": final_ood_metrics.get(
+                    "eval_ood/final_accuracy", None
+                ),
+                "eval_ood_final_hard_accuracy": final_ood_metrics.get(
+                    "eval_ood/final_hard_accuracy", None
+                ),
+            }
+        )
+
+    # Circuit and model architecture info
+    final_results.update(
+        {
+            "input_bits": cfg.circuit.input_bits,
+            "output_bits": cfg.circuit.output_bits,
+            "num_layers": len(layer_sizes),
+            "total_nodes": sum(size[0] for size in layer_sizes),
+            "hidden_dim": cfg.model.hidden_dim,
+            "message_steps": cfg.training.n_message_steps,
+            "eval_batch_size": cfg.eval.batch_size,
+            "pool_size": cfg.pool.size,
+            "pool_initial_diversity": cfg.pool.initial_diversity,
+        }
+    )
+
+    # Create pandas DataFrame
+    results_df = pd.DataFrame([final_results])
+
+    # Save DataFrame to CSV
+    results_csv_path = os.path.join(output_dir, "final_results.csv")
+    results_df.to_csv(results_csv_path, index=False)
+    log.info(f"Final results saved to: {results_csv_path}")
+
+    # Display the DataFrame
+    log.info("Final Results Summary:")
+    pd.set_option("display.max_columns", None)
+    pd.set_option("display.width", None)
+    log.info("\n" + str(results_df.T))  # Transpose for better readability
+
+    # Log to wandb if enabled
+    if cfg.wandb.enabled:
+        # Log the DataFrame as a table
+        wandb.log({"final_results_table": wandb.Table(dataframe=results_df)})
+
+        # Also log individual final metrics for easy access
+        wandb.log({f"final/{k}": v for k, v in final_results.items() if v is not None})
+
+    # Final log (traditional format for backward compatibility)
     log.info(f"Training complete. Final results:")
     log.info(f"  Meta Loss: {model_results['losses'][-1]:.4f}")
     log.info(f"  Meta Hard Loss: {model_results['hard_losses'][-1]:.4f}")
     log.info(f"  Meta Accuracy: {model_results['accuracies'][-1]:.4f}")
     log.info(f"  Meta Hard Accuracy: {model_results['hard_accuracies'][-1]:.4f}")
-    log.info(f"  Inner Loop Final Loss: {step_metrics['soft_loss'][-1]:.4f}")
-    log.info(f"  Inner Loop Final Hard Loss: {step_metrics['hard_loss'][-1]:.4f}")
-    log.info(f"  Inner Loop Final Accuracy: {step_metrics['soft_accuracy'][-1]:.4f}")
-    log.info(
-        f"  Inner Loop Final Hard Accuracy: {step_metrics['hard_accuracy'][-1]:.4f}"
-    )
+
+    # Log evaluation results if available
+    if step_metrics and len(step_metrics.get("soft_loss", [])) > 0:
+        log.info(f"  Inner Loop Final Loss: {step_metrics['soft_loss'][-1]:.4f}")
+        log.info(f"  Inner Loop Final Hard Loss: {step_metrics['hard_loss'][-1]:.4f}")
+        log.info(
+            f"  Inner Loop Final Accuracy: {step_metrics['soft_accuracy'][-1]:.4f}"
+        )
+        log.info(
+            f"  Inner Loop Final Hard Accuracy: {step_metrics['hard_accuracy'][-1]:.4f}"
+        )
+
+    if eval_results:
+        final_seed_metrics = eval_results.get("final_metrics_seed", {})
+        if final_seed_metrics:
+            log.info(
+                f"  Eval Seed Final Loss: {final_seed_metrics.get('eval_seed/final_loss', 'N/A'):.4f}"
+            )
+            log.info(
+                f"  Eval Seed Final Hard Accuracy: {final_seed_metrics.get('eval_seed/final_hard_accuracy', 'N/A'):.4f}"
+            )
+
+        final_ood_metrics = eval_results.get("final_metrics_random", {})
+        if final_ood_metrics:
+            log.info(
+                f"  Eval OOD Final Loss: {final_ood_metrics.get('eval_ood/final_loss', 'N/A'):.4f}"
+            )
+            log.info(
+                f"  Eval OOD Final Hard Accuracy: {final_ood_metrics.get('eval_ood/final_hard_accuracy', 'N/A'):.4f}"
+            )
 
     # Display best model performance if applicable
     if cfg.checkpoint.save_best and "best_metric_value" in model_results:
         log.info(
             f"  Best {model_results.get('best_metric', 'metric')}: {model_results['best_metric_value']:.4f}"
+        )
+
+    # Display early stopping information if applicable
+    if model_results.get("early_stopped", False):
+        log.info(
+            f"  Training stopped early at epoch {model_results.get('early_stop_epoch', 'unknown')}"
+        )
+        log.info(
+            f"  Early stopping was triggered by {cfg.stop_accuracy.source}_{cfg.stop_accuracy.metric} >= {cfg.stop_accuracy.threshold}"
+        )
+    else:
+        log.info(
+            f"  Training completed all {cfg.training.epochs or 2**cfg.training.epochs_power_of_2} epochs"
         )
 
     # Close wandb if enabled

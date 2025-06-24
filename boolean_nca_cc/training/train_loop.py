@@ -34,6 +34,11 @@ from boolean_nca_cc.training.evaluation import (
     evaluate_model_stepwise_batched,
     get_loss_and_update_graph,
 )
+from boolean_nca_cc.training.eval_datasets import (
+    create_evaluation_datasets,
+    get_evaluation_rng_keys,
+    EvaluationDatasets,
+)
 import wandb
 
 # Type alias for PyTree
@@ -235,6 +240,210 @@ def _save_stable_state(
         log.warning(f"Error saving stable state: {e}")
 
 
+def _check_early_stopping(
+    stop_accuracy_enabled: bool,
+    epoch: int,
+    stop_accuracy_min_epochs: int,
+    early_stop_triggered: bool,
+    stop_accuracy_metric: str,
+    stop_accuracy_source: str,
+    training_metrics: Dict,
+    current_eval_metrics: Optional[Dict],
+    stop_accuracy_threshold: float,
+    first_threshold_epoch: Optional[int],
+    epochs_above_threshold: int,
+    stop_accuracy_patience: int,
+    # Periodic evaluation parameters
+    periodic_eval_enabled: bool,
+    eval_datasets,
+    periodic_eval_test_seed: int,
+    model,
+    circuit_pool,
+    x_data,
+    y_data,
+    input_n: int,
+    arity: int,
+    hidden_dim: int,
+    periodic_eval_inner_steps: int,
+    loss_type: str,
+    wandb_run,
+    periodic_eval_log_stepwise: bool,
+    layer_sizes,
+    periodic_eval_log_pool_scatter: bool,
+    initial_diversity: int,
+    periodic_eval_batch_size: int,
+    rng: jax.random.PRNGKey,
+) -> Tuple[bool, bool, int, Optional[int], Optional[Dict], jax.random.PRNGKey]:
+    """
+    Check early stopping conditions and handle early stopping logic.
+
+    Returns:
+        Tuple of (should_break, early_stop_triggered, epochs_above_threshold,
+                 first_threshold_epoch, updated_current_eval_metrics, updated_rng)
+    """
+    if (
+        not stop_accuracy_enabled
+        or epoch < stop_accuracy_min_epochs
+        or early_stop_triggered
+    ):
+        return (
+            False,
+            early_stop_triggered,
+            epochs_above_threshold,
+            first_threshold_epoch,
+            current_eval_metrics,
+            rng,
+        )
+
+    # Get the accuracy value for early stopping
+    try:
+        stop_accuracy_value = _get_metric_value(
+            stop_accuracy_metric,
+            stop_accuracy_source,
+            training_metrics,
+            current_eval_metrics,
+        )
+    except (ValueError, KeyError):
+        if stop_accuracy_source == "eval" and current_eval_metrics is None:
+            # Evaluation metrics not available, skip early stopping check this epoch
+            stop_accuracy_value = None
+        else:
+            # Fallback to training metrics if eval not available
+            stop_accuracy_value = _get_metric_value(
+                stop_accuracy_metric,
+                "training",
+                training_metrics,
+                current_eval_metrics,
+            )
+
+    if stop_accuracy_value is None:
+        return (
+            False,
+            early_stop_triggered,
+            epochs_above_threshold,
+            first_threshold_epoch,
+            current_eval_metrics,
+            rng,
+        )
+
+    if stop_accuracy_value >= stop_accuracy_threshold:
+        if first_threshold_epoch is None:
+            first_threshold_epoch = epoch
+            log.info(
+                f"Reached accuracy threshold {stop_accuracy_threshold:.4f} "
+                f"({stop_accuracy_source}_{stop_accuracy_metric}={stop_accuracy_value:.4f}) "
+                f"at epoch {epoch}. Starting patience countdown."
+            )
+        epochs_above_threshold += 1
+
+        # Check if we should stop
+        if epochs_above_threshold >= stop_accuracy_patience:
+            early_stop_triggered = True
+            log.info(
+                f"Early stopping triggered! "
+                f"Accuracy {stop_accuracy_source}_{stop_accuracy_metric}={stop_accuracy_value:.4f} "
+                f"has been above threshold {stop_accuracy_threshold:.4f} "
+                f"for {stop_accuracy_patience} epochs. "
+                f"Stopping at epoch {epoch}."
+            )
+
+            # Run final periodic evaluation before stopping
+            if periodic_eval_enabled and eval_datasets is not None:
+                log.info("Running final periodic evaluation before early stopping...")
+                rng, final_eval_key = jax.random.split(rng)
+
+                # Create datasets with current pool for final evaluation
+                final_datasets = create_evaluation_datasets(
+                    test_seed=periodic_eval_test_seed,
+                    layer_sizes=layer_sizes,
+                    arity=arity,
+                    ood_batch_size=periodic_eval_batch_size,
+                    pool=circuit_pool,
+                    pool_batch_size=periodic_eval_batch_size,
+                    pool_rng_key=final_eval_key,
+                    initial_diversity=initial_diversity,
+                )
+
+                final_eval_results = run_periodic_evaluation_with_datasets(
+                    model=model,
+                    datasets=final_datasets,
+                    pool=circuit_pool,
+                    x_data=x_data,
+                    y_data=y_data,
+                    input_n=input_n,
+                    arity=arity,
+                    hidden_dim=hidden_dim,
+                    n_message_steps=periodic_eval_inner_steps,
+                    loss_type=loss_type,
+                    epoch=epoch,
+                    wandb_run=wandb_run,
+                    log_stepwise=periodic_eval_log_stepwise,
+                    layer_sizes=layer_sizes,
+                    log_pool_scatter=periodic_eval_log_pool_scatter,
+                )
+                # Update current_eval_metrics with final evaluation results
+                current_eval_metrics = final_eval_results.get(
+                    "final_metrics_seed", current_eval_metrics
+                )
+
+            # Log early stopping info to wandb
+            if wandb_run:
+                early_stop_log_dict = {
+                    "early_stop/triggered": True,
+                    "early_stop/epoch": epoch,
+                    "early_stop/threshold": stop_accuracy_threshold,
+                    "early_stop/metric": f"{stop_accuracy_source}_{stop_accuracy_metric}",
+                    "early_stop/final_value": stop_accuracy_value,
+                    "early_stop/first_threshold_epoch": first_threshold_epoch,
+                    "early_stop/patience": stop_accuracy_patience,
+                }
+                # Add final evaluation metrics if available
+                if current_eval_metrics is not None:
+                    early_stop_log_dict.update(
+                        {
+                            "early_stop/final_eval_loss": current_eval_metrics.get(
+                                "eval_seed/final_loss"
+                            ),
+                            "early_stop/final_eval_hard_loss": current_eval_metrics.get(
+                                "eval_seed/final_hard_loss"
+                            ),
+                            "early_stop/final_eval_accuracy": current_eval_metrics.get(
+                                "eval_seed/final_accuracy"
+                            ),
+                            "early_stop/final_eval_hard_accuracy": current_eval_metrics.get(
+                                "eval_seed/final_hard_accuracy"
+                            ),
+                        }
+                    )
+                wandb_run.log(early_stop_log_dict)
+
+            return (
+                True,
+                early_stop_triggered,
+                epochs_above_threshold,
+                first_threshold_epoch,
+                current_eval_metrics,
+                rng,
+            )
+    else:
+        # Reset counter if accuracy drops below threshold
+        if epochs_above_threshold > 0:
+            log.info(
+                f"Accuracy dropped below threshold. Resetting early stopping counter."
+            )
+        epochs_above_threshold = 0
+        first_threshold_epoch = None
+
+    return (
+        False,
+        early_stop_triggered,
+        epochs_above_threshold,
+        first_threshold_epoch,
+        current_eval_metrics,
+        rng,
+    )
+
+
 def _log_final_wandb_metrics(wandb_run, results: Dict, epochs: int) -> None:
     """Log final metrics and plots to wandb."""
     if wandb_run is None:
@@ -328,13 +537,10 @@ def _log_pool_scatter(pool, epoch, wandb_run):
     wandb_run.log({"pool/scatter": wandb.plot.scatter(table, "steps", "loss")})
 
 
-def _run_periodic_evaluation_dual(
+def run_periodic_evaluation_with_datasets(
     model,
+    datasets: EvaluationDatasets,
     pool,
-    test_seed_wires,
-    test_seed_logits,
-    test_random_wires,
-    test_random_logits,
     x_data,
     y_data,
     input_n,
@@ -347,19 +553,14 @@ def _run_periodic_evaluation_dual(
     log_stepwise=False,
     layer_sizes: List[Tuple[int, int]] = None,
     log_pool_scatter: bool = False,
-    initial_diversity: int = 1,
-    eval_batch_size: int = 16,
-    eval_rng_key: jax.random.PRNGKey = None,
 ) -> Dict:
     """
-    Run dual periodic evaluation: both fixed seed and in-distribution/OOD batch evaluations.
+    Run comprehensive periodic evaluation using standardized datasets.
 
     Args:
         model: The model to evaluate
-        test_seed_wires: Test circuit wires (single circuit with fixed seed)
-        test_seed_logits: Test circuit logits (single circuit with fixed seed)
-        test_random_wires: Test circuit wires (batch of random circuits for OOD)
-        test_random_logits: Test circuit logits (batch of random circuits for OOD)
+        datasets: EvaluationDatasets object containing all test circuits
+        pool: GraphPool for logging scatter plot
         x_data: Input data
         y_data: Target data
         input_n: Number of input nodes
@@ -372,9 +573,6 @@ def _run_periodic_evaluation_dual(
         log_stepwise: Whether to log step-by-step metrics
         layer_sizes: Circuit layer sizes
         log_pool_scatter: Whether to log pool scatterplot (loss vs steps)
-        initial_diversity: Number of initial diverse circuits in the pool
-        eval_batch_size: Batch size for pool sampling evaluation
-        eval_rng_key: Random key for evaluation sampling
 
     Returns:
         Dictionary with evaluation metrics from fixed seed, in-distribution, and OOD evaluations
@@ -383,8 +581,8 @@ def _run_periodic_evaluation_dual(
         # 1. Run fixed seed evaluation (single circuit)
         step_metrics_seed = evaluate_model_stepwise(
             model=model,
-            wires=test_seed_wires,
-            logits=test_seed_logits,
+            wires=datasets.test_seed_wires,
+            logits=datasets.test_seed_logits,
             x_data=x_data,
             y_data=y_data,
             input_n=input_n,
@@ -404,26 +602,14 @@ def _run_periodic_evaluation_dual(
             "eval_seed/epoch": epoch,
         }
 
-        # 2. Run in-distribution evaluation if diversity > 1 (sample from pool)
+        # 2. Run in-distribution evaluation if pool data available
         final_metrics_pool = {}
         step_metrics_pool = None
-        if initial_diversity > 1 and eval_rng_key is not None:
-            # Sample circuits from the current pool for in-distribution evaluation
-            pool_sample_key, eval_rng_key = jax.random.split(eval_rng_key)
-            _, pool_graphs, pool_wires, pool_logits = pool.sample(
-                pool_sample_key, eval_batch_size
-            )
-
-            # Reset the pool circuits to initial state for fair evaluation
-            # (remove any accumulated update steps and set loss to 0)
-            pool_graphs = pool_graphs._replace(
-                globals=jp.zeros_like(pool_graphs.globals)
-            )
-
+        if datasets.has_pool_data:
             step_metrics_pool = evaluate_model_stepwise_batched(
                 model=model,
-                batch_wires=pool_wires,
-                batch_logits=pool_logits,
+                batch_wires=datasets.pool_wires,
+                batch_logits=datasets.pool_logits,
                 x_data=x_data,
                 y_data=y_data,
                 input_n=input_n,
@@ -443,11 +629,11 @@ def _run_periodic_evaluation_dual(
                 "eval_pool/epoch": epoch,
             }
 
-        # 3. Run random batch evaluation (OOD testing)
+        # 3. Run OOD evaluation (random batch testing)
         step_metrics_random = evaluate_model_stepwise_batched(
             model=model,
-            batch_wires=test_random_wires,
-            batch_logits=test_random_logits,
+            batch_wires=datasets.ood_wires,
+            batch_logits=datasets.ood_logits,
             x_data=x_data,
             y_data=y_data,
             input_n=input_n,
@@ -547,7 +733,7 @@ def _run_periodic_evaluation_dual(
                     wandb_run.log(step_data_random)
 
         # Log summary to console
-        batch_size = test_random_wires[0].shape[0]
+        ood_batch_size = datasets.ood_batch_size
         log_message = (
             f"Periodic Eval (epoch {epoch}):\n"
             f"  Fixed Seed: Loss={final_metrics_seed['eval_seed/final_loss']:.4f}, "
@@ -557,14 +743,17 @@ def _run_periodic_evaluation_dual(
 
         # Add pool evaluation if available
         if final_metrics_pool:
+            pool_batch_size = (
+                datasets.pool_wires[0].shape[0] if datasets.pool_wires else 0
+            )
             log_message += (
-                f"  Pool Sample (batch {eval_batch_size}): Loss={final_metrics_pool['eval_pool/final_loss']:.4f}, "
+                f"  Pool Sample (batch {pool_batch_size}): Loss={final_metrics_pool['eval_pool/final_loss']:.4f}, "
                 f"Acc={final_metrics_pool['eval_pool/final_accuracy']:.4f}, "
                 f"Hard Acc={final_metrics_pool['eval_pool/final_hard_accuracy']:.4f}\n"
             )
 
         log_message += (
-            f"  OOD (batch {batch_size}): Loss={final_metrics_random['eval_ood/final_loss']:.4f}, "
+            f"  OOD (batch {ood_batch_size}): Loss={final_metrics_random['eval_ood/final_loss']:.4f}, "
             f"Acc={final_metrics_random['eval_ood/final_accuracy']:.4f}, "
             f"Hard Acc={final_metrics_random['eval_ood/final_hard_accuracy']:.4f}"
         )
@@ -585,134 +774,6 @@ def _run_periodic_evaluation_dual(
             result["final_metrics_pool"] = final_metrics_pool
 
         return result
-
-    except Exception as e:
-        log.warning(f"Error during periodic evaluation at epoch {epoch}: {e}")
-        return {}
-
-
-def _run_periodic_evaluation(
-    model,
-    pool,
-    test_wires,
-    test_logits,
-    x_data,
-    y_data,
-    input_n,
-    arity,
-    hidden_dim,
-    n_message_steps,
-    loss_type,
-    epoch,
-    wandb_run,
-    log_stepwise=False,
-    layer_sizes: List[Tuple[int, int]] = None,
-    log_pool_scatter: bool = False,
-    wiring_mode: str = "random",
-) -> Dict:
-    """
-    Run periodic evaluation on test circuits.
-
-    Args:
-        model: The model to evaluate
-        test_wires: Test circuit wires (single circuit or batch)
-        test_logits: Test circuit logits (single circuit or batch)
-        x_data: Input data
-        y_data: Target data
-        input_n: Number of input nodes
-        arity: Arity of gates
-        hidden_dim: Hidden dimension
-        n_message_steps: Number of message steps for evaluation
-        loss_type: Loss function type
-        epoch: Current epoch number
-        wandb_run: WandB run object (or None)
-        log_stepwise: Whether to log step-by-step metrics
-        layer_sizes: Circuit layer sizes
-        log_pool_scatter: Whether to log pool scatterplot (loss vs steps)
-        wiring_mode: Wiring mode ("fixed" or "random")
-
-    Returns:
-        Dictionary with evaluation metrics including final values for best model tracking
-    """
-    try:
-        if wiring_mode == "fixed":
-            # For fixed wiring, use single circuit evaluation
-            step_metrics = evaluate_model_stepwise(
-                model=model,
-                wires=test_wires,
-                logits=test_logits,
-                x_data=x_data,
-                y_data=y_data,
-                input_n=input_n,
-                arity=arity,
-                hidden_dim=hidden_dim,
-                n_message_steps=n_message_steps,
-                loss_type=loss_type,
-                layer_sizes=layer_sizes,
-            )
-            eval_type = "fixed"
-        else:
-            # For random wiring, use batched evaluation
-            # test_wires and test_logits should already be batched from initialization
-            step_metrics = evaluate_model_stepwise_batched(
-                model=model,
-                batch_wires=test_wires,
-                batch_logits=test_logits,
-                x_data=x_data,
-                y_data=y_data,
-                input_n=input_n,
-                arity=arity,
-                hidden_dim=hidden_dim,
-                n_message_steps=n_message_steps,
-                loss_type=loss_type,
-                layer_sizes=layer_sizes,
-            )
-            eval_type = f"random_batch_{test_wires[0].shape[0]}"
-
-        # Get final metrics (last step)
-        final_metrics = {
-            "eval/final_loss": step_metrics["soft_loss"][-1],
-            "eval/final_hard_loss": step_metrics["hard_loss"][-1],
-            "eval/final_accuracy": step_metrics["soft_accuracy"][-1],
-            "eval/final_hard_accuracy": step_metrics["hard_accuracy"][-1],
-            "eval/epoch": epoch,
-        }
-
-        # Log to wandb if enabled
-        if wandb_run:
-            wandb_run.log(final_metrics)
-
-            if log_pool_scatter:
-                _log_pool_scatter(pool, epoch, wandb_run)
-
-            # Optionally log step-by-step metrics
-            if log_stepwise:
-                for step_idx in range(len(step_metrics["step"])):
-                    step_data = {
-                        f"eval_steps/step": step_metrics["step"][step_idx],
-                        f"eval_steps/loss": step_metrics["soft_loss"][step_idx],
-                        f"eval_steps/hard_loss": step_metrics["hard_loss"][step_idx],
-                        f"eval_steps/accuracy": step_metrics["soft_accuracy"][step_idx],
-                        f"eval_steps/hard_accuracy": step_metrics["hard_accuracy"][
-                            step_idx
-                        ],
-                        f"eval_steps/epoch": epoch,
-                    }
-                    wandb_run.log(step_data)
-
-        # Log summary to console
-        log.info(
-            f"Periodic Eval ({eval_type}, epoch {epoch}): "
-            f"Loss={final_metrics['eval/final_loss']:.4f}, "
-            f"Acc={final_metrics['eval/final_accuracy']:.4f}, "
-            f"Hard Acc={final_metrics['eval/final_hard_accuracy']:.4f}"
-        )
-
-        # Return both step metrics and final metrics for best model tracking
-        return {
-            "step_metrics": step_metrics,
-            "final_metrics": final_metrics,
-        }
 
     except Exception as e:
         log.warning(f"Error during periodic evaluation at epoch {epoch}: {e}")
@@ -789,6 +850,13 @@ def train_model(
     wandb_logging: bool = False,
     log_interval: int = 1,
     wandb_run_config: Dict = None,
+    # Early stopping parameters
+    stop_accuracy_enabled: bool = False,
+    stop_accuracy_threshold: float = 0.95,
+    stop_accuracy_metric: str = "hard_accuracy",
+    stop_accuracy_source: str = "training",
+    stop_accuracy_patience: int = 10,
+    stop_accuracy_min_epochs: int = 100,
 ):
     """
     Train a GNN to optimize boolean circuit parameters.
@@ -841,6 +909,12 @@ def train_model(
         wandb_logging: Whether to log metrics to wandb
         log_interval: Interval for logging metrics
         wandb_run_config: Configuration to pass to wandb
+        stop_accuracy_enabled: Whether to enable early stopping based on accuracy
+        stop_accuracy_threshold: Accuracy threshold to trigger early stopping
+        stop_accuracy_metric: Which accuracy metric to use ('accuracy' or 'hard_accuracy')
+        stop_accuracy_source: Source of the metric ('training' or 'eval')
+        stop_accuracy_patience: Number of epochs to wait after reaching threshold before stopping
+        stop_accuracy_min_epochs: Minimum number of epochs before early stopping can occur
     Returns:
         Dictionary with trained GNN model and training metrics
     """
@@ -1108,6 +1182,11 @@ def train_model(
     # Track best model
     best_metric_value = float("-inf") if "accuracy" in best_metric else float("inf")
 
+    # Early stopping variables
+    early_stop_triggered = False
+    epochs_above_threshold = 0
+    first_threshold_epoch = None
+
     # Create progress bar for training
     pbar = tqdm(range(epochs), desc="Training GNN")
     avg_steps_reset = 0
@@ -1115,37 +1194,24 @@ def train_model(
     # Track last reset epoch for scheduling
     last_reset_epoch = -1  # Initialize to -1 so first check works correctly
 
-    # Initialize test circuits for periodic evaluation if enabled
-    test_seed_wires = None
-    test_seed_logits = None
-    test_random_wires = None
-    test_random_logits = None
-
+    # Initialize evaluation datasets for periodic evaluation if enabled
+    eval_datasets = None
     if periodic_eval_enabled:
-        # Always initialize both types of test circuits
+        log.info("Creating standardized evaluation datasets for periodic evaluation")
 
-        # 1. Fixed test seed circuit (for consistent evaluation)
-        test_seed_rng = jax.random.PRNGKey(periodic_eval_test_seed)
-        test_seed_wires, test_seed_logits = gen_circuit(
-            test_seed_rng, layer_sizes, arity=arity
+        # Create standardized evaluation datasets
+        eval_datasets = create_evaluation_datasets(
+            test_seed=periodic_eval_test_seed,
+            layer_sizes=layer_sizes,
+            arity=arity,
+            ood_batch_size=periodic_eval_batch_size,
+            pool=None,  # Pool will be provided dynamically during evaluation
+            pool_batch_size=periodic_eval_batch_size,
+            pool_rng_key=None,  # Will be generated dynamically
+            initial_diversity=initial_diversity,
         )
-        log.info("Fixed test seed circuit initialized for periodic evaluation")
 
-        # 2. Batch of random test circuits (for OOD evaluation)
-        test_random_rng = jax.random.PRNGKey(
-            periodic_eval_test_seed + 1000
-        )  # Different seed for random batch
-        test_random_rngs = jax.random.split(test_random_rng, periodic_eval_batch_size)
-
-        # Use vmap to generate multiple circuits
-        vmap_gen_circuit = jax.vmap(
-            lambda rng: gen_circuit(rng, layer_sizes, arity=arity)
-        )
-        test_random_wires, test_random_logits = vmap_gen_circuit(test_random_rngs)
-
-        log.info(
-            f"Batch of {periodic_eval_batch_size} random test circuits initialized for periodic evaluation (OOD testing)"
-        )
+        log.info(eval_datasets.get_summary())
 
     # Save initial stable state if needed
     last_stable_state = {
@@ -1319,38 +1385,63 @@ def train_model(
                     schedule_value = learning_rate
                 metrics_dict["scheduler/learning_rate"] = schedule_value
 
+                # Add early stopping metrics if enabled
+                if stop_accuracy_enabled:
+                    metrics_dict["early_stop/enabled"] = True
+                    metrics_dict["early_stop/epochs_above_threshold"] = (
+                        epochs_above_threshold
+                    )
+                    metrics_dict["early_stop/threshold"] = stop_accuracy_threshold
+                    if first_threshold_epoch is not None:
+                        metrics_dict["early_stop/first_threshold_epoch"] = (
+                            first_threshold_epoch
+                        )
+
                 _log_to_wandb(wandb_run, metrics_dict, epoch, log_interval)
 
                 # Update progress bar with current metrics
-                pbar.set_postfix(
-                    {
-                        "Loss": f"{loss:.4f}",
-                        "Accuracy": f"{accuracy:.4f}",
-                        "Hard Acc": f"{hard_accuracy:.4f}",
-                        "Diversity": f"{diversity:.3f}",
-                        "Reset Steps": f"{avg_steps_reset:.2f}",
-                        "Loss Steps": f"{loss_steps:.2f}",
-                    }
-                )
+                postfix_dict = {
+                    "Loss": f"{loss:.4f}",
+                    "Accuracy": f"{accuracy:.4f}",
+                    "Hard Acc": f"{hard_accuracy:.4f}",
+                    "Diversity": f"{diversity:.3f}",
+                    "Reset Steps": f"{avg_steps_reset:.2f}",
+                    "Loss Steps": f"{loss_steps:.2f}",
+                }
+
+                # Add early stopping info if active
+                if stop_accuracy_enabled and epochs_above_threshold > 0:
+                    postfix_dict["ES"] = (
+                        f"{epochs_above_threshold}/{stop_accuracy_patience}"
+                    )
+
+                pbar.set_postfix(postfix_dict)
 
                 # Step 2: Run periodic evaluation if enabled (BEFORE best model tracking)
                 if (
                     periodic_eval_enabled
-                    and test_seed_wires is not None
-                    and test_seed_logits is not None
-                    and test_random_wires is not None
-                    and test_random_logits is not None
+                    and eval_datasets is not None
                     and epoch % periodic_eval_interval == 0
                 ):
                     # Run enhanced evaluations: fixed seed, pool sample (if diversity > 1), and OOD
                     rng, eval_key = jax.random.split(rng)
-                    eval_results = _run_periodic_evaluation_dual(
-                        model=model,
+
+                    # Create datasets with current pool for periodic evaluation
+                    current_datasets = create_evaluation_datasets(
+                        test_seed=periodic_eval_test_seed,
+                        layer_sizes=layer_sizes,
+                        arity=arity,
+                        ood_batch_size=periodic_eval_batch_size,
                         pool=circuit_pool,
-                        test_seed_wires=test_seed_wires,
-                        test_seed_logits=test_seed_logits,
-                        test_random_wires=test_random_wires,
-                        test_random_logits=test_random_logits,
+                        pool_batch_size=periodic_eval_batch_size,
+                        pool_rng_key=eval_key,
+                        initial_diversity=initial_diversity,
+                    )
+
+                    eval_results = run_periodic_evaluation_with_datasets(
+                        model=model,
+                        datasets=current_datasets,
+                        pool=circuit_pool,
                         x_data=x_data,
                         y_data=y_data,
                         input_n=input_n,
@@ -1363,9 +1454,6 @@ def train_model(
                         log_stepwise=periodic_eval_log_stepwise,
                         layer_sizes=layer_sizes,
                         log_pool_scatter=periodic_eval_log_pool_scatter,
-                        initial_diversity=initial_diversity,
-                        eval_batch_size=periodic_eval_batch_size,
-                        eval_rng_key=eval_key,
                     )
                     # Extract final metrics for best model tracking (use fixed seed metrics)
                     current_eval_metrics = eval_results.get("final_metrics_seed", None)
@@ -1450,6 +1538,52 @@ def train_model(
                         wandb_run,
                     )
 
+                # Step 5: Check for early stopping based on accuracy
+                (
+                    should_break,
+                    early_stop_triggered,
+                    epochs_above_threshold,
+                    first_threshold_epoch,
+                    current_eval_metrics,
+                    rng,
+                ) = _check_early_stopping(
+                    stop_accuracy_enabled=stop_accuracy_enabled,
+                    epoch=epoch,
+                    stop_accuracy_min_epochs=stop_accuracy_min_epochs,
+                    early_stop_triggered=early_stop_triggered,
+                    stop_accuracy_metric=stop_accuracy_metric,
+                    stop_accuracy_source=stop_accuracy_source,
+                    training_metrics=training_metrics,
+                    current_eval_metrics=current_eval_metrics,
+                    stop_accuracy_threshold=stop_accuracy_threshold,
+                    first_threshold_epoch=first_threshold_epoch,
+                    epochs_above_threshold=epochs_above_threshold,
+                    stop_accuracy_patience=stop_accuracy_patience,
+                    # Periodic evaluation parameters
+                    periodic_eval_enabled=periodic_eval_enabled,
+                    eval_datasets=eval_datasets,
+                    periodic_eval_test_seed=periodic_eval_test_seed,
+                    model=model,
+                    circuit_pool=circuit_pool,
+                    x_data=x_data,
+                    y_data=y_data,
+                    input_n=input_n,
+                    arity=arity,
+                    hidden_dim=hidden_dim,
+                    periodic_eval_inner_steps=periodic_eval_inner_steps,
+                    loss_type=loss_type,
+                    wandb_run=wandb_run,
+                    periodic_eval_log_stepwise=periodic_eval_log_stepwise,
+                    layer_sizes=layer_sizes,
+                    periodic_eval_log_pool_scatter=periodic_eval_log_pool_scatter,
+                    initial_diversity=initial_diversity,
+                    periodic_eval_batch_size=periodic_eval_batch_size,
+                    rng=rng,
+                )
+
+                if should_break:
+                    break
+
                 # Return the trained GNN model and metrics
                 result = {
                     "model": model,
@@ -1461,6 +1595,8 @@ def train_model(
                     "reset_steps": reset_steps,
                     "best_metric_value": best_metric_value,
                     "best_metric": best_metric,
+                    "early_stopped": early_stop_triggered,
+                    "early_stop_epoch": epoch if early_stop_triggered else None,
                 }
 
                 # Add pool to result if used
