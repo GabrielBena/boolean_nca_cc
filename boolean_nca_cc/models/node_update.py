@@ -25,7 +25,7 @@ class NodeUpdateModule(nnx.Module):
     def __init__(
         self,
         node_mlp_features: List[int],
-        hidden_dim: int,
+        circuit_hidden_dim: int,
         arity: int,
         message_passing: bool = True,
         *,
@@ -38,7 +38,7 @@ class NodeUpdateModule(nnx.Module):
 
         Args:
             node_mlp_features: Hidden layer sizes for the node MLP
-            hidden_dim: Dimension of hidden features
+            circuit_hidden_dim: Dimension of hidden features
             arity: Number of inputs per gate in the boolean circuit
             message_passing: Whether to use message passing or only self-updates
             rngs: Random number generators
@@ -46,28 +46,28 @@ class NodeUpdateModule(nnx.Module):
             re_zero_update: Whether to use learnable update residual rate
         """
         self.arity = arity
-        self.hidden_dim = hidden_dim
+        self.circuit_hidden_dim = circuit_hidden_dim
         self.message_passing = message_passing
         self.logit_dim = 2**arity
-        pe_dim = hidden_dim  # Dimension for positional encodings
+        pe_dim = circuit_hidden_dim  # Dimension for positional encodings
 
         # Calculate MLP input size
         # Current features: Logits, Hidden, Layer PE, Intra-Layer PE, Loss
         current_features_size = (
-            self.logit_dim + hidden_dim + pe_dim + pe_dim + 1
+            self.logit_dim + circuit_hidden_dim + pe_dim + pe_dim + 1
         )  # +1 for loss feature
 
         if message_passing:
             # If using message passing, include aggregated messages
             # Edge message contains logits + hidden derived features
-            aggregated_message_size = self.logit_dim + hidden_dim
+            aggregated_message_size = self.logit_dim + circuit_hidden_dim
             mlp_input_size = current_features_size + aggregated_message_size
         else:
             # Without message passing, only use current node features
             mlp_input_size = current_features_size
 
         # Output needs to contain updated logits and hidden features
-        mlp_output_size = self.logit_dim + hidden_dim
+        mlp_output_size = self.logit_dim + circuit_hidden_dim
 
         # Add feature normalization layers
         self.logits_norm = nnx.LayerNorm(
@@ -76,7 +76,7 @@ class NodeUpdateModule(nnx.Module):
             rngs=rngs,
         )
         self.hidden_norm = nnx.LayerNorm(
-            hidden_dim,
+            circuit_hidden_dim,
             epsilon=1e-5,
             rngs=rngs,
         )
@@ -184,7 +184,7 @@ class NodeUpdateModule(nnx.Module):
         """
         # Extract current node features
         current_logits = nodes["logits"]  # Shape: [num_nodes, 2**arity]
-        current_hidden = nodes["hidden"]  # Shape: [num_nodes, hidden_dim]
+        current_hidden = nodes["hidden"]  # Shape: [num_nodes, circuit_hidden_dim]
         current_layer_pe = nodes["layer_pe"]  # Shape: [num_nodes, pe_dim]
         current_intra_layer_pe = nodes["intra_layer_pe"]  # Shape: [num_nodes, pe_dim]
         current_loss = nodes["loss"]  # Shape: [num_nodes]

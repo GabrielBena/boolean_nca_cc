@@ -26,7 +26,7 @@ class CircuitGNN(nnx.Module):
 
     def __init__(
         self,
-        hidden_dim: int = 16,
+        circuit_hidden_dim: int = 16,
         mlp_dim: int = 32,
         mlp_n_layers: int = 2,
         arity: int = 2,
@@ -42,7 +42,7 @@ class CircuitGNN(nnx.Module):
         Initialize the Circuit GNN.
 
         Args:
-            hidden_dim: Dimension of hidden features
+            circuit_hidden_dim: Dimension of hidden features
             mlp_dim: Hidden layer size for the MLP
             mlp_n_layers: Number of layers for the MLP
             arity: Number of inputs per gate in the boolean circuit
@@ -55,14 +55,14 @@ class CircuitGNN(nnx.Module):
         """
         self.arity = arity
         self.message_passing = message_passing
-        self.hidden_dim = hidden_dim
+        self.circuit_hidden_dim = circuit_hidden_dim
         self.mlp_dim = mlp_dim
         self.mlp_n_layers = mlp_n_layers
 
         # Create the node and edge update modules
         self.node_update = NodeUpdateModule(
             node_mlp_features=[mlp_dim] * mlp_n_layers,
-            hidden_dim=hidden_dim,
+            circuit_hidden_dim=circuit_hidden_dim,
             arity=arity,
             message_passing=message_passing,
             rngs=rngs,
@@ -72,7 +72,7 @@ class CircuitGNN(nnx.Module):
 
         self.edge_update = EdgeUpdateModule(
             edge_mlp_features=[mlp_dim] * mlp_n_layers,
-            hidden_dim=hidden_dim,
+            circuit_hidden_dim=circuit_hidden_dim,
             arity=arity,
             rngs=rngs,
         )
@@ -81,7 +81,7 @@ class CircuitGNN(nnx.Module):
         if use_attention:
             logit_dim = 2**arity
             self.aggregate_fn = AttentionAggregation(
-                feature_dim=hidden_dim + logit_dim,
+                feature_dim=circuit_hidden_dim + logit_dim,
                 num_heads=4,
                 rngs=rngs,
             )

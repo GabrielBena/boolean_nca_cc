@@ -28,7 +28,7 @@ pool:
 model:
   _target_: boolean_nca_cc.models.CircuitGNN
   type: "gnn"
-  hidden_dim: 64
+  circuit_hidden_dim: 64
   node_mlp_features: [32, 16]
   edge_mlp_features: [32, 16]
 

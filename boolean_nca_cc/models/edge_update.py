@@ -25,7 +25,7 @@ class EdgeUpdateModule(nnx.Module):
     def __init__(
         self,
         edge_mlp_features: List[int],
-        hidden_dim: int,
+        circuit_hidden_dim: int,
         arity: int,
         *,
         rngs: nnx.Rngs,
@@ -35,22 +35,22 @@ class EdgeUpdateModule(nnx.Module):
 
         Args:
             edge_mlp_features: Hidden layer sizes for the edge MLP
-            hidden_dim: Dimension of hidden features
+            circuit_hidden_dim: Dimension of hidden features
             arity: Number of inputs per gate in the boolean circuit
             rngs: Random number generators
             zero_init: Whether to initialize weights and biases to zero
             re_zero_update: Whether to use learnable update residual rate
         """
-        self.hidden_dim = hidden_dim
+        self.circuit_hidden_dim = circuit_hidden_dim
         self.arity = arity
         self.logit_dim = 2**arity
-        pe_dim = hidden_dim  # Dimension for positional encodings
+        pe_dim = circuit_hidden_dim  # Dimension for positional encodings
 
         # Input: Sender's Logits, Hidden, Layer PE, Intra-Layer PE
         self.arity = arity
-        self.mlp_input_size = self.logit_dim + hidden_dim + pe_dim + pe_dim
+        self.mlp_input_size = self.logit_dim + circuit_hidden_dim + pe_dim + pe_dim
         # Output: Features used for aggregation (Logits + Hidden dimensions)
-        self.mlp_output_size = self.logit_dim + hidden_dim
+        self.mlp_output_size = self.logit_dim + circuit_hidden_dim
         self.mlp_features = [
             self.mlp_input_size,
             *edge_mlp_features,
@@ -101,7 +101,7 @@ class EdgeUpdateModule(nnx.Module):
             globals_: Global features (ignored, kept for compatibility)
 
         Returns:
-            Message features to be sent along the edge [num_edges, logit_dim + hidden_dim]
+            Message features to be sent along the edge [num_edges, logit_dim + circuit_hidden_dim]
         """
         # Extract sender's features
         sender_logits = sender_node_features["logits"]
@@ -118,4 +118,4 @@ class EdgeUpdateModule(nnx.Module):
         # Apply edge MLP to generate the message
         message = self.edge_mlp(sender_combined_features)
 
-        return message  # Shape: [num_edges, logit_dim + hidden_dim]
+        return message  # Shape: [num_edges, logit_dim + circuit_hidden_dim]

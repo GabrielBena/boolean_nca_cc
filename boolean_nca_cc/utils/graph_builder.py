@@ -17,7 +17,7 @@ def build_graph(
     wires: list[jp.ndarray],
     input_n: int,
     arity: int,
-    hidden_dim: int,
+    circuit_hidden_dim: int,
     bidirectional_edges: bool = True,
     loss_value: jp.ndarray | int = 0,
     update_steps: int = 0,
@@ -31,7 +31,7 @@ def build_graph(
                 The first element wires[0] connects input nodes to the first gate layer.
         input_n: Number of input nodes/bits for the first layer
         arity: Fan-in for each gate
-        hidden_dim: Dimension of hidden features for nodes
+        circuit_hidden_dim: Dimension of hidden features for nodes
         bidirectional_edges: If True, create edges in both forward and backward directions
         loss_value: Optional scalar value representing the current loss of the circuit.
         update_steps: Number of times this graph has been updated by the GNN.
@@ -44,7 +44,7 @@ def build_graph(
     all_forward_receivers = []
     current_global_node_idx = 0
     layer_start_indices = []  # Store the start index of each layer
-    pe_dim = hidden_dim  # Dimension for positional encodings
+    pe_dim = circuit_hidden_dim  # Dimension for positional encodings
     max_layers = len(logits) + 1  # +1 for the input layer
 
     # --- Input Layer Nodes ---
@@ -63,7 +63,7 @@ def build_graph(
         "logits": jp.zeros(
             (input_n, 2**arity), dtype=jp.float32
         ),  # Inputs have no logits
-        "hidden": jp.zeros((input_n, hidden_dim), dtype=jp.float32),
+        "hidden": jp.zeros((input_n, circuit_hidden_dim), dtype=jp.float32),
         "layer_pe": input_layer_pe,
         "intra_layer_pe": input_intra_layer_pe,
         "loss": jp.zeros(input_n, dtype=jp.float32),  # Loss feature for all nodes
@@ -94,7 +94,7 @@ def build_graph(
             "group": jp.repeat(jp.arange(group_n), group_size),
             "gate_id": layer_global_indices,
             "logits": layer_logits.reshape(num_gates_in_layer, logit_dim),
-            "hidden": jp.zeros((num_gates_in_layer, hidden_dim), dtype=jp.float32),
+            "hidden": jp.zeros((num_gates_in_layer, circuit_hidden_dim), dtype=jp.float32),
             "loss": jp.zeros(
                 num_gates_in_layer, dtype=jp.float32
             ),  # Loss feature for all nodes

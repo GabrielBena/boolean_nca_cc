@@ -135,7 +135,7 @@ def evaluate_model_stepwise_generator(
     y_data: jp.ndarray,
     input_n: int,
     arity: int = 2,
-    hidden_dim: int = 16,
+    circuit_hidden_dim: int = 16,
     max_steps: int = None,
     loss_type: str = "l4",
     bidirectional_edges: bool = True,
@@ -156,7 +156,7 @@ def evaluate_model_stepwise_generator(
         y_data: Target output data
         input_n: Number of input nodes
         arity: Number of inputs per gate
-        hidden_dim: Dimension of hidden features
+        circuit_hidden_dim: Dimension of hidden features
         max_steps: Maximum number of steps to run (None for infinite)
         loss_type: Loss function to use
         bidirectional_edges: Whether to use bidirectional edges
@@ -188,7 +188,7 @@ def evaluate_model_stepwise_generator(
         wires,
         input_n,
         arity,
-        hidden_dim,
+        circuit_hidden_dim,
         loss_value=initial_loss,
         bidirectional_edges=bidirectional_edges,
     )
@@ -280,7 +280,7 @@ def evaluate_model_stepwise(
     y_data: jp.ndarray,
     input_n: int,
     arity: int = 2,
-    hidden_dim: int = 16,
+    circuit_hidden_dim: int = 16,
     n_message_steps: int = 100,
     loss_type: str = "l4",
     bidirectional_edges: bool = True,
@@ -302,7 +302,7 @@ def evaluate_model_stepwise(
         y_data: Target output data
         input_n: Number of input nodes
         arity: Number of inputs per gate
-        hidden_dim: Dimension of hidden features
+        circuit_hidden_dim: Dimension of hidden features
         n_message_steps: Maximum number of message passing steps to run
         loss_type: Loss function to use
         bidirectional_edges: Whether to use bidirectional edges
@@ -329,7 +329,7 @@ def evaluate_model_stepwise(
         y_data=y_data,
         input_n=input_n,
         arity=arity,
-        hidden_dim=hidden_dim,
+        circuit_hidden_dim=circuit_hidden_dim,
         max_steps=n_message_steps,
         loss_type=loss_type,
         bidirectional_edges=bidirectional_edges,
@@ -372,7 +372,7 @@ def evaluate_model_stepwise_batched(
     y_data: jp.ndarray,
     input_n: int,
     arity: int = 2,
-    hidden_dim: int = 16,
+    circuit_hidden_dim: int = 16,
     n_message_steps: int = 100,
     loss_type: str = "l4",
     bidirectional_edges: bool = True,
@@ -390,7 +390,7 @@ def evaluate_model_stepwise_batched(
         y_data: Target output data
         input_n: Number of input nodes
         arity: Number of inputs per gate
-        hidden_dim: Dimension of hidden features
+        circuit_hidden_dim: Dimension of hidden features
         n_message_steps: Maximum number of message passing steps to run
         loss_type: Loss function to use
         bidirectional_edges: Whether to use bidirectional edges
@@ -408,7 +408,7 @@ def evaluate_model_stepwise_batched(
             wires=wires,
             input_n=input_n,
             arity=arity,
-            hidden_dim=hidden_dim,
+            circuit_hidden_dim=circuit_hidden_dim,
             loss_value=0.0,  # Will be calculated properly
             bidirectional_edges=bidirectional_edges,
         )

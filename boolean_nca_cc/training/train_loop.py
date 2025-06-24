@@ -336,12 +336,13 @@ def _check_early_stopping(
             and epoch < stop_accuracy_min_epochs
         ):
             # Log that we would stop but are waiting for minimum epochs
-            log.info(
-                f"Early stopping condition met "
-                f"(accuracy {stop_accuracy_source}_{stop_accuracy_metric}={stop_accuracy_value:.4f} "
-                f"above threshold {stop_accuracy_threshold:.4f} for {stop_accuracy_patience} epochs), "
-                f"but waiting until minimum epoch {stop_accuracy_min_epochs} (currently at epoch {epoch})."
-            )
+            # log.info(
+            #     f"Early stopping condition met "
+            #     f"(accuracy {stop_accuracy_source}_{stop_accuracy_metric}={stop_accuracy_value:.4f} "
+            #     f"above threshold {stop_accuracy_threshold:.4f} for {stop_accuracy_patience} epochs), "
+            #     f"but waiting until minimum epoch {stop_accuracy_min_epochs} (currently at epoch {epoch})."
+            # )
+            pass
     else:
         # Reset counter if accuracy drops below threshold
         if epochs_above_threshold > 0:
@@ -439,7 +440,7 @@ def run_unified_periodic_evaluation(
     y_data,
     input_n,
     arity,
-    hidden_dim,
+    circuit_hidden_dim,
     n_message_steps,
     loss_type,
     epoch,
@@ -459,7 +460,7 @@ def run_unified_periodic_evaluation(
         y_data: Target data
         input_n: Number of input nodes
         arity: Arity of gates
-        hidden_dim: Hidden dimension
+        circuit_hidden_dim: Hidden dimension
         n_message_steps: Number of message steps for evaluation
         loss_type: Loss function type
         epoch: Current epoch number
@@ -492,7 +493,7 @@ def run_unified_periodic_evaluation(
             y_data=y_data,
             input_n=input_n,
             arity=arity,
-            hidden_dim=hidden_dim,
+            circuit_hidden_dim=circuit_hidden_dim,
             n_message_steps=n_message_steps,
             loss_type=loss_type,
             layer_sizes=layer_sizes,
@@ -526,7 +527,7 @@ def run_unified_periodic_evaluation(
             y_data=y_data,
             input_n=input_n,
             arity=arity,
-            hidden_dim=hidden_dim,
+            circuit_hidden_dim=circuit_hidden_dim,
             n_message_steps=n_message_steps,
             loss_type=loss_type,
             layer_sizes=layer_sizes,
@@ -664,7 +665,7 @@ def train_model(
     layer_sizes: List[Tuple[int, int]],
     # Model architecture parameters
     arity: int = 2,
-    hidden_dim: int = 16,
+    circuit_hidden_dim: int = 16,
     message_passing: bool = True,
     node_mlp_features: List[int] = [64, 32],
     edge_mlp_features: List[int] = [64, 32],
@@ -742,7 +743,7 @@ def train_model(
         x_data: Input data for training [batch, input_bits]
         y_data: Target output data [batch, output_bits]
         arity: Number of inputs per gate
-        hidden_dim: Dimension of hidden features
+        circuit_hidden_dim: Dimension of hidden features
         message_passing: Whether to use message passing or only self-updates
         node_mlp_features: Hidden layer sizes for the node MLP
         edge_mlp_features: Hidden layer sizes for the edge MLP
@@ -822,7 +823,7 @@ def train_model(
         model = CircuitGNN(
             node_mlp_features=node_mlp_features,
             edge_mlp_features=edge_mlp_features,
-            hidden_dim=hidden_dim,
+            circuit_hidden_dim=circuit_hidden_dim,
             arity=arity,
             message_passing=message_passing,
             use_attention=use_attention,
@@ -865,7 +866,7 @@ def train_model(
         pool_size=pool_size,
         input_n=input_n,
         arity=arity,
-        hidden_dim=hidden_dim,
+        circuit_hidden_dim=circuit_hidden_dim,
         loss_value=0.0,  # Initial loss will be calculated properly in first step
         wiring_mode=wiring_mode,
         initial_diversity=initial_diversity,
@@ -1147,7 +1148,7 @@ def train_model(
                             layer_sizes=layer_sizes,
                             input_n=input_n,
                             arity=arity,
-                            hidden_dim=hidden_dim,
+                            circuit_hidden_dim=circuit_hidden_dim,
                             mutation_rate=genetic_mutation_rate,
                             n_swaps_per_layer=genetic_swaps_per_layer,
                             reset_strategy=reset_strategy,
@@ -1170,7 +1171,7 @@ def train_model(
                         pool_size=pool_size,  # Use same size as circuit_pool
                         input_n=input_n,
                         arity=arity,
-                        hidden_dim=hidden_dim,
+                        circuit_hidden_dim=circuit_hidden_dim,
                         wiring_mode=wiring_mode,
                         initial_diversity=initial_diversity,
                     )
@@ -1311,7 +1312,7 @@ def train_model(
                         y_data=y_data,
                         input_n=input_n,
                         arity=arity,
-                        hidden_dim=hidden_dim,
+                        circuit_hidden_dim=circuit_hidden_dim,
                         n_message_steps=periodic_eval_inner_steps,  # Use fixed message steps
                         loss_type=loss_type,
                         epoch=epoch,

@@ -532,7 +532,7 @@ class GraphPool(struct.PyTreeNode):
         layer_sizes: List[Tuple[int, int]],
         input_n: int,
         arity: int,
-        hidden_dim: int,
+        circuit_hidden_dim: int,
         mutation_rate: float = 0.1,
         n_swaps_per_layer: int = 1,
         reset_strategy: str = "uniform",
@@ -553,7 +553,7 @@ class GraphPool(struct.PyTreeNode):
             layer_sizes: Circuit layer sizes for logit generation
             input_n: Number of input nodes
             arity: Number of inputs per gate
-            hidden_dim: Hidden dimension for graphs
+            circuit_hidden_dim: Hidden dimension for graphs
             mutation_rate: Rate of wire mutations (0.0 to 1.0)
             n_swaps_per_layer: Number of swaps per layer for genetic mutation
             reset_strategy: Strategy for selecting circuits to reset
@@ -603,7 +603,7 @@ class GraphPool(struct.PyTreeNode):
                 wires=wires,
                 input_n=input_n,
                 arity=arity,
-                hidden_dim=hidden_dim,
+                circuit_hidden_dim=circuit_hidden_dim,
                 loss_value=0.0,  # Reset loss
                 update_steps=0,  # Reset update steps
             )
@@ -629,7 +629,7 @@ def initialize_graph_pool(
     pool_size: int,
     input_n: int,
     arity: int = 2,
-    hidden_dim: int = 16,
+    circuit_hidden_dim: int = 16,
     loss_value: float = 0.0,
     wiring_mode: str = "random",
     initial_diversity: int = 1,
@@ -643,7 +643,7 @@ def initialize_graph_pool(
         pool_size: Number of graphs in the pool
         input_n: Number of inputs to the circuit
         arity: Number of inputs per gate
-        hidden_dim: Dimension of hidden features
+        circuit_hidden_dim: Dimension of hidden features
         loss_value: Initial loss value for graph globals
         wiring_mode: Mode for generating wirings ("random", "fixed", or "genetic")
                     Note: "genetic" mode initializes the same as "fixed" mode -
@@ -748,7 +748,7 @@ def initialize_graph_pool(
             wires=wires,
             input_n=input_n,
             arity=arity,
-            hidden_dim=hidden_dim,
+            circuit_hidden_dim=circuit_hidden_dim,
             loss_value=loss_value,
             update_steps=0,  # Initialize update steps counter to 0
         )

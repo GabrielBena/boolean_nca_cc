@@ -165,11 +165,13 @@ class CircuitSelfAttention(nnx.Module):
     def __init__(
         self,
         n_node: int,
-        hidden_dim: int = 16,
+        circuit_hidden_dim: int = 16,
         arity: int = 2,
+        attention_dim: int = 128,
         num_heads: int = 4,
         num_layers: int = 3,
-        mlp_dim: int = 64,
+        mlp_dim: int | None = None,
+        mlp_dim_multiplier: int = 2,
         dropout_rate: float = 0.0,
         *,
         rngs: nnx.Rngs,
@@ -182,11 +184,13 @@ class CircuitSelfAttention(nnx.Module):
 
         Args:
             n_node: Fixed number of nodes in the circuit
-            hidden_dim: Dimension of hidden features
+            circuit_hidden_dim: Dimension of hidden features in the circuit graphs (interface constraint)
             arity: Number of inputs per gate in the boolean circuit
+            attention_dim: Total dimension for attention mechanism (model's internal working dimension)
             num_heads: Number of attention heads
             num_layers: Number of self-attention layers
-            mlp_dim: Dimension of feed-forward network
+            mlp_dim: Dimension of feed-forward network in attention blocks
+            mlp_dim_multiplier: Multiplier for mlp_dim (default 2 for efficient transformer pattern)
             dropout_rate: Dropout rate
             rngs: Random number generators
             type: Type of model
@@ -195,24 +199,37 @@ class CircuitSelfAttention(nnx.Module):
         """
         self.n_node = int(n_node)
         self.arity = arity
-        self.hidden_dim = hidden_dim
+        self.circuit_hidden_dim = circuit_hidden_dim
+        self.attention_dim = attention_dim
+        self.hidden_dim_per_head = attention_dim // num_heads
         self.logit_dim = 2**arity
         self.dropout_rate = dropout_rate
         self.num_heads = num_heads
         self.deterministic = True
 
-        # Compute the total feature dimension (logits + hidden + positional encodings + loss)
-        feature_dim = (
-            self.logit_dim + hidden_dim * 3 + 1
-        )  # logits + hidden + 2 PE's + loss
+        if (
+            mlp_dim is None
+        ):  # default to mlp_dim_multiplier * attention_dim (efficient transformer pattern)
+            mlp_dim = attention_dim * mlp_dim_multiplier
 
-        # Feature projection
-        self.feature_proj = nnx.Linear(feature_dim, hidden_dim * 4, rngs=rngs)
+        # Validate that attention_dim is divisible by num_heads
+        if attention_dim % num_heads != 0:
+            raise ValueError(
+                f"attention_dim ({attention_dim}) must be divisible by num_heads ({num_heads})"
+            )
+
+        # Compute the total input feature dimension (logits + circuit_hidden + positional encodings + loss)
+        input_feature_dim = (
+            self.logit_dim + circuit_hidden_dim * 3 + 1
+        )  # logits + circuit_hidden + 2 PE's + loss
+
+        # Input projection: from circuit features to model's internal attention dimension
+        self.feature_proj = nnx.Linear(input_feature_dim, self.attention_dim, rngs=rngs)
 
         # Self-attention layers
         self.attention_layers = [
             SelfAttentionBlock(
-                feature_dim=hidden_dim * 4,
+                feature_dim=self.attention_dim,
                 mlp_dim=mlp_dim,
                 num_heads=num_heads,
                 dropout_rate=dropout_rate,
@@ -223,7 +240,7 @@ class CircuitSelfAttention(nnx.Module):
 
         # Output projections for both logits and hidden features
         self.logit_proj = nnx.Linear(
-            hidden_dim * 4,
+            self.attention_dim,
             self.logit_dim,
             kernel_init=nnx.initializers.zeros
             if zero_init
@@ -244,8 +261,8 @@ class CircuitSelfAttention(nnx.Module):
         )
 
         self.hidden_proj = nnx.Linear(
-            hidden_dim * 4,
-            hidden_dim,
+            self.attention_dim,
+            circuit_hidden_dim,
             kernel_init=nnx.initializers.zeros
             if zero_init
             else nnx.initializers.kaiming_normal(),
@@ -311,10 +328,10 @@ class CircuitSelfAttention(nnx.Module):
         """
         # Extract relevant features
         logits = nodes["logits"]  # [n_node, logit_dim]
-        hidden = nodes["hidden"]  # [n_node, hidden_dim]
+        hidden = nodes["hidden"]  # [n_node, circuit_hidden_dim]
         # Positional encodings
-        layer_pe = nodes["layer_pe"]  # [n_node, hidden_dim]
-        intra_layer_pe = nodes["intra_layer_pe"]  # [n_node, hidden_dim]
+        layer_pe = nodes["layer_pe"]  # [n_node, circuit_hidden_dim]
+        intra_layer_pe = nodes["intra_layer_pe"]  # [n_node, circuit_hidden_dim]
         # Loss feature
         loss = nodes["loss"]  # [n_node]
         # Add dimension to match other features: [n_node] -> [n_node, 1]

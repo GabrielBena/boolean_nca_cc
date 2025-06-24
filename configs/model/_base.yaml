@@ -1,7 +1,6 @@
 defaults:
   - _self_
 
-hidden_dim: 128
-mlp_dim: 32
+circuit_hidden_dim: ${circuit.circuit_hidden_dim}
 zero_init: false
 re_zero_update: true

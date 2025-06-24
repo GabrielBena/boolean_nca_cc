@@ -412,7 +412,7 @@ def load_best_model_from_wandb(
             logits=logits,
             input_n=input_n,
             arity=arity,
-            hidden_dim=config.model.hidden_dim,
+            circuit_hidden_dim=config.model.circuit_hidden_dim,
         )
 
         n_nodes = int(graph.n_node[0])
@@ -629,7 +629,7 @@ def load_best_model_from_wandb(
     current_config_model_node = config.model
 
     # Convert the OmegaConf node for the model to a standard Python dictionary.
-    # This dictionary will contain parameters like `hidden_dim`, `edge_mlp_features`, etc.,
+    # This dictionary will contain parameters like `circuit_hidden_dim`, `edge_mlp_features`, etc.,
     # and also `_target_` if present.
     model_params_from_config = OmegaConf.to_container(
         current_config_model_node, resolve=True

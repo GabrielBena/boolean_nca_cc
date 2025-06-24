@@ -30,12 +30,13 @@ circuit:
   arity: 4
   num_layers: 3
   layer_sizes: null  # Auto-generate if null 
+  circuit_hidden_dim: 32
 
 # Training parameters
 training:
   # WIRING MODE : "random" or "fixed"
   wiring_mode: "fixed"  # Options: "fixed", "genetic", or "random"
-  initial_diversity: 1
+  initial_diversity: 1024
   # INNER LOOP
   n_message_steps: 5  # Number of message passing steps per training iteration
   # LOSS TYPE
@@ -45,7 +46,7 @@ training:
   # BATCH SIZE
   meta_batch_size: 64
   # OPTIMIZATION
-  learning_rate: 1e-4
+  learning_rate: 2e-4
   weight_decay: 1e-5
   # LEARNING RATE SCHEDULER
   lr_scheduler: "linear_warmup"  # Options: "constant", "exponential", "cosine", "linear_warmup"
@@ -56,7 +57,7 @@ training:
     alpha: 1e-1 # final lr = 1% of initial lr
   # NUMBER OF EPOCHS
   epochs: null
-  epochs_power_of_2: 15 # 2^n
+  epochs_power_of_2: 14 # 2^n
   # USE SCAN
   use_scan: true
 
@@ -105,11 +106,11 @@ eval:
   inner_steps: 100  # Number of message passing steps for inner loop evaluation
   # Periodic evaluation during training
   log_stepwise: false  # Whether to log detailed step-by-step metrics to wandb
-  batch_size: 64  # Batch size for random wiring evaluation
+  batch_size: 256  # Batch size for random wiring evaluation
   log_pool_scatter: true
   periodic:
     enabled: true  # Whether to run periodic evaluation during training
-    interval: 1024  # Evaluate every N epochs
+    interval: 512  # Evaluate every N epochs
 
 # Early stopping based on accuracy
 stop_accuracy:
@@ -118,7 +119,7 @@ stop_accuracy:
   metric: "hard_accuracy"  # Which accuracy metric to use ("accuracy" or "hard_accuracy")
   source: "training"  # Source of the metric ("training" or "eval")
   patience: 10  # Number of epochs to wait after reaching threshold before stopping
-  min_epochs: 1024  # Minimum number of epochs before early stopping can occur
+  min_epochs: 501  # Minimum number of epochs before early stopping can occur (eval every 512 epochs - 10 epochs)
 
 # Checkpointing
 checkpoint:
