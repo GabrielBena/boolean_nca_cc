@@ -164,6 +164,7 @@ def _create_circuit_batch_with_pattern(
     batch_size: int,
     wiring_mode: str,
     initial_diversity: int,
+    get_all_wirings: bool = False,
 ) -> Tuple[List[jp.ndarray], List[jp.ndarray], int]:
     """
     Create a batch of circuits using the exact same logic as initialize_graph_pool.
@@ -204,7 +205,7 @@ def _create_circuit_batch_with_pattern(
                 single_logits,
             )
             actual_batch_size = batch_size
-        elif effective_diversity >= batch_size:
+        elif effective_diversity >= batch_size and get_all_wirings:
             # Generate ALL unique wirings (not just a subset)
             # This ensures comprehensive evaluation across the full diversity
             rngs = jax.random.split(rng, effective_diversity)
@@ -213,6 +214,14 @@ def _create_circuit_batch_with_pattern(
             )
             batch_wires, batch_logits = vmap_gen_circuit(rngs)
             actual_batch_size = effective_diversity
+        elif effective_diversity >= batch_size and not get_all_wirings:
+            # Generate N different wirings and repeat them across the batch
+            diversity_rngs = jax.random.split(rng, effective_diversity)[:batch_size]
+            vmap_gen_circuit = jax.vmap(
+                lambda rng: gen_circuit(rng, layer_sizes, arity=arity)
+            )
+            batch_wires, batch_logits = vmap_gen_circuit(diversity_rngs)
+            actual_batch_size = batch_size
         else:
             # Generate N different wirings and repeat them across the batch
             diversity_rngs = jax.random.split(rng, effective_diversity)

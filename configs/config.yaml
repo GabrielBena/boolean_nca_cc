@@ -56,8 +56,8 @@ training:
     exponent: 1
     alpha: 1e-1 # final lr = 1% of initial lr
   # NUMBER OF EPOCHS
-  epochs: null
-  epochs_power_of_2: 14 # 2^n
+  epochs: 512
+  epochs_power_of_2: null # 2^n
   # USE SCAN
   use_scan: true
 
@@ -119,7 +119,7 @@ stop_accuracy:
   metric: "hard_accuracy"  # Which accuracy metric to use ("accuracy" or "hard_accuracy")
   source: "training"  # Source of the metric ("training" or "eval")
   patience: 10  # Number of epochs to wait after reaching threshold before stopping
-  min_epochs: 501  # Minimum number of epochs before early stopping can occur (eval every 512 epochs - 10 epochs)
+  min_epochs: 501 # Minimum number of epochs before early stopping can occur (eval every 512 epochs - 10 epochs)
 
 # Checkpointing
 checkpoint:
