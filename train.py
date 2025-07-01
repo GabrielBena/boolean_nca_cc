@@ -542,6 +542,8 @@ def main(cfg: DictConfig) -> None:
         genetic_mutation_rate=cfg.pool.mutation_rate,
         genetic_swaps_per_layer=cfg.pool.n_swaps_per_layer,
         initial_diversity=cfg.pool.initial_diversity,
+        # Perturbation configurations
+        persistent_knockout_config=cfg.pool.get("persistent_knockout", None),
         # Learning rate scheduling
         lr_scheduler=cfg.training.lr_scheduler,
         lr_scheduler_params=cfg.training.lr_scheduler_params,
@@ -642,6 +644,8 @@ def main(cfg: DictConfig) -> None:
     # Close wandb if enabled
     if cfg.wandb.enabled:
         cleanup_redundant_wandb_artifacts(
+            project=cfg.wandb.project,
+            entity=cfg.wandb.entity,
             run_id=wandb_run.id,
             dry_run=False,
             verbose=True,

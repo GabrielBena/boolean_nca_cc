@@ -17,6 +17,10 @@ from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.utils.graph_builder import build_graph
 from boolean_nca_cc.utils.extraction import extract_logits_from_graph
 from boolean_nca_cc.training.pool.perturbation import mutate_wires_batch
+from boolean_nca_cc.training.pool.structural_perturbation import (
+    create_reproducible_knockout_pattern,
+    extract_layer_info_from_graph,
+)
 
 PyTree = Any
 
@@ -39,6 +43,8 @@ class GraphPool(struct.PyTreeNode):
     logits: PyTree = None
     # Reset counter to track which elements were reset recently
     reset_counter: Optional[Array] = None
+    # Knockout patterns for persistent structural perturbations
+    knockout_patterns: Optional[Array] = None
 
     @classmethod
     def create(
@@ -47,6 +53,7 @@ class GraphPool(struct.PyTreeNode):
         wires: PyTree = None,
         logits: PyTree = None,
         reset_counter: Optional[Array] = None,
+        knockout_patterns: Optional[Array] = None,
     ) -> "GraphPool":
         """
         Create a new GraphPool instance from a batched GraphsTuple.
@@ -57,6 +64,7 @@ class GraphPool(struct.PyTreeNode):
             wires: The wire matrices corresponding to each graph.
             logits: The logit matrices corresponding to each graph.
             reset_counter: Optional counter to track reset operations.
+            knockout_patterns: Optional boolean array for persistent knockouts.
 
         Returns:
             A new GraphPool instance.
@@ -74,12 +82,19 @@ class GraphPool(struct.PyTreeNode):
         if reset_counter is None:
             reset_counter = jp.zeros(size, dtype=jp.int32)
 
+        # Initialize knockout patterns if not provided
+        if knockout_patterns is None:
+            # Infer num_nodes from the logits feature of the graph's nodes
+            num_nodes = batched_graphs.nodes["logits"].shape[1]
+            knockout_patterns = jp.zeros((size, num_nodes), dtype=jp.bool_)
+
         return cls(
             size=size,
             graphs=batched_graphs,
             wires=wires,
             logits=logits,
             reset_counter=reset_counter,
+            knockout_patterns=knockout_patterns,
         )
 
     @jax.jit
@@ -89,6 +104,7 @@ class GraphPool(struct.PyTreeNode):
         batch_of_graphs: jraph.GraphsTuple,
         batch_of_wires: PyTree = None,
         batch_of_logits: PyTree = None,
+        batch_of_knockout_patterns: Optional[Array] = None,
     ) -> "GraphPool":
         """
         Update graphs in the pool at the specified indices with a batch of graphs.
@@ -102,6 +118,7 @@ class GraphPool(struct.PyTreeNode):
                            If None, wires remain unchanged.
             batch_of_logits: Optional PyTree of logits corresponding to batch_of_graphs.
                            If None, logits remain unchanged.
+            batch_of_knockout_patterns: Optional knockout patterns for updated graphs.
 
         Returns:
             A new GraphPool instance with the updated graphs.
@@ -177,6 +194,16 @@ class GraphPool(struct.PyTreeNode):
                 batch_of_logits,
             )
 
+        # Update knockout patterns if provided
+        updated_knockout_patterns = self.knockout_patterns
+        if (
+            batch_of_knockout_patterns is not None
+            and self.knockout_patterns is not None
+        ):
+            updated_knockout_patterns = self.knockout_patterns.at[idxs].set(
+                batch_of_knockout_patterns
+            )
+
         # Reset the counter for the indices that were updated
         updated_reset_counter = (
             self.reset_counter.at[idxs].set(0)
@@ -189,12 +216,13 @@ class GraphPool(struct.PyTreeNode):
             wires=updated_wires,
             logits=updated_logits,
             reset_counter=updated_reset_counter,
+            knockout_patterns=updated_knockout_patterns,
         )
 
     @partial(jax.jit, static_argnames=("batch_size",))
     def sample(
         self, key: Array, batch_size: int
-    ) -> Tuple[Array, jraph.GraphsTuple, Optional[PyTree], Optional[PyTree]]:
+    ) -> Tuple[Array, jraph.GraphsTuple, Optional[PyTree], Optional[PyTree], Optional[Array]]:
         """
         Sample a batch of graphs from the pool.
 
@@ -209,6 +237,7 @@ class GraphPool(struct.PyTreeNode):
                                   according to idxs, representing the sampled batch.
                 - sampled_wires: Corresponding wires if available, otherwise None.
                 - sampled_logits: Corresponding logits if available, otherwise None.
+                - sampled_knockout_patterns: Corresponding knockout patterns.
         """
         idxs = jax.random.choice(key, self.size, shape=(batch_size,))
 
@@ -229,7 +258,10 @@ class GraphPool(struct.PyTreeNode):
         if self.logits is not None:
             sampled_logits = jax.tree.map(_safe_slice_leaf, self.logits)
 
-        return idxs, sampled_graphs, sampled_wires, sampled_logits
+        # Sample knockout patterns
+        sampled_knockout_patterns = jax.tree.map(_safe_slice_leaf, self.knockout_patterns)
+
+        return idxs, sampled_graphs, sampled_wires, sampled_logits, sampled_knockout_patterns
 
     # Method to get average update steps of graphs in the pool
     def get_average_update_steps(self) -> float:
@@ -340,6 +372,7 @@ class GraphPool(struct.PyTreeNode):
         new_graphs: jraph.GraphsTuple,
         new_wires: PyTree = None,
         new_logits: PyTree = None,
+        new_knockout_patterns: Optional[Array] = None,
         reset_strategy: str = "uniform",  # Options: "uniform", "steps_biased", "loss_biased", or "combined"
         combined_weights: Tuple[float, float] = (
             0.5,
@@ -355,6 +388,7 @@ class GraphPool(struct.PyTreeNode):
             new_graphs: Fresh graphs to use for reset
             new_wires: Fresh wires to use for reset
             new_logits: Fresh logits to use for reset
+            new_knockout_patterns: Fresh knockout patterns for reset
             reset_strategy: Strategy for selecting graphs to reset:
                             "uniform" - uniform random selection
                             "steps_biased" - bias by update steps (more steps = higher probability)
@@ -396,8 +430,19 @@ class GraphPool(struct.PyTreeNode):
         if new_logits is not None:
             reset_logits = jax.tree.map(lambda leaf: leaf[sample_idxs], new_logits)
 
+        # Sample knockout patterns if provided
+        reset_knockout_patterns = None
+        if new_knockout_patterns is not None:
+            reset_knockout_patterns = new_knockout_patterns[sample_idxs]
+
         # Update the pool with reset elements
-        reset_pool = self.update(reset_idxs, reset_graphs, reset_wires, reset_logits)
+        reset_pool = self.update(
+            reset_idxs,
+            reset_graphs,
+            reset_wires,
+            reset_logits,
+            reset_knockout_patterns,
+        )
 
         # Increment the reset counter for all elements
         if reset_pool.reset_counter is not None:
@@ -633,6 +678,7 @@ def initialize_graph_pool(
     loss_value: float = 0.0,
     wiring_mode: str = "random",
     initial_diversity: int = 1,
+    knockout_config: Optional[Dict[str, Any]] = None,
 ) -> GraphPool:
     """
     Initialize a pool of graphs using a provided graph creation function.
@@ -646,13 +692,10 @@ def initialize_graph_pool(
         circuit_hidden_dim: Dimension of hidden features
         loss_value: Initial loss value for graph globals
         wiring_mode: Mode for generating wirings ("random", "fixed", or "genetic")
-                    Note: "genetic" mode initializes the same as "fixed" mode -
-                    genetic mutations are applied during pool resets
         initial_diversity: Number of different initial wirings to start with.
-                          Only used in "fixed" and "genetic" modes.
-                          - 1: All circuits start with identical wiring (original behavior)
-                          - N: Pool starts with N different wirings, each repeated pool_size//N times
-                          - If N >= pool_size: Each circuit gets a unique wiring (same as "random" mode)
+        knockout_config: Optional configuration to apply persistent knockouts
+                         to a fraction of the newly created circuits.
+                         Expected keys: 'fraction', 'damage_prob', 'target_layer'.
 
     Returns:
         Initialized GraphPool
@@ -758,4 +801,42 @@ def initialize_graph_pool(
     # Initialize reset counter
     reset_counter = jp.zeros(pool_size, dtype=jp.int32)
 
-    return GraphPool.create(graphs, all_wires, all_logits, reset_counter)
+    # Initialize knockout patterns to all False (no knockouts)
+    num_nodes = graphs.nodes["logits"].shape[1]
+    knockout_patterns = jp.zeros((pool_size, num_nodes), dtype=jp.bool_)
+
+    # If knockout config is provided, apply persistent knockouts to a fraction of the new pool
+    if knockout_config and knockout_config.get("fraction", 0.0) > 0.0:
+        knockout_key, rng = jax.random.split(rng)
+        fraction = knockout_config.get("fraction")
+        damage_prob = knockout_config.get("damage_prob")
+        target_layer = knockout_config.get("target_layer", None)
+
+        num_to_damage = jp.round(pool_size * fraction).astype(jp.int32)
+        damage_indices = jax.random.choice(
+            knockout_key, pool_size, shape=(num_to_damage,), replace=False
+        )
+
+        # Extract true layer sizes from one of the generated graphs to ensure consistency
+        single_graph = jax.tree.map(lambda x: x[0], graphs)
+        true_layer_sizes = extract_layer_info_from_graph(single_graph, input_n)
+
+        # Generate new patterns for the selected indices
+        pattern_keys = jax.random.split(knockout_key, num_to_damage)
+        vmapped_pattern_creator = jax.vmap(
+            lambda k: create_reproducible_knockout_pattern(
+                key=k,
+                layer_sizes=true_layer_sizes,
+                damage_prob=damage_prob,
+                target_layer=target_layer,
+                input_n=input_n,
+            )
+        )
+        new_patterns = vmapped_pattern_creator(pattern_keys)
+
+        # Apply the new patterns at the selected indices
+        knockout_patterns = knockout_patterns.at[damage_indices].set(new_patterns)
+
+    return GraphPool.create(
+        graphs, all_wires, all_logits, reset_counter, knockout_patterns
+    )

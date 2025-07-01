@@ -17,7 +17,7 @@ output:
 wandb:
   enabled: true
   project: "boolean-nca-cc"
-  entity: m2snn  # Your wandb username or team name
+  entity: marcello-barylli-growai  # Your wandb username or team name
   run_name: null  # Auto-generated if null
   tags: ["boolean-circuit", "nca", "meta-learning"]
   group: null
@@ -56,8 +56,8 @@ training:
     exponent: 1
     alpha: 1e-1 # final lr = 1% of initial lr
   # NUMBER OF EPOCHS
-  epochs: 512
-  epochs_power_of_2: null # 2^n
+  epochs: 8192 # 512
+  epochs_power_of_2: 12 # 2^n
   # USE SCAN
   use_scan: true
 
@@ -73,23 +73,39 @@ pool:
   n_swaps_per_layer: null # For genetic mutation number of swaps per layer
   initial_diversity: ${training.initial_diversity} # For genetic mutation number of initial wires
 
-  # Gate knockout ("hard" LUT zeroing - resets globals)
-  gate_knockout:
-    active: false
-    fraction: 0.1
-    interval: 64
-    strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
-    damage_prob: 0.05  # Probability of zeroing an entire LUT in selected circuits
-    combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined strategy
+  # Persistent structural knockout (injected periodically)
+  persistent_knockout:
+    fraction: 0.1 # Fraction of the *newly reset* circuits to damage
+    damage_prob: 1.0 # Expected number of knockouts per target layer
+    target_layer: null # Target a specific layer (e.g., 0, 1, ...), null for all layers
 
-  # Soft LUT damage ("soft" LUT zeroing - preserves globals)
-  soft_lut_damage:
-    active: false
-    fraction: 0.01
-    interval: 64
-    strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
-    damage_prob: 0.1 # Probability of zeroing an entire LUT in selected circuits
-    combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined strategy
+  # # Gate knockout ("hard" LUT zeroing - resets globals)
+  # gate_knockout:
+  #   active: false
+  #   fraction: 0.1
+  #   interval: 64
+  #   strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
+  #   damage_prob: 0.05  # Probability of zeroing an entire LUT in selected circuits
+  #   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined strategy
+
+  # # Soft LUT damage ("soft" LUT zeroing - preserves globals)
+  # soft_lut_damage:
+  #   active: false
+  #   fraction: 0.01
+  #   interval: 64
+  #   strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
+  #   damage_prob: 0.1 # Probability of zeroing an entire LUT in selected circuits
+  #   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined strategy
+
+  # # Structural LUT perturbation (removes edges from graph)
+  # lut_perturbation:
+  #   active: false
+  #   mode: "hard"
+  #   damage_prob: 0.8 # Expected number of knockouts per target layer
+  #   target_layer: null # Target a specific layer (e.g., 0, 1, ...), null for all layers
+  #   interval: 64 # Apply every N epochs
+  #   reproducible: true
+  #   seed: 42
 
 # Backpropagation baseline
 backprop:
@@ -111,6 +127,11 @@ eval:
   periodic:
     enabled: true  # Whether to run periodic evaluation during training
     interval: 512  # Evaluate every N epochs
+  # Knockout evaluation
+  knockout_eval:
+    enabled: false
+    damage_prob: 1.0
+    target_layer: null
 
 # Early stopping based on accuracy
 stop_accuracy:

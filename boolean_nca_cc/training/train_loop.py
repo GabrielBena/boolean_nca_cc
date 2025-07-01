@@ -35,6 +35,10 @@ from boolean_nca_cc.training.eval_datasets import (
     evaluate_circuits_in_chunks,
     UnifiedEvaluationDatasets,
 )
+from boolean_nca_cc.training.knockout_eval import (
+    create_knockout_evaluation_datasets,
+    KnockoutEvaluationDatasets,
+)
 import wandb
 
 # Type alias for PyTree
@@ -277,7 +281,7 @@ def _check_early_stopping(
             current_eval_metrics,
         )
     except (ValueError, KeyError):
-        if stop_accuracy_source == "eval" and current_eval_metrics is None:
+        if "eval" in stop_accuracy_source and current_eval_metrics is None:
             # Evaluation metrics not available, skip early stopping check this epoch
             stop_accuracy_value = None
         else:
@@ -397,7 +401,7 @@ def _get_metric_value(
 
     Args:
         metric_name: Name of the metric ('loss', 'hard_loss', 'accuracy', 'hard_accuracy')
-        metric_source: Source of the metric ('training' or 'eval')
+        metric_source: Source of the metric ('training', 'eval', or 'eval_ko')
         training_metrics: Dictionary with training metrics
         eval_metrics: Dictionary with evaluation metrics (optional)
 
@@ -415,6 +419,17 @@ def _get_metric_value(
             "hard_loss": "eval_in/final_hard_loss",
             "accuracy": "eval_in/final_accuracy",
             "hard_accuracy": "eval_in/final_hard_accuracy",
+        }
+        return eval_metrics[eval_key_map[metric_name]]
+    elif metric_source == "eval_ko":
+        if eval_metrics is None:
+            raise ValueError("Knockout evaluation metrics not available for eval_ko source")
+        # Map to knockout evaluation metric keys
+        eval_key_map = {
+            "loss": "eval_ko_in/final_loss",
+            "hard_loss": "eval_ko_in/final_hard_loss",
+            "accuracy": "eval_ko_in/final_accuracy",
+            "hard_accuracy": "eval_ko_in/final_hard_accuracy",
         }
         return eval_metrics[eval_key_map[metric_name]]
     else:
@@ -658,6 +673,127 @@ def run_unified_periodic_evaluation(
         return {}
 
 
+def run_knockout_periodic_evaluation(
+    model,
+    datasets: KnockoutEvaluationDatasets,
+    x_data,
+    y_data,
+    input_n,
+    arity,
+    circuit_hidden_dim,
+    n_message_steps,
+    loss_type,
+    epoch,
+    wandb_run,
+    log_stepwise=False,
+    layer_sizes: List[Tuple[int, int]] = None,
+) -> Dict:
+    """
+    Run periodic evaluation on circuits with persistent knockouts.
+    """
+    try:
+        # 1. Run IN-distribution knockout evaluation
+        log.info(
+            f"Running IN-distribution Knockout evaluation ({datasets.in_actual_batch_size} circuits)..."
+        )
+        step_metrics_in = evaluate_circuits_in_chunks(
+            eval_fn=evaluate_model_stepwise_batched,
+            wires=datasets.in_distribution_wires,
+            logits=datasets.in_distribution_logits,
+            knockout_patterns=datasets.in_distribution_knockouts,
+            target_chunk_size=datasets.target_batch_size,
+            model=model,
+            x_data=x_data,
+            y_data=y_data,
+            input_n=input_n,
+            arity=arity,
+            circuit_hidden_dim=circuit_hidden_dim,
+            n_message_steps=n_message_steps,
+            loss_type=loss_type,
+            layer_sizes=layer_sizes,
+        )
+
+        final_metrics_in = {
+            "eval_ko_in/final_loss": step_metrics_in["soft_loss"][-1],
+            "eval_ko_in/final_hard_loss": step_metrics_in["hard_loss"][-1],
+            "eval_ko_in/final_accuracy": step_metrics_in["soft_accuracy"][-1],
+            "eval_ko_in/final_hard_accuracy": step_metrics_in["hard_accuracy"][-1],
+            "eval_ko_in/epoch": epoch,
+        }
+
+        # 2. Run OUT-of-distribution knockout evaluation
+        log.info(
+            f"Running OUT-of-distribution Knockout evaluation ({datasets.out_actual_batch_size} circuits)..."
+        )
+        step_metrics_out = evaluate_circuits_in_chunks(
+            eval_fn=evaluate_model_stepwise_batched,
+            wires=datasets.out_of_distribution_wires,
+            logits=datasets.out_of_distribution_logits,
+            knockout_patterns=datasets.out_of_distribution_knockouts,
+            target_chunk_size=datasets.target_batch_size,
+            model=model,
+            x_data=x_data,
+            y_data=y_data,
+            input_n=input_n,
+            arity=arity,
+            circuit_hidden_dim=circuit_hidden_dim,
+            n_message_steps=n_message_steps,
+            loss_type=loss_type,
+            layer_sizes=layer_sizes,
+        )
+
+        final_metrics_out = {
+            "eval_ko_out/final_loss": step_metrics_out["soft_loss"][-1],
+            "eval_ko_out/final_hard_loss": step_metrics_out["hard_loss"][-1],
+            "eval_ko_out/final_accuracy": step_metrics_out["soft_accuracy"][-1],
+            "eval_ko_out/final_hard_accuracy": step_metrics_out["hard_accuracy"][-1],
+            "eval_ko_out/epoch": epoch,
+        }
+
+        combined_metrics = {**final_metrics_in, **final_metrics_out}
+        if wandb_run:
+            wandb_run.log(combined_metrics)
+
+            if log_stepwise:
+                for step_idx in range(len(step_metrics_in["step"])):
+                    wandb_run.log({
+                        "eval_ko_in_steps/step": step_metrics_in["step"][step_idx],
+                        "eval_ko_in_steps/loss": step_metrics_in["soft_loss"][step_idx],
+                        "eval_ko_in_steps/hard_loss": step_metrics_in["hard_loss"][step_idx],
+                        "eval_ko_in_steps/accuracy": step_metrics_in["soft_accuracy"][step_idx],
+                        "eval_ko_in_steps/hard_accuracy": step_metrics_in["hard_accuracy"][step_idx],
+                        "eval_ko_in_steps/epoch": epoch,
+                    })
+                for step_idx in range(len(step_metrics_out["step"])):
+                    wandb_run.log({
+                        "eval_ko_out_steps/step": step_metrics_out["step"][step_idx],
+                        "eval_ko_out_steps/loss": step_metrics_out["soft_loss"][step_idx],
+                        "eval_ko_out_steps/hard_loss": step_metrics_out["hard_loss"][step_idx],
+                        "eval_ko_out_steps/accuracy": step_metrics_out["soft_accuracy"][step_idx],
+                        "eval_ko_out_steps/hard_accuracy": step_metrics_out["hard_accuracy"][step_idx],
+                        "eval_ko_out_steps/epoch": epoch,
+                    })
+
+        log.info(
+            f"Knockout Eval (epoch {epoch}):\n"
+            f"  IN-distribution KO: Loss={final_metrics_in['eval_ko_in/final_loss']:.4f}, "
+            f"Acc={final_metrics_in['eval_ko_in/final_accuracy']:.4f}, "
+            f"Hard Acc={final_metrics_in['eval_ko_in/final_hard_accuracy']:.4f}\n"
+            f"  OUT-of-distribution KO: Loss={final_metrics_out['eval_ko_out/final_loss']:.4f}, "
+            f"Acc={final_metrics_out['eval_ko_out/final_accuracy']:.4f}, "
+            f"Hard Acc={final_metrics_out['eval_ko_out/final_hard_accuracy']:.4f}"
+        )
+
+        return {
+            "final_metrics_in": final_metrics_in,
+            "final_metrics_out": final_metrics_out,
+        }
+
+    except Exception as e:
+        log.warning(f"Error during knockout periodic evaluation at epoch {epoch}: {e}")
+        return {}
+
+
 def train_model(
     # Data parameters
     x_data: jp.ndarray,
@@ -696,6 +832,8 @@ def train_model(
         0.5,
         0.5,
     ),  # Weights for [loss, steps] in combined strategy
+    # Perturbation configurations
+    persistent_knockout_config: Optional[Dict] = None,
     # Learning rate scheduling
     lr_scheduler: str = "constant",  # Options: "constant", "exponential", "cosine", "linear_warmup"
     lr_scheduler_params: Dict = None,
@@ -723,6 +861,9 @@ def train_model(
     periodic_eval_log_stepwise: bool = False,
     periodic_eval_batch_size: int = 16,  # Batch size for random wiring evaluation
     periodic_eval_log_pool_scatter: bool = False,
+    # Knockout evaluation parameters
+    knockout_eval_config: Optional[Dict] = None,
+    knockout_eval_log_stepwise: bool = False,
     # Wandb parameters
     wandb_logging: bool = False,
     log_interval: int = 1,
@@ -763,6 +904,7 @@ def train_model(
         reset_pool_interval: Number of epochs between pool resets
         reset_strategy: Strategy for selecting graphs to reset ("uniform", "steps_biased", "loss_biased", or "combined")
         combined_weights: Tuple of weights (loss_weight, steps_weight) for combining factors in "combined" strategy
+        persistent_knockout_config: Configuration for persistent knockout perturbations.
         key: Random seed
         wiring_fixed_key: Fixed key for generating wirings when wiring_mode='fixed'
         init_model: Optional pre-trained GNN model to continue training
@@ -896,6 +1038,7 @@ def train_model(
         loss_type: str,
         loss_key: jax.random.PRNGKey,
         epoch: int,
+        knockout_patterns: Optional[jp.ndarray] = None,
     ):
         """
         Single training step using graphs from the pool.
@@ -914,6 +1057,7 @@ def train_model(
             n_message_steps: Number of message passing steps
             loss_type: Type of loss function to use
             loss_key: Random key for loss computation
+            knockout_patterns: Optional knockout pattern for structural perturbations.
         Returns:
             Tuple of (loss, auxiliary outputs, updated pool)
         """
@@ -932,7 +1076,7 @@ def train_model(
                 return n_message_steps - 1
 
         # Define loss function
-        def loss_fn_scan(model, graph, logits, wires, loss_key):
+        def loss_fn_scan(model, graph, logits, wires, loss_key, knockout_pattern):
             # Store original shapes for reconstruction
             logits_original_shapes = [logit.shape for logit in logits]
 
@@ -961,6 +1105,7 @@ def train_model(
                 y_data=y_target,
                 loss_type=loss_type,
                 layer_sizes=layer_sizes,
+                knockout_pattern=knockout_pattern,
             )
 
             loss_step = get_loss_step(loss_key)
@@ -971,7 +1116,7 @@ def train_model(
 
             return final_loss, (final_aux, final_graph, final_logits, loss_step)
 
-        def loss_fn_no_scan(model, graph, logits, wires, loss_key):
+        def loss_fn_no_scan(model, graph, logits, wires, loss_key, knockout_pattern):
             # Store original shapes for reconstruction
             logits_original_shapes = [logit.shape for logit in logits]
             loss_step = get_loss_step(loss_key)
@@ -979,7 +1124,7 @@ def train_model(
             all_results = []
 
             for i in range(n_message_steps):
-                graph = model(graph)
+                graph = model(graph, knockout_pattern=knockout_pattern)
 
                 graph, loss, logits, aux = get_loss_and_update_graph(
                     graph=graph,
@@ -1009,16 +1154,17 @@ def train_model(
 
             return final_loss, (final_aux, final_graph, final_logits, loss_step)
 
-        def batch_loss_fn(model, graphs, logits, wires, loss_key):
+        def batch_loss_fn(model, graphs, logits, wires, loss_key, knockout_patterns):
             if use_scan:
                 loss_fn = loss_fn_scan
             else:
                 loss_fn = loss_fn_no_scan
 
             loss_keys = jax.random.split(loss_key, graphs.n_node.shape[0])
+            
             loss, (aux, updated_graphs, updated_logits, loss_steps) = nnx.vmap(
-                loss_fn, in_axes=(None, 0, 0, 0, 0)
-            )(model, graphs, logits, wires, loss_keys)
+                loss_fn, in_axes=(None, 0, 0, 0, 0, 0)
+            )(model, graphs, logits, wires, loss_keys, knockout_patterns)
             return jp.mean(loss), (
                 jax.tree.map(lambda x: jp.mean(x, axis=0), aux),
                 updated_graphs,
@@ -1034,6 +1180,7 @@ def train_model(
                 logits=logits,
                 wires=wires,
                 loss_key=loss_key,
+                knockout_patterns=knockout_patterns,
             )
         )
 
@@ -1084,6 +1231,19 @@ def train_model(
 
         log.info(eval_datasets.get_summary())
 
+    knockout_eval_datasets = None
+    if knockout_eval_config and knockout_eval_config.get("enabled"):
+        log.info("Creating standardized knockout evaluation datasets")
+        knockout_eval_datasets = create_knockout_evaluation_datasets(
+            evaluation_base_seed=periodic_eval_test_seed,
+            knockout_eval_config=knockout_eval_config,
+            layer_sizes=layer_sizes,
+            arity=arity,
+            circuit_hidden_dim=circuit_hidden_dim,
+            eval_batch_size=periodic_eval_batch_size,
+        )
+        log.info(knockout_eval_datasets.get_summary())
+
     # Save initial stable state if needed
     last_stable_state = {
         "model": model,
@@ -1107,7 +1267,7 @@ def train_model(
             # Pool-based training
             # Sample a batch from the pool using the current (potentially dynamic) batch size
             rng, sample_key, loss_key = jax.random.split(rng, 3)
-            idxs, graphs, wires, logits = circuit_pool.sample(
+            idxs, graphs, wires, logits, knockout_patterns = circuit_pool.sample(
                 sample_key, meta_batch_size
             )
 
@@ -1130,6 +1290,7 @@ def train_model(
                 loss_type=loss_type,
                 loss_key=loss_key,
                 epoch=epoch,
+                knockout_patterns=knockout_patterns,
             )
 
             *_, hard_loss, _, _, accuracy, hard_accuracy, _, _ = aux
@@ -1157,7 +1318,8 @@ def train_model(
                     )
                 else:
                     # Original logic for fixed and random wiring modes
-                    # Generate fresh circuits for resetting
+                    # Generate fresh circuits for resetting, potentially with knockouts
+                    num_to_reset = max(1, round(pool_size * reset_pool_fraction))
 
                     # Use consistent key generation for pool resets
                     if wiring_mode in ["fixed", "genetic"]:
@@ -1165,24 +1327,27 @@ def train_model(
                     else:
                         reset_pool_key = fresh_key
 
-                    fresh_pool = initialize_graph_pool(
+                    # Create a pool of fresh circuits, applying persistent knockouts if configured
+                    damaged_pool = initialize_graph_pool(
                         rng=reset_pool_key,
                         layer_sizes=layer_sizes,
-                        pool_size=pool_size,  # Use same size as circuit_pool
+                        pool_size=num_to_reset,  # Only create circuits we need
                         input_n=input_n,
                         arity=arity,
                         circuit_hidden_dim=circuit_hidden_dim,
                         wiring_mode=wiring_mode,
                         initial_diversity=initial_diversity,
+                        knockout_config=persistent_knockout_config,  # Pass config
                     )
 
                     # Reset a fraction of the pool and get avg steps of reset graphs
                     circuit_pool, avg_steps_reset = circuit_pool.reset_fraction(
                         reset_key,
                         reset_pool_fraction,
-                        fresh_pool.graphs,
-                        fresh_pool.wires,
-                        fresh_pool.logits,
+                        damaged_pool.graphs,
+                        damaged_pool.wires,
+                        damaged_pool.logits,
+                        damaged_pool.knockout_patterns,  # Pass patterns
                         reset_strategy=reset_strategy,
                         combined_weights=combined_weights,
                     )
@@ -1292,6 +1457,7 @@ def train_model(
                 pbar.set_postfix(postfix_dict)
 
                 # Step 2: Run periodic evaluation if enabled (BEFORE best model tracking)
+                all_eval_metrics = {}
                 if (
                     periodic_eval_enabled
                     and eval_datasets is not None
@@ -1322,7 +1488,37 @@ def train_model(
                         log_pool_scatter=periodic_eval_log_pool_scatter,
                     )
                     # Extract final metrics for best model tracking (use IN-distribution metrics)
-                    current_eval_metrics = eval_results.get("final_metrics_in", None)
+                    if eval_results and "final_metrics_in" in eval_results:
+                        all_eval_metrics.update(eval_results["final_metrics_in"])
+                        all_eval_metrics.update(eval_results["final_metrics_out"])
+
+                if (
+                    knockout_eval_config
+                    and knockout_eval_config.get("enabled")
+                    and knockout_eval_datasets is not None
+                    and epoch % periodic_eval_interval == 0
+                ):
+                    ko_eval_results = run_knockout_periodic_evaluation(
+                        model=model,
+                        datasets=knockout_eval_datasets,
+                        x_data=x_data,
+                        y_data=y_data,
+                        input_n=input_n,
+                        arity=arity,
+                        circuit_hidden_dim=circuit_hidden_dim,
+                        n_message_steps=periodic_eval_inner_steps,
+                        loss_type=loss_type,
+                        epoch=epoch,
+                        wandb_run=wandb_run,
+                        log_stepwise=knockout_eval_log_stepwise,
+                        layer_sizes=layer_sizes,
+                    )
+                    if ko_eval_results and "final_metrics_in" in ko_eval_results:
+                        all_eval_metrics.update(ko_eval_results["final_metrics_in"])
+                        all_eval_metrics.update(ko_eval_results["final_metrics_out"])
+
+                # Set current eval metrics to the combined dictionary if any evals ran
+                current_eval_metrics = all_eval_metrics if all_eval_metrics else None
 
                 # Step 3: Get current metric value for best model tracking using modular approach
                 try:
@@ -1333,9 +1529,11 @@ def train_model(
                         current_eval_metrics,
                     )
                 except (ValueError, KeyError) as e:
-                    if best_metric_source == "eval" and not periodic_eval_enabled:
+                    if "eval" in best_metric_source and not (
+                        periodic_eval_enabled or (knockout_eval_config and knockout_eval_config.get("enabled"))
+                    ):
                         log.warning(
-                            f"Best metric source is 'eval' but periodic evaluation is disabled. "
+                            f"Best metric source is '{best_metric_source}' but corresponding evaluation is disabled. "
                             f"Falling back to training metrics for {best_metric}."
                         )
                         current_metric_value = _get_metric_value(
@@ -1344,7 +1542,7 @@ def train_model(
                             training_metrics,
                             current_eval_metrics,
                         )
-                    elif best_metric_source == "eval" and current_eval_metrics is None:
+                    elif "eval" in best_metric_source and current_eval_metrics is None:
                         # Evaluation is enabled but hasn't run yet this epoch, skip best model check
                         current_metric_value = None
                     else:

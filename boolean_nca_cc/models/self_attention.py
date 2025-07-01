@@ -285,20 +285,22 @@ class CircuitSelfAttention(nnx.Module):
         self,
         senders: jp.ndarray,
         receivers: jp.ndarray,
+        knockout_pattern: Optional[jp.ndarray] = None,
         bidirectional: bool = True,
     ) -> jp.ndarray:
         """
-        Create an attention mask based on the circuit wiring.
+        Create an attention mask based on the circuit wiring and knockout pattern.
 
         Args:
             senders: Array of sender node indices
             receivers: Array of receiver node indices
+            knockout_pattern: Optional boolean array where True indicates a knocked-out node.
             bidirectional: If True, create a symmetric mask
 
         Returns:
             Boolean attention mask of shape [batch_size, 1, seq_len, seq_len]
         """
-        # Create a mask where edges exist in the graph
+        # Create a base mask from the graph's wiring topology
         mask = jp.zeros((self.n_node, self.n_node), dtype=jp.bool_)
 
         if len(senders) > 0:
@@ -309,8 +311,21 @@ class CircuitSelfAttention(nnx.Module):
                 # Also set mask[sender, receiver] = True for bidirectional attention
                 mask = mask.at[senders, receivers].set(True)
 
-        # Add self-connections (diagonal of True)
+        # Add self-connections (diagonal of True) so nodes can attend to themselves
         mask = mask | jp.eye(self.n_node, dtype=jp.bool_)
+
+        # If a knockout pattern is provided, apply it to the mask
+        if knockout_pattern is not None:
+            # Create a mask for active (non-knocked-out) nodes
+            active_nodes_mask = ~knockout_pattern
+
+            # A node can't send attention if it's knocked out.
+            # A node can't receive attention if it's knocked out.
+            # This is equivalent to ANDing the active mask with both rows and columns.
+            knockout_mask = jp.outer(active_nodes_mask, active_nodes_mask)
+            
+            # Combine the wiring mask with the knockout mask
+            mask = mask & knockout_mask
 
         # Add batch dimension and singleton head dimension [batch_size, 1, seq_len, seq_len]
         # This format matches the MultiHeadAttention mask format
@@ -348,6 +363,7 @@ class CircuitSelfAttention(nnx.Module):
         self,
         graph: jraph.GraphsTuple,
         attention_mask: Optional[jp.ndarray] = None,
+        knockout_pattern: Optional[jp.ndarray] = None,
     ) -> jraph.GraphsTuple:
         """
         Apply self-attention to update circuit parameters.
@@ -356,6 +372,7 @@ class CircuitSelfAttention(nnx.Module):
             graph: Input graph structure with node and edge features
             attention_mask: Optional pre-computed attention mask.
                           If None, it will be computed from the graph.
+            knockout_pattern: Optional knockout pattern to apply to the attention mask.
 
         Returns:
             Updated graph after self-attention
@@ -373,7 +390,7 @@ class CircuitSelfAttention(nnx.Module):
         # Create attention mask if not provided
         if attention_mask is None:
             attention_mask = self._create_attention_mask(
-                senders, receivers, bidirectional=True
+                senders, receivers, knockout_pattern=knockout_pattern, bidirectional=True
             )
 
         # Project features to the attention dimension
@@ -410,6 +427,7 @@ def run_self_attention_scan(
     model: CircuitSelfAttention,
     graph: jraph.GraphsTuple,
     num_steps: int,
+    knockout_pattern: Optional[jp.ndarray] = None,
 ) -> Tuple[jraph.GraphsTuple, List[jraph.GraphsTuple]]:
     """
     Apply the self-attention model iteratively for multiple steps using jax.lax.scan.
@@ -418,6 +436,7 @@ def run_self_attention_scan(
         model: The CircuitSelfAttention model
         graph: The initial graph
         num_steps: Number of steps to perform
+        knockout_pattern: Optional knockout pattern to apply to the attention mask.
 
     Returns:
         final_graph: The graph after all steps
@@ -425,7 +444,7 @@ def run_self_attention_scan(
     """
     # --- Compute the mask *once* before the scan ---
     attention_mask = model._create_attention_mask(
-        graph.senders, graph.receivers, bidirectional=True
+        graph.senders, graph.receivers, knockout_pattern=knockout_pattern, bidirectional=True
     )
     # ---------------------------------------------
 
@@ -455,6 +474,7 @@ def run_self_attention_scan_with_loss(
     y_data: jp.ndarray,
     loss_type: str,
     layer_sizes: Tuple[Tuple[int, int], ...],
+    knockout_pattern: Optional[jp.ndarray] = None,
 ) -> Tuple[jraph.GraphsTuple, List[jraph.GraphsTuple], jp.ndarray, List]:
     """
     Run the self-attention model for multiple steps with loss computation and graph updating at each step.
@@ -472,6 +492,7 @@ def run_self_attention_scan_with_loss(
         y_data: Target output data
         loss_type: Type of loss function to use
         layer_sizes: List of (nodes, group_size) tuples for each layer
+        knockout_pattern: Optional knockout pattern to apply to the attention mask.
 
     Returns:
         final_graph: The graph after all steps
@@ -483,7 +504,7 @@ def run_self_attention_scan_with_loss(
 
     # --- Compute the mask *once* before the scan ---
     attention_mask = model._create_attention_mask(
-        graph.senders, graph.receivers, bidirectional=True
+        graph.senders, graph.receivers, knockout_pattern=knockout_pattern, bidirectional=True
     )
     # ---------------------------------------------
 
