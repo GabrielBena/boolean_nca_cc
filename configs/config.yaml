@@ -36,7 +36,7 @@ circuit:
 training:
   # WIRING MODE : "random" or "fixed"
   wiring_mode: "fixed"  # Options: "fixed", "genetic", or "random"
-  initial_diversity: 1024
+  initial_diversity: 1
   # INNER LOOP
   n_message_steps: 5  # Number of message passing steps per training iteration
   # LOSS TYPE
@@ -75,7 +75,7 @@ pool:
 
   # Persistent structural knockout (injected periodically)
   persistent_knockout:
-    fraction: 0.1 # Fraction of the *newly reset* circuits to damage
+    fraction: 0.8 # Fraction of the *newly reset* circuits to damage
     damage_prob: 1.0 # Expected number of knockouts per target layer
     target_layer: null # Target a specific layer (e.g., 0, 1, ...), null for all layers
 
@@ -129,7 +129,7 @@ eval:
     interval: 512  # Evaluate every N epochs
   # Knockout evaluation
   knockout_eval:
-    enabled: false
+    enabled: true
     damage_prob: 1.0
     target_layer: null
 
@@ -138,7 +138,7 @@ stop_accuracy:
   enabled: true  # Whether to enable early stopping based on accuracy
   threshold: 0.995  # Accuracy threshold to trigger early stopping
   metric: "hard_accuracy"  # Which accuracy metric to use ("accuracy" or "hard_accuracy")
-  source: "training"  # Source of the metric ("training" or "eval")
+  source: "eval_ko"  # Source of the metric ("training", "eval", or "eval_ko")
   patience: 10  # Number of epochs to wait after reaching threshold before stopping
   min_epochs: 501 # Minimum number of epochs before early stopping can occur (eval every 512 epochs - 10 epochs)
 

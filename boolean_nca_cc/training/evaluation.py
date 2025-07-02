@@ -8,7 +8,7 @@ models on optimizing boolean circuits.
 import jax
 import jax.numpy as jp
 from tqdm.auto import tqdm
-from typing import List, Dict, Tuple, Generator, NamedTuple
+from typing import List, Dict, Tuple, Generator, NamedTuple, Optional
 
 from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention
 from boolean_nca_cc.utils import (
@@ -377,6 +377,7 @@ def evaluate_model_stepwise_batched(
     loss_type: str = "l4",
     bidirectional_edges: bool = True,
     layer_sizes: List[Tuple[int, int]] = None,
+    knockout_patterns: Optional[jp.ndarray] = None,
 ) -> Dict:
     """
     Evaluate GNN performance on a batch of circuits by running message passing steps
@@ -395,6 +396,7 @@ def evaluate_model_stepwise_batched(
         loss_type: Loss function to use
         bidirectional_edges: Whether to use bidirectional edges
         layer_sizes: List of (nodes, group_size) tuples for each layer
+        knockout_patterns: Optional knockout patterns for each circuit
 
     Returns:
         Dictionary with averaged metrics collected at each step
@@ -473,8 +475,13 @@ def evaluate_model_stepwise_batched(
 
     for step in range(1, n_message_steps + 1):
         # Apply model to all graphs in batch
-        vmap_model = jax.vmap(model)
-        updated_graphs = vmap_model(current_graphs)
+        if knockout_patterns is not None:
+            # Use a lambda to correctly map over the knockout_pattern keyword argument
+            vmap_model = jax.vmap(lambda g, k: model(g, knockout_pattern=k))
+            updated_graphs = vmap_model(current_graphs, knockout_patterns)
+        else:
+            vmap_model = jax.vmap(model)
+            updated_graphs = vmap_model(current_graphs)
 
         # Extract logits from updated graphs
         vmap_extract_logits = jax.vmap(

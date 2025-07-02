@@ -314,6 +314,10 @@ def evaluate_circuits_in_chunks(
     num_chunks = (total_circuits + target_chunk_size - 1) // target_chunk_size
     chunk_results = []
 
+    # Pop knockout_patterns from kwargs to handle it manually for chunking
+    local_kwargs = eval_kwargs.copy()
+    knockout_patterns = local_kwargs.pop("knockout_patterns", None)
+
     for chunk_idx in range(num_chunks):
         start_idx = chunk_idx * target_chunk_size
         end_idx = min(start_idx + target_chunk_size, total_circuits)
@@ -322,9 +326,16 @@ def evaluate_circuits_in_chunks(
         chunk_wires = [w[start_idx:end_idx] for w in wires]
         chunk_logits = [l[start_idx:end_idx] for l in logits]
 
+        chunk_knockouts = None
+        if knockout_patterns is not None:
+            chunk_knockouts = knockout_patterns[start_idx:end_idx]
+
         # Evaluate chunk
         chunk_result = eval_fn(
-            batch_wires=chunk_wires, batch_logits=chunk_logits, **eval_kwargs
+            batch_wires=chunk_wires,
+            batch_logits=chunk_logits,
+            knockout_patterns=chunk_knockouts,
+            **local_kwargs,
         )
         chunk_results.append(chunk_result)
 

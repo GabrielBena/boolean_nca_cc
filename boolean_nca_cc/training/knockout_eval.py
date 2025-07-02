@@ -7,6 +7,7 @@ import jax.numpy as jp
 import jraph
 from typing import List, Tuple, Dict, Any, Optional
 from flax import struct
+from functools import partial
 
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.utils.graph_builder import build_graph
@@ -70,6 +71,8 @@ def create_knockout_evaluation_datasets(
     arity: int,
     circuit_hidden_dim: int,
     eval_batch_size: int,
+    base_wires: PyTree,
+    base_logits: PyTree,
 ) -> KnockoutEvaluationDatasets:
     """
     Creates standardized IN-distribution and OUT-of-distribution datasets for knockout evaluation.
@@ -85,16 +88,17 @@ def create_knockout_evaluation_datasets(
         arity: Arity of gates.
         circuit_hidden_dim: Hidden dimension for graph nodes.
         eval_batch_size: The target batch size for evaluation.
+        base_wires: The base wiring to use for all evaluation circuits.
+        base_logits: The base logits to use for all evaluation circuits.
 
     Returns:
         A KnockoutEvaluationDatasets object.
     """
     base_rng = jax.random.PRNGKey(evaluation_base_seed)
-    in_dist_key, out_dist_key, base_circuit_key = jax.random.split(base_rng, 3)
+    in_dist_key, out_dist_key = jax.random.split(base_rng)
     input_n = layer_sizes[0][0]
 
-    # 1. Generate a single, fixed base circuit (wiring and logits)
-    base_wires, base_logits = gen_circuit(base_circuit_key, layer_sizes, arity=arity)
+    # 1. Use the provided base circuit (wiring and logits)
     base_graph = build_graph(
         logits=base_logits,
         wires=base_wires,
@@ -104,42 +108,44 @@ def create_knockout_evaluation_datasets(
     )
     true_layer_sizes = extract_layer_info_from_graph(base_graph, input_n)
 
+    # Define a partially applied function for vmapping to avoid unintended caching
+    # This makes the static arguments explicit and ensures the changing 'key' is handled correctly
+    pattern_creator_fn = partial(
+        create_reproducible_knockout_pattern,
+        layer_sizes=true_layer_sizes,
+        damage_prob=knockout_eval_config["damage_prob"],
+        target_layer=knockout_eval_config["target_layer"],
+        input_n=input_n,
+    )
 
     # 2. Create IN-distribution knockout patterns
     in_pattern_keys = jax.random.split(in_dist_key, eval_batch_size)
-    vmapped_in_pattern_creator = jax.vmap(
-        lambda k: create_reproducible_knockout_pattern(
-            key=k,
-            layer_sizes=true_layer_sizes,
-            damage_prob=knockout_eval_config["damage_prob"],
-            target_layer=knockout_eval_config["target_layer"],
-            input_n=input_n,
-        )
-    )
-    in_knockout_patterns = vmapped_in_pattern_creator(in_pattern_keys)
+    in_knockout_patterns = jax.vmap(pattern_creator_fn)(in_pattern_keys)
 
     # 3. Create OUT-of-distribution knockout patterns (different seed)
     out_pattern_keys = jax.random.split(out_dist_key, eval_batch_size)
-    vmapped_out_pattern_creator = jax.vmap(
-        lambda k: create_reproducible_knockout_pattern(
-            key=k,
-            layer_sizes=true_layer_sizes,
-            damage_prob=knockout_eval_config["damage_prob"],
-            target_layer=knockout_eval_config["target_layer"],
-            input_n=input_n,
-        )
-    )
-    out_knockout_patterns = vmapped_out_pattern_creator(out_pattern_keys)
+    out_knockout_patterns = jax.vmap(pattern_creator_fn)(out_pattern_keys)
 
     # 4. Replicate base circuit for the batch
-    in_graphs = jax.tree.map(lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_graph)
-    in_wires = jax.tree.map(lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_wires)
-    in_logits = jax.tree.map(lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_logits)
-    
-    out_graphs = jax.tree.map(lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_graph)
-    out_wires = jax.tree.map(lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_wires)
-    out_logits = jax.tree.map(lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_logits)
+    in_graphs = jax.tree.map(
+        lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_graph
+    )
+    in_wires = jax.tree.map(
+        lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_wires
+    )
+    in_logits = jax.tree.map(
+        lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_logits
+    )
 
+    out_graphs = jax.tree.map(
+        lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_graph
+    )
+    out_wires = jax.tree.map(
+        lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_wires
+    )
+    out_logits = jax.tree.map(
+        lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_logits
+    )
 
     return KnockoutEvaluationDatasets(
         in_distribution_graphs=in_graphs,

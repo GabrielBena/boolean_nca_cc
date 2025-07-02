@@ -41,6 +41,8 @@ from boolean_nca_cc.training.knockout_eval import (
 )
 import wandb
 
+from boolean_nca_cc.circuits.model import gen_circuit
+
 # Type alias for PyTree
 PyTree = Any
 
@@ -862,8 +864,7 @@ def train_model(
     periodic_eval_batch_size: int = 16,  # Batch size for random wiring evaluation
     periodic_eval_log_pool_scatter: bool = False,
     # Knockout evaluation parameters
-    knockout_eval_config: Optional[Dict] = None,
-    knockout_eval_log_stepwise: bool = False,
+    knockout_eval: Optional[Dict] = None,
     # Wandb parameters
     wandb_logging: bool = False,
     log_interval: int = 1,
@@ -1232,15 +1233,21 @@ def train_model(
         log.info(eval_datasets.get_summary())
 
     knockout_eval_datasets = None
-    if knockout_eval_config and knockout_eval_config.get("enabled"):
+    if knockout_eval and knockout_eval.get("enabled"):
         log.info("Creating standardized knockout evaluation datasets")
+
+        # Generate the base circuit using the same fixed key as training to ensure consistency
+        base_wires, base_logits = gen_circuit(wiring_fixed_key, layer_sizes, arity=arity)
+
         knockout_eval_datasets = create_knockout_evaluation_datasets(
             evaluation_base_seed=periodic_eval_test_seed,
-            knockout_eval_config=knockout_eval_config,
+            knockout_eval_config=knockout_eval,
             layer_sizes=layer_sizes,
             arity=arity,
             circuit_hidden_dim=circuit_hidden_dim,
             eval_batch_size=periodic_eval_batch_size,
+            base_wires=base_wires,
+            base_logits=base_logits,
         )
         log.info(knockout_eval_datasets.get_summary())
 
@@ -1493,8 +1500,8 @@ def train_model(
                         all_eval_metrics.update(eval_results["final_metrics_out"])
 
                 if (
-                    knockout_eval_config
-                    and knockout_eval_config.get("enabled")
+                    knockout_eval
+                    and knockout_eval.get("enabled")
                     and knockout_eval_datasets is not None
                     and epoch % periodic_eval_interval == 0
                 ):
@@ -1510,7 +1517,7 @@ def train_model(
                         loss_type=loss_type,
                         epoch=epoch,
                         wandb_run=wandb_run,
-                        log_stepwise=knockout_eval_log_stepwise,
+                        log_stepwise=periodic_eval_log_stepwise,
                         layer_sizes=layer_sizes,
                     )
                     if ko_eval_results and "final_metrics_in" in ko_eval_results:
@@ -1530,7 +1537,7 @@ def train_model(
                     )
                 except (ValueError, KeyError) as e:
                     if "eval" in best_metric_source and not (
-                        periodic_eval_enabled or (knockout_eval_config and knockout_eval_config.get("enabled"))
+                        periodic_eval_enabled or (knockout_eval and knockout_eval.get("enabled"))
                     ):
                         log.warning(
                             f"Best metric source is '{best_metric_source}' but corresponding evaluation is disabled. "

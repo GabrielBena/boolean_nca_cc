@@ -563,6 +563,8 @@ def main(cfg: DictConfig) -> None:
         periodic_eval_log_stepwise=cfg.eval.log_stepwise,
         periodic_eval_batch_size=cfg.eval.batch_size,
         periodic_eval_log_pool_scatter=cfg.eval.log_pool_scatter,
+        # Knockout evaluation
+        knockout_eval=cfg.eval.get("knockout_eval", None),
         # WandB parameters
         wandb_logging=cfg.wandb.enabled,
         log_interval=cfg.logging.log_interval,
