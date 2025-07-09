@@ -38,14 +38,14 @@ training:
   wiring_mode: "random"  # Options: "fixed", "genetic", or "random"
   initial_diversity: 1024
   # INNER LOOP
-  n_message_steps: 5  # Number of message passing steps per training iteration
+  n_message_steps: 10  # Number of message passing steps per training iteration
   # LOSS TYPE
   loss_type: "l4"  # Options: "l4", "l2", or "bce"
-  random_loss_step: false  # Use random message passing step for loss computation
-  use_beta_loss_step: false  # Use beta distribution for random loss step (varies from early to late steps through training)
+  random_loss_step: true  # Use random message passing step for loss computation
+  use_beta_loss_step: true  # Use beta distribution for random loss step (varies from early to late steps through training)
   # BATCH SIZE
   meta_batch_size: 1024
-  batch_chunk_size: 128  # Sequential batch processing chunk size (null means use meta_batch_size)
+  batch_chunk_size: 64  # Sequential batch processing chunk size (null means use meta_batch_size)
   # OPTIMIZATION
   learning_rate: 1e-4
   weight_decay: 1e-5
