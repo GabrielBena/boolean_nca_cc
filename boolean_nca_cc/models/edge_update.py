@@ -4,11 +4,11 @@ Edge update modules for graph neural networks.
 This module provides edge update functions for generating messages between nodes.
 """
 
+from typing import Dict, List
+
 import jax
 import jax.numpy as jp
 from flax import nnx
-from typing import List, Dict
-
 
 # Type aliases for clarity
 NodeType = Dict[str, jp.ndarray]
@@ -68,7 +68,7 @@ class EdgeUpdateModule(nnx.Module):
                     out_f,
                     rngs=rngs,
                     kernel_init=nnx.initializers.xavier_normal(),
-                    bias_init=jax.nn.initializers.random_normal(stddev=1e-4),
+                    bias_init=jax.nn.initializers.normal(stddev=1e-4),
                 )
             )
             # Add BatchNorm and ReLU except for the last layer

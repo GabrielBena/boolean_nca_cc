@@ -35,7 +35,7 @@ circuit:
 # Training parameters
 training:
   # WIRING MODE : "random" or "fixed"
-  wiring_mode: "fixed"  # Options: "fixed", "genetic", or "random"
+  wiring_mode: "random"  # Options: "fixed", "genetic", or "random"
   initial_diversity: 1024
   # INNER LOOP
   n_message_steps: 5  # Number of message passing steps per training iteration
@@ -44,9 +44,10 @@ training:
   random_loss_step: false  # Use random message passing step for loss computation
   use_beta_loss_step: false  # Use beta distribution for random loss step (varies from early to late steps through training)
   # BATCH SIZE
-  meta_batch_size: 64
+  meta_batch_size: 1024
+  batch_chunk_size: 128  # Sequential batch processing chunk size (null means use meta_batch_size)
   # OPTIMIZATION
-  learning_rate: 2e-4
+  learning_rate: 1e-4
   weight_decay: 1e-5
   # LEARNING RATE SCHEDULER
   lr_scheduler: "linear_warmup"  # Options: "constant", "exponential", "cosine", "linear_warmup"
@@ -56,15 +57,15 @@ training:
     exponent: 1
     alpha: 1e-1 # final lr = 1% of initial lr
   # NUMBER OF EPOCHS
-  epochs: 512
-  epochs_power_of_2: null # 2^n
+  epochs: null
+  epochs_power_of_2: 18 # 2^n
   # USE SCAN
   use_scan: true
 
 # Pool configuration for meta-learning
 pool:
-  size: 2048
-  reset_fraction: 0.1
+  size: 8192
+  reset_fraction: 0.25
   reset_interval: 128
   reset_strategy: "combined"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
@@ -110,7 +111,7 @@ eval:
   log_pool_scatter: true
   periodic:
     enabled: true  # Whether to run periodic evaluation during training
-    interval: 512  # Evaluate every N epochs
+    interval: 1024  # Evaluate every N epochs
 
 # Early stopping based on accuracy
 stop_accuracy:
@@ -119,7 +120,7 @@ stop_accuracy:
   metric: "hard_accuracy"  # Which accuracy metric to use ("accuracy" or "hard_accuracy")
   source: "training"  # Source of the metric ("training" or "eval")
   patience: 10  # Number of epochs to wait after reaching threshold before stopping
-  min_epochs: 501 # Minimum number of epochs before early stopping can occur (eval every 512 epochs - 10 epochs)
+  min_epochs: 1012 # Minimum number of epochs before early stopping can occur (eval every 512 epochs - 10 epochs)
 
 # Checkpointing
 checkpoint:

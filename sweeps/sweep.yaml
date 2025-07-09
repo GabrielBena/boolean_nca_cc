@@ -4,8 +4,11 @@ defaults:
 
 sweep:
   grid:  # parameters to combine in all possible ways
-    # seed: [1, 2, 3]
+    seed: [1, 2, 3]
     model: [self_attention]
-    training.initial_diversity: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
-    model.hidden_dim: [16, 32, 64, 128]
-
+    training.initial_diversity: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+    model.mlp_dim_multiplier: [1, 2, 4]
+    model.attention_dim: [16, 32, 64, 128, 256]
+    # model.mlp_dim_multiplier: [4]
+    # model.attention_dim: [128, 256]
+    # training.initial_diversity: [1024, 2048]

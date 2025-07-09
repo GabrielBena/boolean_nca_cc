@@ -68,3 +68,4 @@ gnn_results.pkl
 attn_results.pkl
 sweeps/hsm_config.yaml
 boolean_nca_cc.code-workspace
+sweeps/README.md

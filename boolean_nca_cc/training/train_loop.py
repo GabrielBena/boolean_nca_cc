@@ -5,37 +5,37 @@ This module provides functions for training GNN models to optimize
 boolean circuits over multiple epochs.
 """
 
+import logging
+import os
+from datetime import datetime
+from functools import partial
+from typing import Any, Dict, List, Optional, Tuple
+
 import jax
 import jax.numpy as jp
+import jraph
 import optax
 from flax import nnx
-import jraph
-from typing import List, Tuple, Dict, Any, Optional
-from functools import partial
 from tqdm.auto import tqdm
-import os
-import logging
-from datetime import datetime
 
+import wandb
 from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention
-from boolean_nca_cc.training.utils import save_checkpoint
-from boolean_nca_cc.training.schedulers import (
-    should_reset_pool,
-    get_learning_rate_schedule,
-    get_step_beta,
+from boolean_nca_cc.training.eval_datasets import (
+    UnifiedEvaluationDatasets,
+    create_unified_evaluation_datasets,
+    evaluate_circuits_in_chunks,
 )
-
-from boolean_nca_cc.training.pool.pool import GraphPool, initialize_graph_pool
 from boolean_nca_cc.training.evaluation import (
     evaluate_model_stepwise_batched,
     get_loss_and_update_graph,
 )
-from boolean_nca_cc.training.eval_datasets import (
-    create_unified_evaluation_datasets,
-    evaluate_circuits_in_chunks,
-    UnifiedEvaluationDatasets,
+from boolean_nca_cc.training.pool.pool import GraphPool, initialize_graph_pool
+from boolean_nca_cc.training.schedulers import (
+    get_learning_rate_schedule,
+    get_step_beta,
+    should_reset_pool,
 )
-import wandb
+from boolean_nca_cc.training.utils import save_checkpoint
 
 # Type alias for PyTree
 PyTree = Any
@@ -683,6 +683,9 @@ def train_model(
     # Wiring mode parameters
     wiring_mode: str = "random",  # Options: 'fixed', 'random', or 'genetic'
     meta_batch_size: int = 64,
+    batch_chunk_size: Optional[
+        int
+    ] = None,  # Sequential batch processing chunk size (None means use meta_batch_size)
     # Genetic mutation parameters (only used when wiring_mode='genetic')
     genetic_mutation_rate: float = 0.0,  # Fraction of connections to mutate (0.0 to 1.0)
     genetic_swaps_per_layer: int = 1,  # Number of swaps per layer for genetic mutation
@@ -756,6 +759,7 @@ def train_model(
         use_beta_loss_step: Use beta distribution for random loss step (varies from early to late steps through training)
         wiring_mode: Mode for circuit wirings ('fixed', 'random', or 'genetic')
         meta_batch_size: Batch size for training
+        batch_chunk_size: Sequential batch processing chunk size (None means use meta_batch_size)
         genetic_mutation_rate: Fraction of connections to mutate (0.0 to 1.0)
         genetic_swaps_per_layer: Number of swaps per layer for genetic mutation
         pool_size: Size of the graph pool
@@ -1045,6 +1049,274 @@ def train_model(
 
         return loss, (aux, updated_pool, loss_steps)
 
+    # Define JIT-compiled chunk processing function
+    @partial(
+        nnx.jit,
+        static_argnames=(
+            "layer_sizes",
+            "n_message_steps",
+            "loss_type",
+        ),
+    )
+    def pool_train_step_chunk_only(
+        model: CircuitGNN,
+        graphs: jraph.GraphsTuple,
+        wires: PyTree,
+        logits: PyTree,
+        x: jp.ndarray,
+        y_target: jp.ndarray,
+        layer_sizes: Tuple[Tuple[int, int], ...],
+        n_message_steps: int,
+        loss_type: str,
+        loss_key: jax.random.PRNGKey,
+        epoch: int,
+    ):
+        """
+        JIT-compiled loss and gradient computation for a single chunk.
+        Reuses the exact same logic as pool_train_step but without optimizer update.
+        """
+
+        def get_loss_step(loss_key):
+            if random_loss_step:
+                if use_beta_loss_step:
+                    return get_step_beta(
+                        loss_key,
+                        n_message_steps,
+                        training_progress=epoch / (epochs - 1),
+                    )
+                else:
+                    return jax.random.randint(loss_key, (1,), 0, n_message_steps)[0]
+            else:
+                return n_message_steps - 1
+
+        # Define loss function (same as regular batching)
+        def loss_fn_scan(model, graph, logits, wires, loss_key):
+            # Store original shapes for reconstruction
+            logits_original_shapes = [logit.shape for logit in logits]
+
+            # Determine which scan function to use based on model type
+            if isinstance(model, CircuitGNN):
+                from boolean_nca_cc.models.gnn import run_gnn_scan_with_loss
+
+                scan_fn = run_gnn_scan_with_loss
+            elif isinstance(model, CircuitSelfAttention):
+                from boolean_nca_cc.models.self_attention import (
+                    run_self_attention_scan_with_loss,
+                )
+
+                scan_fn = run_self_attention_scan_with_loss
+            else:
+                raise ValueError(f"Unknown model type: {type(model)}")
+
+            # Run scan for all steps, computing loss and updating graph at each step
+            final_graph, step_outputs = scan_fn(
+                model=model,
+                graph=graph,
+                num_steps=n_message_steps,
+                logits_original_shapes=logits_original_shapes,
+                wires=wires,
+                x_data=x,
+                y_data=y_target,
+                loss_type=loss_type,
+                layer_sizes=layer_sizes,
+            )
+
+            loss_step = get_loss_step(loss_key)
+
+            final_graph, final_loss, final_logits, final_aux = jax.tree.map(
+                lambda x: x[loss_step], step_outputs
+            )
+
+            return final_loss, (final_aux, final_graph, final_logits, loss_step)
+
+        def loss_fn_no_scan(model, graph, logits, wires, loss_key):
+            # Store original shapes for reconstruction
+            logits_original_shapes = [logit.shape for logit in logits]
+            loss_step = get_loss_step(loss_key)
+
+            all_results = []
+
+            for i in range(n_message_steps):
+                graph = model(graph)
+
+                graph, loss, logits, aux = get_loss_and_update_graph(
+                    graph=graph,
+                    logits_original_shapes=logits_original_shapes,
+                    wires=wires,
+                    x_data=x,
+                    y_data=y_target,
+                    loss_type=loss_type,
+                    layer_sizes=layer_sizes,
+                )
+                # Update graph globals with current update steps
+                current_update_steps = (
+                    graph.globals[..., 1] if graph.globals is not None else 0
+                )
+                graph = graph._replace(
+                    globals=jp.array([loss, current_update_steps + 1], dtype=jp.float32)
+                )
+                all_results.append((loss, aux, graph, logits))
+
+            # Stack all results using jax.tree_map
+            stacked_results = jax.tree.map(lambda *args: jp.stack(args), *all_results)
+
+            # Index at n_loss_step
+            final_loss, final_aux, final_graph, final_logits = jax.tree.map(
+                lambda x: x[loss_step], stacked_results
+            )
+
+            return final_loss, (final_aux, final_graph, final_logits, loss_step)
+
+        def batch_loss_fn(model, graphs, logits, wires, loss_key):
+            if use_scan:
+                loss_fn = loss_fn_scan
+            else:
+                loss_fn = loss_fn_no_scan
+
+            loss_keys = jax.random.split(loss_key, graphs.n_node.shape[0])
+            loss, (aux, updated_graphs, updated_logits, loss_steps) = nnx.vmap(
+                loss_fn, in_axes=(None, 0, 0, 0, 0)
+            )(model, graphs, logits, wires, loss_keys)
+            return jp.mean(loss), (
+                jax.tree.map(lambda x: jp.mean(x, axis=0), aux),
+                updated_graphs,
+                updated_logits,
+                jp.mean(loss_steps),
+            )
+
+        # Compute loss and gradients (no optimizer update)
+        (loss, (aux, updated_graphs, updated_logits, loss_steps)), grads = (
+            nnx.value_and_grad(batch_loss_fn, has_aux=True)(
+                model=model,
+                graphs=graphs,
+                logits=logits,
+                wires=wires,
+                loss_key=loss_key,
+            )
+        )
+
+        return loss, aux, updated_graphs, updated_logits, loss_steps, grads
+
+    # Define efficient sequential batch processing function
+    def pool_train_step_sequential(
+        model: CircuitGNN,
+        optimizer: nnx.Optimizer,
+        pool: GraphPool,
+        idxs: jp.ndarray,
+        graphs: jraph.GraphsTuple,
+        wires: PyTree,
+        logits: PyTree,
+        x: jp.ndarray,
+        y_target: jp.ndarray,
+        layer_sizes: Tuple[Tuple[int, int], ...],
+        n_message_steps: int,
+        loss_type: str,
+        loss_key: jax.random.PRNGKey,
+        epoch: int,
+        chunk_size: int,
+    ):
+        """
+        Sequential batch processing with gradient accumulation.
+
+        Processes the batch in smaller chunks to save memory while maintaining
+        the same gradient computation as processing the full batch at once.
+
+        This implementation reuses the main pool_train_step function for each chunk,
+        but accumulates gradients instead of applying them immediately.
+        """
+        batch_size = graphs.n_node.shape[0]
+        num_chunks = (batch_size + chunk_size - 1) // chunk_size  # Ceiling division
+
+        # Initialize accumulated gradients and metrics
+        accumulated_grads = None
+        accumulated_loss = 0.0
+        accumulated_aux = None
+        accumulated_updated_graphs = []
+        accumulated_updated_logits = []
+        accumulated_loss_steps = 0.0
+
+        # Split loss keys for each chunk
+        chunk_loss_keys = jax.random.split(loss_key, num_chunks)
+
+        for chunk_idx in range(num_chunks):
+            start_idx = chunk_idx * chunk_size
+            end_idx = min(start_idx + chunk_size, batch_size)
+            actual_chunk_size = end_idx - start_idx
+
+            # Extract chunk data
+            chunk_graphs = jax.tree.map(lambda x: x[start_idx:end_idx], graphs)
+            chunk_wires = jax.tree.map(lambda x: x[start_idx:end_idx], wires)
+            chunk_logits = jax.tree.map(lambda x: x[start_idx:end_idx], logits)
+
+            # Process chunk using JIT-compiled function
+            (
+                chunk_loss,
+                chunk_aux,
+                chunk_updated_graphs,
+                chunk_updated_logits,
+                chunk_loss_steps,
+                chunk_grads,
+            ) = pool_train_step_chunk_only(
+                model=model,
+                graphs=chunk_graphs,
+                wires=chunk_wires,
+                logits=chunk_logits,
+                x=x,
+                y_target=y_target,
+                layer_sizes=layer_sizes,
+                n_message_steps=n_message_steps,
+                loss_type=loss_type,
+                loss_key=chunk_loss_keys[chunk_idx],
+                epoch=epoch,
+            )
+
+            # Accumulate gradients (weighted by chunk size for proper averaging)
+            chunk_weight = actual_chunk_size / batch_size
+            if accumulated_grads is None:
+                accumulated_grads = jax.tree.map(
+                    lambda g: g * chunk_weight, chunk_grads
+                )
+            else:
+                accumulated_grads = jax.tree.map(
+                    lambda acc_g, chunk_g: acc_g + chunk_g * chunk_weight,
+                    accumulated_grads,
+                    chunk_grads,
+                )
+
+            # Accumulate loss and metrics (weighted by chunk size)
+            accumulated_loss += chunk_loss * chunk_weight
+            if accumulated_aux is None:
+                accumulated_aux = jax.tree.map(lambda x: x * chunk_weight, chunk_aux)
+            else:
+                accumulated_aux = jax.tree.map(
+                    lambda acc_x, chunk_x: acc_x + chunk_x * chunk_weight,
+                    accumulated_aux,
+                    chunk_aux,
+                )
+            accumulated_loss_steps += chunk_loss_steps * chunk_weight
+
+            # Store updated graphs and logits
+            accumulated_updated_graphs.append(chunk_updated_graphs)
+            accumulated_updated_logits.append(chunk_updated_logits)
+
+        # Combine updated graphs and logits from all chunks
+        combined_updated_graphs = jax.tree.map(
+            lambda *chunks: jp.concatenate(chunks, axis=0), *accumulated_updated_graphs
+        )
+        combined_updated_logits = jax.tree.map(
+            lambda *chunks: jp.concatenate(chunks, axis=0), *accumulated_updated_logits
+        )
+
+        # Update GNN parameters with accumulated gradients
+        optimizer.update(accumulated_grads)
+
+        # Update pool with the updated graphs and logits
+        updated_pool = pool.update(
+            idxs, combined_updated_graphs, batch_of_logits=combined_updated_logits
+        )
+
+        return accumulated_loss, (accumulated_aux, updated_pool, accumulated_loss_steps)
+
     # Setup wandb logging if enabled
     wandb_run = _init_wandb(wandb_logging, wandb_run_config)
     wandb_id = wandb_run.run.id if wandb_run else None
@@ -1099,6 +1371,19 @@ def train_model(
         "epoch": 0,
     }
 
+    # Determine effective batch chunk size
+    effective_batch_chunk_size = (
+        batch_chunk_size if batch_chunk_size is not None else meta_batch_size
+    )
+    use_sequential_batching = (
+        batch_chunk_size is not None and batch_chunk_size < meta_batch_size
+    )
+
+    if use_sequential_batching:
+        log.info(
+            f"Using sequential batch processing: meta_batch_size={meta_batch_size}, chunk_size={effective_batch_chunk_size}"
+        )
+
     diversity = 0.0
     result = {}
     # Training loop
@@ -1111,26 +1396,52 @@ def train_model(
                 sample_key, meta_batch_size
             )
 
-            # Perform pool training step
-            (
-                loss,
-                (aux, circuit_pool, loss_steps),
-            ) = pool_train_step(
-                model,
-                optimizer,
-                circuit_pool,
-                idxs,
-                graphs,
-                wires,
-                logits,
-                x_data,
-                y_data,
-                tuple(layer_sizes),  # Convert list to tuple for JAX static arguments
-                n_message_steps,
-                loss_type=loss_type,
-                loss_key=loss_key,
-                epoch=epoch,
-            )
+            # Perform pool training step (sequential or standard)
+            if use_sequential_batching:
+                (
+                    loss,
+                    (aux, circuit_pool, loss_steps),
+                ) = pool_train_step_sequential(
+                    model,
+                    optimizer,
+                    circuit_pool,
+                    idxs,
+                    graphs,
+                    wires,
+                    logits,
+                    x_data,
+                    y_data,
+                    tuple(
+                        layer_sizes
+                    ),  # Convert list to tuple for JAX static arguments
+                    n_message_steps,
+                    loss_type=loss_type,
+                    loss_key=loss_key,
+                    epoch=epoch,
+                    chunk_size=effective_batch_chunk_size,
+                )
+            else:
+                (
+                    loss,
+                    (aux, circuit_pool, loss_steps),
+                ) = pool_train_step(
+                    model,
+                    optimizer,
+                    circuit_pool,
+                    idxs,
+                    graphs,
+                    wires,
+                    logits,
+                    x_data,
+                    y_data,
+                    tuple(
+                        layer_sizes
+                    ),  # Convert list to tuple for JAX static arguments
+                    n_message_steps,
+                    loss_type=loss_type,
+                    loss_key=loss_key,
+                    epoch=epoch,
+                )
 
             *_, hard_loss, _, _, accuracy, hard_accuracy, _, _ = aux
 
@@ -1252,6 +1563,22 @@ def train_model(
                     "pool/loss_steps": loss_steps,
                 }
 
+                # Add sequential batching metrics if enabled
+                if use_sequential_batching:
+                    num_chunks = (
+                        meta_batch_size + effective_batch_chunk_size - 1
+                    ) // effective_batch_chunk_size
+                    metrics_dict.update(
+                        {
+                            "training/sequential_batching": True,
+                            "training/meta_batch_size": meta_batch_size,
+                            "training/chunk_size": effective_batch_chunk_size,
+                            "training/num_chunks": num_chunks,
+                        }
+                    )
+                else:
+                    metrics_dict["training/sequential_batching"] = False
+
                 # Add learning rate if available
                 if schedule is not None:
                     schedule_value = schedule(epoch)
@@ -1282,6 +1609,15 @@ def train_model(
                     "Reset Steps": f"{avg_steps_reset:.2f}",
                     "Loss Steps": f"{loss_steps:.2f}",
                 }
+
+                # Add chunk info if using sequential batching
+                if use_sequential_batching:
+                    num_chunks = (
+                        meta_batch_size + effective_batch_chunk_size - 1
+                    ) // effective_batch_chunk_size
+                    postfix_dict["Chunks"] = (
+                        f"{num_chunks}x{effective_batch_chunk_size}"
+                    )
 
                 # Add early stopping info if active
                 if stop_accuracy_enabled and epochs_above_threshold > 0:

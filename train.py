@@ -11,34 +11,34 @@ import os
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 import logging
+from functools import partial
+
+import hydra
 import jax
 import optax
-import hydra
-from omegaconf import DictConfig, OmegaConf, open_dict
-import wandb
-from tqdm.auto import tqdm
-from functools import partial
-from flax import nnx
 import pandas as pd
+from flax import nnx
+from omegaconf import DictConfig, OmegaConf, open_dict
+from tqdm.auto import tqdm
 
+import wandb
+from boolean_nca_cc import generate_layer_sizes
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.circuits.tasks import get_task_data
-from boolean_nca_cc import generate_layer_sizes
-from boolean_nca_cc.circuits.train import TrainState, loss_f_l4, loss_f_bce, train_step
-
-from boolean_nca_cc.training.train_loop import (
-    train_model,
-    run_unified_periodic_evaluation,
-)
+from boolean_nca_cc.circuits.train import TrainState, loss_f_bce, loss_f_l4, train_step
 from boolean_nca_cc.training.eval_datasets import (
     create_unified_evaluation_datasets,
 )
-from boolean_nca_cc.utils.graph_builder import build_graph
+from boolean_nca_cc.training.train_loop import (
+    run_unified_periodic_evaluation,
+    train_model,
+)
 from boolean_nca_cc.training.utils import (
+    cleanup_redundant_wandb_artifacts,
     plot_training_curves,
     save_checkpoint,
-    cleanup_redundant_wandb_artifacts,
 )
+from boolean_nca_cc.utils.graph_builder import build_graph
 
 # Configure logging
 log = logging.getLogger(__name__)
@@ -532,6 +532,7 @@ def main(cfg: DictConfig) -> None:
         # Wiring mode parameters
         wiring_mode=cfg.training.wiring_mode,
         meta_batch_size=cfg.training.meta_batch_size,
+        batch_chunk_size=cfg.training.batch_chunk_size,
         wiring_fixed_key=jax.random.PRNGKey(cfg.test_seed),
         # Pool parameters
         pool_size=cfg.pool.size,
