@@ -64,6 +64,42 @@ class KnockoutEvaluationDatasets:
         )
 
 
+def create_knockout_vocabulary(
+    rng: jax.random.PRNGKey,
+    vocabulary_size: int,
+    layer_sizes: List[Tuple[int, int]],
+    damage_prob: float,
+    target_layer: Optional[int],
+    input_n: int,
+) -> jp.ndarray:
+    """
+    Generates a fixed vocabulary of knockout patterns.
+
+    Args:
+        rng: JAX random key.
+        vocabulary_size: The number of unique patterns to generate.
+        layer_sizes: List of (nodes, group_size) for each layer.
+        damage_prob: The probability of knocking out a connection.
+        target_layer: The specific layer to target for knockouts.
+        input_n: The number of input nodes.
+
+    Returns:
+        An array of knockout patterns of shape (vocabulary_size, ...).
+    """
+    pattern_creator_fn = partial(
+        create_reproducible_knockout_pattern,
+        layer_sizes=layer_sizes,
+        damage_prob=damage_prob,
+        target_layer=target_layer,
+        input_n=input_n,
+    )
+
+    pattern_keys = jax.random.split(rng, vocabulary_size)
+    knockout_vocabulary = jax.vmap(pattern_creator_fn)(pattern_keys)
+
+    return knockout_vocabulary
+
+
 def create_knockout_evaluation_datasets(
     evaluation_base_seed: int,
     knockout_eval_config: Dict,

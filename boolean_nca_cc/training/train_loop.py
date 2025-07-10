@@ -35,13 +35,12 @@ from boolean_nca_cc.training.eval_datasets import (
     evaluate_circuits_in_chunks,
     UnifiedEvaluationDatasets,
 )
-from boolean_nca_cc.training.knockout_eval import (
-    create_knockout_evaluation_datasets,
-    KnockoutEvaluationDatasets,
-)
+# Removed unused knockout dataset imports since we now use vocabulary-based evaluation
 import wandb
 
 from boolean_nca_cc.circuits.model import gen_circuit
+from boolean_nca_cc.utils.graph_builder import build_graph
+from boolean_nca_cc.training.pool.structural_perturbation import extract_layer_info_from_graph
 
 # Type alias for PyTree
 PyTree = Any
@@ -677,7 +676,11 @@ def run_unified_periodic_evaluation(
 
 def run_knockout_periodic_evaluation(
     model,
-    datasets: KnockoutEvaluationDatasets,
+    knockout_vocabulary: Optional[jp.ndarray],
+    base_wires: PyTree,
+    base_logits: PyTree,
+    knockout_config: Dict,
+    periodic_eval_test_seed: int,
     x_data,
     y_data,
     input_n,
@@ -687,23 +690,72 @@ def run_knockout_periodic_evaluation(
     loss_type,
     epoch,
     wandb_run,
+    eval_batch_size: int,
     log_stepwise=False,
     layer_sizes: List[Tuple[int, int]] = None,
+    use_scan: bool = False,
 ) -> Dict:
     """
-    Run periodic evaluation on circuits with persistent knockouts.
+    Run periodic evaluation on circuits with persistent knockouts using vocabulary-based sampling.
     """
     try:
-        # 1. Run IN-distribution knockout evaluation
-        log.info(
-            f"Running IN-distribution Knockout evaluation ({datasets.in_actual_batch_size} circuits)..."
+        from boolean_nca_cc.training.knockout_eval import create_knockout_vocabulary
+        from boolean_nca_cc.training.pool.structural_perturbation import (
+            create_reproducible_knockout_pattern,
+            extract_layer_info_from_graph,
         )
+        from functools import partial
+        
+        # Build a sample graph to extract true layer sizes
+        sample_graph = build_graph(
+            logits=base_logits,
+            wires=base_wires,
+            input_n=input_n,
+            arity=arity,
+            circuit_hidden_dim=circuit_hidden_dim,
+        )
+        true_layer_sizes = extract_layer_info_from_graph(sample_graph, input_n)
+        
+        # 1. Sample IN-distribution knockout patterns from vocabulary
+        if knockout_vocabulary is not None:
+            log.info(f"Running IN-distribution Knockout evaluation using vocabulary ({eval_batch_size} patterns)...")
+            
+            # Sample patterns from vocabulary with replacement
+            id_rng = jax.random.PRNGKey(periodic_eval_test_seed)
+            pattern_indices = jax.random.choice(
+                id_rng, len(knockout_vocabulary), shape=(eval_batch_size,), replace=True
+            )
+            in_knockout_patterns = knockout_vocabulary[pattern_indices]
+        else:
+            log.info(f"Running IN-distribution Knockout evaluation with fresh patterns ({eval_batch_size} patterns)...")
+            
+            # Generate patterns using same logic as vocabulary but with eval seed
+            pattern_creator_fn = partial(
+                create_reproducible_knockout_pattern,
+                layer_sizes=true_layer_sizes,
+                damage_prob=knockout_config["damage_prob"],
+                target_layer=knockout_config["target_layer"],
+                input_n=input_n,
+            )
+            
+            id_rng = jax.random.PRNGKey(periodic_eval_test_seed)
+            in_pattern_keys = jax.random.split(id_rng, eval_batch_size)
+            in_knockout_patterns = jax.vmap(pattern_creator_fn)(in_pattern_keys)
+        
+        # Replicate base circuit for the batch
+        in_wires = jax.tree.map(
+            lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_wires
+        )
+        in_logits = jax.tree.map(
+            lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_logits
+        )
+        
         step_metrics_in = evaluate_circuits_in_chunks(
             eval_fn=evaluate_model_stepwise_batched,
-            wires=datasets.in_distribution_wires,
-            logits=datasets.in_distribution_logits,
-            knockout_patterns=datasets.in_distribution_knockouts,
-            target_chunk_size=datasets.target_batch_size,
+            wires=in_wires,
+            logits=in_logits,
+            knockout_patterns=in_knockout_patterns,
+            target_chunk_size=eval_batch_size,
             model=model,
             x_data=x_data,
             y_data=y_data,
@@ -713,6 +765,7 @@ def run_knockout_periodic_evaluation(
             n_message_steps=n_message_steps,
             loss_type=loss_type,
             layer_sizes=layer_sizes,
+            use_scan=use_scan,
         )
 
         final_metrics_in = {
@@ -723,16 +776,64 @@ def run_knockout_periodic_evaluation(
             "eval_ko_in/epoch": epoch,
         }
 
-        # 2. Run OUT-of-distribution knockout evaluation
-        log.info(
-            f"Running OUT-of-distribution Knockout evaluation ({datasets.out_actual_batch_size} circuits)..."
+        # 2. Generate OUT-of-distribution knockout patterns (always fresh, different seed)
+        log.info(f"Running OUT-of-distribution Knockout evaluation with fresh patterns ({eval_batch_size} patterns)...")
+        
+        pattern_creator_fn = partial(
+            create_reproducible_knockout_pattern,
+            layer_sizes=true_layer_sizes,
+            damage_prob=knockout_config["damage_prob"],
+            target_layer=knockout_config["target_layer"],
+            input_n=input_n,
         )
+        
+        # Use different seed for OOD patterns
+        ood_rng = jax.random.PRNGKey(periodic_eval_test_seed + 1)
+        out_pattern_keys = jax.random.split(ood_rng, eval_batch_size)
+        out_knockout_patterns = jax.vmap(pattern_creator_fn)(out_pattern_keys)
+        
+        # --- BEGIN DEBUG CHECKS ---
+        # Check that ID and OOD patterns are not the same
+        are_patterns_identical = jp.all(in_knockout_patterns == out_knockout_patterns)
+        log.info(f"DEBUG: Are IN-dist and OUT-dist patterns identical? {are_patterns_identical}")
+        
+        # Check if OOD patterns are in the vocabulary (they shouldn't be)
+        if knockout_vocabulary is not None and out_knockout_patterns.size > 0:
+            first_ood_pattern = out_knockout_patterns[0]
+            ood_in_vocab = jp.any(jp.all(first_ood_pattern == knockout_vocabulary, axis=1))
+            log.info(f"DEBUG: Is first OOD pattern in vocabulary? {ood_in_vocab}")
+            if wandb_run:
+                wandb_run.log({"debug/ood_pattern_in_vocab": float(ood_in_vocab)})
+
+        # Log pattern sums to wandb
+        if wandb_run:
+            in_sum = jp.sum(in_knockout_patterns)
+            out_sum = jp.sum(out_knockout_patterns)
+            log.info(f"DEBUG: IN-dist sum: {in_sum}, OUT-dist sum: {out_sum}")
+            wandb_run.log({
+                "debug/in_knockout_patterns_sum": in_sum,
+                "debug/out_knockout_patterns_sum": out_sum,
+                "debug/patterns_are_identical": float(are_patterns_identical),
+            })
+        
+        # This assertion will stop training if the patterns are identical
+        assert not are_patterns_identical, "IN-distribution and OUT-of-distribution knockout patterns are identical."
+        # --- END DEBUG CHECKS ---
+        
+        # Replicate base circuit for the batch
+        out_wires = jax.tree.map(
+            lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_wires
+        )
+        out_logits = jax.tree.map(
+            lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_logits
+        )
+        
         step_metrics_out = evaluate_circuits_in_chunks(
             eval_fn=evaluate_model_stepwise_batched,
-            wires=datasets.out_of_distribution_wires,
-            logits=datasets.out_of_distribution_logits,
-            knockout_patterns=datasets.out_of_distribution_knockouts,
-            target_chunk_size=datasets.target_batch_size,
+            wires=out_wires,
+            logits=out_logits,
+            knockout_patterns=out_knockout_patterns,
+            target_chunk_size=eval_batch_size,
             model=model,
             x_data=x_data,
             y_data=y_data,
@@ -742,6 +843,7 @@ def run_knockout_periodic_evaluation(
             n_message_steps=n_message_steps,
             loss_type=loss_type,
             layer_sizes=layer_sizes,
+            use_scan=use_scan,
         )
 
         final_metrics_out = {
@@ -836,6 +938,7 @@ def train_model(
     ),  # Weights for [loss, steps] in combined strategy
     # Perturbation configurations
     persistent_knockout_config: Optional[Dict] = None,
+    knockout_diversity: Optional[int] = None,  # Size of knockout pattern vocabulary for shared training/evaluation patterns
     # Learning rate scheduling
     lr_scheduler: str = "constant",  # Options: "constant", "exponential", "cosine", "linear_warmup"
     lr_scheduler_params: Dict = None,
@@ -906,6 +1009,7 @@ def train_model(
         reset_strategy: Strategy for selecting graphs to reset ("uniform", "steps_biased", "loss_biased", or "combined")
         combined_weights: Tuple of weights (loss_weight, steps_weight) for combining factors in "combined" strategy
         persistent_knockout_config: Configuration for persistent knockout perturbations.
+        knockout_diversity: Size of knockout pattern vocabulary for shared training/evaluation patterns
         key: Random seed
         wiring_fixed_key: Fixed key for generating wirings when wiring_mode='fixed'
         init_model: Optional pre-trained GNN model to continue training
@@ -1233,23 +1337,52 @@ def train_model(
         log.info(eval_datasets.get_summary())
 
     knockout_eval_datasets = None
+    knockout_eval_base_circuit = None
     if knockout_eval and knockout_eval.get("enabled"):
-        log.info("Creating standardized knockout evaluation datasets")
+        # Store base circuit for on-demand evaluation (no pre-created datasets)
+        log.info("Knockout evaluation enabled - will use vocabulary-based evaluation")
+        knockout_eval_base_circuit = gen_circuit(wiring_fixed_key, layer_sizes, arity=arity)
+        log.info("Base circuit created for knockout evaluation")
 
-        # Generate the base circuit using the same fixed key as training to ensure consistency
-        base_wires, base_logits = gen_circuit(wiring_fixed_key, layer_sizes, arity=arity)
-
-        knockout_eval_datasets = create_knockout_evaluation_datasets(
-            evaluation_base_seed=periodic_eval_test_seed,
-            knockout_eval_config=knockout_eval,
-            layer_sizes=layer_sizes,
+    # Initialize knockout vocabulary if knockout_diversity is configured
+    knockout_vocabulary = None
+    if (persistent_knockout_config and knockout_diversity is not None and 
+        knockout_diversity > 0 and persistent_knockout_config.get("fraction", 0.0) > 0.0):
+        log.info(f"Creating knockout pattern vocabulary with {knockout_diversity} patterns")
+        
+        from boolean_nca_cc.training.knockout_eval import create_knockout_vocabulary
+        
+        # Use the same seed as evaluation to ensure pattern space is identical
+        vocab_rng = jax.random.PRNGKey(periodic_eval_test_seed)
+        
+        # Extract layer configuration from one sample circuit for vocabulary generation
+        sample_wires, sample_logits = gen_circuit(wiring_fixed_key, layer_sizes, arity=arity)
+        sample_graph = build_graph(
+            logits=sample_logits,
+            wires=sample_wires,
+            input_n=input_n,
             arity=arity,
             circuit_hidden_dim=circuit_hidden_dim,
-            eval_batch_size=periodic_eval_batch_size,
-            base_wires=base_wires,
-            base_logits=base_logits,
         )
-        log.info(knockout_eval_datasets.get_summary())
+        true_layer_sizes = extract_layer_info_from_graph(sample_graph, input_n)
+        
+        # Generate the shared knockout vocabulary
+        knockout_vocabulary = create_knockout_vocabulary(
+            rng=vocab_rng,
+            vocabulary_size=knockout_diversity,
+            layer_sizes=true_layer_sizes,
+            damage_prob=persistent_knockout_config.get("damage_prob"),
+            target_layer=persistent_knockout_config.get("target_layer", None),
+            input_n=input_n,
+        )
+        
+        log.info(f"Generated knockout vocabulary with shape: {knockout_vocabulary.shape}")
+
+        # DEBUG: Verify vocabulary content
+        if wandb_run:
+            vocab_sum = jp.sum(knockout_vocabulary)
+            log.info(f"DEBUG: Vocabulary sum: {vocab_sum}")
+            wandb_run.log({"debug/vocab_sum": vocab_sum})
 
     # Save initial stable state if needed
     last_stable_state = {
@@ -1334,7 +1467,26 @@ def train_model(
                     else:
                         reset_pool_key = fresh_key
 
-                    # Create a pool of fresh circuits, applying persistent knockouts if configured
+                    # Sample knockout patterns from vocabulary if available, otherwise use config
+                    sampled_knockout_patterns = None
+                    if knockout_vocabulary is not None:
+                        # Sample patterns with replacement from the vocabulary
+                        pattern_sample_key = jax.random.fold_in(reset_key, 42)  # Use different key for pattern sampling
+                        pattern_indices = jax.random.choice(
+                            pattern_sample_key, knockout_diversity, shape=(num_to_reset,), replace=True
+                        )
+                        sampled_knockout_patterns = knockout_vocabulary[pattern_indices]
+
+                        # DEBUG: Verify that sampled training patterns are in the vocabulary
+                        if wandb_run and sampled_knockout_patterns.size > 0:
+                            # Check if the first sampled pattern exists in the vocabulary
+                            first_pattern = sampled_knockout_patterns[0]
+                            is_in_vocab = jp.any(jp.all(first_pattern == knockout_vocabulary, axis=1))
+                            log.info(f"DEBUG: First sampled training pattern is in vocabulary: {is_in_vocab}")
+                            wandb_run.log({"debug/train_pattern_in_vocab": float(is_in_vocab)})
+
+
+                    # Create a pool of fresh circuits, applying knockout patterns
                     damaged_pool = initialize_graph_pool(
                         rng=reset_pool_key,
                         layer_sizes=layer_sizes,
@@ -1344,7 +1496,8 @@ def train_model(
                         circuit_hidden_dim=circuit_hidden_dim,
                         wiring_mode=wiring_mode,
                         initial_diversity=initial_diversity,
-                        knockout_config=persistent_knockout_config,  # Pass config
+                        knockout_config=persistent_knockout_config if knockout_vocabulary is None else None,  # Use config only if no vocabulary
+                        knockout_patterns=sampled_knockout_patterns,  # Pass sampled patterns
                     )
 
                     # Reset a fraction of the pool and get avg steps of reset graphs
@@ -1502,12 +1655,19 @@ def train_model(
                 if (
                     knockout_eval
                     and knockout_eval.get("enabled")
-                    and knockout_eval_datasets is not None
+                    and knockout_eval_base_circuit is not None
                     and epoch % periodic_eval_interval == 0
                 ):
+                    base_wires, base_logits = knockout_eval_base_circuit
+
+                    # DEBUG: Pass vocabulary and wandb_run for detailed checks
                     ko_eval_results = run_knockout_periodic_evaluation(
                         model=model,
-                        datasets=knockout_eval_datasets,
+                        knockout_vocabulary=knockout_vocabulary,
+                        base_wires=base_wires,
+                        base_logits=base_logits,
+                        knockout_config=knockout_eval,
+                        periodic_eval_test_seed=periodic_eval_test_seed,
                         x_data=x_data,
                         y_data=y_data,
                         input_n=input_n,
@@ -1516,10 +1676,13 @@ def train_model(
                         n_message_steps=periodic_eval_inner_steps,
                         loss_type=loss_type,
                         epoch=epoch,
-                        wandb_run=wandb_run,
+                        wandb_run=wandb_run, # Already passed
+                        eval_batch_size=periodic_eval_batch_size,
                         log_stepwise=periodic_eval_log_stepwise,
                         layer_sizes=layer_sizes,
+                        use_scan=use_scan,
                     )
+                    # Extract final metrics for best model tracking
                     if ko_eval_results and "final_metrics_in" in ko_eval_results:
                         all_eval_metrics.update(ko_eval_results["final_metrics_in"])
                         all_eval_metrics.update(ko_eval_results["final_metrics_out"])

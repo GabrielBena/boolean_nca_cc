@@ -59,12 +59,12 @@ training:
   epochs: 8192 # 512
   epochs_power_of_2: 12 # 2^n
   # USE SCAN
-  use_scan: true
+  use_scan: false
 
 # Pool configuration for meta-learning
 pool:
-  size: 2048
-  reset_fraction: 0.1
+  size: 1024
+  reset_fraction: 0.15
   reset_interval: 128
   reset_strategy: "combined"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
@@ -75,37 +75,10 @@ pool:
 
   # Persistent structural knockout (injected periodically)
   persistent_knockout:
-    fraction: 0.8 # Fraction of the *newly reset* circuits to damage
-    damage_prob: 1.0 # Expected number of knockouts per target layer
-    target_layer: null # Target a specific layer (e.g., 0, 1, ...), null for all layers
-
-  # # Gate knockout ("hard" LUT zeroing - resets globals)
-  # gate_knockout:
-  #   active: false
-  #   fraction: 0.1
-  #   interval: 64
-  #   strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
-  #   damage_prob: 0.05  # Probability of zeroing an entire LUT in selected circuits
-  #   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined strategy
-
-  # # Soft LUT damage ("soft" LUT zeroing - preserves globals)
-  # soft_lut_damage:
-  #   active: false
-  #   fraction: 0.01
-  #   interval: 64
-  #   strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
-  #   damage_prob: 0.1 # Probability of zeroing an entire LUT in selected circuits
-  #   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined strategy
-
-  # # Structural LUT perturbation (removes edges from graph)
-  # lut_perturbation:
-  #   active: false
-  #   mode: "hard"
-  #   damage_prob: 0.8 # Expected number of knockouts per target layer
-  #   target_layer: null # Target a specific layer (e.g., 0, 1, ...), null for all layers
-  #   interval: 64 # Apply every N epochs
-  #   reproducible: true
-  #   seed: 42
+    fraction: 0.8 # 0.00001 # Fraction of the *newly reset* circuits to damage
+    damage_prob: 70.0 # Expected number of knockouts (per layer if target_layer specified, per circuit if null)
+    target_layer: null # Target a specific layer (e.g., 0, 1, ...), null for circuit-wide knockouts
+    knockout_diversity: 256  # Vocabulary size for knockout patterns
 
 # Backpropagation baseline
 backprop:
@@ -130,7 +103,7 @@ eval:
   # Knockout evaluation
   knockout_eval:
     enabled: true
-    damage_prob: 1.0
+    damage_prob: ${pool.persistent_knockout.damage_prob}
     target_layer: null
 
 # Early stopping based on accuracy

@@ -544,6 +544,9 @@ def main(cfg: DictConfig) -> None:
         initial_diversity=cfg.pool.initial_diversity,
         # Perturbation configurations
         persistent_knockout_config=cfg.pool.get("persistent_knockout", None),
+        knockout_diversity=cfg.pool.get("persistent_knockout", {}).get(
+            "knockout_diversity"
+        ),
         # Learning rate scheduling
         lr_scheduler=cfg.training.lr_scheduler,
         lr_scheduler_params=cfg.training.lr_scheduler_params,

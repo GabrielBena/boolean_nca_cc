@@ -679,6 +679,7 @@ def initialize_graph_pool(
     wiring_mode: str = "random",
     initial_diversity: int = 1,
     knockout_config: Optional[Dict[str, Any]] = None,
+    knockout_patterns: Optional[Array] = None,  # Pre-generated knockout patterns to use directly
 ) -> GraphPool:
     """
     Initialize a pool of graphs using a provided graph creation function.
@@ -696,6 +697,9 @@ def initialize_graph_pool(
         knockout_config: Optional configuration to apply persistent knockouts
                          to a fraction of the newly created circuits.
                          Expected keys: 'fraction', 'damage_prob', 'target_layer'.
+        knockout_patterns: Optional pre-generated knockout patterns to use directly.
+                          If provided, takes precedence over knockout_config.
+                          Shape: (num_patterns, num_nodes)
 
     Returns:
         Initialized GraphPool
@@ -803,10 +807,21 @@ def initialize_graph_pool(
 
     # Initialize knockout patterns to all False (no knockouts)
     num_nodes = graphs.nodes["logits"].shape[1]
-    knockout_patterns = jp.zeros((pool_size, num_nodes), dtype=jp.bool_)
+    pool_knockout_patterns = jp.zeros((pool_size, num_nodes), dtype=jp.bool_)
 
-    # If knockout config is provided, apply persistent knockouts to a fraction of the new pool
-    if knockout_config and knockout_config.get("fraction", 0.0) > 0.0:
+    # If pre-generated knockout patterns are provided, use them directly
+    if knockout_patterns is not None:
+        knockout_key, rng = jax.random.split(rng)
+        num_patterns_available = knockout_patterns.shape[0]
+        
+        # Sample patterns with replacement from the vocabulary for the entire pool
+        pattern_indices = jax.random.choice(
+            knockout_key, num_patterns_available, shape=(pool_size,), replace=True
+        )
+        pool_knockout_patterns = knockout_patterns[pattern_indices]
+        
+    # If knockout config is provided and no pre-generated patterns, apply persistent knockouts to a fraction of the new pool
+    elif knockout_config and knockout_config.get("fraction", 0.0) > 0.0:
         knockout_key, rng = jax.random.split(rng)
         fraction = knockout_config.get("fraction")
         damage_prob = knockout_config.get("damage_prob")
@@ -835,8 +850,8 @@ def initialize_graph_pool(
         new_patterns = vmapped_pattern_creator(pattern_keys)
 
         # Apply the new patterns at the selected indices
-        knockout_patterns = knockout_patterns.at[damage_indices].set(new_patterns)
+        pool_knockout_patterns = pool_knockout_patterns.at[damage_indices].set(new_patterns)
 
     return GraphPool.create(
-        graphs, all_wires, all_logits, reset_counter, knockout_patterns
+        graphs, all_wires, all_logits, reset_counter, pool_knockout_patterns
     )

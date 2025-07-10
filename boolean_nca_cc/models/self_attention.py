@@ -411,6 +411,14 @@ class CircuitSelfAttention(nnx.Module):
         logit_updates = logit_updates[0]
         hidden_updates = hidden_updates[0]
 
+        # # Apply knockout pattern to prevent updates to knocked-out nodes
+        # if knockout_pattern is not None:
+        #     # Create active mask (True for non-knocked-out nodes)
+        #     active_mask = ~knockout_pattern
+        #     # Zero out updates for knocked-out nodes
+        #     logit_updates = logit_updates * active_mask[:, None]  # Broadcast over logit dimension
+        #     hidden_updates = hidden_updates * active_mask[:, None]  # Broadcast over hidden dimension
+
         # Update logits and hidden features in a residual manner
         updated_logits = nodes["logits"] + self.logit_scale * logit_updates
         updated_hidden = nodes["hidden"] + self.hidden_scale * hidden_updates
@@ -450,7 +458,7 @@ def run_self_attention_scan(
 
     def scan_body(carry_graph, _):
         # Apply one step of self-attention with precomputed mask
-        updated_graph = model(carry_graph, attention_mask=attention_mask)
+        updated_graph = model(carry_graph, attention_mask=attention_mask, knockout_pattern=knockout_pattern)
         return updated_graph, updated_graph
 
     # Run the scan
@@ -512,7 +520,7 @@ def run_self_attention_scan_with_loss(
         current_graph = carry
 
         # Apply self-attention with precomputed mask
-        model_updated_graph = model(current_graph, attention_mask=attention_mask)
+        model_updated_graph = model(current_graph, attention_mask=attention_mask, knockout_pattern=knockout_pattern)
 
         # Compute loss and update graph
         updated_graph, loss, current_logits, aux = get_loss_and_update_graph(

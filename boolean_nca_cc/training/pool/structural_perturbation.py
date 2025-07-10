@@ -25,15 +25,20 @@ def create_reproducible_knockout_pattern(
     Args:
         key: Random key for reproducible generation
         layer_sizes: List of (group_n, group_size) for each gate layer
-        damage_prob: Expected number of knockouts per layer (automatically scaled by layer size)
-                    E.g., damage_prob=1.0 means expect 1 knockout per layer on average
-                    Actual per-gate probability = damage_prob / layer_size
+        damage_prob: Expected number of knockouts. Behavior depends on target_layer:
+                    - If target_layer is specified: Expected knockouts in that layer
+                    - If target_layer is None: Expected knockouts across entire circuit
         target_layer: If specified, only knock out gates in this layer
         input_n: Number of input nodes (never knocked out)
         
     Returns:
         Boolean array indicating which nodes are knocked out
         Shape: (total_nodes,) where True = knocked out
+        
+    Note:
+        - Input layer (layer 0) is never knocked out
+        - Output layer (last layer) is never knocked out
+        - When target_layer=None, damage is distributed across all eligible layers
     """
     total_nodes = input_n  # Start with input nodes
     for group_n, group_size in layer_sizes:
@@ -45,25 +50,52 @@ def create_reproducible_knockout_pattern(
     # Never knock out input nodes
     current_idx = input_n
     
+    # Identify output layer index (last layer)
+    output_layer_idx = len(layer_sizes) - 1
+    
+    # Calculate total eligible gates (excluding output layer)
+    if target_layer is None:
+        # When target_layer is None, calculate total gates across all layers except output
+        total_eligible_gates = 0
+        for layer_idx, (group_n, group_size) in enumerate(layer_sizes):
+            if layer_idx != output_layer_idx:  # Exclude output layer
+                total_eligible_gates += group_n * group_size
+    
     # Process each gate layer
     for layer_idx, (group_n, group_size) in enumerate(layer_sizes):
         layer_size = group_n * group_size
         layer_end = current_idx + layer_size
         
-        if target_layer is None or layer_idx == target_layer:
-            # Apply knockouts to this layer
-            layer_key = jax.random.fold_in(key, layer_idx)
-            
-            # Scale probability by layer size so damage_prob represents expected knockouts per layer
+        # Skip output layer - never knock out output nodes
+        if layer_idx == output_layer_idx:
+            current_idx = layer_end
+            continue
+        
+        # Apply knockouts based on target_layer setting
+        if target_layer is None:
+            # Circuit-wide mode: distribute damage_prob across all eligible gates
+            if total_eligible_gates > 0:
+                scaled_prob = damage_prob / total_eligible_gates
+            else:
+                scaled_prob = 0.0
+        elif layer_idx == target_layer:
+            # Layer-specific mode: scale by this layer's size
             scaled_prob = damage_prob / layer_size if layer_size > 0 else 0.0
-            scaled_prob = jp.clip(scaled_prob, 0.0, 1.0)
-            
-            # Generate knockout decisions
-            random_vals = jax.random.uniform(layer_key, (layer_size,))
-            layer_knockouts = random_vals < scaled_prob
-            
-            # Apply to knockout pattern
-            knockout_pattern = knockout_pattern.at[current_idx:layer_end].set(layer_knockouts)
+        else:
+            # Not the target layer, skip
+            current_idx = layer_end
+            continue
+        
+        # Ensure probability is valid
+        scaled_prob = jp.clip(scaled_prob, 0.0, 1.0)
+        
+        # Generate knockout decisions for this layer
+        layer_key = jax.random.fold_in(key, layer_idx)
+        random_vals = jax.random.uniform(layer_key, (layer_size,))
+        layer_knockouts = random_vals < scaled_prob
+        
+        # Apply to knockout pattern
+        knockout_pattern = knockout_pattern.at[current_idx:layer_end].set(layer_knockouts)
         
         current_idx = layer_end
     

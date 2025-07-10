@@ -7,6 +7,7 @@ models on optimizing boolean circuits.
 
 import jax
 import jax.numpy as jp
+import jraph
 from tqdm.auto import tqdm
 from typing import List, Dict, Tuple, Generator, NamedTuple, Optional
 
@@ -378,6 +379,7 @@ def evaluate_model_stepwise_batched(
     bidirectional_edges: bool = True,
     layer_sizes: List[Tuple[int, int]] = None,
     knockout_patterns: Optional[jp.ndarray] = None,
+    use_scan: bool = False,
 ) -> Dict:
     """
     Evaluate GNN performance on a batch of circuits by running message passing steps
@@ -397,6 +399,7 @@ def evaluate_model_stepwise_batched(
         bidirectional_edges: Whether to use bidirectional edges
         layer_sizes: List of (nodes, group_size) tuples for each layer
         knockout_patterns: Optional knockout patterns for each circuit
+        use_scan: Whether to use scan mode (should match training configuration)
 
     Returns:
         Dictionary with averaged metrics collected at each step
@@ -470,8 +473,166 @@ def evaluate_model_stepwise_batched(
         logit.shape[1:] for logit in batch_logits
     ]  # Remove batch dim
 
+    if use_scan:
+        # Use scan mode to match training behavior
+        return _evaluate_with_scan(
+            model=model,
+            batch_graphs=batch_graphs,
+            batch_wires=batch_wires,
+            batch_logits=batch_logits,
+            x_data=x_data,
+            y_data=y_data,
+            n_message_steps=n_message_steps,
+            loss_type=loss_type,
+            layer_sizes=layer_sizes,
+            knockout_patterns=knockout_patterns,
+            logits_original_shapes=logits_original_shapes,
+            step_metrics=step_metrics,
+        )
+    else:
+        # Use loop mode (original behavior)
+        return _evaluate_with_loop(
+            model=model,
+            batch_graphs=batch_graphs,
+            batch_wires=batch_wires,
+            x_data=x_data,
+            y_data=y_data,
+            n_message_steps=n_message_steps,
+            loss_type=loss_type,
+            layer_sizes=layer_sizes,
+            knockout_patterns=knockout_patterns,
+            logits_original_shapes=logits_original_shapes,
+            step_metrics=step_metrics,
+        )
+
+
+def _evaluate_with_scan(
+    model,
+    batch_graphs: jraph.GraphsTuple,
+    batch_wires: List[jp.ndarray],
+    batch_logits: List[jp.ndarray],
+    x_data: jp.ndarray,
+    y_data: jp.ndarray,
+    n_message_steps: int,
+    loss_type: str,
+    layer_sizes: List[Tuple[int, int]],
+    knockout_patterns: Optional[jp.ndarray],
+    logits_original_shapes: List[Tuple],
+    step_metrics: Dict,
+) -> Dict:
+    """
+    Evaluate using scan mode to match training behavior.
+    """
+    from boolean_nca_cc.models.self_attention import run_self_attention_scan_with_loss
+    from boolean_nca_cc.models.gnn import run_gnn_scan_with_loss
+
+    def evaluate_single_circuit_scan(graph, wires, logits, knockout_pattern):
+        # Determine which scan function to use based on model type
+        if isinstance(model, CircuitSelfAttention):
+            scan_fn = run_self_attention_scan_with_loss
+        elif isinstance(model, CircuitGNN):
+            scan_fn = run_gnn_scan_with_loss
+        else:
+            raise ValueError(f"Unknown model type: {type(model)}")
+
+        # Run scan for all steps, computing loss and updating graph at each step
+        final_graph, step_outputs = scan_fn(
+            model=model,
+            graph=graph,
+            num_steps=n_message_steps,
+            logits_original_shapes=logits_original_shapes,
+            wires=wires,
+            x_data=x_data,
+            y_data=y_data,
+            loss_type=loss_type,
+            layer_sizes=tuple(layer_sizes),  # Convert to tuple for JAX
+            knockout_pattern=knockout_pattern,
+        )
+
+        return step_outputs
+
+    # Split batched graphs into individual graphs for processing
+    individual_graphs = jraph.unbatch(batch_graphs)
+    
+    # Handle knockout patterns
+    if knockout_patterns is not None:
+        all_step_outputs = []
+        for i, (graph, wires, logits, knockout_pattern) in enumerate(
+            zip(individual_graphs, batch_wires, batch_logits, knockout_patterns)
+        ):
+            step_outputs = evaluate_single_circuit_scan(graph, wires, logits, knockout_pattern)
+            all_step_outputs.append(step_outputs)
+    else:
+        all_step_outputs = []
+        for i, (graph, wires, logits) in enumerate(
+            zip(individual_graphs, batch_wires, batch_logits)
+        ):
+            step_outputs = evaluate_single_circuit_scan(graph, wires, logits, None)
+            all_step_outputs.append(step_outputs)
+
+    # Extract and average metrics across batch and steps
+    # all_step_outputs is (batch_size, num_steps, step_data_tuple)
+    # step_data_tuple = (final_graph, loss, current_logits, aux)
+    
+    batch_size = len(all_step_outputs)
+    
+    for step in range(n_message_steps):
+        # Extract data for this step across all circuits in batch
+        step_losses = jp.array([all_step_outputs[b][step][1] for b in range(batch_size)])
+        step_aux = [all_step_outputs[b][step][3] for b in range(batch_size)]
+        
+        # Extract individual aux components and average across batch
+        step_hard_losses = jp.mean(jp.array([aux[1] for aux in step_aux]))
+        step_accuracies = jp.mean(jp.array([aux[4] for aux in step_aux]))
+        step_hard_accuracies = jp.mean(jp.array([aux[5] for aux in step_aux]))
+        
+        # Extract logits for mean calculation
+        step_logits = jp.array([all_step_outputs[b][step][2] for b in range(batch_size)])
+        step_logits_mean = jp.mean(jp.concatenate([jp.concatenate(logits) for logits in step_logits]))
+
+        # Store averaged metrics
+        step_metrics["step"].append(step + 1)
+        step_metrics["soft_loss"].append(float(jp.mean(step_losses)))
+        step_metrics["hard_loss"].append(float(step_hard_losses))
+        step_metrics["soft_accuracy"].append(float(step_accuracies))
+        step_metrics["hard_accuracy"].append(float(step_hard_accuracies))
+        step_metrics["logits_mean"].append(float(step_logits_mean))
+
+    return step_metrics
+
+
+def _evaluate_with_loop(
+    model,
+    batch_graphs: jraph.GraphsTuple,
+    batch_wires: List[jp.ndarray],
+    x_data: jp.ndarray,
+    y_data: jp.ndarray,
+    n_message_steps: int,
+    loss_type: str,
+    layer_sizes: List[Tuple[int, int]],
+    knockout_patterns: Optional[jp.ndarray],
+    logits_original_shapes: List[Tuple],
+    step_metrics: Dict,
+) -> Dict:
+    """
+    Evaluate using loop mode (original behavior).
+    """
     # Run message passing steps
     current_graphs = batch_graphs
+    
+    vmap_get_loss = jax.vmap(
+        lambda logits, wires: get_loss_from_wires_logits(
+            logits, wires, x_data, y_data, loss_type
+        )
+    )
+    
+    vmap_update_loss = jax.vmap(
+        lambda graph, res: update_output_node_loss(graph, layer_sizes, res.mean(axis=0))
+    )
+    
+    vmap_extract_logits = jax.vmap(
+        lambda graph: extract_logits_from_graph(graph, logits_original_shapes)
+    )
 
     for step in range(1, n_message_steps + 1):
         # Apply model to all graphs in batch
@@ -484,9 +645,6 @@ def evaluate_model_stepwise_batched(
             updated_graphs = vmap_model(current_graphs)
 
         # Extract logits from updated graphs
-        vmap_extract_logits = jax.vmap(
-            lambda graph: extract_logits_from_graph(graph, logits_original_shapes)
-        )
         current_batch_logits = vmap_extract_logits(updated_graphs)
 
         # Calculate losses for the batch
