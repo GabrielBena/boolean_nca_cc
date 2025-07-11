@@ -16,7 +16,6 @@ import jraph
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.utils.graph_builder import build_graph
 from boolean_nca_cc.utils.extraction import extract_logits_from_graph
-from boolean_nca_cc.training.pool.perturbation import mutate_wires_batch
 from boolean_nca_cc.training.pool.structural_perturbation import (
     create_reproducible_knockout_pattern,
     extract_layer_info_from_graph,
@@ -569,103 +568,6 @@ class GraphPool(struct.PyTreeNode):
         avg_steps_reset = self.get_average_update_steps_for_indices(reset_idxs)
 
         return reset_idxs, avg_steps_reset
-
-    def reset_with_genetic_mutation(
-        self,
-        key: Array,
-        fraction: float,
-        layer_sizes: List[Tuple[int, int]],
-        input_n: int,
-        arity: int,
-        circuit_hidden_dim: int,
-        mutation_rate: float = 0.1,
-        n_swaps_per_layer: int = 1,
-        reset_strategy: str = "uniform",
-        combined_weights: Tuple[float, float] = (0.5, 0.5),
-    ) -> Tuple["GraphPool", float]:
-        """
-        Reset a fraction of the pool using genetic mutation of existing circuits.
-
-        This method:
-        1. Selects circuits to reset using the specified strategy
-        2. Takes existing circuits from the pool and mutates their wiring
-        3. Generates fresh logits for the mutated circuits
-        4. Updates the pool with the mutated circuits
-
-        Args:
-            key: Random key for mutations and selection
-            fraction: Fraction of pool to reset
-            layer_sizes: Circuit layer sizes for logit generation
-            input_n: Number of input nodes
-            arity: Number of inputs per gate
-            circuit_hidden_dim: Hidden dimension for graphs
-            mutation_rate: Rate of wire mutations (0.0 to 1.0)
-            n_swaps_per_layer: Number of swaps per layer for genetic mutation
-            reset_strategy: Strategy for selecting circuits to reset
-            combined_weights: Weights for combined reset strategy
-
-        Returns:
-            Tuple of (updated_pool, avg_steps_of_reset_circuits)
-        """
-        # Split keys for different operations
-        selection_key, mutation_key, logit_key = jax.random.split(key, 3)
-
-        # Get indices of circuits to reset
-        reset_idxs, avg_steps_reset = self.get_reset_indices(
-            selection_key, fraction, reset_strategy, combined_weights
-        )
-
-        num_reset = len(reset_idxs)
-
-        # Sample existing circuits from the pool for mutation
-        # We'll mutate random circuits from the pool, not necessarily the ones being reset
-        source_idxs = jax.random.choice(
-            mutation_key, self.size, shape=(num_reset,), replace=True
-        )
-
-        # Extract wires from the source circuits
-        source_wires = jax.tree.map(lambda leaf: leaf[source_idxs], self.wires)
-
-        # Apply genetic mutations to the source wires
-        mutated_wires = mutate_wires_batch(
-            source_wires, mutation_key, mutation_rate, n_swaps_per_layer
-        )
-
-        # Generate fresh logits for the mutated circuits
-        from boolean_nca_cc.circuits.model import make_nops
-
-        fresh_logits = []
-        for out_n, group_size in layer_sizes[1:]:  # Skip input layer
-            layer_logits = make_nops(out_n, arity, group_size)
-            # Repeat for batch
-            batched_logits = jp.repeat(layer_logits[None, ...], num_reset, axis=0)
-            fresh_logits.append(batched_logits)
-
-        # Build new graphs with mutated wires and fresh logits
-        vmap_build_graph = jax.vmap(
-            lambda logit, wires: build_graph(
-                logits=logit,
-                wires=wires,
-                input_n=input_n,
-                arity=arity,
-                circuit_hidden_dim=circuit_hidden_dim,
-                loss_value=0.0,  # Reset loss
-                update_steps=0,  # Reset update steps
-            )
-        )
-        mutated_graphs = vmap_build_graph(fresh_logits, mutated_wires)
-
-        # Update the pool with mutated circuits
-        updated_pool = self.update(
-            reset_idxs, mutated_graphs, mutated_wires, fresh_logits
-        )
-
-        # Increment the reset counter for all elements
-        if updated_pool.reset_counter is not None:
-            new_counter = updated_pool.reset_counter + 1
-            updated_pool = updated_pool.replace(reset_counter=new_counter)
-
-        return updated_pool, avg_steps_reset
 
 
 def initialize_graph_pool(

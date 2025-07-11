@@ -46,6 +46,7 @@ training:
   # BATCH SIZE
   meta_batch_size: 64
   # OPTIMIZATION
+  optimizer: "adamw"  # Options: "adamw", "sgd"
   learning_rate: 2e-4
   weight_decay: 1e-5
   # LEARNING RATE SCHEDULER
@@ -68,27 +69,14 @@ pool:
   reset_interval: 128
   reset_strategy: "combined"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
-  # Genetic mutation parameters
-  mutation_rate: 1e-3 # For genetic mutation rate
-  n_swaps_per_layer: null # For genetic mutation number of swaps per layer
-  initial_diversity: ${training.initial_diversity} # For genetic mutation number of initial wires
+  initial_diversity: ${training.initial_diversity} 
 
   # Persistent structural knockout (injected periodically)
   persistent_knockout:
     fraction: 0.8 # 0.00001 # Fraction of the *newly reset* circuits to damage
-    damage_prob: 70.0 # Expected number of knockouts (per layer if target_layer specified, per circuit if null)
+    damage_prob: 30.0 # Expected number of knockouts (per layer if target_layer specified, per circuit if null)
     target_layer: null # Target a specific layer (e.g., 0, 1, ...), null for circuit-wide knockouts
-    knockout_diversity: 256  # Vocabulary size for knockout patterns
-
-# Backpropagation baseline
-backprop:
-  enabled: false
-  epochs: 100 
-  learning_rate: 1
-  weight_decay: 1e-1
-  optimizer: "adamw"
-  beta1: 0.8
-  beta2: 0.8
+    knockout_diversity: 512  # Vocabulary size for knockout patterns
   
 # Evaluation parameters
 eval:
@@ -105,15 +93,6 @@ eval:
     enabled: true
     damage_prob: ${pool.persistent_knockout.damage_prob}
     target_layer: null
-
-# Early stopping based on accuracy
-stop_accuracy:
-  enabled: true  # Whether to enable early stopping based on accuracy
-  threshold: 0.995  # Accuracy threshold to trigger early stopping
-  metric: "hard_accuracy"  # Which accuracy metric to use ("accuracy" or "hard_accuracy")
-  source: "eval_ko"  # Source of the metric ("training", "eval", or "eval_ko")
-  patience: 10  # Number of epochs to wait after reaching threshold before stopping
-  min_epochs: 501 # Minimum number of epochs before early stopping can occur (eval every 512 epochs - 10 epochs)
 
 # Checkpointing
 checkpoint:

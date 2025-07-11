@@ -16,9 +16,8 @@ from boolean_nca_cc.circuits.model import (
     run_circuit,
     run_layer,
 )
-from boolean_nca_cc.circuits.train import TrainState, train_step
+from boolean_nca_cc.circuits.train import TrainState
 from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
-from boolean_nca_cc.models import CircuitGNN, run_gnn_scan
 from boolean_nca_cc.training import (
     train_model,
     evaluate_model_stepwise,
@@ -34,9 +33,6 @@ __all__ = [
     "run_layer",
     "TrainState",
     "train_step",
-    # Models
-    "CircuitGNN",
-    "run_gnn_scan",
     # Utils
     "build_graph",
     "extract_logits_from_graph",

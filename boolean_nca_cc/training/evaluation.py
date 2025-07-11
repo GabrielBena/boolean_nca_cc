@@ -11,7 +11,7 @@ import jraph
 from tqdm.auto import tqdm
 from typing import List, Dict, Tuple, Generator, NamedTuple, Optional
 
-from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention
+from boolean_nca_cc.models import CircuitSelfAttention
 from boolean_nca_cc.utils import (
     build_graph,
     extract_logits_from_graph,
@@ -129,7 +129,7 @@ def get_loss_and_update_graph(
 
 
 def evaluate_model_stepwise_generator(
-    model: CircuitGNN | CircuitSelfAttention,
+    model: CircuitSelfAttention,
     wires: List[jp.ndarray],
     logits: List[jp.ndarray],
     x_data: jp.ndarray,
@@ -274,7 +274,7 @@ def evaluate_model_stepwise_generator(
 
 
 def evaluate_model_stepwise(
-    model: CircuitGNN | CircuitSelfAttention,
+    model: CircuitSelfAttention,
     wires: List[jp.ndarray],
     logits: List[jp.ndarray],
     x_data: jp.ndarray,
@@ -366,7 +366,7 @@ def evaluate_model_stepwise(
 
 
 def evaluate_model_stepwise_batched(
-    model: CircuitGNN | CircuitSelfAttention,
+    model: CircuitSelfAttention,
     batch_wires: List[jp.ndarray],  # Shape: [batch_size, ...original_wire_shape...]
     batch_logits: List[jp.ndarray],  # Shape: [batch_size, ...original_logit_shape...]
     x_data: jp.ndarray,
@@ -520,83 +520,69 @@ def _evaluate_with_scan(
     logits_original_shapes: List[Tuple],
     step_metrics: Dict,
 ) -> Dict:
-    """
-    Evaluate using scan mode to match training behavior.
-    """
-    from boolean_nca_cc.models.self_attention import run_self_attention_scan_with_loss
-    from boolean_nca_cc.models.gnn import run_gnn_scan_with_loss
+    """Helper function to run evaluation using jax.lax.scan for efficiency."""
 
+    # Vmap the evaluation over the batch of circuits
+    # This will run the scan for each circuit in parallel
+    @jax.vmap
     def evaluate_single_circuit_scan(graph, wires, logits, knockout_pattern):
         # Determine which scan function to use based on model type
-        if isinstance(model, CircuitSelfAttention):
-            scan_fn = run_self_attention_scan_with_loss
-        elif isinstance(model, CircuitGNN):
-            scan_fn = run_gnn_scan_with_loss
-        else:
-            raise ValueError(f"Unknown model type: {type(model)}")
-
-        # Run scan for all steps, computing loss and updating graph at each step
-        final_graph, step_outputs = scan_fn(
-            model=model,
-            graph=graph,
-            num_steps=n_message_steps,
-            logits_original_shapes=logits_original_shapes,
-            wires=wires,
-            x_data=x_data,
-            y_data=y_data,
-            loss_type=loss_type,
-            layer_sizes=tuple(layer_sizes),  # Convert to tuple for JAX
+        _, step_outputs = run_self_attention_scan_with_loss(
+            model,
+            graph,
+            n_message_steps,
+            logits_original_shapes,
+            wires,
+            x_data,
+            y_data,
+            loss_type,
+            layer_sizes,
             knockout_pattern=knockout_pattern,
         )
 
         return step_outputs
 
-    # Split batched graphs into individual graphs for processing
-    individual_graphs = jraph.unbatch(batch_graphs)
-    
-    # Handle knockout patterns
-    if knockout_patterns is not None:
-        all_step_outputs = []
-        for i, (graph, wires, logits, knockout_pattern) in enumerate(
-            zip(individual_graphs, batch_wires, batch_logits, knockout_patterns)
-        ):
-            step_outputs = evaluate_single_circuit_scan(graph, wires, logits, knockout_pattern)
-            all_step_outputs.append(step_outputs)
-    else:
-        all_step_outputs = []
-        for i, (graph, wires, logits) in enumerate(
-            zip(individual_graphs, batch_wires, batch_logits)
-        ):
-            step_outputs = evaluate_single_circuit_scan(graph, wires, logits, None)
-            all_step_outputs.append(step_outputs)
+    # Run the vmapped evaluation
+    all_step_outputs = evaluate_single_circuit_scan(
+        batch_graphs, batch_wires, batch_logits, knockout_patterns
+    )
 
-    # Extract and average metrics across batch and steps
-    # all_step_outputs is (batch_size, num_steps, step_data_tuple)
-    # step_data_tuple = (final_graph, loss, current_logits, aux)
-    
-    batch_size = len(all_step_outputs)
-    
+    # Process results
+    # all_step_outputs is a tuple of (all_graphs, all_losses, all_logits, all_aux)
+    # Each element in the tuple has shape [batch_size, n_steps, ...]
+    all_graphs, all_losses, all_logits, all_aux = all_step_outputs
+
+    # all_aux is a tuple of (hard_loss, pred, pred_hard, accuracy, hard_accuracy, res, hard_res)
+    # Each has shape [batch_size, n_steps, ...]
+    (
+        batch_hard_losses,
+        _,
+        _,
+        batch_accuracies,
+        batch_hard_accuracies,
+        _,
+        _,
+    ) = all_aux
+
+    # Average metrics over the batch for each step
+    # Shape of metrics will be [n_steps]
+    avg_losses = jp.mean(all_losses, axis=0)
+    avg_hard_losses = jp.mean(batch_hard_losses, axis=0)
+    avg_accuracies = jp.mean(batch_accuracies, axis=0)
+    avg_hard_accuracies = jp.mean(batch_hard_accuracies, axis=0)
+
+    # Store metrics for each step
     for step in range(n_message_steps):
-        # Extract data for this step across all circuits in batch
-        step_losses = jp.array([all_step_outputs[b][step][1] for b in range(batch_size)])
-        step_aux = [all_step_outputs[b][step][3] for b in range(batch_size)]
-        
-        # Extract individual aux components and average across batch
-        step_hard_losses = jp.mean(jp.array([aux[1] for aux in step_aux]))
-        step_accuracies = jp.mean(jp.array([aux[4] for aux in step_aux]))
-        step_hard_accuracies = jp.mean(jp.array([aux[5] for aux in step_aux]))
-        
-        # Extract logits for mean calculation
-        step_logits = jp.array([all_step_outputs[b][step][2] for b in range(batch_size)])
-        step_logits_mean = jp.mean(jp.concatenate([jp.concatenate(logits) for logits in step_logits]))
+        step_metrics[f"loss_step_{step+1}"] = avg_losses[step]
+        step_metrics[f"hard_loss_step_{step+1}"] = avg_hard_losses[step]
+        step_metrics[f"accuracy_step_{step+1}"] = avg_accuracies[step]
+        step_metrics[f"hard_accuracy_step_{step+1}"] = avg_hard_accuracies[step]
 
-        # Store averaged metrics
-        step_metrics["step"].append(step + 1)
-        step_metrics["soft_loss"].append(float(jp.mean(step_losses)))
-        step_metrics["hard_loss"].append(float(step_hard_losses))
-        step_metrics["soft_accuracy"].append(float(step_accuracies))
-        step_metrics["hard_accuracy"].append(float(step_hard_accuracies))
-        step_metrics["logits_mean"].append(float(step_logits_mean))
+    # Add final metrics after all steps
+    step_metrics["loss"] = avg_losses[-1]
+    step_metrics["hard_loss"] = avg_hard_losses[-1]
+    step_metrics["accuracy"] = avg_accuracies[-1]
+    step_metrics["hard_accuracy"] = avg_hard_accuracies[-1]
 
     return step_metrics
 

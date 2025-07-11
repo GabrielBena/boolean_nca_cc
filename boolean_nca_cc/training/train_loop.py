@@ -17,30 +17,24 @@ import os
 import logging
 from datetime import datetime
 
-from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention
+from boolean_nca_cc.models import CircuitSelfAttention
 from boolean_nca_cc.training.utils import save_checkpoint
-from boolean_nca_cc.training.schedulers import (
-    should_reset_pool,
-    get_learning_rate_schedule,
-    get_step_beta,
-)
-
 from boolean_nca_cc.training.pool.pool import GraphPool, initialize_graph_pool
+from boolean_nca_cc.training.knockout_eval import create_knockout_vocabulary
+from boolean_nca_cc.training.pool.structural_perturbation import (
+    create_reproducible_knockout_pattern,
+    extract_layer_info_from_graph,
+)
 from boolean_nca_cc.training.evaluation import (
     evaluate_model_stepwise_batched,
     get_loss_and_update_graph,
 )
-from boolean_nca_cc.training.eval_datasets import (
-    create_unified_evaluation_datasets,
-    evaluate_circuits_in_chunks,
-    UnifiedEvaluationDatasets,
-)
-# Removed unused knockout dataset imports since we now use vocabulary-based evaluation
 import wandb
 
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.utils.graph_builder import build_graph
 from boolean_nca_cc.training.pool.structural_perturbation import extract_layer_info_from_graph
+from boolean_nca_cc.training.schedulers import get_learning_rate_schedule, should_reset_pool
 
 # Type alias for PyTree
 PyTree = Any
@@ -90,305 +84,218 @@ def _log_to_wandb(
         log.warning(f"Error logging to wandb: {e}")
 
 
-def _setup_checkpoint_dir(
-    checkpoint_dir: Optional[str], wandb_id: Optional[str]
-) -> Optional[str]:
-    """Setup checkpoint directory with unique identifier."""
-    if checkpoint_dir is None:
-        return None
+# def _setup_checkpoint_dir(
+#     checkpoint_dir: Optional[str], wandb_id: Optional[str]
+# ) -> Optional[str]:
+#     """Setup checkpoint directory with unique identifier."""
+#     if checkpoint_dir is None:
+#         return None
 
-    # Create unique checkpoint directory using wandb ID or timestamp
-    unique_id = wandb_id if wandb_id else datetime.now().strftime("%Y%m%d_%H%M%S")
+#     # Create unique checkpoint directory using wandb ID or timestamp
+#     unique_id = wandb_id if wandb_id else datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    checkpoint_path = os.path.join(checkpoint_dir, f"run_{unique_id}")
-    os.makedirs(checkpoint_path, exist_ok=True)
-    log.info(f"Checkpoints will be saved to: {checkpoint_path}")
+#     checkpoint_path = os.path.join(checkpoint_dir, f"run_{unique_id}")
+#     os.makedirs(checkpoint_path, exist_ok=True)
+#     log.info(f"Checkpoints will be saved to: {checkpoint_path}")
 
-    return checkpoint_path
-
-
-def _save_periodic_checkpoint(
-    checkpoint_path: str,
-    model,
-    optimizer,
-    metrics: Dict,
-    epoch: int,
-    checkpoint_interval: int,
-    wandb_run=None,
-) -> None:
-    """Save periodic checkpoint if interval allows."""
-    if checkpoint_path is None or epoch == 0 or epoch % checkpoint_interval != 0:
-        return
-
-    ckpt_filename = "latest_checkpoint.pkl"
-    # log.info(f"Saving periodic checkpoint at epoch {epoch}")
-
-    try:
-        save_checkpoint(
-            model,
-            optimizer,
-            metrics,
-            {"epoch": epoch},
-            epoch,
-            checkpoint_path,
-            filename=ckpt_filename,
-        )
-
-        # Log to wandb if enabled
-        if wandb_run:
-            wandb_run.save(os.path.join(checkpoint_path, ckpt_filename))
-
-            # Also log this as an artifact for better tracking in wandb
-            try:
-                artifact = wandb_run.Artifact("latest_checkpoint", type="model")
-                artifact.add_file(os.path.join(checkpoint_path, ckpt_filename))
-                wandb_run.log_artifact(artifact)
-            except Exception as e:
-                log.warning(f"Error logging checkpoint as artifact: {e}")
-
-    except Exception as e:
-        log.warning(f"Error saving checkpoint: {e}")
+#     return checkpoint_path
 
 
-def _save_best_checkpoint(
-    checkpoint_path: str,
-    is_best: bool,
-    save_best: bool,
-    model,
-    optimizer,
-    metrics: Dict,
-    epoch: int,
-    best_metric: str,
-    current_metric_value: float,
-    wandb_run=None,
-) -> None:
-    """Save best checkpoint if enabled and is best."""
-    if not (checkpoint_path and save_best and is_best):
-        return
+# def _save_periodic_checkpoint(
+#     checkpoint_path: str,
+#     model,
+#     optimizer,
+#     metrics: Dict,
+#     epoch: int,
+#     checkpoint_interval: int,
+#     wandb_run=None,
+# ) -> None:
+#     """Save periodic checkpoint if interval allows."""
+#     if checkpoint_path is None or epoch == 0 or epoch % checkpoint_interval != 0:
+#         return
 
-    # Use a fixed filename for the best model to avoid creating multiple files
-    best_filename = f"best_model_{best_metric}.pkl"
-    # log.info(
-    #     f"Saving best model at epoch {epoch} with {best_metric}={current_metric_value:.4f}"
-    # )
+#     ckpt_filename = "latest_checkpoint.pkl"
+#     # log.info(f"Saving periodic checkpoint at epoch {epoch}")
 
-    try:
-        save_checkpoint(
-            model,
-            optimizer,
-            metrics,
-            {"epoch": epoch, f"best_{best_metric}": current_metric_value},
-            epoch,
-            checkpoint_path,
-            filename=best_filename,
-        )
+#     try:
+#         save_checkpoint(
+#             model,
+#             optimizer,
+#             metrics,
+#             {"epoch": epoch},
+#             epoch,
+#             checkpoint_path,
+#             filename=ckpt_filename,
+#         )
 
-        # Log to wandb if enabled
-        if wandb_run:
-            wandb_run.log(
-                {f"best/{best_metric}": current_metric_value, "best/epoch": epoch}
-            )
+#         # Log to wandb if enabled
+#         if wandb_run:
+#             wandb_run.save(os.path.join(checkpoint_path, ckpt_filename))
 
-            # Save the best model to wandb (will overwrite the previous best)
-            wandb_run.save(os.path.join(checkpoint_path, best_filename))
+#             # Also log this as an artifact for better tracking in wandb
+#             try:
+#                 artifact = wandb_run.Artifact("latest_checkpoint", type="model")
+#                 artifact.add_file(os.path.join(checkpoint_path, ckpt_filename))
+#                 wandb_run.log_artifact(artifact)
+#             except Exception as e:
+#                 log.warning(f"Error logging checkpoint as artifact: {e}")
 
-            # Also log this as an artifact for better tracking in wandb
-            try:
-                artifact = wandb_run.Artifact(f"best_model_{best_metric}", type="model")
-                artifact.add_file(os.path.join(checkpoint_path, best_filename))
-                wandb_run.log_artifact(artifact)
-            except Exception as e:
-                log.warning(f"Error logging best model as artifact: {e}")
-    except Exception as e:
-        log.warning(f"Error saving best checkpoint: {e}")
+#     except Exception as e:
+#         log.warning(f"Error saving checkpoint: {e}")
 
 
-def _save_stable_state(
-    checkpoint_path: str,
-    save_stable_states: bool,
-    last_stable_state: Dict,
-    epoch: int,
-    wandb_run=None,
-) -> None:
-    """Save the last stable state before NaN loss."""
-    if not (checkpoint_path and save_stable_states):
-        return
+# def _save_best_checkpoint(
+#     checkpoint_path: str,
+#     is_best: bool,
+#     save_best: bool,
+#     model,
+#     optimizer,
+#     metrics: Dict,
+#     epoch: int,
+#     best_metric: str,
+#     current_metric_value: float,
+#     wandb_run=None,
+# ) -> None:
+#     """Save best checkpoint if enabled and is best."""
+#     if not (checkpoint_path and save_best and is_best):
+#         return
 
-    try:
-        stable_path = os.path.join(
-            checkpoint_path, f"stable_state_epoch_{epoch - 1}.pkl"
-        )
-        # log.info(f"Saving last stable state to {stable_path}")
-        save_checkpoint(
-            last_stable_state["model"],
-            last_stable_state["optimizer"],
-            last_stable_state["metrics"],
-            {"epoch": epoch - 1},
-            epoch - 1,
-            os.path.dirname(stable_path),
-            filename=os.path.basename(stable_path),
-        )
+#     # Use a fixed filename for the best model to avoid creating multiple files
+#     best_filename = f"best_model_{best_metric}.pkl"
+#     # log.info(
+#     #     f"Saving best model at epoch {epoch} with {best_metric}={current_metric_value:.4f}"
+#     # )
 
-        # Log to wandb if enabled
-        if wandb_run:
-            wandb_run.log({"training/early_stop_epoch": epoch - 1})
-            wandb_run.alert(
-                title="Training Stopped - NaN Loss",
-                text=f"Training stopped at epoch {epoch} due to NaN loss. Last stable state saved.",
-                level=wandb_run.AlertLevel.WARN,
-            )
-    except Exception as e:
-        log.warning(f"Error saving stable state: {e}")
+#     try:
+#         save_checkpoint(
+#             model,
+#             optimizer,
+#             metrics,
+#             {"epoch": epoch, f"best_{best_metric}": current_metric_value},
+#             epoch,
+#             checkpoint_path,
+#             filename=best_filename,
+#         )
+
+#         # Log to wandb if enabled
+#         if wandb_run:
+#             wandb_run.log(
+#                 {f"best/{best_metric}": current_metric_value, "best/epoch": epoch}
+#             )
+
+#             # Save the best model to wandb (will overwrite the previous best)
+#             wandb_run.save(os.path.join(checkpoint_path, best_filename))
+
+#             # Also log this as an artifact for better tracking in wandb
+#             try:
+#                 artifact = wandb_run.Artifact(f"best_model_{best_metric}", type="model")
+#                 artifact.add_file(os.path.join(checkpoint_path, best_filename))
+#                 wandb_run.log_artifact(artifact)
+#             except Exception as e:
+#                 log.warning(f"Error logging best model as artifact: {e}")
+#     except Exception as e:
+#         log.warning(f"Error saving best checkpoint: {e}")
 
 
-def _check_early_stopping(
-    stop_accuracy_enabled: bool,
-    epoch: int,
-    stop_accuracy_min_epochs: int,
-    early_stop_triggered: bool,
-    stop_accuracy_metric: str,
-    stop_accuracy_source: str,
-    training_metrics: Dict,
-    current_eval_metrics: Optional[Dict],
-    stop_accuracy_threshold: float,
-    first_threshold_epoch: Optional[int],
-    epochs_above_threshold: int,
-    stop_accuracy_patience: int,
-    rng: jax.random.PRNGKey,
-) -> Tuple[bool, bool, int, Optional[int], Optional[Dict], jax.random.PRNGKey]:
-    """
-    Check early stopping conditions and handle early stopping logic.
+# def _save_stable_state(
+#     checkpoint_path: str,
+#     save_stable_states: bool,
+#     last_stable_state: Dict,
+#     epoch: int,
+#     wandb_run=None,
+# ) -> None:
+#     """Save the last stable state before NaN loss."""
+#     if not (checkpoint_path and save_stable_states):
+#         return
 
-    Returns:
-        Tuple of (should_break, early_stop_triggered, epochs_above_threshold,
-                 first_threshold_epoch, updated_current_eval_metrics, updated_rng)
-    """
-    if not stop_accuracy_enabled or early_stop_triggered:
-        return (
-            False,
-            early_stop_triggered,
-            epochs_above_threshold,
-            first_threshold_epoch,
-            current_eval_metrics,
-            rng,
-        )
+#     try:
+#         stable_path = os.path.join(
+#             checkpoint_path, f"stable_state_epoch_{epoch - 1}.pkl"
+#         )
+#         # log.info(f"Saving last stable state to {stable_path}")
+#         save_checkpoint(
+#             last_stable_state["model"],
+#             last_stable_state["optimizer"],
+#             last_stable_state["metrics"],
+#             {"epoch": epoch - 1},
+#             epoch - 1,
+#             os.path.dirname(stable_path),
+#             filename=os.path.basename(stable_path),
+#         )
 
-    # Get the accuracy value for early stopping
-    try:
-        stop_accuracy_value = _get_metric_value(
-            stop_accuracy_metric,
-            stop_accuracy_source,
-            training_metrics,
-            current_eval_metrics,
-        )
-    except (ValueError, KeyError):
-        if "eval" in stop_accuracy_source and current_eval_metrics is None:
-            # Evaluation metrics not available, skip early stopping check this epoch
-            stop_accuracy_value = None
-        else:
-            # Fallback to training metrics if eval not available
-            stop_accuracy_value = _get_metric_value(
-                stop_accuracy_metric,
-                "training",
-                training_metrics,
-                current_eval_metrics,
-            )
+#         # Log to wandb if enabled
+#         if wandb_run:
+#             wandb_run.log({"training/early_stop_epoch": epoch - 1})
+#             wandb_run.alert(
+#                 title="Training Stopped - NaN Loss",
+#                 text=f"Training stopped at epoch {epoch} due to NaN loss. Last stable state saved.",
+#                 level=wandb_run.AlertLevel.WARN,
+#             )
+#     except Exception as e:
+#         log.warning(f"Error saving stable state: {e}")
 
-    if stop_accuracy_value is None:
-        return (
-            False,
-            early_stop_triggered,
-            epochs_above_threshold,
-            first_threshold_epoch,
-            current_eval_metrics,
-            rng,
-        )
 
-    if stop_accuracy_value >= stop_accuracy_threshold:
-        if first_threshold_epoch is None:
-            first_threshold_epoch = epoch
-            log.info(
-                f"Reached accuracy threshold {stop_accuracy_threshold:.4f} "
-                f"({stop_accuracy_source}_{stop_accuracy_metric}={stop_accuracy_value:.4f}) "
-                f"at epoch {epoch}. Starting patience countdown."
-            )
-        epochs_above_threshold += 1
+# def _check_early_stopping(
+#     stop_accuracy_enabled: bool,
+#     epoch: int,
+#     stop_accuracy_min_epochs: int,
+#     early_stop_triggered: bool,
+#     stop_accuracy_metric: str,
+#     training_metrics: Dict,
+#     stop_accuracy_threshold: float,
+#     first_threshold_epoch: Optional[int],
+#     epochs_above_threshold: int,
+#     stop_accuracy_patience: int,
+#     rng: jax.random.PRNGKey,
+# ) -> Tuple[bool, bool, int, Optional[int], jax.random.PRNGKey]:
+#     """Check for early stopping conditions and return updated state."""
+#     if not stop_accuracy_enabled or epoch < stop_accuracy_min_epochs:
+#         return early_stop_triggered, False, 0, None, rng
 
-        # Check if we should stop (only after minimum epochs requirement is met)
-        if (
-            epochs_above_threshold >= stop_accuracy_patience
-            and epoch >= stop_accuracy_min_epochs
-        ):
-            early_stop_triggered = True
-            log.info(
-                f"Early stopping triggered! "
-                f"Accuracy {stop_accuracy_source}_{stop_accuracy_metric}={stop_accuracy_value:.4f} "
-                f"has been above threshold {stop_accuracy_threshold:.4f} "
-                f"for {stop_accuracy_patience} epochs. "
-                f"Stopping at epoch {epoch}."
-            )
+#     # Get the metric from the training metrics
+#     metric_value = _get_metric_value(stop_accuracy_metric, training_metrics)
 
-            return (
-                True,
-                early_stop_triggered,
-                epochs_above_threshold,
-                first_threshold_epoch,
-                current_eval_metrics,
-                rng,
-            )
-        elif (
-            epochs_above_threshold >= stop_accuracy_patience
-            and epoch < stop_accuracy_min_epochs
-        ):
-            # Log that we would stop but are waiting for minimum epochs
-            # log.info(
-            #     f"Early stopping condition met "
-            #     f"(accuracy {stop_accuracy_source}_{stop_accuracy_metric}={stop_accuracy_value:.4f} "
-            #     f"above threshold {stop_accuracy_threshold:.4f} for {stop_accuracy_patience} epochs), "
-            #     f"but waiting until minimum epoch {stop_accuracy_min_epochs} (currently at epoch {epoch})."
-            # )
-            pass
-    else:
-        # Reset counter if accuracy drops below threshold
-        if epochs_above_threshold > 0:
-            log.info(
-                "Accuracy dropped below threshold. Resetting early stopping counter."
-            )
-        epochs_above_threshold = 0
-        first_threshold_epoch = None
+#     if metric_value is None:
+#         log.warning(f"Early stopping metric '{stop_accuracy_metric}' not found.")
+#         return early_stop_triggered, False, 0, None, rng
 
-    return (
-        False,
-        early_stop_triggered,
-        epochs_above_threshold,
-        first_threshold_epoch,
-        current_eval_metrics,
-        rng,
-    )
+#     # Check if the metric has reached the threshold
+#     if metric_value >= stop_accuracy_threshold:
+#         if not early_stop_triggered:
+#             log.info(
+#                 f"Accuracy threshold of {stop_accuracy_threshold:.2%} reached at epoch {epoch}."
+#             )
+#             early_stop_triggered = True
+#             first_threshold_epoch = epoch
+#             epochs_above_threshold = 1
+#         else:
+#             epochs_above_threshold += 1
+
+#         # Check for patience
+#         if epochs_above_threshold >= stop_accuracy_patience:
+#             return early_stop_triggered, True, epochs_above_threshold, first_threshold_epoch, rng
+#     else:
+#         # Reset if accuracy drops below threshold
+#         early_stop_triggered = False
+#         first_threshold_epoch = None
+#         epochs_above_threshold = 0
+
+#     return early_stop_triggered, False, epochs_above_threshold, first_threshold_epoch, rng
 
 
 def _log_final_wandb_metrics(wandb_run, results: Dict, epochs: int) -> None:
-    """Log final metrics and plots to wandb."""
+    """Log final metrics to wandb if enabled."""
     if wandb_run is None:
         return
 
-    try:
-        # Log final metrics
-        wandb_run.log(
-            {
-                "final/loss": results["losses"][-1],
-                "final/hard_loss": results["hard_losses"][-1],
-                "final/accuracy": results["accuracies"][-1],
-                "final/hard_accuracy": results["hard_accuracies"][-1],
-                "final/epoch": epochs,
-                f"best/{results.get('best_metric', 'metric')}": results.get(
-                    "best_metric_value", 0
-                ),
-            }
-        )
-
-    except Exception as e:
-        log.warning(f"Error logging final metrics to wandb: {e}")
+    final_metrics = {
+        "final/epoch": epochs,
+        "final/loss": results.get("loss"),
+        "final/hard_loss": results.get("hard_loss"),
+        "final/accuracy": results.get("accuracy"),
+        "final/hard_accuracy": results.get("hard_accuracy"),
+    }
+    wandb_run.log(final_metrics)
 
 
 def _get_metric_value(
@@ -411,17 +318,17 @@ def _get_metric_value(
     """
     if metric_source == "training":
         return training_metrics[metric_name]
-    elif metric_source == "eval":
-        if eval_metrics is None:
-            raise ValueError("Evaluation metrics not available for eval source")
-        # Map to evaluation metric keys (use IN-distribution evaluation for consistency)
-        eval_key_map = {
-            "loss": "eval_in/final_loss",
-            "hard_loss": "eval_in/final_hard_loss",
-            "accuracy": "eval_in/final_accuracy",
-            "hard_accuracy": "eval_in/final_hard_accuracy",
-        }
-        return eval_metrics[eval_key_map[metric_name]]
+    # elif metric_source == "eval":
+    #     if eval_metrics is None:
+    #         raise ValueError("Evaluation metrics not available for eval source")
+    #     # Map to evaluation metric keys (use IN-distribution evaluation for consistency)
+    #     eval_key_map = {
+    #         "loss": "eval_in/final_loss",
+    #         "hard_loss": "eval_in/final_hard_loss",
+    #         "accuracy": "eval_in/final_accuracy",
+    #         "hard_accuracy": "eval_in/final_hard_accuracy",
+    #     }
+    #     return eval_metrics[eval_key_map[metric_name]]
     elif metric_source == "eval_ko":
         if eval_metrics is None:
             raise ValueError("Knockout evaluation metrics not available for eval_ko source")
@@ -437,241 +344,15 @@ def _get_metric_value(
         raise ValueError(f"Unknown metric source: {metric_source}")
 
 
-def _log_pool_scatter(pool, epoch, wandb_run):
-    """Log pool scatterplot to wandb."""
-    if wandb_run is None:
-        return
+# def _log_pool_scatter(pool, epoch, wandb_run):
+#     """Log pool scatterplot to wandb."""
+#     if wandb_run is None:
+#         return
 
-    all_loss, all_steps = pool.graphs.globals[..., 0], pool.graphs.globals[..., 1]
-    data = list(zip(all_steps, all_loss))
-    table = wandb.Table(data=data, columns=["steps", "loss"])
-    wandb_run.log({"pool/scatter": wandb.plot.scatter(table, "steps", "loss")})
-
-
-def run_unified_periodic_evaluation(
-    model,
-    datasets: UnifiedEvaluationDatasets,
-    pool,
-    x_data,
-    y_data,
-    input_n,
-    arity,
-    circuit_hidden_dim,
-    n_message_steps,
-    loss_type,
-    epoch,
-    wandb_run,
-    log_stepwise=False,
-    layer_sizes: List[Tuple[int, int]] = None,
-    log_pool_scatter: bool = False,
-) -> Dict:
-    """
-    Run unified periodic evaluation with only IN-distribution and OUT-of-distribution testing.
-
-    Args:
-        model: The model to evaluate
-        datasets: UnifiedEvaluationDatasets object containing IN and OUT distribution circuits
-        pool: GraphPool for logging scatter plot
-        x_data: Input data
-        y_data: Target data
-        input_n: Number of input nodes
-        arity: Arity of gates
-        circuit_hidden_dim: Hidden dimension
-        n_message_steps: Number of message steps for evaluation
-        loss_type: Loss function type
-        epoch: Current epoch number
-        wandb_run: WandB run object (or None)
-        log_stepwise: Whether to log step-by-step metrics
-        layer_sizes: Circuit layer sizes
-        log_pool_scatter: Whether to log pool scatterplot (loss vs steps)
-
-    Returns:
-        Dictionary with evaluation metrics from IN-distribution and OUT-of-distribution evaluations
-    """
-    try:
-        # 1. Run IN-distribution evaluation (matches training pattern)
-        # Use chunked evaluation to handle cases where diversity exceeds target batch size
-        log.info(
-            f"Running IN-distribution evaluation ({datasets.in_actual_batch_size} circuits)..."
-        )
-        if datasets.in_actual_batch_size > datasets.target_batch_size:
-            log.info(
-                f"Using chunked evaluation (chunks of {datasets.target_batch_size})"
-            )
-
-        step_metrics_in = evaluate_circuits_in_chunks(
-            eval_fn=evaluate_model_stepwise_batched,
-            wires=datasets.in_distribution_wires,
-            logits=datasets.in_distribution_logits,
-            target_chunk_size=datasets.target_batch_size,
-            model=model,
-            x_data=x_data,
-            y_data=y_data,
-            input_n=input_n,
-            arity=arity,
-            circuit_hidden_dim=circuit_hidden_dim,
-            n_message_steps=n_message_steps,
-            loss_type=loss_type,
-            layer_sizes=layer_sizes,
-        )
-
-        # Get final metrics (last step) for IN-distribution
-        final_metrics_in = {
-            "eval_in/final_loss": step_metrics_in["soft_loss"][-1],
-            "eval_in/final_hard_loss": step_metrics_in["hard_loss"][-1],
-            "eval_in/final_accuracy": step_metrics_in["soft_accuracy"][-1],
-            "eval_in/final_hard_accuracy": step_metrics_in["hard_accuracy"][-1],
-            "eval_in/epoch": epoch,
-        }
-
-        # 2. Run OUT-of-distribution evaluation (always random)
-        log.info(
-            f"Running OUT-of-distribution evaluation ({datasets.out_actual_batch_size} circuits)..."
-        )
-        if datasets.out_actual_batch_size > datasets.target_batch_size:
-            log.info(
-                f"Using chunked evaluation (chunks of {datasets.target_batch_size})"
-            )
-
-        step_metrics_out = evaluate_circuits_in_chunks(
-            eval_fn=evaluate_model_stepwise_batched,
-            wires=datasets.out_of_distribution_wires,
-            logits=datasets.out_of_distribution_logits,
-            target_chunk_size=datasets.target_batch_size,
-            model=model,
-            x_data=x_data,
-            y_data=y_data,
-            input_n=input_n,
-            arity=arity,
-            circuit_hidden_dim=circuit_hidden_dim,
-            n_message_steps=n_message_steps,
-            loss_type=loss_type,
-            layer_sizes=layer_sizes,
-        )
-
-        # Get final metrics (last step) for OUT-of-distribution
-        final_metrics_out = {
-            "eval_out/final_loss": step_metrics_out["soft_loss"][-1],
-            "eval_out/final_hard_loss": step_metrics_out["hard_loss"][-1],
-            "eval_out/final_accuracy": step_metrics_out["soft_accuracy"][-1],
-            "eval_out/final_hard_accuracy": step_metrics_out["hard_accuracy"][-1],
-            "eval_out/epoch": epoch,
-        }
-
-        # Combine all metrics for logging
-        combined_metrics = {
-            **final_metrics_in,
-            **final_metrics_out,
-        }
-
-        # Log to wandb if enabled
-        if wandb_run:
-            wandb_run.log(combined_metrics)
-
-            if log_pool_scatter:
-                _log_pool_scatter(pool, epoch, wandb_run)
-
-            # Optionally log step-by-step metrics for both evaluations
-            if log_stepwise:
-                # IN-distribution step-wise metrics
-                for step_idx in range(len(step_metrics_in["step"])):
-                    step_data_in = {
-                        "eval_in_steps/step": step_metrics_in["step"][step_idx],
-                        "eval_in_steps/loss": step_metrics_in["soft_loss"][step_idx],
-                        "eval_in_steps/hard_loss": step_metrics_in["hard_loss"][
-                            step_idx
-                        ],
-                        "eval_in_steps/accuracy": step_metrics_in["soft_accuracy"][
-                            step_idx
-                        ],
-                        "eval_in_steps/hard_accuracy": step_metrics_in["hard_accuracy"][
-                            step_idx
-                        ],
-                        "eval_in_steps/epoch": epoch,
-                    }
-                    wandb_run.log(step_data_in)
-
-                # OUT-of-distribution step-wise metrics
-                for step_idx in range(len(step_metrics_out["step"])):
-                    step_data_out = {
-                        "eval_out_steps/step": step_metrics_out["step"][step_idx],
-                        "eval_out_steps/loss": step_metrics_out["soft_loss"][step_idx],
-                        "eval_out_steps/hard_loss": step_metrics_out["hard_loss"][
-                            step_idx
-                        ],
-                        "eval_out_steps/accuracy": step_metrics_out["soft_accuracy"][
-                            step_idx
-                        ],
-                        "eval_out_steps/hard_accuracy": step_metrics_out[
-                            "hard_accuracy"
-                        ][step_idx],
-                        "eval_out_steps/epoch": epoch,
-                    }
-                    wandb_run.log(step_data_out)
-
-        # Log summary to console
-        training_config = datasets.training_config
-
-        # Add chunking info if used
-        in_chunk_info = ""
-        if datasets.in_actual_batch_size > datasets.target_batch_size:
-            num_in_chunks = (
-                datasets.in_actual_batch_size + datasets.target_batch_size - 1
-            ) // datasets.target_batch_size
-            in_chunk_info = f", {num_in_chunks} chunks"
-
-        out_chunk_info = ""
-        if datasets.out_actual_batch_size > datasets.target_batch_size:
-            num_out_chunks = (
-                datasets.out_actual_batch_size + datasets.target_batch_size - 1
-            ) // datasets.target_batch_size
-            out_chunk_info = f", {num_out_chunks} chunks"
-
-        log_message = (
-            f"Unified Eval (epoch {epoch}):\n"
-            f"  IN-distribution ({datasets.in_actual_batch_size} circuits{in_chunk_info}, "
-            f"mode={training_config['wiring_mode']}, diversity={training_config['initial_diversity']}): "
-            f"Loss={final_metrics_in['eval_in/final_loss']:.4f}, "
-            f"Acc={final_metrics_in['eval_in/final_accuracy']:.4f}, "
-            f"Hard Acc={final_metrics_in['eval_in/final_hard_accuracy']:.4f}\n"
-            f"  OUT-of-distribution ({datasets.out_actual_batch_size} circuits{out_chunk_info}, random): "
-            f"Loss={final_metrics_out['eval_out/final_loss']:.4f}, "
-            f"Acc={final_metrics_out['eval_out/final_accuracy']:.4f}, "
-            f"Hard Acc={final_metrics_out['eval_out/final_hard_accuracy']:.4f}"
-        )
-
-        log.info(log_message)
-
-        # Return all step metrics and final metrics for best model tracking
-        result = {
-            "step_metrics_in": step_metrics_in,
-            "step_metrics_out": step_metrics_out,
-            "final_metrics_in": final_metrics_in,
-            "final_metrics_out": final_metrics_out,
-            # Add datasets information for comprehensive result reporting
-            "datasets_info": {
-                "in_actual_batch_size": datasets.in_actual_batch_size,
-                "out_actual_batch_size": datasets.out_actual_batch_size,
-                "target_batch_size": datasets.target_batch_size,
-                "in_used_chunking": datasets.in_actual_batch_size
-                > datasets.target_batch_size,
-                "out_used_chunking": datasets.out_actual_batch_size
-                > datasets.target_batch_size,
-                "training_wiring_mode": datasets.training_config["wiring_mode"],
-                "training_initial_diversity": datasets.training_config[
-                    "initial_diversity"
-                ],
-                "evaluation_base_seed": datasets.training_config[
-                    "evaluation_base_seed"
-                ],
-            },
-        }
-
-        return result
-
-    except Exception as e:
-        log.warning(f"Error during unified periodic evaluation at epoch {epoch}: {e}")
-        return {}
+#     all_loss, all_steps = pool.graphs.globals[..., 0], pool.graphs.globals[..., 1]
+#     data = list(zip(all_steps, all_loss))
+#     table = wandb.Table(data=data, columns=["steps", "loss"])
+#     wandb_run.log({"pool/scatter": wandb.plot.scatter(table, "steps", "loss")})
 
 
 def run_knockout_periodic_evaluation(
@@ -699,13 +380,7 @@ def run_knockout_periodic_evaluation(
     Run periodic evaluation on circuits with persistent knockouts using vocabulary-based sampling.
     """
     try:
-        from boolean_nca_cc.training.knockout_eval import create_knockout_vocabulary
-        from boolean_nca_cc.training.pool.structural_perturbation import (
-            create_reproducible_knockout_pattern,
-            extract_layer_info_from_graph,
-        )
-        from functools import partial
-        
+    
         # Build a sample graph to extract true layer sizes
         sample_graph = build_graph(
             logits=base_logits,
@@ -734,7 +409,6 @@ def run_knockout_periodic_evaluation(
                 create_reproducible_knockout_pattern,
                 layer_sizes=true_layer_sizes,
                 damage_prob=knockout_config["damage_prob"],
-                target_layer=knockout_config["target_layer"],
                 input_n=input_n,
             )
             
@@ -750,13 +424,11 @@ def run_knockout_periodic_evaluation(
             lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_logits
         )
         
-        step_metrics_in = evaluate_circuits_in_chunks(
-            eval_fn=evaluate_model_stepwise_batched,
-            wires=in_wires,
-            logits=in_logits,
-            knockout_patterns=in_knockout_patterns,
-            target_chunk_size=eval_batch_size,
+        step_metrics_in = evaluate_model_stepwise_batched(
             model=model,
+            batch_wires=in_wires,
+            batch_logits=in_logits,
+            knockout_patterns=in_knockout_patterns,
             x_data=x_data,
             y_data=y_data,
             input_n=input_n,
@@ -783,7 +455,6 @@ def run_knockout_periodic_evaluation(
             create_reproducible_knockout_pattern,
             layer_sizes=true_layer_sizes,
             damage_prob=knockout_config["damage_prob"],
-            target_layer=knockout_config["target_layer"],
             input_n=input_n,
         )
         
@@ -791,35 +462,6 @@ def run_knockout_periodic_evaluation(
         ood_rng = jax.random.PRNGKey(periodic_eval_test_seed + 1)
         out_pattern_keys = jax.random.split(ood_rng, eval_batch_size)
         out_knockout_patterns = jax.vmap(pattern_creator_fn)(out_pattern_keys)
-        
-        # --- BEGIN DEBUG CHECKS ---
-        # Check that ID and OOD patterns are not the same
-        are_patterns_identical = jp.all(in_knockout_patterns == out_knockout_patterns)
-        log.info(f"DEBUG: Are IN-dist and OUT-dist patterns identical? {are_patterns_identical}")
-        
-        # Check if OOD patterns are in the vocabulary (they shouldn't be)
-        if knockout_vocabulary is not None and out_knockout_patterns.size > 0:
-            first_ood_pattern = out_knockout_patterns[0]
-            ood_in_vocab = jp.any(jp.all(first_ood_pattern == knockout_vocabulary, axis=1))
-            log.info(f"DEBUG: Is first OOD pattern in vocabulary? {ood_in_vocab}")
-            if wandb_run:
-                wandb_run.log({"debug/ood_pattern_in_vocab": float(ood_in_vocab)})
-
-        # Log pattern sums to wandb
-        if wandb_run:
-            in_sum = jp.sum(in_knockout_patterns)
-            out_sum = jp.sum(out_knockout_patterns)
-            log.info(f"DEBUG: IN-dist sum: {in_sum}, OUT-dist sum: {out_sum}")
-            wandb_run.log({
-                "debug/in_knockout_patterns_sum": in_sum,
-                "debug/out_knockout_patterns_sum": out_sum,
-                "debug/patterns_are_identical": float(are_patterns_identical),
-            })
-        
-        # This assertion will stop training if the patterns are identical
-        assert not are_patterns_identical, "IN-distribution and OUT-of-distribution knockout patterns are identical."
-        # --- END DEBUG CHECKS ---
-        
         # Replicate base circuit for the batch
         out_wires = jax.tree.map(
             lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_wires
@@ -828,13 +470,11 @@ def run_knockout_periodic_evaluation(
             lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_logits
         )
         
-        step_metrics_out = evaluate_circuits_in_chunks(
-            eval_fn=evaluate_model_stepwise_batched,
-            wires=out_wires,
-            logits=out_logits,
-            knockout_patterns=out_knockout_patterns,
-            target_chunk_size=eval_batch_size,
+        step_metrics_out = evaluate_model_stepwise_batched(
             model=model,
+            batch_wires=out_wires,
+            batch_logits=out_logits,
+            knockout_patterns=out_knockout_patterns,
             x_data=x_data,
             y_data=y_data,
             input_n=input_n,
@@ -906,10 +546,6 @@ def train_model(
     # Model architecture parameters
     arity: int = 2,
     circuit_hidden_dim: int = 16,
-    message_passing: bool = True,
-    node_mlp_features: List[int] = [64, 32],
-    edge_mlp_features: List[int] = [64, 32],
-    use_attention: bool = False,
     # Training hyperparameters
     learning_rate: float = 1e-3,
     weight_decay: float = 1e-4,
@@ -918,15 +554,9 @@ def train_model(
     use_scan: bool = False,
     # Loss parameters
     loss_type: str = "l4",  # Options: 'l4' or 'bce'
-    random_loss_step: bool = False,  # Use random message passing step for loss computation
-    use_beta_loss_step: bool = False,  # Use beta distribution for random loss step (varies from early to late steps through training)
     # Wiring mode parameters
     wiring_mode: str = "random",  # Options: 'fixed', 'random', or 'genetic'
     meta_batch_size: int = 64,
-    # Genetic mutation parameters (only used when wiring_mode='genetic')
-    genetic_mutation_rate: float = 0.0,  # Fraction of connections to mutate (0.0 to 1.0)
-    genetic_swaps_per_layer: int = 1,  # Number of swaps per layer for genetic mutation
-    initial_diversity: int = 1,  # Number of initial wires for genetic mutation
     # Pool parameters
     pool_size: int = 1024,
     reset_pool_fraction: float = 0.05,
@@ -936,6 +566,7 @@ def train_model(
         0.5,
         0.5,
     ),  # Weights for [loss, steps] in combined strategy
+    initial_diversity: int = 1,
     # Perturbation configurations
     persistent_knockout_config: Optional[Dict] = None,
     knockout_diversity: Optional[int] = None,  # Size of knockout pattern vocabulary for shared training/evaluation patterns
@@ -947,7 +578,7 @@ def train_model(
     wiring_fixed_key: jax.random.PRNGKey = jax.random.PRNGKey(
         42
     ),  # Fixed key for generating wirings when wiring_mode='fixed'
-    init_model: CircuitGNN | CircuitSelfAttention = None,
+    init_model: CircuitSelfAttention = None,
     init_optimizer: nnx.Optimizer = None,
     initial_metrics: Dict = None,
     # Checkpointing parameters
@@ -956,7 +587,7 @@ def train_model(
     checkpoint_interval: int = 10,
     save_best: bool = True,
     best_metric: str = "hard_accuracy",  # Options: 'loss', 'hard_loss', 'accuracy', 'hard_accuracy'
-    best_metric_source: str = "training",  # Options: 'training' or 'eval'
+    best_metric_source: str = 'training',
     save_stable_states: bool = True,
     # Periodic evaluation parameters
     periodic_eval_enabled: bool = False,
@@ -965,7 +596,7 @@ def train_model(
     periodic_eval_test_seed: int = 42,
     periodic_eval_log_stepwise: bool = False,
     periodic_eval_batch_size: int = 16,  # Batch size for random wiring evaluation
-    periodic_eval_log_pool_scatter: bool = False,
+    # periodic_eval_log_pool_scatter: bool = False,
     # Knockout evaluation parameters
     knockout_eval: Optional[Dict] = None,
     # Wandb parameters
@@ -976,7 +607,6 @@ def train_model(
     stop_accuracy_enabled: bool = False,
     stop_accuracy_threshold: float = 0.95,
     stop_accuracy_metric: str = "hard_accuracy",
-    stop_accuracy_source: str = "training",
     stop_accuracy_patience: int = 10,
     stop_accuracy_min_epochs: int = 100,
 ):
@@ -997,12 +627,8 @@ def train_model(
         epochs: Number of training epochs
         n_message_steps: Number of message passing steps per pool batch
         loss_type: Type of loss to use ('l4' for L4 norm or 'bce' for binary cross-entropy)
-        random_loss_step: Use random message passing step for loss computation
-        use_beta_loss_step: Use beta distribution for random loss step (varies from early to late steps through training)
         wiring_mode: Mode for circuit wirings ('fixed', 'random', or 'genetic')
         meta_batch_size: Batch size for training
-        genetic_mutation_rate: Fraction of connections to mutate (0.0 to 1.0)
-        genetic_swaps_per_layer: Number of swaps per layer for genetic mutation
         pool_size: Size of the graph pool
         reset_pool_fraction: Fraction of pool to reset periodically
         reset_pool_interval: Number of epochs between pool resets
@@ -1021,7 +647,6 @@ def train_model(
         checkpoint_interval: How often to save periodic checkpoints
         save_best: Whether to track and save the best model
         best_metric: Metric to use for determining the best model
-        best_metric_source: Source of the metric ('training' or 'eval')
         save_stable_states: Whether to save stable states (before potential NaN losses)
         periodic_eval_enabled: Whether to enable periodic evaluation
         periodic_eval_inner_steps: Number of inner steps for periodic evaluation
@@ -1035,7 +660,6 @@ def train_model(
         stop_accuracy_enabled: Whether to enable early stopping based on accuracy
         stop_accuracy_threshold: Accuracy threshold to trigger early stopping
         stop_accuracy_metric: Which accuracy metric to use ('accuracy' or 'hard_accuracy')
-        stop_accuracy_source: Source of the metric ('training' or 'eval')
         stop_accuracy_patience: Number of epochs to wait after reaching threshold before stopping
         stop_accuracy_min_epochs: Minimum number of epochs before early stopping can occur
     Returns:
@@ -1067,7 +691,7 @@ def train_model(
     if init_model is None:
         # Create a new GNN
         rng, init_key = jax.random.split(rng)
-        model = CircuitGNN(
+        model = CircuitSelfAttention(
             node_mlp_features=node_mlp_features,
             edge_mlp_features=edge_mlp_features,
             circuit_hidden_dim=circuit_hidden_dim,
@@ -1101,7 +725,7 @@ def train_model(
 
     # Initialize Graph Pool for training
     # Use consistent key generation: wiring_fixed_key for fixed/genetic modes, dynamic for random
-    if wiring_mode in ["fixed", "genetic"]:
+    if wiring_mode in ["fixed"]:
         training_pool_key = wiring_fixed_key
     else:
         # For random mode, use a portion of the main RNG to maintain consistency
@@ -1129,7 +753,7 @@ def train_model(
         ),
     )
     def pool_train_step(
-        model: CircuitGNN,
+        model: CircuitSelfAttention,
         optimizer: nnx.Optimizer,
         pool: GraphPool,
         idxs: jp.ndarray,
@@ -1168,58 +792,7 @@ def train_model(
         """
 
         def get_loss_step(loss_key):
-            if random_loss_step:
-                if use_beta_loss_step:
-                    return get_step_beta(
-                        loss_key,
-                        n_message_steps,
-                        training_progress=epoch / (epochs - 1),
-                    )
-                else:
-                    return jax.random.randint(loss_key, (1,), 0, n_message_steps)[0]
-            else:
-                return n_message_steps - 1
-
-        # Define loss function
-        def loss_fn_scan(model, graph, logits, wires, loss_key, knockout_pattern):
-            # Store original shapes for reconstruction
-            logits_original_shapes = [logit.shape for logit in logits]
-
-            # Determine which scan function to use based on model type
-            if isinstance(model, CircuitGNN):
-                from boolean_nca_cc.models.gnn import run_gnn_scan_with_loss
-
-                scan_fn = run_gnn_scan_with_loss
-            elif isinstance(model, CircuitSelfAttention):
-                from boolean_nca_cc.models.self_attention import (
-                    run_self_attention_scan_with_loss,
-                )
-
-                scan_fn = run_self_attention_scan_with_loss
-            else:
-                raise ValueError(f"Unknown model type: {type(model)}")
-
-            # Run scan for all steps, computing loss and updating graph at each step
-            final_graph, step_outputs = scan_fn(
-                model=model,
-                graph=graph,
-                num_steps=n_message_steps,
-                logits_original_shapes=logits_original_shapes,
-                wires=wires,
-                x_data=x,
-                y_data=y_target,
-                loss_type=loss_type,
-                layer_sizes=layer_sizes,
-                knockout_pattern=knockout_pattern,
-            )
-
-            loss_step = get_loss_step(loss_key)
-
-            final_graph, final_loss, final_logits, final_aux = jax.tree.map(
-                lambda x: x[loss_step], step_outputs
-            )
-
-            return final_loss, (final_aux, final_graph, final_logits, loss_step)
+            return n_message_steps - 1
 
         def loss_fn_no_scan(model, graph, logits, wires, loss_key, knockout_pattern):
             # Store original shapes for reconstruction
@@ -1260,10 +833,8 @@ def train_model(
             return final_loss, (final_aux, final_graph, final_logits, loss_step)
 
         def batch_loss_fn(model, graphs, logits, wires, loss_key, knockout_patterns):
-            if use_scan:
-                loss_fn = loss_fn_scan
-            else:
-                loss_fn = loss_fn_no_scan
+
+            loss_fn = loss_fn_no_scan
 
             loss_keys = jax.random.split(loss_key, graphs.n_node.shape[0])
             
@@ -1301,9 +872,6 @@ def train_model(
     wandb_run = _init_wandb(wandb_logging, wandb_run_config)
     wandb_id = wandb_run.run.id if wandb_run else None
 
-    # Setup checkpointing directory
-    checkpoint_path = _setup_checkpoint_dir(checkpoint_dir, wandb_id)
-
     # Track best model
     best_metric_value = float("-inf") if "accuracy" in best_metric else float("inf")
 
@@ -1319,24 +887,6 @@ def train_model(
     # Track last reset epoch for scheduling
     last_reset_epoch = -1  # Initialize to -1 so first check works correctly
 
-    # Initialize evaluation datasets for periodic evaluation if enabled
-    eval_datasets = None
-    if periodic_eval_enabled:
-        log.info("Creating standardized evaluation datasets for periodic evaluation")
-
-        # Create unified evaluation datasets
-        eval_datasets = create_unified_evaluation_datasets(
-            evaluation_base_seed=periodic_eval_test_seed,
-            training_wiring_mode=wiring_mode,
-            training_initial_diversity=initial_diversity,
-            layer_sizes=layer_sizes,
-            arity=arity,
-            eval_batch_size=periodic_eval_batch_size,
-        )
-
-        log.info(eval_datasets.get_summary())
-
-    knockout_eval_datasets = None
     knockout_eval_base_circuit = None
     if knockout_eval and knockout_eval.get("enabled"):
         # Store base circuit for on-demand evaluation (no pre-created datasets)
@@ -1349,9 +899,7 @@ def train_model(
     if (persistent_knockout_config and knockout_diversity is not None and 
         knockout_diversity > 0 and persistent_knockout_config.get("fraction", 0.0) > 0.0):
         log.info(f"Creating knockout pattern vocabulary with {knockout_diversity} patterns")
-        
-        from boolean_nca_cc.training.knockout_eval import create_knockout_vocabulary
-        
+                
         # Use the same seed as evaluation to ensure pattern space is identical
         vocab_rng = jax.random.PRNGKey(periodic_eval_test_seed)
         
@@ -1377,12 +925,6 @@ def train_model(
         )
         
         log.info(f"Generated knockout vocabulary with shape: {knockout_vocabulary.shape}")
-
-        # DEBUG: Verify vocabulary content
-        if wandb_run:
-            vocab_sum = jp.sum(knockout_vocabulary)
-            log.info(f"DEBUG: Vocabulary sum: {vocab_sum}")
-            wandb_run.log({"debug/vocab_sum": vocab_sum})
 
     # Save initial stable state if needed
     last_stable_state = {
@@ -1436,81 +978,53 @@ def train_model(
             *_, hard_loss, _, _, accuracy, hard_accuracy, _, _ = aux
 
             # Reset a fraction of the pool using scheduled intervals
-
             if should_reset_pool(epoch, reset_pool_interval, last_reset_epoch):
-                rng, reset_key, fresh_key = jax.random.split(rng, 3)
+                rng, reset_key = jax.random.split(rng, 2)
 
-                if wiring_mode == "genetic":
-                    # Use genetic mutations instead of completely fresh circuits
-                    circuit_pool, avg_steps_reset = (
-                        circuit_pool.reset_with_genetic_mutation(
-                            key=reset_key,
-                            fraction=reset_pool_fraction,
-                            layer_sizes=layer_sizes,
-                            input_n=input_n,
-                            arity=arity,
-                            circuit_hidden_dim=circuit_hidden_dim,
-                            mutation_rate=genetic_mutation_rate,
-                            n_swaps_per_layer=genetic_swaps_per_layer,
-                            reset_strategy=reset_strategy,
-                            combined_weights=combined_weights,
-                        )
+                # Generate fresh circuits for resetting, potentially with knockouts
+                num_to_reset = max(1, round(pool_size * reset_pool_fraction))
+
+
+                reset_pool_key = wiring_fixed_key
+
+
+                # Sample knockout patterns from vocabulary if available, otherwise use config
+                sampled_knockout_patterns = None
+                if knockout_vocabulary is not None:
+                    # Sample patterns with replacement from the vocabulary
+                    pattern_sample_key = jax.random.fold_in(reset_key, 42)  # Use different key for pattern sampling
+                    pattern_indices = jax.random.choice(
+                        pattern_sample_key, knockout_diversity, shape=(num_to_reset,), replace=True
                     )
-                else:
-                    # Original logic for fixed and random wiring modes
-                    # Generate fresh circuits for resetting, potentially with knockouts
-                    num_to_reset = max(1, round(pool_size * reset_pool_fraction))
-
-                    # Use consistent key generation for pool resets
-                    if wiring_mode in ["fixed", "genetic"]:
-                        reset_pool_key = wiring_fixed_key
-                    else:
-                        reset_pool_key = fresh_key
-
-                    # Sample knockout patterns from vocabulary if available, otherwise use config
-                    sampled_knockout_patterns = None
-                    if knockout_vocabulary is not None:
-                        # Sample patterns with replacement from the vocabulary
-                        pattern_sample_key = jax.random.fold_in(reset_key, 42)  # Use different key for pattern sampling
-                        pattern_indices = jax.random.choice(
-                            pattern_sample_key, knockout_diversity, shape=(num_to_reset,), replace=True
-                        )
-                        sampled_knockout_patterns = knockout_vocabulary[pattern_indices]
-
-                        # DEBUG: Verify that sampled training patterns are in the vocabulary
-                        if wandb_run and sampled_knockout_patterns.size > 0:
-                            # Check if the first sampled pattern exists in the vocabulary
-                            first_pattern = sampled_knockout_patterns[0]
-                            is_in_vocab = jp.any(jp.all(first_pattern == knockout_vocabulary, axis=1))
-                            log.info(f"DEBUG: First sampled training pattern is in vocabulary: {is_in_vocab}")
-                            wandb_run.log({"debug/train_pattern_in_vocab": float(is_in_vocab)})
+                    sampled_knockout_patterns = knockout_vocabulary[pattern_indices]
 
 
-                    # Create a pool of fresh circuits, applying knockout patterns
-                    damaged_pool = initialize_graph_pool(
-                        rng=reset_pool_key,
-                        layer_sizes=layer_sizes,
-                        pool_size=num_to_reset,  # Only create circuits we need
-                        input_n=input_n,
-                        arity=arity,
-                        circuit_hidden_dim=circuit_hidden_dim,
-                        wiring_mode=wiring_mode,
-                        initial_diversity=initial_diversity,
-                        knockout_config=persistent_knockout_config if knockout_vocabulary is None else None,  # Use config only if no vocabulary
-                        knockout_patterns=sampled_knockout_patterns,  # Pass sampled patterns
-                    )
 
-                    # Reset a fraction of the pool and get avg steps of reset graphs
-                    circuit_pool, avg_steps_reset = circuit_pool.reset_fraction(
-                        reset_key,
-                        reset_pool_fraction,
-                        damaged_pool.graphs,
-                        damaged_pool.wires,
-                        damaged_pool.logits,
-                        damaged_pool.knockout_patterns,  # Pass patterns
-                        reset_strategy=reset_strategy,
-                        combined_weights=combined_weights,
-                    )
+                # Create a pool of fresh circuits, applying knockout patterns
+                damaged_pool = initialize_graph_pool(
+                    rng=reset_pool_key,
+                    layer_sizes=layer_sizes,
+                    pool_size=num_to_reset,  # Only create circuits we need
+                    input_n=input_n,
+                    arity=arity,
+                    circuit_hidden_dim=circuit_hidden_dim,
+                    wiring_mode=wiring_mode,
+                    initial_diversity=initial_diversity,
+                    knockout_config=persistent_knockout_config if knockout_vocabulary is None else None,  # Use config only if no vocabulary
+                    knockout_patterns=sampled_knockout_patterns,  # Pass sampled patterns
+                )
+
+                # Reset a fraction of the pool and get avg steps of reset graphs
+                circuit_pool, avg_steps_reset = circuit_pool.reset_fraction(
+                    reset_key,
+                    reset_pool_fraction,
+                    damaged_pool.graphs,
+                    damaged_pool.wires,
+                    damaged_pool.logits,
+                    damaged_pool.knockout_patterns,  # Pass patterns
+                    reset_strategy=reset_strategy,
+                    combined_weights=combined_weights,
+                )
 
                 # Update last reset epoch
                 last_reset_epoch = epoch
@@ -1519,14 +1033,6 @@ def train_model(
             if jp.isnan(loss):
                 log.warning(
                     f"Loss is NaN at epoch {epoch}, returning last stable state"
-                )
-                # Save the last stable state if enabled
-                _save_stable_state(
-                    checkpoint_path,
-                    save_stable_states,
-                    last_stable_state,
-                    epoch,
-                    wandb_run,
                 )
                 return last_stable_state
             else:
@@ -1619,40 +1125,6 @@ def train_model(
                 # Step 2: Run periodic evaluation if enabled (BEFORE best model tracking)
                 all_eval_metrics = {}
                 if (
-                    periodic_eval_enabled
-                    and eval_datasets is not None
-                    and epoch % periodic_eval_interval == 0
-                ):
-                    # Run enhanced evaluations: fixed seed, pool sample (if diversity > 1), and OOD
-                    rng, eval_key = jax.random.split(rng)
-
-                    # Use the same datasets created during initialization
-                    # The pool evaluation circuits are recreated with the same logic as training
-                    current_datasets = eval_datasets
-
-                    eval_results = run_unified_periodic_evaluation(
-                        model=model,
-                        datasets=current_datasets,
-                        pool=circuit_pool,
-                        x_data=x_data,
-                        y_data=y_data,
-                        input_n=input_n,
-                        arity=arity,
-                        circuit_hidden_dim=circuit_hidden_dim,
-                        n_message_steps=periodic_eval_inner_steps,  # Use fixed message steps
-                        loss_type=loss_type,
-                        epoch=epoch,
-                        wandb_run=wandb_run,
-                        log_stepwise=periodic_eval_log_stepwise,
-                        layer_sizes=layer_sizes,
-                        log_pool_scatter=periodic_eval_log_pool_scatter,
-                    )
-                    # Extract final metrics for best model tracking (use IN-distribution metrics)
-                    if eval_results and "final_metrics_in" in eval_results:
-                        all_eval_metrics.update(eval_results["final_metrics_in"])
-                        all_eval_metrics.update(eval_results["final_metrics_out"])
-
-                if (
                     knockout_eval
                     and knockout_eval.get("enabled")
                     and knockout_eval_base_circuit is not None
@@ -1660,7 +1132,6 @@ def train_model(
                 ):
                     base_wires, base_logits = knockout_eval_base_circuit
 
-                    # DEBUG: Pass vocabulary and wandb_run for detailed checks
                     ko_eval_results = run_knockout_periodic_evaluation(
                         model=model,
                         knockout_vocabulary=knockout_vocabulary,
@@ -1690,7 +1161,8 @@ def train_model(
                 # Set current eval metrics to the combined dictionary if any evals ran
                 current_eval_metrics = all_eval_metrics if all_eval_metrics else None
 
-                # Step 3: Get current metric value for best model tracking using modular approach
+                # Step 3: Get current metric value for best model tracking
+                                # Step 3: Get current metric value for best model tracking using modular approach
                 try:
                     current_metric_value = _get_metric_value(
                         best_metric,
@@ -1731,73 +1203,6 @@ def train_model(
                         if current_metric_value < best_metric_value:
                             best_metric_value = current_metric_value
                             is_best = True
-
-                # Step 4: Save checkpoints (periodic always, best if improvement detected)
-                if checkpoint_enabled:
-                    _save_periodic_checkpoint(
-                        checkpoint_path,
-                        model,
-                        optimizer,
-                        {
-                            "losses": losses,
-                            "hard_losses": hard_losses,
-                            "accuracies": accuracies,
-                            "hard_accuracies": hard_accuracies,
-                            "reset_steps": reset_steps,
-                        },
-                        epoch,
-                        checkpoint_interval,
-                        wandb_run,
-                    )
-
-                    # Save best model if enabled and is best
-                    _save_best_checkpoint(
-                        checkpoint_path,
-                        is_best,
-                        save_best,
-                        model,
-                        optimizer,
-                        {
-                            "losses": losses,
-                            "hard_losses": hard_losses,
-                            "accuracies": accuracies,
-                            "hard_accuracies": hard_accuracies,
-                            "reset_steps": reset_steps,
-                        },
-                        epoch,
-                        f"{best_metric_source}_{best_metric}",  # Include source in metric name
-                        current_metric_value
-                        if current_metric_value is not None
-                        else best_metric_value,
-                        wandb_run,
-                    )
-
-                # Step 5: Check for early stopping based on accuracy
-                (
-                    should_break,
-                    early_stop_triggered,
-                    epochs_above_threshold,
-                    first_threshold_epoch,
-                    current_eval_metrics,
-                    rng,
-                ) = _check_early_stopping(
-                    stop_accuracy_enabled=stop_accuracy_enabled,
-                    epoch=epoch,
-                    stop_accuracy_min_epochs=stop_accuracy_min_epochs,
-                    early_stop_triggered=early_stop_triggered,
-                    stop_accuracy_metric=stop_accuracy_metric,
-                    stop_accuracy_source=stop_accuracy_source,
-                    training_metrics=training_metrics,
-                    current_eval_metrics=current_eval_metrics,
-                    stop_accuracy_threshold=stop_accuracy_threshold,
-                    first_threshold_epoch=first_threshold_epoch,
-                    epochs_above_threshold=epochs_above_threshold,
-                    stop_accuracy_patience=stop_accuracy_patience,
-                    rng=rng,
-                )
-
-                if should_break:
-                    break
 
                 # Return the trained GNN model and metrics
                 result = {
