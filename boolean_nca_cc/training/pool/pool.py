@@ -15,8 +15,6 @@ import jraph
 
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.utils.graph_builder import build_graph
-from boolean_nca_cc.utils.extraction import extract_logits_from_graph
-from boolean_nca_cc.training.pool.perturbation import mutate_wires_batch
 from boolean_nca_cc.training.pool.structural_perturbation import (
     create_reproducible_knockout_pattern,
     extract_layer_info_from_graph,
@@ -449,8 +447,6 @@ def initialize_graph_pool(
         arity: Number of inputs per gate
         circuit_hidden_dim: Dimension of hidden features
         loss_value: Initial loss value for graph globals
-        # wiring_mode: Mode for generating wirings ("random", "fixed", or "genetic")
-        # initial_diversity: Number of different initial wirings to start with.
         knockout_config: Optional configuration to apply persistent knockouts
                          to a fraction of the newly created circuits.
                          Expected keys: 'fraction', 'damage_prob'.

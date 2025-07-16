@@ -10,6 +10,7 @@ import jax
 import jax.numpy as jp
 import jraph
 from typing import List, Tuple, Optional
+from functools import partial
 
 
 def create_reproducible_knockout_pattern(
@@ -86,6 +87,39 @@ def create_reproducible_knockout_pattern(
     
     return knockout_pattern
 
+
+def create_knockout_vocabulary(
+    rng: jax.random.PRNGKey,
+    vocabulary_size: int,
+    layer_sizes: List[Tuple[int, int]],
+    damage_prob: float,
+    input_n: int,
+) -> jp.ndarray:
+    """
+    Generates a fixed vocabulary of knockout patterns.
+
+    Args:
+        rng: JAX random key.
+        vocabulary_size: The number of unique patterns to generate.
+        layer_sizes: List of (nodes, group_size) for each layer.
+        damage_prob: The probability of knocking out a connection.
+        target_layer: The specific layer to target for knockouts.
+        input_n: The number of input nodes.
+
+    Returns:
+        An array of knockout patterns of shape (vocabulary_size, ...).
+    """
+    pattern_creator_fn = partial(
+        create_reproducible_knockout_pattern,
+        layer_sizes=layer_sizes,
+        damage_prob=damage_prob,
+        input_n=input_n,
+    )
+
+    pattern_keys = jax.random.split(rng, vocabulary_size)
+    knockout_vocabulary = jax.vmap(pattern_creator_fn)(pattern_keys)
+
+    return knockout_vocabulary
 
 def extract_layer_info_from_graph(graph: jraph.GraphsTuple, input_n: int) -> List[Tuple[int, int]]:
     """

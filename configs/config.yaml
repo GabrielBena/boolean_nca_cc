@@ -1,0 +1,82 @@
+# Main Hydra configuration file for Boolean NCA training
+
+# Default parameters for experiment
+defaults:
+  - model: self_attention  # Default model (gnn or self_attention)
+  - _self_  # For self-overrides
+
+# Random seed for reproducibility
+seed: 0
+test_seed: 42
+
+# Output configuration
+output:
+  dir: null  # Output directory (null means use current working directory)
+
+# Wandb configuration
+wandb:
+  enabled: true
+  project: "boolean-nca-cc"
+  entity: marcello-barylli-growai  # Your wandb username or team name
+  run_name: null  # Auto-generated if null
+  tags: ["boolean-circuit", "nca", "meta-learning"]
+  group: null
+
+# Circuit configuration
+circuit:
+  task: "reverse"
+  input_bits: 8
+  output_bits: 8
+  arity: 4
+  num_layers: 3
+  layer_sizes: null  # Auto-generate if null 
+  circuit_hidden_dim: 32
+
+# Training parameters
+training:
+  # INNER LOOP
+  n_message_steps: 5  # Number of message passing steps per training iteration
+  # LOSS TYPE
+  loss_type: "l4"  # Options: "l4", "l2", or "bce"
+  # BATCH SIZE
+  meta_batch_size: 64
+  # OPTIMIZATION
+  learning_rate: 2e-4
+  weight_decay: 1e-5
+  # LEARNING RATE SCHEDULER
+  lr_scheduler: "linear_warmup"  # Options: "constant", "exponential", "cosine", "linear_warmup"
+  lr_scheduler_params:
+    warmup_steps_factor: 50
+    lr_warmup_start: 1e-6
+    exponent: 1
+    alpha: 1e-1 # final lr = 1% of initial lr
+  # NUMBER OF EPOCHS
+  epochs: 8192 # 512
+  epochs_power_of_2: 12 # 2^n
+  # USE SCAN
+  use_scan: false
+
+pool:
+  size: 1024
+  reset_fraction: 0.15
+  reset_interval: 128
+  reset_strategy: "combined"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
+  combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
+
+  # Persistent structural knockout (injected periodically)
+  persistent_knockout:
+    fraction: 0.8 # 0.00001 # Fraction of the *newly reset* circuits to damage
+    damage_prob: 70.0 # Expected number of knockouts (per layer if target_layer specified, per circuit if null)
+    knockout_diversity: 256  # Vocabulary size for knockout patterns
+
+eval:
+  # Knockout evaluation
+  knockout_eval:
+    enabled: true
+    damage_prob: ${pool.persistent_knockout.damage_prob}
+    target_layer: null
+
+# Logging configuration
+logging:
+  log_interval: 16  # Log metrics every N epochs
+  level: "INFO" 
