@@ -73,7 +73,29 @@ this codebase uses the 'metabool' conda environment. IMPORTANT: conda activate m
   - Orchestrates model instantiation and training
   - Manages experiment configuration and logging
 
-### 6. Knockout Mechanisms
+### 6. Configuration Management
+- **`configs/config.yaml`**
+  - Central hub controlling all experiment parameters
+  - **Critical Training Parameters**:
+    - `training`: Batch sizes, learning rates, optimizer settings
+    - `pool`: Circuit population management and knockout injection settings
+    - `eval`: Knockout evaluation frequency and damage parameters
+  - **Key Knockout Controls**:
+    - `persistent_knockout.fraction`: Percentage of circuits receiving knockouts
+    - `persistent_knockout.damage_prob`: Knockout density per circuit
+    - `knockout_diversity`: Number of unique knockout patterns
+  - **Model Selection**: Swappable model architectures via Hydra config
+
+- **`configs/model/self_attention.yaml`**
+  - Model-specific hyperparameters:
+    - Self-attention layer dimensions
+    - Number of attention heads
+    - Masking strategies for knockout nodes
+    - Transformer architecture variants
+  - Optimization parameters for attention-based updates
+
+### 7. Knockout Mechanisms
+>
 - **`boolean_nca_cc/training/pool/structural_perturbation.py`**
   - Defines knockout pattern generation
   - Creates reproducible perturbations for evaluation
@@ -128,7 +150,7 @@ we are creating a testing suite to get a comprehensive understanding of each com
 ### Ground-Up Component Isolation Testing
 All testing scripts should be in tests/
 
-The tests should reflect the functions as they are used in the actual codebase / training and eval run. 
+The tests should reflect the functions as they are used in the actual codebase / training and eval run. THis also means that each test script should import from config.yaml, if it uses parameters defined there.
 
 IMPORTANT: For each testing script, the functions that are being tested might have dependencies on other parts of the codebase. So we need to read the files that are being imported into the test scripts as well to get a clear understanding of the methods. Before writing any test script, please identify the substructure of the codebase it represents and how the scripts and functions fit together. Then, see how the specific implementation can be tested according to our plan by consulting with me on this structure and proposed tests. 
 
@@ -197,6 +219,7 @@ IMPORTANT: CONSULT WITH ME, do not implement unless I say so. I want part of the
   - Verify scan-based optimization handles masked attention
   - Verify patterns reach the model's attention mechanism
   - Validate attention masking actually prevents updates
+  - Validate that knocked out nodes do not get upddated in any way, which includes message passing, residual updates or any other update
 
 **4.2 Model State Updates**
 - Test knocked-out nodes remain unchanged during optimization

@@ -177,6 +177,9 @@ The `extract_logits_from_graph` function in `utils/extraction.py` has a **fundam
 4. `test_gradient_flow_through_extraction` - Type errors in gradient computation
 5. Multiple other tests dependent on correct extraction
 
+
+Marcello's note: before we propse a fix, we should verify that this is not simply an issue with the test script. Therefore, we have to directtly trace this functionality as it is used in the training loop.
+
 **Proposed Fix**:
 
 The `extract_logits_from_graph` function needs to be modified to:
