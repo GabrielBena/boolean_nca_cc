@@ -242,7 +242,7 @@ def run_knockout_periodic_evaluation(
             n_message_steps=n_message_steps,
             loss_type=loss_type,
             layer_sizes=layer_sizes,
-            use_scan=use_scan,
+            # use_scan=use_scan,
         )
 
         final_metrics_in = {
@@ -319,7 +319,7 @@ def run_knockout_periodic_evaluation(
             n_message_steps=n_message_steps,
             loss_type=loss_type,
             layer_sizes=layer_sizes,
-            use_scan=use_scan,
+            # use_scan=use_scan,
         )
 
         final_metrics_out = {
@@ -419,10 +419,10 @@ def train_model(
     init_optimizer: Optional[nnx.Optimizer] = None,
     initial_metrics: Optional[Dict] = None,
     # Checkpointing parameters
-    save_best: bool = True,
-    best_metric: str = "hard_accuracy",  # Options: 'loss', 'hard_loss', 'accuracy', 'hard_accuracy'
-    best_metric_source: str = "training",  # Options: 'training' or 'eval'
-    save_stable_states: bool = True,
+    # save_best: bool = True,
+    # best_metric: str = "hard_accuracy",  # Options: 'loss', 'hard_loss', 'accuracy', 'hard_accuracy'
+    # best_metric_source: str = "training",  # Options: 'training' or 'eval'
+    # save_stable_states: bool = True,
     # Periodic evaluation parameters
     periodic_eval_enabled: bool = False,
     periodic_eval_inner_steps: int = 100,
@@ -469,10 +469,10 @@ def train_model(
         lr_scheduler_params: Dictionary of parameters for the scheduler
         # checkpoint_dir: Directory to save checkpoints
         # checkpoint_interval: How often to save periodic checkpoints
-        save_best: Whether to track and save the best model
-        best_metric: Metric to use for determining the best model
-        best_metric_source: Source of the metric ('training' or 'eval')
-        save_stable_states: Whether to save stable states (before potential NaN losses)
+        # save_best: Whether to track and save the best model
+        # best_metric: Metric to use for determining the best model
+        # best_metric_source: Source of the metric ('training' or 'eval')
+        # save_stable_states: Whether to save stable states (before potential NaN losses)
         periodic_eval_enabled: Whether to enable periodic evaluation
         periodic_eval_inner_steps: Number of inner steps for periodic evaluation
         periodic_eval_interval: Interval for periodic evaluation
@@ -509,23 +509,24 @@ def train_model(
 
     # Initialize or reuse GNN
     if init_model is None:
-        # Create a new GNN
-        rng, init_key = jax.random.split(rng)
-        model = CircuitSelfAttention(
-            # node_mlp_features=node_mlp_features,
-            # edge_mlp_features=edge_mlp_features,
-            circuit_hidden_dim=circuit_hidden_dim,
-            arity=arity,
-            attention_dim=128,
-            num_heads=4,
-            num_layers=3,
-            mlp_dim=256,
-            mlp_dim_multiplier=2,
-            dropout_rate=0.0,
-            # message_passing=message_passing,
-            # use_attention=use_attention,
-            rngs=nnx.Rngs(params=init_key),
-        )
+        # # Create a new GNN
+        # rng, init_key = jax.random.split(rng)
+        # model = CircuitSelfAttention(
+        #     # node_mlp_features=node_mlp_features,
+        #     # edge_mlp_features=edge_mlp_features,
+        #     circuit_hidden_dim=circuit_hidden_dim,
+        #     arity=arity,
+        #     attention_dim=128,
+        #     num_heads=4,
+        #     num_layers=3,
+        #     mlp_dim=256,
+        #     mlp_dim_multiplier=2,
+        #     dropout_rate=0.0,
+        #     # message_passing=message_passing,
+        #     # use_attention=use_attention,
+        #     rngs=nnx.Rngs(params=init_key),
+        # )
+        pass
     else:
         # Use the provided GNN
         model = init_model
@@ -693,7 +694,7 @@ def train_model(
     wandb_id = wandb_run.run.id if wandb_run else None
 
     # Track best model
-    best_metric_value = float("-inf") if "accuracy" in best_metric else float("inf")
+    # best_metric_value = float("-inf") if "accuracy" in best_metric else float("inf")
 
     # Create progress bar for training
     pbar = tqdm(range(epochs), desc="Training GNN")
@@ -826,7 +827,7 @@ def train_model(
 
                 # Update last reset epoch
                 last_reset_epoch = epoch
-                diversity = circuit_pool.get_wiring_diversity(layer_sizes)
+                # diversity = circuit_pool.get_wiring_diversity(layer_sizes)
 
             if jp.isnan(loss):
                 log.warning(
@@ -875,9 +876,9 @@ def train_model(
                     "training/hard_loss": float(hard_loss),
                     "training/accuracy": float(accuracy),
                     "training/hard_accuracy": float(hard_accuracy),
-                    "pool/wiring_diversity": float(diversity),
+                    # "pool/wiring_diversity": float(diversity),
                     "pool/reset_steps": float(avg_steps_reset),
-                    "pool/avg_update_steps": float(avg_steps),
+                    # "pool/avg_update_steps": float(avg_steps),
                     "pool/loss_steps": loss_steps,
                 }
 
@@ -895,7 +896,7 @@ def train_model(
                     "Loss": f"{loss:.4f}",
                     "Accuracy": f"{accuracy:.4f}",
                     "Hard Acc": f"{hard_accuracy:.4f}",
-                    "Diversity": f"{diversity:.3f}",
+                    # "Diversity": f"{diversity:.3f}",
                     "Reset Steps": f"{avg_steps_reset:.2f}",
                     "Loss Steps": f"{loss_steps:.2f}",
                 }
@@ -943,46 +944,46 @@ def train_model(
                 current_eval_metrics = all_eval_metrics if all_eval_metrics else None
 
                 # Step 3: Get current metric value for best model tracking using modular approach
-                try:
-                    current_metric_value = _get_metric_value(
-                        best_metric,
-                        best_metric_source,
-                        training_metrics,
-                        current_eval_metrics,
-                    )
-                except (ValueError, KeyError) as e:
-                    if "eval" in best_metric_source and not (
-                        periodic_eval_enabled or (knockout_eval and knockout_eval.get("enabled"))
-                    ):
-                        log.warning(
-                            f"Best metric source is '{best_metric_source}' but corresponding evaluation is disabled. "
-                            f"Falling back to training metrics for {best_metric}."
-                        )
-                        current_metric_value = _get_metric_value(
-                            best_metric,
-                            "training",
-                            training_metrics,
-                            current_eval_metrics,
-                        )
-                    elif "eval" in best_metric_source and current_eval_metrics is None:
-                        # Evaluation is enabled but hasn't run yet this epoch, skip best model check
-                        current_metric_value = None
-                    else:
-                        raise e
+                # try:
+                #     current_metric_value = _get_metric_value(
+                #         best_metric,
+                #         best_metric_source,
+                #         training_metrics,
+                #         current_eval_metrics,
+                #     )
+                # except (ValueError, KeyError) as e:
+                #     if "eval" in best_metric_source and not (
+                #         periodic_eval_enabled or (knockout_eval and knockout_eval.get("enabled"))
+                #     ):
+                #         log.warning(
+                #             f"Best metric source is '{best_metric_source}' but corresponding evaluation is disabled. "
+                #             f"Falling back to training metrics for {best_metric}."
+                #         )
+                #         current_metric_value = _get_metric_value(
+                #             best_metric,
+                #             "training",
+                #             training_metrics,
+                #             current_eval_metrics,
+                #         )
+                #     elif "eval" in best_metric_source and current_eval_metrics is None:
+                #         # Evaluation is enabled but hasn't run yet this epoch, skip best model check
+                #         current_metric_value = None
+                #     else:
+                #         raise e
 
                 # Check if this is the best model based on the specified metric
-                is_best = False
-                if current_metric_value is not None:
-                    if (
-                        "accuracy" in best_metric
-                    ):  # For accuracy metrics, higher is better
-                        if current_metric_value > best_metric_value:
-                            best_metric_value = current_metric_value
-                            is_best = True
-                    else:  # For loss metrics, lower is better
-                        if current_metric_value < best_metric_value:
-                            best_metric_value = current_metric_value
-                            is_best = True
+                # is_best = False
+                # if current_metric_value is not None:
+                #     if (
+                #         "accuracy" in best_metric
+                #     ):  # For accuracy metrics, higher is better
+                #         if current_metric_value > best_metric_value:
+                #             best_metric_value = current_metric_value
+                #             is_best = True
+                #     else:  # For loss metrics, lower is better
+                #         if current_metric_value < best_metric_value:
+                #             best_metric_value = current_metric_value
+                #             is_best = True
 
                 # Return the trained GNN model and metrics
                 result = {
@@ -993,8 +994,8 @@ def train_model(
                     "accuracies": accuracies,
                     "hard_accuracies": hard_accuracies,
                     "reset_steps": reset_steps,
-                    "best_metric_value": best_metric_value,
-                    "best_metric": best_metric,
+                    # "best_metric_value": best_metric_value,
+                    # "best_metric": best_metric,
                 }
 
                 # Add pool to result if used

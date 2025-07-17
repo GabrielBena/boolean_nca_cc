@@ -15,6 +15,7 @@ import jraph
 
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.utils.graph_builder import build_graph
+from boolean_nca_cc.utils.extraction import extract_logits_from_graph
 from boolean_nca_cc.training.pool.structural_perturbation import (
     create_reproducible_knockout_pattern,
     extract_layer_info_from_graph,
@@ -89,6 +90,8 @@ class GraphPool(struct.PyTreeNode):
         return cls(
             size=size,
             graphs=batched_graphs,
+            wires=wires,
+            logits=logits,
             reset_counter=reset_counter,
             knockout_patterns=knockout_patterns,
         )
@@ -98,6 +101,8 @@ class GraphPool(struct.PyTreeNode):
         self,
         idxs: Array,
         batch_of_graphs: jraph.GraphsTuple,
+        batch_of_wires: PyTree = None,
+        batch_of_logits: PyTree = None,
         batch_of_knockout_patterns: Optional[Array] = None,
     ) -> "GraphPool":
         """
@@ -108,6 +113,10 @@ class GraphPool(struct.PyTreeNode):
             batch_of_graphs: A jraph.GraphsTuple where each leaf has a leading
                              batch dimension corresponding to the size of `idxs`.
                              This contains the new graph data.
+            batch_of_wires: Optional PyTree of wires corresponding to batch_of_graphs.
+                            If None, wires remain unchanged.
+            batch_of_logits: Optional PyTree of logits corresponding to batch_of_graphs.
+                            If None, logits remain unchanged.
             batch_of_knockout_patterns: Optional knockout patterns for updated graphs.
 
         Returns:
@@ -160,6 +169,29 @@ class GraphPool(struct.PyTreeNode):
             is None,  # Tells tree_map to treat None values as leaves
         )
 
+        # Update wires if provided
+        updated_wires = self.wires
+        if batch_of_wires is not None and self.wires is not None:
+            updated_wires = jax.tree.map(
+                lambda pool_wires, batch_wires: pool_wires.at[idxs].set(batch_wires),
+                self.wires,
+                batch_of_wires,
+            )
+
+        # Update logits if provided
+        updated_logits = self.logits
+        if batch_of_logits is None:
+            batch_of_logits = jax.vmap(extract_logits_from_graph, in_axes=(0, None))(
+                batch_of_graphs, [l.shape[1:] for l in self.logits]
+            )
+        if self.logits is not None:
+            updated_logits = jax.tree.map(
+                lambda pool_logits, batch_logits: pool_logits.at[idxs].set(
+                    batch_logits
+                ),
+                self.logits,
+                batch_of_logits,
+            )
         # Update knockout patterns if provided
         updated_knockout_patterns = self.knockout_patterns
         if (
@@ -179,6 +211,8 @@ class GraphPool(struct.PyTreeNode):
 
         return self.replace(
             graphs=updated_graphs_data,
+            wires=updated_wires,
+            logits=updated_logits,
             reset_counter=updated_reset_counter,
             knockout_patterns=updated_knockout_patterns,
         )
@@ -200,6 +234,8 @@ class GraphPool(struct.PyTreeNode):
                 - idxs: The sampled batch indices in the pool.
                 - sampled_graphs: A jraph.GraphsTuple where each leaf is sliced
                                   according to idxs, representing the sampled batch.
+                - sampled_wires: Corresponding wires.
+                - sampled_logits: Corresponding logits.
                 - sampled_knockout_patterns: Corresponding knockout patterns.
         """
         idxs = jax.random.choice(key, self.size, shape=(batch_size,))
@@ -210,28 +246,39 @@ class GraphPool(struct.PyTreeNode):
             return pool_leaf[idxs]
 
         sampled_graphs = jax.tree.map(_safe_slice_leaf, self.graphs)
+
+        # Sample wires if they exist
+        sampled_wires = None
+        if self.wires is not None:
+            sampled_wires = jax.tree.map(_safe_slice_leaf, self.wires)
+
+        # Sample logits if they exist
+        sampled_logits = None
+        if self.logits is not None:
+            sampled_logits = jax.tree.map(_safe_slice_leaf, self.logits)
+
         # Sample knockout patterns
         sampled_knockout_patterns = jax.tree.map(_safe_slice_leaf, self.knockout_patterns)
 
-        return idxs, sampled_graphs, sampled_knockout_patterns
+        return idxs, sampled_graphs, sampled_wires, sampled_logits, sampled_knockout_patterns
 
-    # # Method to get average update steps of graphs in the pool
-    # def get_average_update_steps(self) -> float:
-    #     """Get the average number of update steps across all graphs in the pool."""
-    #     if self.graphs.globals is None:
-    #         return 0.0
-    #     # Extract update_steps from the globals (second element in each graph's globals)
-    #     update_steps = self.graphs.globals[..., 1]
-    #     return float(jp.mean(update_steps))
+    # Method to get average update steps of graphs in the pool
+    def get_average_update_steps(self) -> float:
+        """Get the average number of update steps across all graphs in the pool."""
+        if self.graphs.globals is None:
+            return 0.0
+        # Extract update_steps from the globals (second element in each graph's globals)
+        update_steps = self.graphs.globals[..., 1]
+        return float(jp.mean(update_steps))
 
-    # # Method to get average update steps of a subset of graphs (for reset reporting)
-    # def get_average_update_steps_for_indices(self, indices: Array) -> float:
-    #     """Get the average number of update steps for specified graph indices."""
-    #     if self.graphs.globals is None:
-    #         return 0.0
-    #     # Extract update_steps for the selected indices
-    #     update_steps = self.graphs.globals[indices, 1]
-    #     return float(jp.mean(update_steps))
+    # Method to get average update steps of a subset of graphs (for reset reporting)
+    def get_average_update_steps_for_indices(self, indices: Array) -> float:
+        """Get the average number of update steps for specified graph indices."""
+        if self.graphs.globals is None:
+            return 0.0
+        # Extract update_steps for the selected indices
+        update_steps = self.graphs.globals[indices, 1]
+        return float(jp.mean(update_steps))
 
 
     def reset_fraction(
@@ -239,6 +286,8 @@ class GraphPool(struct.PyTreeNode):
         key: Array,
         fraction: float,
         new_graphs: jraph.GraphsTuple,
+        new_wires: Optional[PyTree] = None,
+        new_logits: Optional[PyTree] = None,
         new_knockout_patterns: Optional[Array] = None,
         reset_strategy: str = "uniform",  # Options: "uniform", "steps_biased", "loss_biased", or "combined"
         combined_weights: Tuple[float, float] = (
@@ -253,6 +302,8 @@ class GraphPool(struct.PyTreeNode):
             key: Random key for selection
             fraction: Fraction of pool to reset (between 0 and 1)
             new_graphs: Fresh graphs to use for reset
+            new_wires: Fresh wires to use for reset
+            new_logits: Fresh logits to use for reset
             new_knockout_patterns: Fresh knockout patterns for reset
             reset_strategy: Strategy for selecting graphs to reset:
                             "uniform" - uniform random selection
@@ -285,6 +336,15 @@ class GraphPool(struct.PyTreeNode):
             lambda leaf: None if leaf is None else leaf[sample_idxs], new_graphs
         )
 
+        # Sample wires if provided
+        reset_wires = None
+        if new_wires is not None:
+            reset_wires = jax.tree.map(lambda leaf: leaf[sample_idxs], new_wires)
+
+        # Sample logits if provided
+        reset_logits = None
+        if new_logits is not None:
+            reset_logits = jax.tree.map(lambda leaf: leaf[sample_idxs], new_logits)
 
         # Sample knockout patterns if provided
         reset_knockout_patterns = None
@@ -295,6 +355,8 @@ class GraphPool(struct.PyTreeNode):
         reset_pool = self.update(
             reset_idxs,
             reset_graphs,
+            reset_wires,
+            reset_logits,
             reset_knockout_patterns,
         )
 

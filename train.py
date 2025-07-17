@@ -194,7 +194,7 @@ def main(cfg: DictConfig) -> None:
         lr_scheduler=cfg.training.lr_scheduler,
         lr_scheduler_params=cfg.training.lr_scheduler_params,
         # Checkpoint parameters
-        best_metric_source=cfg.checkpoint.best_metric_source,
+        # best_metric_source=cfg.checkpoint.best_metric_source,
         # Knockout evaluation
         knockout_eval=cfg.eval.get("knockout_eval", None),
         # WandB parameters
@@ -215,3 +215,7 @@ def main(cfg: DictConfig) -> None:
         wandb.finish()
 
     return model_results
+
+
+if __name__ == "__main__":
+    main()

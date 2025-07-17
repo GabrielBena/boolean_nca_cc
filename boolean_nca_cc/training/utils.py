@@ -17,6 +17,36 @@ from boolean_nca_cc.training.schedulers import get_learning_rate_schedule
 
 log = logging.getLogger(__name__)
 
+def compute_n_nodes_from_config(config):
+        """Compute n_nodes for CircuitSelfAttention models by building a dummy graph."""
+        # Generate circuit layer sizes
+        input_n, output_n = config.circuit.input_bits, config.circuit.output_bits
+        arity = config.circuit.arity
+
+        if config.circuit.layer_sizes is None:
+            layer_sizes = generate_layer_sizes(
+                input_n, output_n, arity, layer_n=config.circuit.num_layers
+            )
+        else:
+            layer_sizes = config.circuit.layer_sizes
+
+        # Generate dummy circuit
+        test_key = jax.random.PRNGKey(config.get("test_seed", 42))
+        wires, logits = gen_circuit(test_key, layer_sizes, arity=arity)
+
+        # Generate dummy graph
+        graph = build_graph(
+            wires=wires,
+            logits=logits,
+            input_n=input_n,
+            arity=arity,
+            circuit_hidden_dim=config.model.circuit_hidden_dim,
+        )
+
+        n_nodes = int(graph.n_node[0])
+        print(f"Computed n_nodes for CircuitSelfAttention: {n_nodes}")
+        return n_nodes
+
 def cleanup_redundant_wandb_artifacts(
     run_id=None,
     filters=None,
