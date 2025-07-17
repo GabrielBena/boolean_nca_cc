@@ -12,6 +12,8 @@ The experimental pipeline follows this sequence:
 
 ## Core Components
 
+this codebase uses the 'metabool' conda environment. IMPORTANT: conda activate metabool before running any testing script
+
 ### 1. Boolean Circuit Foundation
 - **`boolean_nca_cc/circuits/model.py`**
   - Implements differentiable boolean circuits with lookup tables
@@ -119,9 +121,18 @@ The experiment uses Hydra configuration management through `configs/` directory,
 
 ## Testing Strategy
 
+we are creating a testing suite to get a comprehensive understanding of each component that could affect the knockout experiment results logged to wandb. This means we have to start from the fundamentals and work our way through the codebase. The detailed tests are broken down below.
+
 **NOTE**: All results from each testing stage should be documented in `tests/testing_suite_results.md` for systematic tracking and validation.
 
 ### Ground-Up Component Isolation Testing
+All testing scripts should be in tests/
+
+The tests should reflect the functions as they are used in the actual codebase / training and eval run. 
+
+IMPORTANT: For each testing script, the functions that are being tested might have dependencies on other parts of the codebase. So we need to read the files that are being imported into the test scripts as well to get a clear understanding of the methods. Before writing any test script, please identify the substructure of the codebase it represents and how the scripts and functions fit together. Then, see how the specific implementation can be tested according to our plan by consulting with me on this structure and proposed tests. 
+
+IMPORTANT: CONSULT WITH ME, do not implement unless I say so. I want part of the report to give me an overview of the structures being tested, as well as the rationale behind each test.
 
 #### Level 1: Foundational Components (Boolean Circuit Core)
 
@@ -169,6 +180,7 @@ The experiment uses Hydra configuration management through `configs/` directory,
   - Test IN-dist vs OUT-dist pattern differentiation
   - Validate pattern format and structure
 
+
 **3.2 Pattern Application**
 - Test knockout patterns correctly modify graph structures
 - Verify attention masks prevent message passing to knocked-out nodes
@@ -183,12 +195,15 @@ The experiment uses Hydra configuration management through `configs/` directory,
   - Test `CircuitSelfAttention` respects knockout patterns
   - Test `SelfAttentionLayer` propagates masks correctly
   - Verify scan-based optimization handles masked attention
+  - Verify patterns reach the model's attention mechanism
+  - Validate attention masking actually prevents updates
 
 **4.2 Model State Updates**
 - Test knocked-out nodes remain unchanged during optimization
 - Test non-knocked-out nodes update normally
 - Verify gradient flow is properly blocked for masked nodes
 - Test model convergence with vs without knockouts
+- CRITICAL: revisit 2.2 - GRAPH CONVERSION in conjuction with knockouts to investigate interaction between these 2 components. Use same knockout functionality as it is implemented in the actual training run.
 
 #### Level 5: Pool Management System
 
@@ -213,6 +228,9 @@ The experiment uses Hydra configuration management through `configs/` directory,
   - Test `get_loss_and_update_graph` handles knockouts correctly
   - Test `evaluate_circuits_in_chunks` processes batches properly
   - Verify evaluation metrics reflect knockout impact
+  - **ADDENDUM: Evaluation Function Chain Tests**
+  - Test knockout implementation as part of the evaluation, where eval consists of multiple functions itself
+  - Test knockout patterns flow through evaluation pipeline
 
 **6.2 Evaluation Data Flow**
 - Test knockout patterns flow from generation → application → evaluation
@@ -234,11 +252,25 @@ The experiment uses Hydra configuration management through `configs/` directory,
   - Test Hydra configuration loads knockout parameters
   - Test experiment orchestration with knockout evaluation enabled
   - Verify all components integrate without configuration conflicts
+  - **ADDENDUM: Parameter Flow Tests**
+    - Test parameter passing from configs/config.yaml through the chain of training and eval
+  - **MISC A: Configuration & Setup Tests**
+    - Verify knockout evaluation is properly enabled
+    - Validate configuration parameter flow
+    - Check periodic evaluation timing
 
 #### Level 8: End-to-End Validation
 
+**8.05 Model behaviour tests**
+Model Behavior Tests
+Test identical circuits with/without knockouts show different performance
+Verify knocked-out nodes don't update during forward pass
+Check attention masks are correctly computed and applied
+
 **8.1 Minimal Working Examples**
-- Create minimal circuits with known knockout behavior
+End-to-end test of knockout evaluation pipeline
+Validate wandb logging receives different values for IN/OUT evaluation
+Test with minimal examples to isolate behavior (Create minimal circuits with known knockout behavior)
 - Test complete pipeline: generation → training → knockout evaluation
 - Verify knockout evaluation produces expected different metrics
 - Test reproducibility across runs with same configuration
@@ -248,6 +280,10 @@ The experiment uses Hydra configuration management through `configs/` directory,
 - Test with complex knockout pattern vocabularies
 - Test memory and performance under knockout evaluation load
 - Verify system stability under extended knockout evaluation runs
+
+#### LEVEL 9
+***Reflection on newly-found knowledge**
+Review the updated test result markdown file, review all of the tests. Is there any critical test we missed? Did we achieve our goal of an airtight deconstruction of the entire knockout program structure to make sure that knockout patterns are created, transferred to the graph, maintained and evaluated, as well as differentiated between in-distribution and OOD?
 
 ### Key Testing Principles
 
