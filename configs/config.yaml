@@ -66,8 +66,8 @@ pool:
   # Persistent structural knockout (injected periodically)
   persistent_knockout:
     fraction: 0.8 # 0.00001 # Fraction of the *newly reset* circuits to damage
-    damage_prob: 70.0 # Expected number of knockouts (per layer if target_layer specified, per circuit if null)
-    knockout_diversity: 256  # Vocabulary size for knockout patterns
+    damage_prob: 0.0 
+    knockout_diversity: 512  # Vocabulary size for knockout patterns
 
 eval:
   # Knockout evaluation

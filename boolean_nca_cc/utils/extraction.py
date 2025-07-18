@@ -26,7 +26,17 @@ def extract_logits_from_graph(
     """
     all_logits_flat = graph.nodes["logits"]
     extracted_logits_list = []
-    current_node_idx = 0
+    # # OLD version: starting index at 0
+    # current_node_idx = 0
+    
+    # NEW version: starting index at input_n
+    # Find the number of input nodes by looking at the layer information
+    # Input nodes have layer=0, gate nodes have layer>0
+    layer_info = graph.nodes["layer"]
+    input_n = jp.sum(layer_info == 0)  # Count nodes with layer=0
+    
+    # Start from the first gate layer (skip input nodes)
+    current_node_idx = input_n
 
     # Precompute sizes and start indices for dynamic slicing
     layer_sizes = []

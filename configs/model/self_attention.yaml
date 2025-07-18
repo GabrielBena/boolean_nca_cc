@@ -1,9 +1,12 @@
 _target_: boolean_nca_cc.models.CircuitSelfAttention
 # Configuration for Self-Attention model
 
-defaults:
-  - _base
+# Common model parameters (previously in _base.yaml)
+circuit_hidden_dim: ${circuit.circuit_hidden_dim}
+zero_init: false
+re_zero_update: true
 
+# Self-attention specific parameters
 type: "self_attention"
 attention_dim: 256
 mlp_dim: null # If null, will be set to attention_dim * mlp_dim_multiplier

@@ -1,6 +1,0 @@
-defaults:
-  - _self_
-
-circuit_hidden_dim: ${circuit.circuit_hidden_dim}
-zero_init: false
-re_zero_update: true
