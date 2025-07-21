@@ -23,8 +23,6 @@ This document outlines the redesign of knockout mechanisms from reset-based dama
 
 ## Recommended Approach: Node Feature Zeroing Strategy
 
-After analyzing the system flow and existing infrastructure, we recommend a **Node Feature Zeroing Strategy** that leverages the natural circuit → graph → circuit conversion loop.
-
 ### Why Node Feature Zeroing?
 
 1. **System Flow Alignment**: Works with the natural `gen_circuit()` → `build_graph()` → message passing → `extract_logits_from_graph()` → `run_circuit()` flow

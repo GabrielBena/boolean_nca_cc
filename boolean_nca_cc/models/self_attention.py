@@ -411,17 +411,25 @@ class CircuitSelfAttention(nnx.Module):
         logit_updates = logit_updates[0]
         hidden_updates = hidden_updates[0]
 
-        # Apply knockout pattern to prevent updates to knocked-out nodes
+        # Apply knockout pattern for complete gate removal
         if knockout_pattern is not None:
-            # Create active mask (True for non-knocked-out nodes)
             active_mask = ~knockout_pattern
-            # Zero out updates for knocked-out nodes
-            logit_updates = logit_updates * active_mask[:, None]  # Broadcast over logit dimension
-            hidden_updates = hidden_updates * active_mask[:, None]  # Broadcast over hidden dimension
-
-        # Update logits and hidden features in a residual manner
-        updated_logits = nodes["logits"] + self.logit_scale * logit_updates
-        updated_hidden = nodes["hidden"] + self.hidden_scale * hidden_updates
+    
+            # ZERO OUT existing node features for knocked-out nodes (NEW)
+            current_logits = nodes["logits"] * active_mask[:, None]
+            current_hidden = nodes["hidden"] * active_mask[:, None]
+    
+            # Zero out updates for knocked-out nodes (EXISTING)
+            logit_updates = logit_updates * active_mask[:, None]
+            hidden_updates = hidden_updates * active_mask[:, None]
+    
+            # Apply updates to zeroed features for complete isolation
+            updated_logits = current_logits + self.logit_scale * logit_updates
+            updated_hidden = current_hidden + self.hidden_scale * hidden_updates
+        else:
+            # No knockouts applied - normal residual updates
+            updated_logits = nodes["logits"] + self.logit_scale * logit_updates
+            updated_hidden = nodes["hidden"] + self.hidden_scale * hidden_updates
 
         # Create updated nodes dictionary
         updated_nodes = {**nodes, "logits": updated_logits, "hidden": updated_hidden}
