@@ -649,34 +649,6 @@ if __name__ == "__main__":
     )
     test_data = (x_data, y_data)
     
-    # Build sample graph for n_node
-    sample_wires, sample_logits = circuits[0]
-    sample_graph = build_graph(
-        logits=sample_logits,
-        wires=sample_wires,
-        input_n=config.circuit.input_bits,
-        arity=config.circuit.arity,
-        circuit_hidden_dim=config.model.circuit_hidden_dim,
-    )
-    n_node = sample_graph.n_node[0]
-
-    # Create model with validated n_node
-    model = CircuitSelfAttention(
-        circuit_hidden_dim=config.model.circuit_hidden_dim,
-        arity=config.circuit.arity,
-        attention_dim=config.model.attention_dim,
-        num_heads=config.model.num_heads,
-        num_layers=config.model.num_layers,
-        mlp_dim=config.model.mlp_dim,
-        mlp_dim_multiplier=config.model.mlp_dim_multiplier,
-        dropout_rate=config.model.dropout_rate,
-        zero_init=config.model.zero_init,
-        re_zero_update=config.model.re_zero_update,
-        n_node=n_node,  # Ensure main execution uses correct value
-        rngs=nnx.Rngs(params=init_key),
-    )
-
-    
     # Create test circuits
     if config.circuit.layer_sizes is None:
         layer_sizes = []
@@ -701,6 +673,34 @@ if __name__ == "__main__":
         circuits.append((wires, logits))
     
     test_circuits = (circuits, layer_sizes)
+    
+    # Build sample graph to get n_node parameter
+    sample_wires, sample_logits = circuits[0]
+    sample_graph = build_graph(
+        logits=sample_logits,
+        wires=sample_wires,
+        input_n=config.circuit.input_bits,
+        arity=config.circuit.arity,
+        circuit_hidden_dim=config.model.circuit_hidden_dim,
+    )
+    n_node = sample_graph.n_node[0]  # Critical: Extract actual node count
+
+    # Create model with validated parameters
+    init_key = jax.random.PRNGKey(config.seed)
+    model = CircuitSelfAttention(
+        circuit_hidden_dim=config.model.circuit_hidden_dim,
+        arity=config.circuit.arity,
+        attention_dim=config.model.attention_dim,
+        num_heads=config.model.num_heads,
+        num_layers=config.model.num_layers,
+        mlp_dim=config.model.mlp_dim,
+        mlp_dim_multiplier=config.model.mlp_dim_multiplier,
+        dropout_rate=config.model.dropout_rate,
+        zero_init=config.model.zero_init,
+        re_zero_update=config.model.re_zero_update,
+        n_node=n_node,  # Now properly initialized
+        rngs=nnx.Rngs(params=init_key),
+    )
     
     print("\n🔄 Running Level 6.1 Phase 1 Test 3: Batch Processing Integration Tests...")
     print("=" * 80)
