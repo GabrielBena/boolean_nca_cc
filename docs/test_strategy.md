@@ -156,6 +156,7 @@ Test 1: Core Training Step Integration* Mirror exact usage from loss_fn_no_scan 
 
 * build_graph → model(graph, knockout_pattern) → get_loss_and_update_graph
 * Verify knockout patterns prevent node updates throughout entire chain
+* Note: Once the attention mask is created with the knockout pattern incorporated, it should work as usual via attention masking
 
 Test 2: Knockout Evaluation Pipeline Integration* Mirror exact usage from run_knockout_periodic_evaluation
 
@@ -182,7 +183,6 @@ This approach gives us:1. High confidence that the critical paths work as intend
 1. Fast failure detection when interfaces break
 2. Realistic test conditions that match actual usage
 3. Complete coverage through subsequent isolation tests
-
 
 **6.2 Evaluation Data Flow**
 
