@@ -197,14 +197,10 @@ This approach gives us:1. High confidence that the critical paths work as intend
 
 - **`train.py`** end-to-end validation:
   - Test Hydra configuration loads knockout parameters
+  - Test parameter passing from configs/config.yaml through the chain of training and eval
   - Test experiment orchestration with knockout evaluation enabled
   - Verify all components integrate without configuration conflicts
-  - **ADDENDUM: Parameter Flow Tests**
-    - Test parameter passing from configs/config.yaml through the chain of training and eval
-  - **MISC A: Configuration & Setup Tests**
-    - Verify knockout evaluation is properly enabled
-    - Validate configuration parameter flow
-    - Check periodic evaluation timing
+  -
 
 #### Level 8: End-to-End Validation
 
