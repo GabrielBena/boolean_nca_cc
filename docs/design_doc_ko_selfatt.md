@@ -20,12 +20,6 @@ this codebase uses the 'metabool' conda environment. IMPORTANT: conda activate m
   - Provides circuit generation (`gen_circuit`) and execution (`run_circuit`)
   - Core functions: `make_nops`, `run_layer`, `gen_wires`
 
-- **`boolean_nca_cc/circuits/train.py`**
-  - **CRITICAL FOR KNOCKOUT TESTING**: Provides fundamental loss functions that measure knockout impact
-  - Implements L4 norm and binary cross-entropy loss computation
-  - Key functions: `loss_f_l4`, `loss_f_bce`, `compute_accuracy`, `binary_cross_entropy`
-  - Pre-compiled gradient functions for efficient training
-
 ### 2. Graph Representation
 - **`boolean_nca_cc/utils/graph_builder.py`**
   - Converts boolean circuits into graph structures compatible with JAX/Jraph
@@ -34,7 +28,7 @@ this codebase uses the 'metabool' conda environment. IMPORTANT: conda activate m
   - Main function: `build_graph`
 
 - **`boolean_nca_cc/utils/extraction.py`**
-  - **CRITICAL FOR KNOCKOUT TESTING**: Handles graph-to-circuit conversion for evaluation
+  - Handles graph-to-circuit conversion for evaluation
   - Extracts logits from graph representations after model updates
   - Key functions: `extract_logits_from_graph`, `update_output_node_loss`, `get_output_node_indices`
   - Ensures knockout evaluation can properly measure circuit performance
@@ -63,7 +57,7 @@ this codebase uses the 'metabool' conda environment. IMPORTANT: conda activate m
   - Key function: `train_model`
 
 - **`boolean_nca_cc/training/evaluation.py`**
-  - **CRITICAL FOR KNOCKOUT TESTING**: Central evaluation pipeline for knockout experiments
+  - Central evaluation pipeline for knockout experiments
   - Processes knockout patterns and computes performance metrics
   - Key functions: `evaluate_model_stepwise_batched`, `get_loss_and_update_graph`, `evaluate_circuits_in_chunks`
   - Handles batched circuit evaluation with knockout pattern application
@@ -101,42 +95,3 @@ this codebase uses the 'metabool' conda environment. IMPORTANT: conda activate m
   - Creates reproducible perturbations for evaluation
   - Functions: `create_reproducible_knockout_pattern`, `create_knockout_vocabulary`
 
-## Key Experimental Features
-
-### Knockout Pattern Management
-- **Vocabulary-based patterns**: Fixed sets of knockout configurations for consistent evaluation
-- **In/Out-of-distribution testing**: Separate evaluation on seen vs unseen knockout patterns
-- **Attention masking**: Prevents knocked-out gates from participating in message passing
-
-### Training Pool System
-- Dynamic circuit population with periodic resets
-- Integration of knockout patterns during training
-- Performance tracking across different structural perturbations
-
-### Evaluation Metrics
-- Standard circuit performance (loss, accuracy)
-- Robustness measures under knockout conditions
-- Generalization assessment (in-dist vs out-of-dist patterns)
-
-## Configuration
-
-The experiment uses Hydra configuration management through `configs/` directory, allowing systematic parameter sweeps and reproducible experiments.
-
-## Key JAX Design Patterns
-
-- **Functional programming**: Pure functions with explicit random keys
-- **JIT compilation**: Performance optimization for training loops
-- **Vectorization**: Batch processing of circuit evaluations
-- **Structural typing**: Consistent graph representations across components
-
-## Navigation Tips
-
-1. Start with `train.py` to understand the overall experiment flow
-2. Examine `model.py` for boolean circuit fundamentals
-3. Study `circuits/train.py` for loss functions that measure knockout impact
-4. Review `graph_builder.py` and `extraction.py` for circuit-to-graph conversion
-5. Understand `pool.py` for circuit population management and sampling strategies
-6. Analyze `self_attention.py` for the core optimization mechanism
-7. Check `structural_perturbation.py` for knockout pattern logic
-8. Explore `training/evaluation.py` for the knockout testing pipeline
-9. Review `train_loop.py` for training dynamics and evaluation integration
