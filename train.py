@@ -197,6 +197,13 @@ def main(cfg: DictConfig) -> None:
         # best_metric_source=cfg.checkpoint.best_metric_source,
         # Knockout evaluation
         knockout_eval=cfg.eval.get("knockout_eval", None),
+        # Periodic evaluation parameters
+        periodic_eval_enabled=cfg.eval.get("periodic_eval_enabled", False),
+        periodic_eval_inner_steps=cfg.eval.get("periodic_eval_inner_steps", 100),
+        periodic_eval_interval=cfg.eval.get("periodic_eval_interval", 1024),
+        periodic_eval_test_seed=cfg.eval.get("periodic_eval_test_seed", 42),
+        periodic_eval_log_stepwise=cfg.eval.get("periodic_eval_log_stepwise", False),
+        periodic_eval_batch_size=cfg.eval.get("periodic_eval_batch_size", 16),
         # WandB parameters
         wandb_logging=cfg.wandb.enabled,
         log_interval=cfg.logging.log_interval,

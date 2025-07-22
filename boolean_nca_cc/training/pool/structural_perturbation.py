@@ -26,8 +26,6 @@ def create_reproducible_knockout_pattern(
         key: Random key for reproducible generation
         layer_sizes: List of (group_n, group_size) for each gate layer
         damage_prob: Expected number of knockouts. Behavior depends on target_layer:
-                    - If target_layer is specified: Expected knockouts in that layer
-                    - If target_layer is None: Expected knockouts across entire circuit
         input_n: Number of input nodes (never knocked out)
         
     Returns:
@@ -103,7 +101,6 @@ def create_knockout_vocabulary(
         vocabulary_size: The number of unique patterns to generate.
         layer_sizes: List of (nodes, group_size) for each layer.
         damage_prob: The probability of knocking out a connection.
-        target_layer: The specific layer to target for knockouts.
         input_n: The number of input nodes.
 
     Returns:

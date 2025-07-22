@@ -415,15 +415,21 @@ class CircuitSelfAttention(nnx.Module):
         if knockout_pattern is not None:
             active_mask = ~knockout_pattern
     
-            # ZERO OUT existing node features for knocked-out nodes (NEW)
-            current_logits = nodes["logits"] * active_mask[:, None]
+            # SET TO LARGE NEGATIVE VALUES for knocked-out nodes (NEW)
+            # Use -10.0 which gives sigmoid(-10) ≈ 4.5e-5 ≈ 0.0
+            large_negative_value = -10.0
+            current_logits = jp.where(
+                active_mask[:, None], 
+                nodes["logits"], 
+                large_negative_value
+            )
             current_hidden = nodes["hidden"] * active_mask[:, None]
     
             # Zero out updates for knocked-out nodes (EXISTING)
             logit_updates = logit_updates * active_mask[:, None]
             hidden_updates = hidden_updates * active_mask[:, None]
     
-            # Apply updates to zeroed features for complete isolation
+            # Apply updates to modified features for complete isolation
             updated_logits = current_logits + self.logit_scale * logit_updates
             updated_hidden = current_hidden + self.hidden_scale * hidden_updates
         else:

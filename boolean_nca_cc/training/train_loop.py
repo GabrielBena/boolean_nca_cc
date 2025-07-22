@@ -272,14 +272,30 @@ def run_knockout_periodic_evaluation(
         # Check that ID and OOD patterns are not the same
         are_patterns_identical = jp.all(in_knockout_patterns == out_knockout_patterns)
         log.info(f"DEBUG: Are IN-dist and OUT-dist patterns identical? {are_patterns_identical}")
-        
-        # Check if OOD patterns are in the vocabulary (they shouldn't be)
-        if knockout_vocabulary is not None and out_knockout_patterns.size > 0:
-            first_ood_pattern = out_knockout_patterns[0]
-            ood_in_vocab = jp.any(jp.all(first_ood_pattern == knockout_vocabulary, axis=1))
-            log.info(f"DEBUG: Is first OOD pattern in vocabulary? {ood_in_vocab}")
+
+        # Check that ID patterns are in the vocabulary (they should be)
+        if knockout_vocabulary is not None and in_knockout_patterns.size > 0:
+            first_id_pattern = in_knockout_patterns[0]
+            id_in_vocab = jp.any(jp.all(first_id_pattern == knockout_vocabulary, axis=1))
+            log.info(f"DEBUG: Is first ID pattern in vocabulary? {id_in_vocab}")
             if wandb_run:
-                wandb_run.log({"debug/ood_pattern_in_vocab": float(ood_in_vocab)})
+                wandb_run.log({"debug/id_pattern_in_vocab": float(id_in_vocab)})
+        
+        # Check how many OOD patterns are in the vocabulary (should be 0)
+        if knockout_vocabulary is not None and out_knockout_patterns.size > 0:
+            # Check each OOD pattern against the vocabulary
+            ood_in_vocab_count = 0
+            for i in range(len(out_knockout_patterns)):
+                ood_pattern = out_knockout_patterns[i]
+                is_in_vocab = jp.any(jp.all(ood_pattern == knockout_vocabulary, axis=1))
+                if is_in_vocab:
+                    ood_in_vocab_count += 1
+            
+            log.info(f"DEBUG: Number of OOD patterns found in vocabulary: {ood_in_vocab_count}/{len(out_knockout_patterns)}")
+            if wandb_run:
+                wandb_run.log({"debug/ood_patterns_in_vocab_count": ood_in_vocab_count})
+                wandb_run.log({"debug/ood_patterns_total": len(out_knockout_patterns)})
+
 
         # Log pattern sums to wandb
         if wandb_run:
@@ -736,7 +752,7 @@ def train_model(
             rng=vocab_rng,
             vocabulary_size=knockout_diversity,
             layer_sizes=true_layer_sizes,
-            damage_prob=persistent_knockout_config.get("damage_prob", 0.1),
+            damage_prob=persistent_knockout_config.get("damage_prob", 10.0),
             input_n=input_n,
         )
         
