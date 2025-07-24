@@ -47,23 +47,14 @@ def create_reproducible_knockout_pattern(
     # Never knock out input nodes
     current_idx = input_n
     
+    # If damage_prob is 0, return all False
+    if damage_prob == 0:
+        return knockout_pattern
+    
     # Identify output layer index (last layer)
     output_layer_idx = len(layer_sizes) - 1
     
-    # Calculate total eligible gates (excluding output layer)
-    total_eligible_gates = 0
-    for layer_idx, (group_n, group_size) in enumerate(layer_sizes):
-        if layer_idx != output_layer_idx:  # Exclude output layer
-            total_eligible_gates += group_n * group_size
-    
-    # If no eligible gates or damage_prob is 0, return all False
-    if total_eligible_gates == 0 or damage_prob == 0:
-        return knockout_pattern
-    
-    # Ensure damage_prob doesn't exceed total eligible gates
-    num_knockouts = min(int(damage_prob), total_eligible_gates)
-    
-    # Create list of all eligible gate indices
+    # Single loop: collect all eligible gate indices
     eligible_indices = []
     current_idx = input_n
     
@@ -71,8 +62,8 @@ def create_reproducible_knockout_pattern(
         layer_size = group_n * group_size
         layer_end = current_idx + layer_size
         
-        # Skip output layer - never knock out output nodes
-        if layer_idx == output_layer_idx:
+        # Skip input and output layers - never knock out input or output nodes
+        if layer_idx == 0 or layer_idx == output_layer_idx:
             current_idx = layer_end
             continue
         
@@ -81,8 +72,15 @@ def create_reproducible_knockout_pattern(
         eligible_indices.append(layer_indices)
         current_idx = layer_end
     
+    # Handle edge case: no eligible gates
+    if not eligible_indices:
+        return knockout_pattern
+    
     # Concatenate all eligible indices
     all_eligible_indices = jp.concatenate(eligible_indices)
+    
+    # Ensure damage_prob doesn't exceed total eligible gates
+    num_knockouts = min(int(damage_prob), len(all_eligible_indices))
     
     # Randomly sample exactly num_knockouts indices
     knockout_indices = jax.random.choice(

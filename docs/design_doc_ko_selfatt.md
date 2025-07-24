@@ -106,3 +106,8 @@ this codebase uses the 'metabool' conda environment. IMPORTANT: conda activate m
     - Masking strategies for knockout nodes
     - Transformer architecture variants
   - Optimization parameters for attention-based updates
+
+
+  The primary experiment is the effect of knocking out some gates and introducing these as part of the periodic reset to the pool. The model is then trained on meta-batches, so that some of the sampled circuits in a given batch will have a knockout pattern associated with them. The eval is then on N inner loop steps, starting from NOPS circuits with knockout patterns to see if a configuration can be found that produces the target output bits. The exact configuration is expected to differ for different knockout masks, meaning that the exact LUT configurations of a circuit vary depending on the exact knockout pattern applied to the circuit.
+
+
