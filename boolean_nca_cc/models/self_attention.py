@@ -411,13 +411,13 @@ class CircuitSelfAttention(nnx.Module):
         logit_updates = logit_updates[0]
         hidden_updates = hidden_updates[0]
 
-        # # Apply knockout pattern to prevent updates to knocked-out nodes
-        # if knockout_pattern is not None:
-        #     # Create active mask (True for non-knocked-out nodes)
-        #     active_mask = ~knockout_pattern
-        #     # Zero out updates for knocked-out nodes
-        #     logit_updates = logit_updates * active_mask[:, None]  # Broadcast over logit dimension
-        #     hidden_updates = hidden_updates * active_mask[:, None]  # Broadcast over hidden dimension
+        # Apply knockout pattern to prevent updates to knocked-out nodes
+        if knockout_pattern is not None:
+            # Create active mask (True for non-knocked-out nodes)
+            active_mask = ~knockout_pattern
+            # Zero out updates for knocked-out nodes
+            logit_updates = logit_updates * active_mask[:, None]  # Broadcast over logit dimension
+            hidden_updates = hidden_updates * active_mask[:, None]  # Broadcast over hidden dimension
 
         # Update logits and hidden features in a residual manner
         updated_logits = nodes["logits"] + self.logit_scale * logit_updates

@@ -464,6 +464,7 @@ def run_unified_periodic_evaluation(
     log_stepwise=False,
     layer_sizes: List[Tuple[int, int]] = None,
     log_pool_scatter: bool = False,
+    use_scan: bool = False,
 ) -> Dict:
     """
     Run unified periodic evaluation with only IN-distribution and OUT-of-distribution testing.
@@ -484,6 +485,7 @@ def run_unified_periodic_evaluation(
         log_stepwise: Whether to log step-by-step metrics
         layer_sizes: Circuit layer sizes
         log_pool_scatter: Whether to log pool scatterplot (loss vs steps)
+        use_scan: Whether to use scan mode for evaluation
 
     Returns:
         Dictionary with evaluation metrics from IN-distribution and OUT-of-distribution evaluations
@@ -513,6 +515,7 @@ def run_unified_periodic_evaluation(
             n_message_steps=n_message_steps,
             loss_type=loss_type,
             layer_sizes=layer_sizes,
+            use_scan=use_scan,
         )
 
         # Get final metrics (last step) for IN-distribution
@@ -547,6 +550,7 @@ def run_unified_periodic_evaluation(
             n_message_steps=n_message_steps,
             loss_type=loss_type,
             layer_sizes=layer_sizes,
+            use_scan=use_scan,
         )
 
         # Get final metrics (last step) for OUT-of-distribution
@@ -1646,6 +1650,7 @@ def train_model(
                         log_stepwise=periodic_eval_log_stepwise,
                         layer_sizes=layer_sizes,
                         log_pool_scatter=periodic_eval_log_pool_scatter,
+                        use_scan=use_scan,
                     )
                     # Extract final metrics for best model tracking (use IN-distribution metrics)
                     if eval_results and "final_metrics_in" in eval_results:

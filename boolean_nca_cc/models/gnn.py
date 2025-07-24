@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jp
 import jraph
 from flax import nnx
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from functools import partial
 
 from boolean_nca_cc.models.node_update import NodeUpdateModule
@@ -88,12 +88,13 @@ class CircuitGNN(nnx.Module):
         else:
             self.aggregate_fn = aggregate_sum
 
-    def __call__(self, graph: jraph.GraphsTuple) -> jraph.GraphsTuple:
+    def __call__(self, graph: jraph.GraphsTuple, knockout_pattern: Optional[jp.ndarray] = None) -> jraph.GraphsTuple:
         """
         Apply one step of GNN message passing.
 
         Args:
             graph: Input graph structure with node and edge features
+            knockout_pattern: Optional boolean array where True indicates a knocked-out node
 
         Returns:
             Updated graph after one step of message passing
@@ -128,13 +129,37 @@ class CircuitGNN(nnx.Module):
             None,
         )
 
+        # 4. Apply knockout pattern if provided
+        if knockout_pattern is not None:
+            # Create active mask (True for non-knocked-out nodes)
+            active_mask = ~knockout_pattern
+            
+            # Zero out logits and hidden features for knocked-out nodes
+            updated_logits = jp.where(
+                active_mask[:, None],  # Broadcast over logit dimension
+                updated_nodes["logits"],
+                jp.zeros_like(updated_nodes["logits"])
+            )
+            updated_hidden = jp.where(
+                active_mask[:, None],  # Broadcast over hidden dimension
+                updated_nodes["hidden"],
+                jp.zeros_like(updated_nodes["hidden"])
+            )
+            
+            # Update the nodes dictionary
+            updated_nodes = {
+                **updated_nodes,
+                "logits": updated_logits,
+                "hidden": updated_hidden,
+            }
+
         # Return updated graph
         return graph._replace(nodes=updated_nodes)
 
 
 @partial(nnx.jit, static_argnames=("num_steps",))
 def run_gnn_scan(
-    gnn: CircuitGNN, graph: jraph.GraphsTuple, num_steps: int
+    gnn: CircuitGNN, graph: jraph.GraphsTuple, num_steps: int, knockout_pattern: Optional[jp.ndarray] = None
 ) -> Tuple[jraph.GraphsTuple, List[jraph.GraphsTuple]]:
     """
     Run the GNN for multiple steps using scan for efficiency.
@@ -143,6 +168,7 @@ def run_gnn_scan(
         gnn: The CircuitGNN model to apply
         graph: Initial graph state
         num_steps: Number of steps to run
+        knockout_pattern: Optional boolean array where True indicates a knocked-out node
 
     Returns:
         final_graph: The graph after all steps
@@ -151,7 +177,7 @@ def run_gnn_scan(
 
     def gnn_step(carry, _):
         graph = carry
-        new_graph = gnn(graph)
+        new_graph = gnn(graph, knockout_pattern=knockout_pattern)
         return new_graph, new_graph
 
     # Run scan
@@ -175,6 +201,7 @@ def run_gnn_scan_with_loss(
     y_data: jp.ndarray,
     loss_type: str,
     layer_sizes: Tuple[Tuple[int, int]],
+    knockout_pattern: Optional[jp.ndarray] = None,
 ) -> Tuple[jraph.GraphsTuple, List[jraph.GraphsTuple], jp.ndarray, List]:
     """
     Run the GNN for multiple steps with loss computation and graph updating at each step.
@@ -192,6 +219,7 @@ def run_gnn_scan_with_loss(
         y_data: Target output data
         loss_type: Type of loss function to use
         layer_sizes: List of (nodes, group_size) tuples for each layer
+        knockout_pattern: Optional boolean array where True indicates a knocked-out node
 
     Returns:
         final_graph: The graph after all steps
@@ -204,8 +232,8 @@ def run_gnn_scan_with_loss(
     def gnn_step_with_loss(carry, _):
         current_graph = carry
 
-        # Apply GNN
-        model_updated_graph = model(current_graph)
+        # Apply GNN with knockout pattern
+        model_updated_graph = model(current_graph, knockout_pattern=knockout_pattern)
 
         # Compute loss and update graph
         updated_graph, loss, current_logits, aux = get_loss_and_update_graph(
