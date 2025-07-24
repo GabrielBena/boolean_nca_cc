@@ -25,7 +25,7 @@ def create_reproducible_knockout_pattern(
     Args:
         key: Random key for reproducible generation
         layer_sizes: List of (group_n, group_size) for each gate layer
-        damage_prob: Expected number of knockouts. Behavior depends on target_layer:
+        damage_prob: Exact number of knockouts to apply
         input_n: Number of input nodes (never knocked out)
         
     Returns:
@@ -35,6 +35,7 @@ def create_reproducible_knockout_pattern(
     Note:
         - Input layer (layer 0) is never knocked out
         - Output layer (last layer) is never knocked out
+        - Exactly damage_prob gates will be knocked out
     """
     total_nodes = input_n  # Start with input nodes
     for group_n, group_size in layer_sizes:
@@ -55,7 +56,17 @@ def create_reproducible_knockout_pattern(
         if layer_idx != output_layer_idx:  # Exclude output layer
             total_eligible_gates += group_n * group_size
     
-    # Process each gate layer
+    # If no eligible gates or damage_prob is 0, return all False
+    if total_eligible_gates == 0 or damage_prob == 0:
+        return knockout_pattern
+    
+    # Ensure damage_prob doesn't exceed total eligible gates
+    num_knockouts = min(int(damage_prob), total_eligible_gates)
+    
+    # Create list of all eligible gate indices
+    eligible_indices = []
+    current_idx = input_n
+    
     for layer_idx, (group_n, group_size) in enumerate(layer_sizes):
         layer_size = group_n * group_size
         layer_end = current_idx + layer_size
@@ -65,23 +76,21 @@ def create_reproducible_knockout_pattern(
             current_idx = layer_end
             continue
         
-        if total_eligible_gates > 0:
-            scaled_prob = damage_prob / total_eligible_gates
-        else:
-            scaled_prob = 0.0
-        
-        # Ensure probability is valid
-        scaled_prob = jp.clip(scaled_prob, 0.0, 1.0)
-        
-        # Generate knockout decisions for this layer
-        layer_key = jax.random.fold_in(key, layer_idx)
-        random_vals = jax.random.uniform(layer_key, (layer_size,))
-        layer_knockouts = random_vals < scaled_prob
-        
-        # Apply to knockout pattern
-        knockout_pattern = knockout_pattern.at[current_idx:layer_end].set(layer_knockouts)
-        
+        # Add all gate indices for this layer
+        layer_indices = jp.arange(current_idx, layer_end)
+        eligible_indices.append(layer_indices)
         current_idx = layer_end
+    
+    # Concatenate all eligible indices
+    all_eligible_indices = jp.concatenate(eligible_indices)
+    
+    # Randomly sample exactly num_knockouts indices
+    knockout_indices = jax.random.choice(
+        key, all_eligible_indices, shape=(num_knockouts,), replace=False
+    )
+    
+    # Set the selected indices to True (knocked out)
+    knockout_pattern = knockout_pattern.at[knockout_indices].set(True)
     
     return knockout_pattern
 

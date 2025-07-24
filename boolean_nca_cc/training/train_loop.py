@@ -273,14 +273,27 @@ def run_knockout_periodic_evaluation(
         are_patterns_identical = jp.all(in_knockout_patterns == out_knockout_patterns)
         log.info(f"DEBUG: Are IN-dist and OUT-dist patterns identical? {are_patterns_identical}")
 
-        # Check that ID patterns are in the vocabulary (they should be)
+        # # Check that ID patterns are in the vocabulary (they should be)
+        # if knockout_vocabulary is not None and in_knockout_patterns.size > 0:
+        #     first_id_pattern = in_knockout_patterns[0]
+        #     id_in_vocab = jp.any(jp.all(first_id_pattern == knockout_vocabulary, axis=1))
+        #     log.info(f"DEBUG: Is first ID pattern in vocabulary? {id_in_vocab}")
+        #     if wandb_run:
+        #         wandb_run.log({"debug/id_pattern_in_vocab": float(id_in_vocab)})
+
+        # Check how many ID patterns are in the vocabulary (should be all of them)
         if knockout_vocabulary is not None and in_knockout_patterns.size > 0:
-            first_id_pattern = in_knockout_patterns[0]
-            id_in_vocab = jp.any(jp.all(first_id_pattern == knockout_vocabulary, axis=1))
-            log.info(f"DEBUG: Is first ID pattern in vocabulary? {id_in_vocab}")
+            id_in_vocab_count = 0
+            for i in range(len(in_knockout_patterns)):
+                id_pattern = in_knockout_patterns[i]
+                is_in_vocab = jp.any(jp.all(id_pattern == knockout_vocabulary, axis=1))
+                if is_in_vocab:
+                    id_in_vocab_count += 1
+            log.info(f"DEBUG: Number of ID patterns found in vocabulary: {id_in_vocab_count}/{len(in_knockout_patterns)}")
             if wandb_run:
-                wandb_run.log({"debug/id_pattern_in_vocab": float(id_in_vocab)})
-        
+                wandb_run.log({"debug/id_patterns_in_vocab_count": id_in_vocab_count})
+                wandb_run.log({"debug/id_patterns_total": len(in_knockout_patterns)})
+
         # Check how many OOD patterns are in the vocabulary (should be 0)
         if knockout_vocabulary is not None and out_knockout_patterns.size > 0:
             # Check each OOD pattern against the vocabulary
