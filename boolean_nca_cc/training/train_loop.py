@@ -732,6 +732,8 @@ def train_model(
 
     # Initialize knockout vocabulary if knockout_diversity is configured
     knockout_vocabulary = None
+    log.info(f"DEBUG: train_loop received knockout_diversity = {knockout_diversity}")
+    log.info(f"DEBUG: train_loop received persistent_knockout_config = {persistent_knockout_config}")
     if (persistent_knockout_config and knockout_diversity is not None and 
         knockout_diversity > 0 and persistent_knockout_config.get("fraction", 0.0) > 0.0):
         log.info(f"Creating knockout pattern vocabulary with {knockout_diversity} patterns")

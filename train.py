@@ -44,6 +44,10 @@ def main(cfg: DictConfig) -> None:
     """
     # Print configuration
     log.info(OmegaConf.to_yaml(cfg))
+    
+    # Debug: Check knockout_diversity value
+    log.info(f"DEBUG: knockout_diversity value = {cfg.pool.persistent_knockout.knockout_diversity}")
+    log.info(f"DEBUG: persistent_knockout_config = {cfg.pool.persistent_knockout}")
 
     # Set random seed
     rng = jax.random.PRNGKey(cfg.seed)
@@ -159,6 +163,7 @@ def main(cfg: DictConfig) -> None:
 
     # Train model
     log.info(f"Starting {cfg.model.type.upper()} training")
+    log.info(f"DEBUG: About to call train_model with knockout_diversity = {cfg.pool.persistent_knockout.knockout_diversity}")
     model_results = train_model(
         # Initialization parameters
         key=cfg.seed,
@@ -186,10 +191,8 @@ def main(cfg: DictConfig) -> None:
         reset_strategy=cfg.pool.reset_strategy,
         reset_pool_interval=cfg.pool.reset_interval,
         # Perturbation configurations
-        persistent_knockout_config=cfg.pool.get("persistent_knockout", None),
-        knockout_diversity=cfg.pool.get("persistent_knockout", {}).get(
-            "knockout_diversity"
-        ),
+        persistent_knockout_config=cfg.pool.persistent_knockout,
+        knockout_diversity=cfg.pool.persistent_knockout.knockout_diversity,
         # Learning rate scheduling
         lr_scheduler=cfg.training.lr_scheduler,
         lr_scheduler_params=cfg.training.lr_scheduler_params,

@@ -57,7 +57,7 @@ training:
   use_scan: false
 
 pool:
-  size: 512
+  size: 1024
   reset_fraction: 0.15
   reset_interval: 128
   reset_strategy: "combined"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
@@ -66,8 +66,8 @@ pool:
   # Persistent structural knockout (injected periodically)
   persistent_knockout:
     fraction: 0.8 # 0.00001 # Fraction of the *newly reset* circuits to damage
-    damage_prob: 1.0 
-    knockout_diversity: 1  # Vocabulary size for knockout patterns
+    damage_prob: 20.0 
+    knockout_diversity: 16  # Vocabulary size for knockout patterns
 
 eval:
   # Periodic evaluation parameters
