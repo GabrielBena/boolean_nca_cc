@@ -242,6 +242,7 @@ def run_knockout_periodic_evaluation(
             n_message_steps=n_message_steps,
             loss_type=loss_type,
             layer_sizes=layer_sizes,
+            return_per_pattern=True,  # Enable per-pattern analysis
             # use_scan=use_scan,
         )
 
@@ -348,6 +349,7 @@ def run_knockout_periodic_evaluation(
             n_message_steps=n_message_steps,
             loss_type=loss_type,
             layer_sizes=layer_sizes,
+            return_per_pattern=True,  # Enable per-pattern analysis
             # use_scan=use_scan,
         )
 
@@ -359,9 +361,42 @@ def run_knockout_periodic_evaluation(
             "eval_ko_out/epoch": epoch,
         }
 
-        combined_metrics = {**final_metrics_in, **final_metrics_out}
+        # Calculate pattern statistics if per-pattern data is available
+        pattern_stats_in = {}
+        pattern_stats_out = {}
+        
+        if "per_pattern" in step_metrics_in:
+            final_hard_accuracies_in = step_metrics_in["per_pattern"]["pattern_hard_accuracies"][-1]
+            pattern_stats_in = {
+                "eval_ko_in/pattern_mean": float(jp.mean(final_hard_accuracies_in)),
+                "eval_ko_in/pattern_std": float(jp.std(final_hard_accuracies_in)), 
+                "eval_ko_in/pattern_min": float(jp.min(final_hard_accuracies_in)),
+                "eval_ko_in/pattern_max": float(jp.max(final_hard_accuracies_in)),
+                "eval_ko_in/pattern_variance": float(jp.var(final_hard_accuracies_in)),
+            }
+            
+        if "per_pattern" in step_metrics_out:
+            final_hard_accuracies_out = step_metrics_out["per_pattern"]["pattern_hard_accuracies"][-1]
+            pattern_stats_out = {
+                "eval_ko_out/pattern_mean": float(jp.mean(final_hard_accuracies_out)),
+                "eval_ko_out/pattern_std": float(jp.std(final_hard_accuracies_out)),
+                "eval_ko_out/pattern_min": float(jp.min(final_hard_accuracies_out)),
+                "eval_ko_out/pattern_max": float(jp.max(final_hard_accuracies_out)),
+                "eval_ko_out/pattern_variance": float(jp.var(final_hard_accuracies_out)),
+            }
+        
+        # Log main metrics normally (these will create panels)
+        main_metrics = {**final_metrics_in, **final_metrics_out}
+        
+        # Store pattern statistics in wandb summary for later use without creating panels
         if wandb_run:
-            wandb_run.log(combined_metrics)
+            wandb_run.log(main_metrics)
+            
+            # Store pattern stats in summary for later unified plotting
+            if pattern_stats_in:
+                wandb_run.summary.update(pattern_stats_in)
+            if pattern_stats_out:
+                wandb_run.summary.update(pattern_stats_out)
 
             if log_stepwise:
                 for step_idx in range(len(step_metrics_in["step"])):
@@ -387,10 +422,13 @@ def run_knockout_periodic_evaluation(
             f"Knockout Eval (epoch {epoch}):\n"
             f"  IN-distribution KO: Loss={final_metrics_in['eval_ko_in/final_loss']:.4f}, "
             f"Acc={final_metrics_in['eval_ko_in/final_accuracy']:.4f}, "
-            f"Hard Acc={final_metrics_in['eval_ko_in/final_hard_accuracy']:.4f}\n"
+            f"Hard Acc={final_metrics_in['eval_ko_in/final_hard_accuracy']:.4f}"
+            + (f", Range=[{pattern_stats_in['eval_ko_in/pattern_min']:.3f}-{pattern_stats_in['eval_ko_in/pattern_max']:.3f}]" if pattern_stats_in else "")
+            + f"\n"
             f"  OUT-of-distribution KO: Loss={final_metrics_out['eval_ko_out/final_loss']:.4f}, "
             f"Acc={final_metrics_out['eval_ko_out/final_accuracy']:.4f}, "
             f"Hard Acc={final_metrics_out['eval_ko_out/final_hard_accuracy']:.4f}"
+            + (f", Range=[{pattern_stats_out['eval_ko_out/pattern_min']:.3f}-{pattern_stats_out['eval_ko_out/pattern_max']:.3f}]" if pattern_stats_out else "")
         )
 
         return {
