@@ -1,0 +1,22 @@
+# Program to run for the sweep
+program: train.py
+
+# Method for the sweep: grid search over specified values
+method: grid
+
+# Metric to optimize
+metric:
+  goal: minimize
+  name: Relative Time (Process)
+
+# Parameters to sweep over
+parameters:
+  # The knockout_diversity will be swept over the following discrete values.
+  # This parameter is nested under 'pool' and 'persistent_knockout' in config.yaml.
+  pool.persistent_knockout.knockout_diversity:
+    values:
+      - 1
+      - 16
+      - 128
+      - 512
+      - 1024

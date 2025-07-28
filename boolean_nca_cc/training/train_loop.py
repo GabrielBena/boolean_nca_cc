@@ -448,10 +448,6 @@ def train_model(
     init_optimizer: Optional[nnx.Optimizer] = None,
     initial_metrics: Optional[Dict] = None,
     # Checkpointing parameters
-    # save_best: bool = True,
-    # best_metric: str = "hard_accuracy",  # Options: 'loss', 'hard_loss', 'accuracy', 'hard_accuracy'
-    # best_metric_source: str = "training",  # Options: 'training' or 'eval'
-    # save_stable_states: bool = True,
     # Periodic evaluation parameters
     periodic_eval_enabled: bool = False,
     periodic_eval_inner_steps: int = 100,
@@ -496,12 +492,6 @@ def train_model(
         initial_metrics: Optional dictionary of metrics from previous training
         lr_scheduler: Learning rate scheduler type
         lr_scheduler_params: Dictionary of parameters for the scheduler
-        # checkpoint_dir: Directory to save checkpoints
-        # checkpoint_interval: How often to save periodic checkpoints
-        # save_best: Whether to track and save the best model
-        # best_metric: Metric to use for determining the best model
-        # best_metric_source: Source of the metric ('training' or 'eval')
-        # save_stable_states: Whether to save stable states (before potential NaN losses)
         periodic_eval_enabled: Whether to enable periodic evaluation
         periodic_eval_inner_steps: Number of inner steps for periodic evaluation
         periodic_eval_interval: Interval for periodic evaluation
