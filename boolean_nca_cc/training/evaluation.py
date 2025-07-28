@@ -549,7 +549,16 @@ def evaluate_circuits_in_chunks(
     # Assume all chunk results have the same structure
     averaged_result = {}
     for key in chunk_results[0].keys():
-        if isinstance(chunk_results[0][key], list):
+        if key == "per_pattern":
+            # Special handling for per_pattern data - concatenate across chunks
+            if "per_pattern" in chunk_results[0]:
+                combined_per_pattern = {}
+                for pattern_key in chunk_results[0]["per_pattern"].keys():
+                    # Concatenate along the batch dimension (axis=1)
+                    pattern_data_list = [chunk["per_pattern"][pattern_key] for chunk in chunk_results]
+                    combined_per_pattern[pattern_key] = jp.concatenate(pattern_data_list, axis=1)
+                averaged_result["per_pattern"] = combined_per_pattern
+        elif isinstance(chunk_results[0][key], list):
             # For step-wise metrics, average at each step
             step_averages = []
             for step_idx in range(len(chunk_results[0][key])):
@@ -584,11 +593,10 @@ def _evaluate_with_loop(
     # Run message passing steps
     current_graphs = batch_graphs
     
-    # Initialize per-pattern storage if requested
-    if return_per_pattern:
-        per_pattern_metrics = {
-            "pattern_hard_accuracies": [],  # [n_steps, batch_size]
-        }
+    # Always initialize per-pattern storage to eliminate redundancy
+    per_pattern_metrics = {
+        "pattern_hard_accuracies": [],  # [n_steps, batch_size]
+    }
     
     vmap_get_loss = jax.vmap(
         lambda logits, wires: get_loss_from_wires_logits(
@@ -638,27 +646,28 @@ def _evaluate_with_loop(
             globals=jp.stack([current_losses, current_steps], axis=1)
         )
 
-        # Store averaged metrics
+        # Always store individual pattern metrics first (single source of truth)
+        per_pattern_metrics["pattern_hard_accuracies"].append(current_hard_accuracies)
+
+        # Store averaged metrics derived from individual values (eliminates redundancy)
         step_metrics["step"].append(step)
         step_metrics["soft_loss"].append(float(jp.mean(current_losses)))
         step_metrics["hard_loss"].append(float(jp.mean(current_hard_losses)))
         step_metrics["soft_accuracy"].append(float(jp.mean(current_accuracies)))
-        step_metrics["hard_accuracy"].append(float(jp.mean(current_hard_accuracies)))
+        step_metrics["hard_accuracy"].append(float(jp.mean(per_pattern_metrics["pattern_hard_accuracies"][-1])))
         step_metrics["logits_mean"].append(
             float(jp.mean(updated_graphs.nodes["logits"]))
         )
 
-        # Store per-pattern metrics if requested
-        if return_per_pattern:
-            per_pattern_metrics["pattern_hard_accuracies"].append(current_hard_accuracies)
-
         current_graphs = updated_graphs
 
-    # Add per-pattern data to step_metrics if requested
+    # Always add per-pattern data to step_metrics, only expose if requested
+    # Convert lists to arrays for easier analysis
+    step_metrics_per_pattern = {
+        "pattern_hard_accuracies": jp.array(per_pattern_metrics["pattern_hard_accuracies"]), # [n_steps, batch_size]
+    }
+    
     if return_per_pattern:
-        # Convert lists to arrays for easier analysis
-        step_metrics["per_pattern"] = {
-            "pattern_hard_accuracies": jp.array(per_pattern_metrics["pattern_hard_accuracies"]), # [n_steps, batch_size]
-        }
+        step_metrics["per_pattern"] = step_metrics_per_pattern
 
     return step_metrics

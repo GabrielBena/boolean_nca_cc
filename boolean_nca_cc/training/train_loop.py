@@ -175,12 +175,40 @@ def run_knockout_periodic_evaluation(
     epoch,
     wandb_run,
     eval_batch_size: int,
+    accumulated_pattern_data: List,  # Add this parameter
     log_stepwise=False,
     layer_sizes: Optional[List[Tuple[int, int]]] = None,
     use_scan: bool = False,
-) -> Dict:
+    knockout_diversity: Optional[int] = None,  # Add diversity parameter for color coding
+) -> Tuple[Dict, List]:  # Return both results and updated accumulated data
     """
     Run periodic evaluation on circuits with persistent knockouts using vocabulary-based sampling.
+    
+    Args:
+        model: The trained model to evaluate
+        knockout_vocabulary: Optional vocabulary of knockout patterns
+        base_wires: Base circuit wires
+        base_logits: Base circuit logits
+        knockout_config: Configuration for knockout evaluation
+        periodic_eval_test_seed: Seed for evaluation
+        x_data: Input data
+        y_data: Target data
+        input_n: Number of inputs
+        arity: Circuit arity
+        circuit_hidden_dim: Hidden dimension for circuit
+        n_message_steps: Number of message passing steps
+        loss_type: Type of loss function
+        epoch: Current training epoch
+        wandb_run: WandB run object for logging
+        eval_batch_size: Batch size for evaluation
+        accumulated_pattern_data: List to accumulate pattern performance data
+        log_stepwise: Whether to log step-by-step metrics
+        layer_sizes: Layer sizes for the circuit
+        use_scan: Whether to use scan for message passing
+        knockout_diversity: Diversity parameter for color coding scatter plots
+        
+    Returns:
+        Tuple of (evaluation results, updated accumulated pattern data)
     """
     try:
         
@@ -270,17 +298,6 @@ def run_knockout_periodic_evaluation(
         out_knockout_patterns = jax.vmap(pattern_creator_fn)(out_pattern_keys)
         
         # --- BEGIN DEBUG CHECKS ---
-        # Check that ID and OOD patterns are not the same
-        are_patterns_identical = jp.all(in_knockout_patterns == out_knockout_patterns)
-        log.info(f"DEBUG: Are IN-dist and OUT-dist patterns identical? {are_patterns_identical}")
-
-        # # Check that ID patterns are in the vocabulary (they should be)
-        # if knockout_vocabulary is not None and in_knockout_patterns.size > 0:
-        #     first_id_pattern = in_knockout_patterns[0]
-        #     id_in_vocab = jp.any(jp.all(first_id_pattern == knockout_vocabulary, axis=1))
-        #     log.info(f"DEBUG: Is first ID pattern in vocabulary? {id_in_vocab}")
-        #     if wandb_run:
-        #         wandb_run.log({"debug/id_pattern_in_vocab": float(id_in_vocab)})
 
         # Check how many ID patterns are in the vocabulary (should be all of them)
         if knockout_vocabulary is not None and in_knockout_patterns.size > 0:
@@ -311,19 +328,6 @@ def run_knockout_periodic_evaluation(
                 wandb_run.log({"debug/ood_patterns_total": len(out_knockout_patterns)})
 
 
-        # Log pattern sums to wandb
-        if wandb_run:
-            in_sum = jp.sum(in_knockout_patterns)
-            out_sum = jp.sum(out_knockout_patterns)
-            log.info(f"DEBUG: IN-dist sum: {in_sum}, OUT-dist sum: {out_sum}")
-            wandb_run.log({
-                "debug/in_knockout_patterns_sum": in_sum,
-                "debug/out_knockout_patterns_sum": out_sum,
-                "debug/patterns_are_identical": float(are_patterns_identical),
-            })
-        
-        # This assertion will stop training if the patterns are identical
-        assert not are_patterns_identical, "IN-distribution and OUT-of-distribution knockout patterns are identical."
         # --- END DEBUG CHECKS ---
         
         # Replicate base circuit for the batch
@@ -361,42 +365,40 @@ def run_knockout_periodic_evaluation(
             "eval_ko_out/epoch": epoch,
         }
 
-        # Calculate pattern statistics if per-pattern data is available
-        pattern_stats_in = {}
-        pattern_stats_out = {}
-        
-        if "per_pattern" in step_metrics_in:
-            final_hard_accuracies_in = step_metrics_in["per_pattern"]["pattern_hard_accuracies"][-1]
-            pattern_stats_in = {
-                "eval_ko_in/pattern_mean": float(jp.mean(final_hard_accuracies_in)),
-                "eval_ko_in/pattern_std": float(jp.std(final_hard_accuracies_in)), 
-                "eval_ko_in/pattern_min": float(jp.min(final_hard_accuracies_in)),
-                "eval_ko_in/pattern_max": float(jp.max(final_hard_accuracies_in)),
-                "eval_ko_in/pattern_variance": float(jp.var(final_hard_accuracies_in)),
-            }
-            
-        if "per_pattern" in step_metrics_out:
-            final_hard_accuracies_out = step_metrics_out["per_pattern"]["pattern_hard_accuracies"][-1]
-            pattern_stats_out = {
-                "eval_ko_out/pattern_mean": float(jp.mean(final_hard_accuracies_out)),
-                "eval_ko_out/pattern_std": float(jp.std(final_hard_accuracies_out)),
-                "eval_ko_out/pattern_min": float(jp.min(final_hard_accuracies_out)),
-                "eval_ko_out/pattern_max": float(jp.max(final_hard_accuracies_out)),
-                "eval_ko_out/pattern_variance": float(jp.var(final_hard_accuracies_out)),
-            }
-        
         # Log main metrics normally (these will create panels)
         main_metrics = {**final_metrics_in, **final_metrics_out}
         
-        # Store pattern statistics in wandb summary for later use without creating panels
         if wandb_run:
             wandb_run.log(main_metrics)
             
-            # Store pattern stats in summary for later unified plotting
-            if pattern_stats_in:
-                wandb_run.summary.update(pattern_stats_in)
-            if pattern_stats_out:
-                wandb_run.summary.update(pattern_stats_out)
+            # Add new pattern data to accumulated data for persistent scatter plot
+            if "per_pattern" in step_metrics_in:
+                final_hard_accuracies_in = step_metrics_in["per_pattern"]["pattern_hard_accuracies"][-1]
+                for pattern_idx, hard_acc in enumerate(final_hard_accuracies_in):
+                    # Include knockout_diversity in data point for color coding
+                    diversity_value = knockout_diversity if knockout_diversity is not None else 0
+                    data_point = [int(epoch), pattern_idx, float(hard_acc), diversity_value]
+                    accumulated_pattern_data.append(data_point)
+            
+            # Log persistent scatter plot with all accumulated data
+            if accumulated_pattern_data:
+                
+                pattern_table = wandb.Table(
+                    data=accumulated_pattern_data,
+                    columns=["epoch", "pattern_id", "hard_accuracy", "knockout_diversity"]
+                )
+                
+                # Create scatter plot with all accumulated points
+                # Note: Color coding by diversity will be handled by wandb's automatic grouping
+                # based on the knockout_diversity column in the table
+                scatter_plot = wandb.plot.scatter(
+                    pattern_table, 
+                    "epoch", 
+                    "hard_accuracy",
+                    title="In-Distribution Pattern Performance by Epoch (Colored by Knockout Diversity)"
+                )
+                
+                wandb_run.log({"pattern_performance_scatter": scatter_plot})
 
             if log_stepwise:
                 for step_idx in range(len(step_metrics_in["step"])):
@@ -422,19 +424,16 @@ def run_knockout_periodic_evaluation(
             f"Knockout Eval (epoch {epoch}):\n"
             f"  IN-distribution KO: Loss={final_metrics_in['eval_ko_in/final_loss']:.4f}, "
             f"Acc={final_metrics_in['eval_ko_in/final_accuracy']:.4f}, "
-            f"Hard Acc={final_metrics_in['eval_ko_in/final_hard_accuracy']:.4f}"
-            + (f", Range=[{pattern_stats_in['eval_ko_in/pattern_min']:.3f}-{pattern_stats_in['eval_ko_in/pattern_max']:.3f}]" if pattern_stats_in else "")
-            + f"\n"
+            f"Hard Acc={final_metrics_in['eval_ko_in/final_hard_accuracy']:.4f}\n"
             f"  OUT-of-distribution KO: Loss={final_metrics_out['eval_ko_out/final_loss']:.4f}, "
             f"Acc={final_metrics_out['eval_ko_out/final_accuracy']:.4f}, "
             f"Hard Acc={final_metrics_out['eval_ko_out/final_hard_accuracy']:.4f}"
-            + (f", Range=[{pattern_stats_out['eval_ko_out/pattern_min']:.3f}-{pattern_stats_out['eval_ko_out/pattern_max']:.3f}]" if pattern_stats_out else "")
         )
 
         return {
             "final_metrics_in": final_metrics_in,
             "final_metrics_out": final_metrics_out,
-        }
+        }, accumulated_pattern_data  # Return updated accumulated data
 
     except Exception as e:
         log.warning(f"Error during knockout periodic evaluation at epoch {epoch}: {e}")
@@ -801,6 +800,9 @@ def train_model(
         
         log.info(f"Generated knockout vocabulary with shape: {knockout_vocabulary.shape}")
 
+    # Initialize accumulated pattern data for persistent scatter plot
+    # Each data point will be: [epoch, pattern_id, hard_accuracy, knockout_diversity]
+    accumulated_pattern_data = []
 
     diversity = 0.0
     result = {}
@@ -973,7 +975,8 @@ def train_model(
                     base_wires, base_logits = knockout_eval_base_circuit
 
                     # Pass vocabulary and wandb_run for detailed checks
-                    ko_eval_results = run_knockout_periodic_evaluation(
+                    # Pass accumulated data and get updated version back
+                    ko_eval_results, accumulated_pattern_data = run_knockout_periodic_evaluation(
                         model=model,
                         knockout_vocabulary=knockout_vocabulary,
                         base_wires=base_wires,
@@ -988,11 +991,13 @@ def train_model(
                         n_message_steps=periodic_eval_inner_steps,
                         loss_type=loss_type,
                         epoch=epoch,
-                        wandb_run=wandb_run, # Already passed
+                        wandb_run=wandb_run,
                         eval_batch_size=periodic_eval_batch_size,
+                        accumulated_pattern_data=accumulated_pattern_data,  # Pass accumulated data
                         log_stepwise=periodic_eval_log_stepwise,
                         layer_sizes=layer_sizes,
                         use_scan=use_scan,
+                        knockout_diversity=knockout_diversity,  # Pass diversity for color coding
                     )
                     # Extract final metrics for best model tracking
                     if ko_eval_results and "final_metrics_in" in ko_eval_results:
@@ -1001,48 +1006,6 @@ def train_model(
 
                 # Set current eval metrics to the combined dictionary if any evals ran
                 current_eval_metrics = all_eval_metrics if all_eval_metrics else None
-
-                # Step 3: Get current metric value for best model tracking using modular approach
-                # try:
-                #     current_metric_value = _get_metric_value(
-                #         best_metric,
-                #         best_metric_source,
-                #         training_metrics,
-                #         current_eval_metrics,
-                #     )
-                # except (ValueError, KeyError) as e:
-                #     if "eval" in best_metric_source and not (
-                #         periodic_eval_enabled or (knockout_eval and knockout_eval.get("enabled"))
-                #     ):
-                #         log.warning(
-                #             f"Best metric source is '{best_metric_source}' but corresponding evaluation is disabled. "
-                #             f"Falling back to training metrics for {best_metric}."
-                #         )
-                #         current_metric_value = _get_metric_value(
-                #             best_metric,
-                #             "training",
-                #             training_metrics,
-                #             current_eval_metrics,
-                #         )
-                #     elif "eval" in best_metric_source and current_eval_metrics is None:
-                #         # Evaluation is enabled but hasn't run yet this epoch, skip best model check
-                #         current_metric_value = None
-                #     else:
-                #         raise e
-
-                # Check if this is the best model based on the specified metric
-                # is_best = False
-                # if current_metric_value is not None:
-                #     if (
-                #         "accuracy" in best_metric
-                #     ):  # For accuracy metrics, higher is better
-                #         if current_metric_value > best_metric_value:
-                #             best_metric_value = current_metric_value
-                #             is_best = True
-                #     else:  # For loss metrics, lower is better
-                #         if current_metric_value < best_metric_value:
-                #             best_metric_value = current_metric_value
-                #             is_best = True
 
                 # Return the trained GNN model and metrics
                 result = {

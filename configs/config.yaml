@@ -24,7 +24,7 @@ wandb:
 
 # Circuit configuration
 circuit:
-  task: "binary_multiply"
+  task: "reverse"
   input_bits: 8
   output_bits: 8
   arity: 4
@@ -37,7 +37,7 @@ training:
   # INNER LOOP
   n_message_steps: 5  # Number of message passing steps per training iteration
   # LOSS TYPE
-  loss_type: "bce"  # Options: "l4", "l2", or "bce"
+  loss_type: "l4"  # Options: "l4", "l2", or "bce"
   # BATCH SIZE
   meta_batch_size: 64
   # OPTIMIZATION
@@ -58,7 +58,6 @@ training:
 
 pool:
   size: 1024
-  size: 1024
   reset_fraction: 0.15
   reset_interval: 128
   reset_strategy: "combined"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
@@ -67,14 +66,14 @@ pool:
   # Persistent structural knockout (injected periodically)
   persistent_knockout:
     fraction: 0.8 # 
-    damage_prob: 20.0 
+    damage_prob: 5.0 
     knockout_diversity: 512  # Vocabulary size for knockout patterns
 
 eval:
   # Periodic evaluation parameters
-  periodic_eval_enabled: false
+  periodic_eval_enabled: true
   periodic_eval_inner_steps: 100
-  periodic_eval_interval: 512
+  periodic_eval_interval: 1024
   periodic_eval_test_seed: 42
   periodic_eval_log_stepwise: false
   periodic_eval_batch_size: ${pool.persistent_knockout.knockout_diversity}  # Batch size for knockout evaluation (should match knockout_diversity)

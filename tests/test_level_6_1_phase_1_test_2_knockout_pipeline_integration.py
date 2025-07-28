@@ -235,7 +235,8 @@ def test_pattern_flow_through_pipeline(test_setup):
     }
     
     # Mirror exact call from training loop
-    ko_eval_results = run_knockout_periodic_evaluation(
+    accumulated_pattern_data = []  # Initialize empty list for test
+    ko_eval_results, accumulated_pattern_data = run_knockout_periodic_evaluation(
         model=setup['model'],
         knockout_vocabulary=setup['knockout_vocabulary'],
         base_wires=setup['base_wires'],
@@ -252,9 +253,11 @@ def test_pattern_flow_through_pipeline(test_setup):
         epoch=0,
         wandb_run=None,
         eval_batch_size=config['eval_batch_size'],
+        accumulated_pattern_data=accumulated_pattern_data,  # Add missing parameter
         log_stepwise=False,
         layer_sizes=config['layer_sizes'],
         use_scan=False,
+        knockout_diversity=config.get('knockout_diversity', 16),  # Add diversity parameter
     )
     
     # Verify pipeline completed successfully
@@ -340,7 +343,8 @@ def test_metrics_differentiation(test_setup):
     }
     
     # Run full evaluation pipeline
-    ko_eval_results = run_knockout_periodic_evaluation(
+    accumulated_pattern_data = []  # Initialize empty list for test
+    ko_eval_results, accumulated_pattern_data = run_knockout_periodic_evaluation(
         model=setup['model'],
         knockout_vocabulary=setup['knockout_vocabulary'],
         base_wires=setup['base_wires'],
@@ -357,9 +361,11 @@ def test_metrics_differentiation(test_setup):
         epoch=0,
         wandb_run=None,
         eval_batch_size=config['eval_batch_size'],
+        accumulated_pattern_data=accumulated_pattern_data,  # Add missing parameter
         log_stepwise=False,
         layer_sizes=config['layer_sizes'],
         use_scan=False,
+        knockout_diversity=config.get('knockout_diversity', 16),  # Add diversity parameter
     )
     
     final_metrics_in = ko_eval_results['final_metrics_in']

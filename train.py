@@ -45,9 +45,6 @@ def main(cfg: DictConfig) -> None:
     # Print configuration
     log.info(OmegaConf.to_yaml(cfg))
     
-    # Debug: Check knockout_diversity value
-    log.info(f"DEBUG: knockout_diversity value = {cfg.pool.persistent_knockout.knockout_diversity}")
-    log.info(f"DEBUG: persistent_knockout_config = {cfg.pool.persistent_knockout}")
 
     # Set random seed
     rng = jax.random.PRNGKey(cfg.seed)
@@ -163,7 +160,6 @@ def main(cfg: DictConfig) -> None:
 
     # Train model
     log.info(f"Starting {cfg.model.type.upper()} training")
-    log.info(f"DEBUG: About to call train_model with knockout_diversity = {cfg.pool.persistent_knockout.knockout_diversity}")
     model_results = train_model(
         # Initialization parameters
         key=cfg.seed,
