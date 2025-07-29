@@ -13,7 +13,7 @@ def mutate_wires_swap(
     wires: list[jp.ndarray],
     key: jax.random.PRNGKey,
     mutation_rate: float = 0.1,
-    n_swaps_per_layer: int = None,
+    n_swaps_per_layer: int | None = None,
 ) -> list[jp.ndarray]:
     """
     Mutate circuit wires by swapping connections within each layer.
@@ -83,11 +83,11 @@ def mutate_wires_swap(
 
         # Apply swaps using vectorized operations
         def apply_swap(i, connections):
-            idx1, idx2 = swap_indices[i]
+            idx1, idx2 = swap_indices[i]  # noqa: B023
             val1, val2 = connections[idx1], connections[idx2]
 
             # Only apply swap if mask is True for this swap
-            should_apply = swap_mask[i]
+            should_apply = swap_mask[i]  # noqa: B023
             new_val1 = jp.where(should_apply, val2, val1)
             new_val2 = jp.where(should_apply, val1, val2)
 
@@ -109,7 +109,7 @@ def mutate_wires_batch(
     batch_wires: list[jp.ndarray],
     key: jax.random.PRNGKey,
     mutation_rate: float = 0.1,
-    n_swaps_per_layer: int = None,
+    n_swaps_per_layer: int | None = None,
 ) -> list[jp.ndarray]:
     """
     Apply wire mutation to a batch of circuits.
@@ -133,7 +133,7 @@ def mutate_wires_batch(
     # Use vmap to apply mutation to each circuit in the batch
     def mutate_single_circuit(circuit_key, *circuit_wires):
         # Unbatch the wires for this single circuit
-        single_wires = [w for w in circuit_wires]
+        single_wires = list(circuit_wires)
         # Apply mutation (correct argument order: wires, key, mutation_rate, n_swaps_per_layer)
         mutated_single = mutate_wires_swap(
             single_wires, circuit_key, mutation_rate, n_swaps_per_layer
@@ -205,7 +205,7 @@ def perturb_logits(
     # Make a copy of logits to avoid modifying the original
     perturbed_logits = []
 
-    for i, logit in enumerate(logits):
+    for _i, logit in enumerate(logits):
         layer_rng, rng = jax.random.split(rng)
 
         # Add small Gaussian noise to the logits
@@ -233,7 +233,7 @@ def apply_damage(
     # Make a copy of logits to avoid modifying the original
     damaged_logits = []
 
-    for i, logit in enumerate(logits):
+    for _i, logit in enumerate(logits):
         layer_rng, rng = jax.random.split(rng)
 
         # Generate damage mask

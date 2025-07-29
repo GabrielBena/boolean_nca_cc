@@ -108,14 +108,14 @@ def loss_f_l4(logits, wires, x, y0):
     hard_loss = res2loss(hard_res)
     accuracy = compute_accuracy(y, y0)
     hard_accuracy = compute_accuracy(hard_y, y0)
-    return loss, dict(
-        act=act,
-        accuracy=accuracy,
-        hard_loss=hard_loss,
-        hard_accuracy=hard_accuracy,
-        res=res,
-        hard_res=hard_res,
-    )
+    return loss, {
+        "act": act,
+        "accuracy": accuracy,
+        "hard_loss": hard_loss,
+        "hard_accuracy": hard_accuracy,
+        "res": res,
+        "hard_res": hard_res,
+    }
 
 
 def loss_f_bce(logits, wires, x, y0):
@@ -128,14 +128,14 @@ def loss_f_bce(logits, wires, x, y0):
     hard_loss = binary_cross_entropy(hard_y, y0)
     accuracy = compute_accuracy(y, y0)
     hard_accuracy = compute_accuracy(hard_y, y0)
-    return loss, dict(
-        act=act,
-        accuracy=accuracy,
-        hard_loss=hard_loss,
-        hard_accuracy=hard_accuracy,
-        res=y - y0,
-        hard_res=hard_y - y0,
-    )
+    return loss, {
+        "act": act,
+        "accuracy": accuracy,
+        "hard_loss": hard_loss,
+        "hard_accuracy": hard_accuracy,
+        "res": y - y0,
+        "hard_res": hard_y - y0,
+    }
 
 
 # Pre-compile gradient functions for both loss types

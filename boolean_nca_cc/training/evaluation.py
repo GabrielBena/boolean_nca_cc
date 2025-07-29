@@ -134,10 +134,10 @@ def evaluate_model_stepwise_generator(
     input_n: int,
     arity: int = 2,
     circuit_hidden_dim: int = 16,
-    max_steps: int = None,
+    max_steps: int | None = None,
     loss_type: str = "l4",
     bidirectional_edges: bool = True,
-    layer_sizes: list[tuple[int, int]] = None,
+    layer_sizes: list[tuple[int, int]] | None = None,
 ) -> Generator[StepResult, None, None]:
     """
     Generator that yields step-by-step evaluation results for GNN model optimization.
@@ -280,7 +280,7 @@ def evaluate_model_stepwise(
     n_message_steps: int = 100,
     loss_type: str = "l4",
     bidirectional_edges: bool = True,
-    layer_sizes: list[tuple[int, int]] = None,
+    layer_sizes: list[tuple[int, int]] | None = None,
     use_tqdm: bool = False,
 ) -> dict:
     """
@@ -372,7 +372,7 @@ def evaluate_model_stepwise_batched(
     n_message_steps: int = 100,
     loss_type: str = "l4",
     bidirectional_edges: bool = True,
-    layer_sizes: list[tuple[int, int]] = None,
+    layer_sizes: list[tuple[int, int]] | None = None,
 ) -> dict:
     """
     Evaluate GNN performance on a batch of circuits by running message passing steps
@@ -424,7 +424,7 @@ def evaluate_model_stepwise_batched(
         initial_hard_accuracies,
         initial_res,
         _,
-    ) = [aux_elem for aux_elem in initial_aux]
+    ) = list(initial_aux)
 
     # Update graph globals with initial losses
     batch_graphs = batch_graphs._replace(
@@ -482,7 +482,7 @@ def evaluate_model_stepwise_batched(
             current_hard_accuracies,
             current_res,
             _,
-        ) = [aux_elem for aux_elem in current_aux]
+        ) = list(current_aux)
 
         # Update output node losses
         updated_graphs = vmap_update_loss(updated_graphs, current_res)

@@ -311,7 +311,7 @@ def evaluate_circuits_in_chunks(
 
         # Extract chunk
         chunk_wires = [w[start_idx:end_idx] for w in wires]
-        chunk_logits = [l[start_idx:end_idx] for l in logits]
+        chunk_logits = [log[start_idx:end_idx] for log in logits]
 
         # Evaluate chunk
         chunk_result = eval_fn(batch_wires=chunk_wires, batch_logits=chunk_logits, **eval_kwargs)
@@ -320,7 +320,7 @@ def evaluate_circuits_in_chunks(
     # Average results across chunks
     # Assume all chunk results have the same structure
     averaged_result = {}
-    for key in chunk_results[0].keys():
+    for key in chunk_results[0]:
         if isinstance(chunk_results[0][key], list):
             # For step-wise metrics, average at each step
             step_averages = []

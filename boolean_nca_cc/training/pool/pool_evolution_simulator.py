@@ -79,7 +79,7 @@ def simulate_pool_reset_evolution(
     meta_batch_size: int,
     reset_strategy: str = "steps_biased",
     use_beta_loss_step: bool = True,
-    reset_interval_schedule: dict = None,
+    reset_interval_schedule: dict | None = None,
     jump_size: int = 1,
     seed: int = 42,
 ) -> dict[str, list]:
@@ -248,7 +248,7 @@ def simulate_pool_reset_evolution(
 def plot_pool_evolution(
     simulation_results: dict[str, list],
     title: str = "Pool Reset Step Evolution",
-    save_path: str = None,
+    save_path: str | None = None,
 ):
     """
     Plot the results of pool evolution simulation.

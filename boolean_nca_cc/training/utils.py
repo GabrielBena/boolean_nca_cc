@@ -235,9 +235,9 @@ def plot_lr_schedule(
     lr_scheduler: str,
     learning_rate: float,
     epochs: int,
-    lr_scheduler_params: dict = None,
+    lr_scheduler_params: dict | None = None,
     title: str = "Learning Rate Schedule",
-    output_dir: str = None,
+    output_dir: str | None = None,
     save_plot: bool = True,
     show_plot: bool = False,
     eval_every_n: int = 1,
@@ -696,7 +696,7 @@ def cleanup_redundant_wandb_artifacts(
     project="boolean-nca-cc",
     entity="m2snn",
     artifact_name_pattern=None,
-    keep_tags=["best", "latest"],
+    keep_tags=("best", "latest"),
     keep_recent_count=3,
     dry_run=True,
     verbose=True,
@@ -813,7 +813,9 @@ def cleanup_redundant_wandb_artifacts(
                     # Fallback: try to sort by version if available
                     try:
                         group_artifacts.sort(key=lambda x: x.version, reverse=True)
-                    except:
+                    except Exception as e:
+                        if verbose:
+                            print(f"Warning: Could not sort artifacts by version: {e}")
                         pass  # Keep original order if sorting fails
 
                 artifacts_to_keep = []
@@ -928,7 +930,7 @@ def check_gradients(grads, verbose=True, return_zero_grad_paths=False):
     leaves_with_paths, _ = jax.tree_util.tree_flatten_with_path(grads)
     zero_grad_paths = []
 
-    for i, (path, leaf) in enumerate(leaves_with_paths):
+    for _i, (path, leaf) in enumerate(leaves_with_paths):
         path_str = keypath_to_string(path)
         if not leaf.any():
             zero_grad_paths.append(path_str)

@@ -38,7 +38,7 @@ def make_nops(gate_n, arity, group_size, nop_scale=3.0):
         During training, these logits are optimized to implement the desired
         boolean function (AND, OR, XOR, etc.) through gradient descent.
     """
-    I = jp.arange(1 << arity)
+    I = jp.arange(1 << arity)  # noqa: E741
     bits = (I >> I[:arity, None]) & 1
     luts = bits[jp.arange(gate_n) % arity]
     logits = (2.0 * luts - 1.0) * nop_scale
@@ -80,7 +80,7 @@ def run_layer(lut, inputs):
     for x in inputs:
         x = x[..., None, None]
         lut = (1.0 - x) * lut[..., ::2] + x * lut[..., 1::2]
-    return lut.reshape(*lut.shape[:-3] + (-1,))
+    return lut.reshape(*(*lut.shape[:-3], -1))
 
 
 def gen_wires(key, in_n, out_n, arity, group_size):

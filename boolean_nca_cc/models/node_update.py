@@ -5,6 +5,8 @@ This module provides node update functions for processing incoming messages and
 updating node features in a graph neural network.
 """
 
+import itertools
+
 import jax
 import jax.numpy as jp
 from flax import nnx
@@ -106,7 +108,7 @@ class NodeUpdateModule(nnx.Module):
         mlp_features = [mlp_input_size, *node_mlp_features, mlp_output_size]
         mlp_layers = []
 
-        for i, (in_f, out_f) in enumerate(zip(mlp_features[:-1], mlp_features[1:], strict=False)):
+        for i, (in_f, out_f) in enumerate(itertools.pairwise(mlp_features)):
             # Special initialization for the final layer
             if i == len(mlp_features) - 2:
                 # Use small random initialization for weights to ensure gradient flow
@@ -248,7 +250,7 @@ class NodeUpdateModule(nnx.Module):
         )
 
         # Update only the 'logits' and 'hidden' fields, preserving others
-        new_node_features = {k: v for k, v in nodes.items()}
+        new_node_features = dict(nodes.items())
         new_node_features["logits"] = updated_logits
         new_node_features["hidden"] = updated_hidden
 

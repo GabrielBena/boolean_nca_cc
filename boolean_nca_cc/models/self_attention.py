@@ -428,7 +428,7 @@ def run_self_attention_scan(
     final_graph, intermediate_graphs = jax.lax.scan(scan_body, graph, None, length=num_steps)
 
     # Combine initial graph with intermediate results
-    all_graphs = [graph] + list(intermediate_graphs)
+    all_graphs = [graph, *list(intermediate_graphs)]
 
     return final_graph, all_graphs
 

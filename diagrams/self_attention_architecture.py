@@ -1,4 +1,27 @@
-from manim import *
+from manim import (
+    BLACK,
+    BLUE,
+    BOLD,
+    DOWN,
+    GREEN,
+    LEFT,
+    ORANGE,
+    ORIGIN,
+    PURPLE,
+    RED,
+    RIGHT,
+    UP,
+    WHITE,
+    YELLOW,
+    Arrow,
+    Circle,
+    Line,
+    RoundedRectangle,
+    Scene,
+    Square,
+    Text,
+    VGroup,
+)
 
 
 class SelfAttentionArchitectureDiagram(Scene):
@@ -142,7 +165,7 @@ class SelfAttentionArchitectureDiagram(Scene):
             corner_radius=0.05,
         )
         output_rect.move_to(DOWN * 0.25)
-        output_text = Text("4 × Hidden Dim", font_size=9, color=WHITE, weight=BOLD)
+        output_text = Text("4 x Hidden Dim", font_size=9, color=WHITE, weight=BOLD)
         output_text.move_to(DOWN * 0.25)
 
         # Formula
@@ -236,8 +259,6 @@ class SelfAttentionArchitectureDiagram(Scene):
         title.move_to(output_box.get_top() + DOWN * 0.3)
 
         # Two projection branches with cleaner layout
-        projections = VGroup()
-
         # Logit projection
         logit_proj_box = RoundedRectangle(
             width=1.6,

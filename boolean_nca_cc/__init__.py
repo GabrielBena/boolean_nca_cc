@@ -27,22 +27,22 @@ from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
 __version__ = "0.1.0"
 
 __all__ = [
-    # Circuits
-    "generate_layer_sizes",
-    "gen_circuit",
-    "run_circuit",
-    "run_layer",
-    "TrainState",
-    "train_step",
     # Models
     "CircuitGNN",
-    "run_gnn_scan",
-    # Utils
-    "build_graph",
-    "extract_logits_from_graph",
-    # Training
-    "train_model",
-    "evaluate_model_stepwise",
+    "TrainState",
     # Version
     "__version__",
+    # Utils
+    "build_graph",
+    "evaluate_model_stepwise",
+    "extract_logits_from_graph",
+    "gen_circuit",
+    # Circuits
+    "generate_layer_sizes",
+    "run_circuit",
+    "run_gnn_scan",
+    "run_layer",
+    # Training
+    "train_model",
+    "train_step",
 ]

@@ -138,11 +138,8 @@ class GraphPool(struct.PyTreeNode):
         # lambda x, y: None if x is None else f(x, y)
         # x corresponds to a leaf from self.graphs (pool_leaf)
         # y corresponds to a leaf from batch_of_graphs (batch_leaf_original)
-        mapped_fn = (
-            lambda pool_leaf, batch_leaf_original: None
-            if pool_leaf is None
-            else core_update_logic(pool_leaf, batch_leaf_original)
-        )
+        def mapped_fn(pool_leaf, batch_leaf_original):
+            return None if pool_leaf is None else core_update_logic(pool_leaf, batch_leaf_original)
 
         updated_graphs_data = jax.tree.map(
             mapped_fn,
@@ -164,7 +161,7 @@ class GraphPool(struct.PyTreeNode):
         updated_logits = self.logits
         if batch_of_logits is None:
             batch_of_logits = jax.vmap(extract_logits_from_graph, in_axes=(0, None))(
-                batch_of_graphs, [l.shape[1:] for l in self.logits]
+                batch_of_graphs, [log.shape[1:] for log in self.logits]
             )
         if self.logits is not None:
             updated_logits = jax.tree.map(
@@ -243,7 +240,7 @@ class GraphPool(struct.PyTreeNode):
         update_steps = self.graphs.globals[indices, 1]
         return float(jp.mean(update_steps))
 
-    def get_wiring_diversity(self, layer_sizes: list[tuple[int, int]] = None) -> float:
+    def get_wiring_diversity(self, layer_sizes: list[tuple[int, int]] | None = None) -> float:
         """
         Calculate the wiring diversity of the pool using entropy-based measurement.
 

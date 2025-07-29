@@ -158,7 +158,7 @@ def run_gnn_scan(
     final_graph, intermediate_graphs = jax.lax.scan(gnn_step, graph, xs=None, length=num_steps)
 
     # Combine initial graph with intermediate results
-    all_graphs = [graph] + list(intermediate_graphs)
+    all_graphs = [graph, *list(intermediate_graphs)]
 
     return final_graph, all_graphs
 

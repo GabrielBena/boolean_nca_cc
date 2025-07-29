@@ -86,10 +86,7 @@ def update_output_node_loss(
     loss_values = jp.atleast_1d(loss_values)
 
     # For 2D case (shape [case_n, output_bits]), average across the first dimension
-    if loss_values.ndim == 2:
-        processed_loss_values = jp.mean(loss_values, axis=0)
-    else:
-        processed_loss_values = loss_values
+    processed_loss_values = jp.mean(loss_values, axis=0) if loss_values.ndim == 2 else loss_values
 
     # If we have a single value, broadcast it to all output nodes
     if processed_loss_values.shape[0] == 1:

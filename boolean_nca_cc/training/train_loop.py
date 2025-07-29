@@ -370,7 +370,7 @@ def _get_metric_value(
     metric_name: str,
     metric_source: str,
     training_metrics: dict,
-    eval_metrics: dict = None,
+    eval_metrics: dict | None = None,
 ) -> float:
     """
     Get metric value from the appropriate source.
@@ -426,7 +426,7 @@ def run_unified_periodic_evaluation(
     epoch,
     wandb_run,
     log_stepwise=False,
-    layer_sizes: list[tuple[int, int]] = None,
+    layer_sizes: list[tuple[int, int]] | None = None,
     log_pool_scatter: bool = False,
 ) -> dict:
     """
@@ -625,8 +625,8 @@ def train_model(
     arity: int = 2,
     circuit_hidden_dim: int = 16,
     message_passing: bool = True,
-    node_mlp_features: list[int] = [64, 32],
-    edge_mlp_features: list[int] = [64, 32],
+    node_mlp_features: list[int] | None = None,
+    edge_mlp_features: list[int] | None = None,
     use_attention: bool = False,
     # Training hyperparameters
     learning_rate: float = 1e-3,
@@ -658,18 +658,18 @@ def train_model(
     ),  # Weights for [loss, steps] in combined strategy
     # Learning rate scheduling
     lr_scheduler: str = "constant",  # Options: "constant", "exponential", "cosine", "linear_warmup"
-    lr_scheduler_params: dict = None,
+    lr_scheduler_params: dict | None = None,
     # Initialization parameters
     key: int = 0,
     wiring_fixed_key: jax.random.PRNGKey = jax.random.PRNGKey(
         42
     ),  # Fixed key for generating wirings when wiring_mode='fixed'
-    init_model: CircuitGNN | CircuitSelfAttention = None,
-    init_optimizer: nnx.Optimizer = None,
-    initial_metrics: dict = None,
+    init_model: CircuitGNN | CircuitSelfAttention | None = None,
+    init_optimizer: nnx.Optimizer | None = None,
+    initial_metrics: dict | None = None,
     # Checkpointing parameters
     checkpoint_enabled: bool = False,
-    checkpoint_dir: str = None,
+    checkpoint_dir: str | None = None,
     checkpoint_interval: int = 10,
     save_best: bool = True,
     best_metric: str = "hard_accuracy",  # Options: 'loss', 'hard_loss', 'accuracy', 'hard_accuracy'
@@ -686,7 +686,7 @@ def train_model(
     # Wandb parameters
     wandb_logging: bool = False,
     log_interval: int = 1,
-    wandb_run_config: dict = None,
+    wandb_run_config: dict | None = None,
     # Early stopping parameters
     stop_accuracy_enabled: bool = False,
     stop_accuracy_threshold: float = 0.95,
@@ -779,20 +779,9 @@ def train_model(
 
     # Initialize or reuse GNN
     if init_model is None:
-        # Create a new GNN
-        rng, init_key = jax.random.split(rng)
-        model = CircuitGNN(
-            node_mlp_features=node_mlp_features,
-            edge_mlp_features=edge_mlp_features,
-            circuit_hidden_dim=circuit_hidden_dim,
-            arity=arity,
-            message_passing=message_passing,
-            use_attention=use_attention,
-            rngs=nnx.Rngs(params=init_key),
-        )
-    else:
-        # Use the provided GNN
-        model = init_model
+        raise ValueError("init_model is required")
+
+    model = init_model
 
     # Create optimizer or reuse existing optimizer
     if init_optimizer is None:
@@ -939,7 +928,7 @@ def train_model(
 
             all_results = []
 
-            for i in range(n_message_steps):
+            for _i in range(n_message_steps):
                 graph = model(graph)
 
                 graph, loss, logits, aux = get_loss_and_update_graph(
@@ -969,10 +958,7 @@ def train_model(
             return final_loss, (final_aux, final_graph, final_logits, loss_step)
 
         def batch_loss_fn(model, graphs, logits, wires, loss_key):
-            if use_scan:
-                loss_fn = loss_fn_scan
-            else:
-                loss_fn = loss_fn_no_scan
+            loss_fn = loss_fn_scan if use_scan else loss_fn_no_scan
 
             loss_keys = jax.random.split(loss_key, graphs.n_node.shape[0])
             loss, (aux, updated_graphs, updated_logits, loss_steps) = nnx.vmap(
@@ -1091,7 +1077,7 @@ def train_model(
 
             all_results = []
 
-            for i in range(n_message_steps):
+            for _i in range(n_message_steps):
                 graph = model(graph)
 
                 graph, loss, logits, aux = get_loss_and_update_graph(
@@ -1121,10 +1107,7 @@ def train_model(
             return final_loss, (final_aux, final_graph, final_logits, loss_step)
 
         def batch_loss_fn(model, graphs, logits, wires, loss_key):
-            if use_scan:
-                loss_fn = loss_fn_scan
-            else:
-                loss_fn = loss_fn_no_scan
+            loss_fn = loss_fn_scan if use_scan else loss_fn_no_scan
 
             loss_keys = jax.random.split(loss_key, graphs.n_node.shape[0])
             loss, (aux, updated_graphs, updated_logits, loss_steps) = nnx.vmap(
@@ -1197,9 +1180,9 @@ def train_model(
             actual_chunk_size = end_idx - start_idx
 
             # Extract chunk data
-            chunk_graphs = jax.tree.map(lambda x: x[start_idx:end_idx], graphs)
-            chunk_wires = jax.tree.map(lambda x: x[start_idx:end_idx], wires)
-            chunk_logits = jax.tree.map(lambda x: x[start_idx:end_idx], logits)
+            chunk_graphs = jax.tree.map(lambda x: x[start_idx:end_idx], graphs)  # noqa: B023
+            chunk_wires = jax.tree.map(lambda x: x[start_idx:end_idx], wires)  # noqa: B023
+            chunk_logits = jax.tree.map(lambda x: x[start_idx:end_idx], logits)  # noqa: B023
 
             # Process chunk using JIT-compiled function
             (
@@ -1226,10 +1209,10 @@ def train_model(
             # Accumulate gradients (weighted by chunk size for proper averaging)
             chunk_weight = actual_chunk_size / batch_size
             if accumulated_grads is None:
-                accumulated_grads = jax.tree.map(lambda g: g * chunk_weight, chunk_grads)
+                accumulated_grads = jax.tree.map(lambda g: g * chunk_weight, chunk_grads)  # noqa: B023
             else:
                 accumulated_grads = jax.tree.map(
-                    lambda acc_g, chunk_g: acc_g + chunk_g * chunk_weight,
+                    lambda acc_g, chunk_g: acc_g + chunk_g * chunk_weight,  # noqa: B023
                     accumulated_grads,
                     chunk_grads,
                 )
@@ -1237,10 +1220,10 @@ def train_model(
             # Accumulate loss and metrics (weighted by chunk size)
             accumulated_loss += chunk_loss * chunk_weight
             if accumulated_aux is None:
-                accumulated_aux = jax.tree.map(lambda x: x * chunk_weight, chunk_aux)
+                accumulated_aux = jax.tree.map(lambda x: x * chunk_weight, chunk_aux)  # noqa: B023
             else:
                 accumulated_aux = jax.tree.map(
-                    lambda acc_x, chunk_x: acc_x + chunk_x * chunk_weight,
+                    lambda acc_x, chunk_x: acc_x + chunk_x * chunk_weight,  # noqa: B023
                     accumulated_aux,
                     chunk_aux,
                 )
@@ -1519,10 +1502,7 @@ def train_model(
                     metrics_dict["training/sequential_batching"] = False
 
                 # Add learning rate if available
-                if schedule is not None:
-                    schedule_value = schedule(epoch)
-                else:
-                    schedule_value = learning_rate
+                schedule_value = schedule(epoch) if schedule is not None else learning_rate
                 metrics_dict["scheduler/learning_rate"] = schedule_value
 
                 # Add early stopping metrics if enabled
