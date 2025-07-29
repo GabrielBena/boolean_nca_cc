@@ -24,7 +24,7 @@ wandb:
 
 # Circuit configuration
 circuit:
-  task: "reverse"
+  task: "binary_multiply"
   input_bits: 8
   output_bits: 8
   arity: 4
@@ -66,14 +66,14 @@ pool:
   # Persistent structural knockout (injected periodically)
   persistent_knockout:
     fraction: 0.8 # 
-    damage_prob: 5.0 
-    knockout_diversity: 512  # Vocabulary size for knockout patterns
+    damage_prob: 20.0 
+    knockout_diversity: 1  # Vocabulary size for knockout patterns
 
 eval:
   # Periodic evaluation parameters
   periodic_eval_enabled: true
   periodic_eval_inner_steps: 100
-  periodic_eval_interval: 1024
+  periodic_eval_interval: 512
   periodic_eval_test_seed: 42
   periodic_eval_log_stepwise: false
   periodic_eval_batch_size: ${pool.persistent_knockout.knockout_diversity}  # Batch size for knockout evaluation (should match knockout_diversity)
