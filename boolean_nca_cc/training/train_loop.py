@@ -36,8 +36,8 @@ import wandb
 
 from boolean_nca_cc.utils.graph_builder import build_graph
 from boolean_nca_cc.training.pool.structural_perturbation import    (
-    create_reproducible_knockout_pattern,
-    extract_layer_info_from_graph, create_knockout_vocabulary
+    create_reproducible_knockout_pattern, 
+    create_knockout_vocabulary
 )
 from functools import partial
 
@@ -212,15 +212,9 @@ def run_knockout_periodic_evaluation(
     """
     try:
         
-        # Build a sample graph to extract true layer sizes
-        sample_graph = build_graph(
-            logits=base_logits,
-            wires=base_wires,
-            input_n=input_n,
-            arity=arity,
-            circuit_hidden_dim=circuit_hidden_dim,
-        )
-        true_layer_sizes = extract_layer_info_from_graph(sample_graph, input_n)
+        # Use the layer_sizes parameter that's already passed to the function
+        # This is in the correct format (total_gates, group_size) from generate_layer_sizes
+        true_layer_sizes = layer_sizes if layer_sizes is not None else []
         
         # 1. Sample IN-distribution knockout patterns from vocabulary
         if knockout_vocabulary is not None:
@@ -240,7 +234,6 @@ def run_knockout_periodic_evaluation(
                 create_reproducible_knockout_pattern,
                 layer_sizes=true_layer_sizes,
                 damage_prob=knockout_config["damage_prob"],
-                input_n=input_n,
             )
             
             id_rng = jax.random.PRNGKey(periodic_eval_test_seed)
@@ -289,7 +282,6 @@ def run_knockout_periodic_evaluation(
             create_reproducible_knockout_pattern,
             layer_sizes=true_layer_sizes,
             damage_prob=knockout_config["damage_prob"],
-            input_n=input_n,
         )
         
         # Use different seed for OOD patterns
@@ -778,16 +770,9 @@ def train_model(
         # Use the same seed as evaluation to ensure pattern space is identical
         vocab_rng = jax.random.PRNGKey(periodic_eval_test_seed)
         
-        # Extract layer configuration from one sample circuit for vocabulary generation
-        sample_wires, sample_logits = gen_circuit(wiring_fixed_key, layer_sizes, arity=arity)
-        sample_graph = build_graph(
-            logits=sample_logits,
-            wires=sample_wires,
-            input_n=input_n,
-            arity=arity,
-            circuit_hidden_dim=circuit_hidden_dim,
-        )
-        true_layer_sizes = extract_layer_info_from_graph(sample_graph, input_n)
+        # Use the layer_sizes parameter directly - it's already in the correct format
+        # from generate_layer_sizes: (total_gates, group_size)
+        true_layer_sizes = layer_sizes
         
         # Generate the shared knockout vocabulary
         knockout_vocabulary = create_knockout_vocabulary(
@@ -795,7 +780,6 @@ def train_model(
             vocabulary_size=knockout_diversity,
             layer_sizes=true_layer_sizes,
             damage_prob=persistent_knockout_config.get("damage_prob", 10.0),
-            input_n=input_n,
         )
         
         log.info(f"Generated knockout vocabulary with shape: {knockout_vocabulary.shape}")

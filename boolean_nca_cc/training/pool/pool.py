@@ -17,9 +17,7 @@ from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.utils.graph_builder import build_graph
 from boolean_nca_cc.utils.extraction import extract_logits_from_graph
 from boolean_nca_cc.training.pool.structural_perturbation import (
-    create_reproducible_knockout_pattern,
-    extract_layer_info_from_graph,
-)
+    create_reproducible_knockout_pattern)
 
 PyTree = Any
 
@@ -31,7 +29,7 @@ class GraphPool(struct.PyTreeNode):
     Stores a single batched jraph.GraphsTuple and allows
     sampling and updating batches. Also tracks wires and logits in parallel
     for computing functional circuit loss without redundant extraction.
-    """
+    """ 
 
     size: int = struct.field(pytree_node=False)
     # graphs is a single jraph.GraphsTuple where each leaf has a leading batch dimension
@@ -577,9 +575,9 @@ def initialize_graph_pool(
             knockout_key, pool_size, shape=(num_to_damage,), replace=False
         )
 
-        # Extract true layer sizes from one of the generated graphs to ensure consistency
-        single_graph = jax.tree.map(lambda x: x[0], graphs)
-        true_layer_sizes = extract_layer_info_from_graph(single_graph, input_n)
+        # Use the layer_sizes parameter directly - knockouts don't change layer structure
+        # The graph structure (nodes, layers, groups) remains static
+        true_layer_sizes = layer_sizes
 
         # Generate new patterns for the selected indices
         pattern_keys = jax.random.split(knockout_key, num_to_damage)
@@ -588,7 +586,6 @@ def initialize_graph_pool(
                 key=k,
                 layer_sizes=true_layer_sizes,
                 damage_prob=damage_prob,
-                input_n=input_n,
             )
         )
         new_patterns = vmapped_pattern_creator(pattern_keys)
