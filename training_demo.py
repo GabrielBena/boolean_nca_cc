@@ -103,7 +103,7 @@ def calc_gate_use_masks(input_n, wires, logits):
         gate_masks: list of ndarrays, each a boolean mask for gates in each layer (from input to output).
         wire_masks: list of ndarrays, each a boolean mask for wires in each layer (from input to output).
     """
-    layer_sizes = [input_n] + [np.prod(l.shape[:2]) for l in logits]
+    layer_sizes = [input_n] + [np.prod(log.shape[:2]) for log in logits]
     gate_use_mask = np.ones(layer_sizes[-1], np.bool_)
     gate_masks = [gate_use_mask]
     wire_masks = []
@@ -180,7 +180,7 @@ class CircuitOptimizationDemo:
         self.initialize_circuit()
 
         # Task configuration
-        self.available_tasks = list(TASKS.keys()) + ["text", "noise"]
+        self.available_tasks = [*list(TASKS.keys()), "text", "noise"]
         self.task_idx = 0
         self.task_text = "Hello Neural CA"
         self.noise_p = 0.5
@@ -264,7 +264,7 @@ class CircuitOptimizationDemo:
         # Store initial logits
         self.logits0 = self.logits
 
-        print(f"Circuit initialized with {sum(l.size for l in self.logits0)} parameters")
+        print(f"Circuit initialized with {sum(logit.size for logit in self.logits0)} parameters")
         print(f"Layer structure: {self.layer_sizes}")
 
         # Reset gate masks for new circuit structure
@@ -386,7 +386,8 @@ class CircuitOptimizationDemo:
                     self.ground_truth_img.shape[0],
                 )
                 self.imgui_initialized = True
-            except:
+            except Exception as e:
+                print(f"Error initializing ImGui textures: {e}")
                 # ImGui context not ready yet
                 pass
 
@@ -827,7 +828,6 @@ class CircuitOptimizationDemo:
             import random
 
             mutation_seed = random.randint(0, 99999)
-            mutation_key = jax.random.PRNGKey(mutation_seed)
 
             # Pick a random layer to mutate (skip if no layers have enough connections)
             available_layers = []
@@ -920,7 +920,7 @@ class CircuitOptimizationDemo:
             x_pos, y_pos = x0 + j * 10, y0 + i * 10
             dl.add_rect_filled((x_pos, y_pos), (x_pos + 10, y_pos + 10), c)
 
-    def draw_circuit(self, pad=4, d=24, H=600):
+    def draw_circuit(self, pad=4, d=24, H=600):  # noqa: N803
         """Draw the detailed circuit visualization"""
         io = imgui.get_io()
         W = imgui.get_content_region_avail().x - pad * 2
@@ -944,7 +944,7 @@ class CircuitOptimizationDemo:
             self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
 
         # Ensure each activation layer has the right shape
-        for li, (gate_n, group_size) in enumerate(self.layer_sizes):
+        for li, (gate_n, _group_size) in enumerate(self.layer_sizes):
             if li >= len(self.act) or self.act[li].shape != (self.case_n, gate_n):
                 if li >= len(self.act):
                     # Extend act list if needed
@@ -1139,10 +1139,6 @@ class CircuitOptimizationDemo:
                             thickness=2.0,
                         )
             else:
-                # Block visualization
-                block_w = disp_w / img_w
-                block_h = disp_h / img_h
-
                 # Limit resolution for performance
                 max_blocks = 64
                 x_step = max(1, img_w // max_blocks)
@@ -1475,7 +1471,7 @@ class CircuitOptimizationDemo:
             # Status information
             imgui.separator_text("Status")
             imgui.text(f"Method: {method_name}")
-            imgui.text(f"Circuit Parameters: {sum(l.size for l in self.logits0)}")
+            imgui.text(f"Circuit Parameters: {sum(logit.size for logit in self.logits0)}")
             imgui.text(f"Optimization Step: {self.step_i}")
             imgui.text(f"Active Input Case: {self.active_case_i}")
             imgui.text(f"Wiring Seed: {self.wiring_seed}")
