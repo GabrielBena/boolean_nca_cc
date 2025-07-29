@@ -9,7 +9,7 @@ import logging
 import os
 from datetime import datetime
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import jax
 import jax.numpy as jp
@@ -44,9 +44,7 @@ PyTree = Any
 log = logging.getLogger(__name__)
 
 
-def _init_wandb(
-    wandb_logging: bool, wandb_run_config: Optional[Dict] = None
-) -> Optional[Any]:
+def _init_wandb(wandb_logging: bool, wandb_run_config: dict | None = None) -> Any | None:
     """Initialize wandb if enabled and return the run object."""
     if not wandb_logging:
         return None
@@ -72,9 +70,7 @@ def _init_wandb(
         return None
 
 
-def _log_to_wandb(
-    wandb_run, metrics_dict: Dict, epoch: int, log_interval: int = 1
-) -> None:
+def _log_to_wandb(wandb_run, metrics_dict: dict, epoch: int, log_interval: int = 1) -> None:
     """Log metrics to wandb if enabled and interval allows."""
     if wandb_run is None or epoch % log_interval != 0:
         return
@@ -85,9 +81,7 @@ def _log_to_wandb(
         log.warning(f"Error logging to wandb: {e}")
 
 
-def _setup_checkpoint_dir(
-    checkpoint_dir: Optional[str], wandb_id: Optional[str]
-) -> Optional[str]:
+def _setup_checkpoint_dir(checkpoint_dir: str | None, wandb_id: str | None) -> str | None:
     """Setup checkpoint directory with unique identifier."""
     if checkpoint_dir is None:
         return None
@@ -106,7 +100,7 @@ def _save_periodic_checkpoint(
     checkpoint_path: str,
     model,
     optimizer,
-    metrics: Dict,
+    metrics: dict,
     epoch: int,
     checkpoint_interval: int,
     wandb_run=None,
@@ -151,7 +145,7 @@ def _save_best_checkpoint(
     save_best: bool,
     model,
     optimizer,
-    metrics: Dict,
+    metrics: dict,
     epoch: int,
     best_metric: str,
     current_metric_value: float,
@@ -180,9 +174,7 @@ def _save_best_checkpoint(
 
         # Log to wandb if enabled
         if wandb_run:
-            wandb_run.log(
-                {f"best/{best_metric}": current_metric_value, "best/epoch": epoch}
-            )
+            wandb_run.log({f"best/{best_metric}": current_metric_value, "best/epoch": epoch})
 
             # Save the best model to wandb (will overwrite the previous best)
             wandb_run.save(os.path.join(checkpoint_path, best_filename))
@@ -201,7 +193,7 @@ def _save_best_checkpoint(
 def _save_stable_state(
     checkpoint_path: str,
     save_stable_states: bool,
-    last_stable_state: Dict,
+    last_stable_state: dict,
     epoch: int,
     wandb_run=None,
 ) -> None:
@@ -210,9 +202,7 @@ def _save_stable_state(
         return
 
     try:
-        stable_path = os.path.join(
-            checkpoint_path, f"stable_state_epoch_{epoch - 1}.pkl"
-        )
+        stable_path = os.path.join(checkpoint_path, f"stable_state_epoch_{epoch - 1}.pkl")
         # log.info(f"Saving last stable state to {stable_path}")
         save_checkpoint(
             last_stable_state["model"],
@@ -243,14 +233,14 @@ def _check_early_stopping(
     early_stop_triggered: bool,
     stop_accuracy_metric: str,
     stop_accuracy_source: str,
-    training_metrics: Dict,
-    current_eval_metrics: Optional[Dict],
+    training_metrics: dict,
+    current_eval_metrics: dict | None,
     stop_accuracy_threshold: float,
-    first_threshold_epoch: Optional[int],
+    first_threshold_epoch: int | None,
     epochs_above_threshold: int,
     stop_accuracy_patience: int,
     rng: jax.random.PRNGKey,
-) -> Tuple[bool, bool, int, Optional[int], Optional[Dict], jax.random.PRNGKey]:
+) -> tuple[bool, bool, int, int | None, dict | None, jax.random.PRNGKey]:
     """
     Check early stopping conditions and handle early stopping logic.
 
@@ -310,10 +300,7 @@ def _check_early_stopping(
         epochs_above_threshold += 1
 
         # Check if we should stop (only after minimum epochs requirement is met)
-        if (
-            epochs_above_threshold >= stop_accuracy_patience
-            and epoch >= stop_accuracy_min_epochs
-        ):
+        if epochs_above_threshold >= stop_accuracy_patience and epoch >= stop_accuracy_min_epochs:
             early_stop_triggered = True
             log.info(
                 f"Early stopping triggered! "
@@ -331,10 +318,7 @@ def _check_early_stopping(
                 current_eval_metrics,
                 rng,
             )
-        elif (
-            epochs_above_threshold >= stop_accuracy_patience
-            and epoch < stop_accuracy_min_epochs
-        ):
+        elif epochs_above_threshold >= stop_accuracy_patience and epoch < stop_accuracy_min_epochs:
             # Log that we would stop but are waiting for minimum epochs
             # log.info(
             #     f"Early stopping condition met "
@@ -346,9 +330,7 @@ def _check_early_stopping(
     else:
         # Reset counter if accuracy drops below threshold
         if epochs_above_threshold > 0:
-            log.info(
-                "Accuracy dropped below threshold. Resetting early stopping counter."
-            )
+            log.info("Accuracy dropped below threshold. Resetting early stopping counter.")
         epochs_above_threshold = 0
         first_threshold_epoch = None
 
@@ -362,7 +344,7 @@ def _check_early_stopping(
     )
 
 
-def _log_final_wandb_metrics(wandb_run, results: Dict, epochs: int) -> None:
+def _log_final_wandb_metrics(wandb_run, results: dict, epochs: int) -> None:
     """Log final metrics and plots to wandb."""
     if wandb_run is None:
         return
@@ -376,9 +358,7 @@ def _log_final_wandb_metrics(wandb_run, results: Dict, epochs: int) -> None:
                 "final/accuracy": results["accuracies"][-1],
                 "final/hard_accuracy": results["hard_accuracies"][-1],
                 "final/epoch": epochs,
-                f"best/{results.get('best_metric', 'metric')}": results.get(
-                    "best_metric_value", 0
-                ),
+                f"best/{results.get('best_metric', 'metric')}": results.get("best_metric_value", 0),
             }
         )
 
@@ -389,8 +369,8 @@ def _log_final_wandb_metrics(wandb_run, results: Dict, epochs: int) -> None:
 def _get_metric_value(
     metric_name: str,
     metric_source: str,
-    training_metrics: Dict,
-    eval_metrics: Dict = None,
+    training_metrics: dict,
+    eval_metrics: dict = None,
 ) -> float:
     """
     Get metric value from the appropriate source.
@@ -427,7 +407,7 @@ def _log_pool_scatter(pool, epoch, wandb_run):
         return
 
     all_loss, all_steps = pool.graphs.globals[..., 0], pool.graphs.globals[..., 1]
-    data = list(zip(all_steps, all_loss))
+    data = list(zip(all_steps, all_loss, strict=False))
     table = wandb.Table(data=data, columns=["steps", "loss"])
     wandb_run.log({"pool/scatter": wandb.plot.scatter(table, "steps", "loss")})
 
@@ -446,9 +426,9 @@ def run_unified_periodic_evaluation(
     epoch,
     wandb_run,
     log_stepwise=False,
-    layer_sizes: List[Tuple[int, int]] = None,
+    layer_sizes: list[tuple[int, int]] = None,
     log_pool_scatter: bool = False,
-) -> Dict:
+) -> dict:
     """
     Run unified periodic evaluation with only IN-distribution and OUT-of-distribution testing.
 
@@ -479,9 +459,7 @@ def run_unified_periodic_evaluation(
             f"Running IN-distribution evaluation ({datasets.in_actual_batch_size} circuits)..."
         )
         if datasets.in_actual_batch_size > datasets.target_batch_size:
-            log.info(
-                f"Using chunked evaluation (chunks of {datasets.target_batch_size})"
-            )
+            log.info(f"Using chunked evaluation (chunks of {datasets.target_batch_size})")
 
         step_metrics_in = evaluate_circuits_in_chunks(
             eval_fn=evaluate_model_stepwise_batched,
@@ -513,9 +491,7 @@ def run_unified_periodic_evaluation(
             f"Running OUT-of-distribution evaluation ({datasets.out_actual_batch_size} circuits)..."
         )
         if datasets.out_actual_batch_size > datasets.target_batch_size:
-            log.info(
-                f"Using chunked evaluation (chunks of {datasets.target_batch_size})"
-            )
+            log.info(f"Using chunked evaluation (chunks of {datasets.target_batch_size})")
 
         step_metrics_out = evaluate_circuits_in_chunks(
             eval_fn=evaluate_model_stepwise_batched,
@@ -562,15 +538,9 @@ def run_unified_periodic_evaluation(
                     step_data_in = {
                         "eval_in_steps/step": step_metrics_in["step"][step_idx],
                         "eval_in_steps/loss": step_metrics_in["soft_loss"][step_idx],
-                        "eval_in_steps/hard_loss": step_metrics_in["hard_loss"][
-                            step_idx
-                        ],
-                        "eval_in_steps/accuracy": step_metrics_in["soft_accuracy"][
-                            step_idx
-                        ],
-                        "eval_in_steps/hard_accuracy": step_metrics_in["hard_accuracy"][
-                            step_idx
-                        ],
+                        "eval_in_steps/hard_loss": step_metrics_in["hard_loss"][step_idx],
+                        "eval_in_steps/accuracy": step_metrics_in["soft_accuracy"][step_idx],
+                        "eval_in_steps/hard_accuracy": step_metrics_in["hard_accuracy"][step_idx],
                         "eval_in_steps/epoch": epoch,
                     }
                     wandb_run.log(step_data_in)
@@ -580,15 +550,9 @@ def run_unified_periodic_evaluation(
                     step_data_out = {
                         "eval_out_steps/step": step_metrics_out["step"][step_idx],
                         "eval_out_steps/loss": step_metrics_out["soft_loss"][step_idx],
-                        "eval_out_steps/hard_loss": step_metrics_out["hard_loss"][
-                            step_idx
-                        ],
-                        "eval_out_steps/accuracy": step_metrics_out["soft_accuracy"][
-                            step_idx
-                        ],
-                        "eval_out_steps/hard_accuracy": step_metrics_out[
-                            "hard_accuracy"
-                        ][step_idx],
+                        "eval_out_steps/hard_loss": step_metrics_out["hard_loss"][step_idx],
+                        "eval_out_steps/accuracy": step_metrics_out["soft_accuracy"][step_idx],
+                        "eval_out_steps/hard_accuracy": step_metrics_out["hard_accuracy"][step_idx],
                         "eval_out_steps/epoch": epoch,
                     }
                     wandb_run.log(step_data_out)
@@ -637,17 +601,11 @@ def run_unified_periodic_evaluation(
                 "in_actual_batch_size": datasets.in_actual_batch_size,
                 "out_actual_batch_size": datasets.out_actual_batch_size,
                 "target_batch_size": datasets.target_batch_size,
-                "in_used_chunking": datasets.in_actual_batch_size
-                > datasets.target_batch_size,
-                "out_used_chunking": datasets.out_actual_batch_size
-                > datasets.target_batch_size,
+                "in_used_chunking": datasets.in_actual_batch_size > datasets.target_batch_size,
+                "out_used_chunking": datasets.out_actual_batch_size > datasets.target_batch_size,
                 "training_wiring_mode": datasets.training_config["wiring_mode"],
-                "training_initial_diversity": datasets.training_config[
-                    "initial_diversity"
-                ],
-                "evaluation_base_seed": datasets.training_config[
-                    "evaluation_base_seed"
-                ],
+                "training_initial_diversity": datasets.training_config["initial_diversity"],
+                "evaluation_base_seed": datasets.training_config["evaluation_base_seed"],
             },
         }
 
@@ -662,13 +620,13 @@ def train_model(
     # Data parameters
     x_data: jp.ndarray,
     y_data: jp.ndarray,
-    layer_sizes: List[Tuple[int, int]],
+    layer_sizes: list[tuple[int, int]],
     # Model architecture parameters
     arity: int = 2,
     circuit_hidden_dim: int = 16,
     message_passing: bool = True,
-    node_mlp_features: List[int] = [64, 32],
-    edge_mlp_features: List[int] = [64, 32],
+    node_mlp_features: list[int] = [64, 32],
+    edge_mlp_features: list[int] = [64, 32],
     use_attention: bool = False,
     # Training hyperparameters
     learning_rate: float = 1e-3,
@@ -683,9 +641,8 @@ def train_model(
     # Wiring mode parameters
     wiring_mode: str = "random",  # Options: 'fixed', 'random', or 'genetic'
     meta_batch_size: int = 64,
-    batch_chunk_size: Optional[
-        int
-    ] = None,  # Sequential batch processing chunk size (None means use meta_batch_size)
+    batch_chunk_size: int
+    | None = None,  # Sequential batch processing chunk size (None means use meta_batch_size)
     # Genetic mutation parameters (only used when wiring_mode='genetic')
     genetic_mutation_rate: float = 0.0,  # Fraction of connections to mutate (0.0 to 1.0)
     genetic_swaps_per_layer: int = 1,  # Number of swaps per layer for genetic mutation
@@ -695,13 +652,13 @@ def train_model(
     reset_pool_fraction: float = 0.05,
     reset_pool_interval: int = 128,
     reset_strategy: str = "uniform",  # Options: "uniform", "steps_biased", "loss_biased", or "combined"
-    combined_weights: Tuple[float, float] = (
+    combined_weights: tuple[float, float] = (
         0.5,
         0.5,
     ),  # Weights for [loss, steps] in combined strategy
     # Learning rate scheduling
     lr_scheduler: str = "constant",  # Options: "constant", "exponential", "cosine", "linear_warmup"
-    lr_scheduler_params: Dict = None,
+    lr_scheduler_params: dict = None,
     # Initialization parameters
     key: int = 0,
     wiring_fixed_key: jax.random.PRNGKey = jax.random.PRNGKey(
@@ -709,7 +666,7 @@ def train_model(
     ),  # Fixed key for generating wirings when wiring_mode='fixed'
     init_model: CircuitGNN | CircuitSelfAttention = None,
     init_optimizer: nnx.Optimizer = None,
-    initial_metrics: Dict = None,
+    initial_metrics: dict = None,
     # Checkpointing parameters
     checkpoint_enabled: bool = False,
     checkpoint_dir: str = None,
@@ -729,7 +686,7 @@ def train_model(
     # Wandb parameters
     wandb_logging: bool = False,
     log_interval: int = 1,
-    wandb_run_config: Dict = None,
+    wandb_run_config: dict = None,
     # Early stopping parameters
     stop_accuracy_enabled: bool = False,
     stop_accuracy_threshold: float = 0.95,
@@ -895,7 +852,7 @@ def train_model(
         logits: PyTree,
         x: jp.ndarray,
         y_target: jp.ndarray,
-        layer_sizes: Tuple[Tuple[int, int], ...],
+        layer_sizes: tuple[tuple[int, int], ...],
         n_message_steps: int,
         loss_type: str,
         loss_key: jax.random.PRNGKey,
@@ -995,9 +952,7 @@ def train_model(
                     layer_sizes=layer_sizes,
                 )
                 # Update graph globals with current update steps
-                current_update_steps = (
-                    graph.globals[..., 1] if graph.globals is not None else 0
-                )
+                current_update_steps = graph.globals[..., 1] if graph.globals is not None else 0
                 graph = graph._replace(
                     globals=jp.array([loss, current_update_steps + 1], dtype=jp.float32)
                 )
@@ -1031,14 +986,14 @@ def train_model(
             )
 
         # Compute loss and gradients
-        (loss, (aux, updated_graphs, updated_logits, loss_steps)), grads = (
-            nnx.value_and_grad(batch_loss_fn, has_aux=True)(
-                model=model,
-                graphs=graphs,
-                logits=logits,
-                wires=wires,
-                loss_key=loss_key,
-            )
+        (loss, (aux, updated_graphs, updated_logits, loss_steps)), grads = nnx.value_and_grad(
+            batch_loss_fn, has_aux=True
+        )(
+            model=model,
+            graphs=graphs,
+            logits=logits,
+            wires=wires,
+            loss_key=loss_key,
         )
 
         # Update GNN parameters
@@ -1065,7 +1020,7 @@ def train_model(
         logits: PyTree,
         x: jp.ndarray,
         y_target: jp.ndarray,
-        layer_sizes: Tuple[Tuple[int, int], ...],
+        layer_sizes: tuple[tuple[int, int], ...],
         n_message_steps: int,
         loss_type: str,
         loss_key: jax.random.PRNGKey,
@@ -1149,9 +1104,7 @@ def train_model(
                     layer_sizes=layer_sizes,
                 )
                 # Update graph globals with current update steps
-                current_update_steps = (
-                    graph.globals[..., 1] if graph.globals is not None else 0
-                )
+                current_update_steps = graph.globals[..., 1] if graph.globals is not None else 0
                 graph = graph._replace(
                     globals=jp.array([loss, current_update_steps + 1], dtype=jp.float32)
                 )
@@ -1185,14 +1138,14 @@ def train_model(
             )
 
         # Compute loss and gradients (no optimizer update)
-        (loss, (aux, updated_graphs, updated_logits, loss_steps)), grads = (
-            nnx.value_and_grad(batch_loss_fn, has_aux=True)(
-                model=model,
-                graphs=graphs,
-                logits=logits,
-                wires=wires,
-                loss_key=loss_key,
-            )
+        (loss, (aux, updated_graphs, updated_logits, loss_steps)), grads = nnx.value_and_grad(
+            batch_loss_fn, has_aux=True
+        )(
+            model=model,
+            graphs=graphs,
+            logits=logits,
+            wires=wires,
+            loss_key=loss_key,
         )
 
         return loss, aux, updated_graphs, updated_logits, loss_steps, grads
@@ -1208,7 +1161,7 @@ def train_model(
         logits: PyTree,
         x: jp.ndarray,
         y_target: jp.ndarray,
-        layer_sizes: Tuple[Tuple[int, int], ...],
+        layer_sizes: tuple[tuple[int, int], ...],
         n_message_steps: int,
         loss_type: str,
         loss_key: jax.random.PRNGKey,
@@ -1273,9 +1226,7 @@ def train_model(
             # Accumulate gradients (weighted by chunk size for proper averaging)
             chunk_weight = actual_chunk_size / batch_size
             if accumulated_grads is None:
-                accumulated_grads = jax.tree.map(
-                    lambda g: g * chunk_weight, chunk_grads
-                )
+                accumulated_grads = jax.tree.map(lambda g: g * chunk_weight, chunk_grads)
             else:
                 accumulated_grads = jax.tree.map(
                     lambda acc_g, chunk_g: acc_g + chunk_g * chunk_weight,
@@ -1375,9 +1326,7 @@ def train_model(
     effective_batch_chunk_size = (
         batch_chunk_size if batch_chunk_size is not None else meta_batch_size
     )
-    use_sequential_batching = (
-        batch_chunk_size is not None and batch_chunk_size < meta_batch_size
-    )
+    use_sequential_batching = batch_chunk_size is not None and batch_chunk_size < meta_batch_size
 
     if use_sequential_batching:
         log.info(
@@ -1392,9 +1341,7 @@ def train_model(
             # Pool-based training
             # Sample a batch from the pool using the current (potentially dynamic) batch size
             rng, sample_key, loss_key = jax.random.split(rng, 3)
-            idxs, graphs, wires, logits = circuit_pool.sample(
-                sample_key, meta_batch_size
-            )
+            idxs, graphs, wires, logits = circuit_pool.sample(sample_key, meta_batch_size)
 
             # Perform pool training step (sequential or standard)
             if use_sequential_batching:
@@ -1411,9 +1358,7 @@ def train_model(
                     logits,
                     x_data,
                     y_data,
-                    tuple(
-                        layer_sizes
-                    ),  # Convert list to tuple for JAX static arguments
+                    tuple(layer_sizes),  # Convert list to tuple for JAX static arguments
                     n_message_steps,
                     loss_type=loss_type,
                     loss_key=loss_key,
@@ -1434,9 +1379,7 @@ def train_model(
                     logits,
                     x_data,
                     y_data,
-                    tuple(
-                        layer_sizes
-                    ),  # Convert list to tuple for JAX static arguments
+                    tuple(layer_sizes),  # Convert list to tuple for JAX static arguments
                     n_message_steps,
                     loss_type=loss_type,
                     loss_key=loss_key,
@@ -1452,19 +1395,17 @@ def train_model(
 
                 if wiring_mode == "genetic":
                     # Use genetic mutations instead of completely fresh circuits
-                    circuit_pool, avg_steps_reset = (
-                        circuit_pool.reset_with_genetic_mutation(
-                            key=reset_key,
-                            fraction=reset_pool_fraction,
-                            layer_sizes=layer_sizes,
-                            input_n=input_n,
-                            arity=arity,
-                            circuit_hidden_dim=circuit_hidden_dim,
-                            mutation_rate=genetic_mutation_rate,
-                            n_swaps_per_layer=genetic_swaps_per_layer,
-                            reset_strategy=reset_strategy,
-                            combined_weights=combined_weights,
-                        )
+                    circuit_pool, avg_steps_reset = circuit_pool.reset_with_genetic_mutation(
+                        key=reset_key,
+                        fraction=reset_pool_fraction,
+                        layer_sizes=layer_sizes,
+                        input_n=input_n,
+                        arity=arity,
+                        circuit_hidden_dim=circuit_hidden_dim,
+                        mutation_rate=genetic_mutation_rate,
+                        n_swaps_per_layer=genetic_swaps_per_layer,
+                        reset_strategy=reset_strategy,
+                        combined_weights=combined_weights,
                     )
                 else:
                     # Original logic for fixed and random wiring modes
@@ -1503,9 +1444,7 @@ def train_model(
                 diversity = circuit_pool.get_wiring_diversity(layer_sizes)
 
             if jp.isnan(loss):
-                log.warning(
-                    f"Loss is NaN at epoch {epoch}, returning last stable state"
-                )
+                log.warning(f"Loss is NaN at epoch {epoch}, returning last stable state")
                 # Save the last stable state if enabled
                 _save_stable_state(
                     checkpoint_path,
@@ -1589,14 +1528,10 @@ def train_model(
                 # Add early stopping metrics if enabled
                 if stop_accuracy_enabled:
                     metrics_dict["early_stop/enabled"] = True
-                    metrics_dict["early_stop/epochs_above_threshold"] = (
-                        epochs_above_threshold
-                    )
+                    metrics_dict["early_stop/epochs_above_threshold"] = epochs_above_threshold
                     metrics_dict["early_stop/threshold"] = stop_accuracy_threshold
                     if first_threshold_epoch is not None:
-                        metrics_dict["early_stop/first_threshold_epoch"] = (
-                            first_threshold_epoch
-                        )
+                        metrics_dict["early_stop/first_threshold_epoch"] = first_threshold_epoch
 
                 _log_to_wandb(wandb_run, metrics_dict, epoch, log_interval)
 
@@ -1615,15 +1550,11 @@ def train_model(
                     num_chunks = (
                         meta_batch_size + effective_batch_chunk_size - 1
                     ) // effective_batch_chunk_size
-                    postfix_dict["Chunks"] = (
-                        f"{num_chunks}x{effective_batch_chunk_size}"
-                    )
+                    postfix_dict["Chunks"] = f"{num_chunks}x{effective_batch_chunk_size}"
 
                 # Add early stopping info if active
                 if stop_accuracy_enabled and epochs_above_threshold > 0:
-                    postfix_dict["ES"] = (
-                        f"{epochs_above_threshold}/{stop_accuracy_patience}"
-                    )
+                    postfix_dict["ES"] = f"{epochs_above_threshold}/{stop_accuracy_patience}"
 
                 pbar.set_postfix(postfix_dict)
 
@@ -1689,9 +1620,7 @@ def train_model(
                 # Check if this is the best model based on the specified metric
                 is_best = False
                 if current_metric_value is not None:
-                    if (
-                        "accuracy" in best_metric
-                    ):  # For accuracy metrics, higher is better
+                    if "accuracy" in best_metric:  # For accuracy metrics, higher is better
                         if current_metric_value > best_metric_value:
                             best_metric_value = current_metric_value
                             is_best = True

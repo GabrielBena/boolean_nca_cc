@@ -12,9 +12,7 @@ import time
 
 import hydra
 import jax
-import jax.numpy as jp
 from flax import nnx
-from omegaconf import DictConfig, OmegaConf
 
 from boolean_nca_cc import generate_layer_sizes
 from boolean_nca_cc.circuits.model import gen_circuit
@@ -156,12 +154,8 @@ def profile_batch_processing():
     print("-" * 70)
 
     # Find baseline (full batch) times for comparison
-    baseline_32 = next(
-        r for r in results if r["meta_batch_size"] == 32 and r["chunk_size"] is None
-    )
-    baseline_64 = next(
-        r for r in results if r["meta_batch_size"] == 64 and r["chunk_size"] is None
-    )
+    baseline_32 = next(r for r in results if r["meta_batch_size"] == 32 and r["chunk_size"] is None)
+    baseline_64 = next(r for r in results if r["meta_batch_size"] == 64 and r["chunk_size"] is None)
 
     for result in results:
         meta_batch = result["meta_batch_size"]
@@ -202,9 +196,7 @@ def profile_batch_processing():
             overhead_factor = result["time_per_epoch"] / baseline["time_per_epoch"]
             num_chunks = result["num_chunks"]
 
-            print(
-                f"{result['description']}: {overhead_factor:.2f}x overhead ({num_chunks} chunks)"
-            )
+            print(f"{result['description']}: {overhead_factor:.2f}x overhead ({num_chunks} chunks)")
 
             if overhead_factor > 2.0:
                 print(
@@ -215,7 +207,7 @@ def profile_batch_processing():
                     f"  ⚠️  CAUTION: Moderate overhead. Expected ~1.2x, got {overhead_factor:.2f}x"
                 )
             else:
-                print(f"  ✓ OK: Reasonable overhead")
+                print("  ✓ OK: Reasonable overhead")
 
     return results
 

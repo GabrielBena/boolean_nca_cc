@@ -6,14 +6,14 @@ optimization. It provides utilities for converting between representations,
 computing loss, and performing optimization steps.
 """
 
+from collections import namedtuple
+
 import jax
 import jax.numpy as jp
 import numpy as np
-from collections import namedtuple
-from boolean_nca_cc.circuits.model import run_circuit
 import optax
-import matplotlib.pyplot as plt
-from functools import partial
+
+from boolean_nca_cc.circuits.model import run_circuit
 
 
 def unpack(x, bit_n=8):
@@ -65,9 +65,7 @@ def binary_cross_entropy(y_pred, y_true):
     # For binary classification, this is equivalent to binary cross-entropy
     return jp.sum(
         optax.sigmoid_binary_cross_entropy(
-            logits=jp.log(
-                jp.clip(y_pred, 1e-7, 1.0) / jp.clip(1.0 - y_pred, 1e-7, 1.0)
-            ),
+            logits=jp.log(jp.clip(y_pred, 1e-7, 1.0) / jp.clip(1.0 - y_pred, 1e-7, 1.0)),
             labels=y_true,
         )
     )

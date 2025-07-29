@@ -129,9 +129,6 @@ def get_task_data(task_name, case_n, **kwargs):
     task_specific_kwargs = {
         k: v
         for k, v in kwargs.items()
-        if k
-        in TASKS[task_name].__code__.co_varnames[
-            : TASKS[task_name].__code__.co_argcount
-        ]
+        if k in TASKS[task_name].__code__.co_varnames[: TASKS[task_name].__code__.co_argcount]
     }
     return TASKS[task_name](case_n, **task_specific_kwargs)

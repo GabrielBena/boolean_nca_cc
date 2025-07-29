@@ -7,11 +7,11 @@ import jax
 import jax.numpy as jp
 from flax import nnx
 
-from boolean_nca_cc.models import CircuitSelfAttention
-from boolean_nca_cc.utils.graph_builder import build_graph, extract_logits_from_graph
 from boolean_nca_cc.circuits.model import gen_circuit, generate_layer_sizes
-from boolean_nca_cc.training.utils import check_gradients
+from boolean_nca_cc.models import CircuitSelfAttention
 from boolean_nca_cc.training.train_loop import get_loss_from_graph
+from boolean_nca_cc.training.utils import check_gradients
+from boolean_nca_cc.utils.graph_builder import build_graph, extract_logits_from_graph
 
 
 def test_multi_step_gradients():
@@ -63,9 +63,7 @@ def test_multi_step_gradients():
 
     def loss_fn(model):
         current_graph = model(graph)
-        current_logits = extract_logits_from_graph(
-            current_graph, logits_original_shapes
-        )
+        current_logits = extract_logits_from_graph(current_graph, logits_original_shapes)
         loss, _ = get_loss_from_graph(current_logits, wires, x_data, y_data, "l4")
         return loss
 
@@ -82,9 +80,7 @@ def test_multi_step_gradients():
         total_params = len(jax.tree.leaves(nnx.state(attn_model)))
         params_with_grads = total_params - len(zero_grad_paths)
 
-        hidden_proj_zero_grads = [
-            path for path in zero_grad_paths if "hidden_proj" in path
-        ]
+        hidden_proj_zero_grads = [path for path in zero_grad_paths if "hidden_proj" in path]
         hidden_proj_has_grads = len(hidden_proj_zero_grads) == 0
 
         print(
@@ -104,9 +100,7 @@ def test_multi_step_gradients():
                 current_graph = model(current_graph)
 
             # Extract logits and compute loss
-            current_logits = extract_logits_from_graph(
-                current_graph, logits_original_shapes
-            )
+            current_logits = extract_logits_from_graph(current_graph, logits_original_shapes)
             loss, _ = get_loss_from_graph(current_logits, wires, x_data, y_data, "l4")
             return loss
 
@@ -123,9 +117,7 @@ def test_multi_step_gradients():
         params_with_grads = total_params - len(zero_grad_paths)
 
         # Check specifically for hidden_proj
-        hidden_proj_zero_grads = [
-            path for path in zero_grad_paths if "hidden_proj" in path
-        ]
+        hidden_proj_zero_grads = [path for path in zero_grad_paths if "hidden_proj" in path]
         hidden_proj_has_grads = len(hidden_proj_zero_grads) == 0
 
         print(f"  Loss: {loss:.6f}")
@@ -142,17 +134,13 @@ def test_multi_step_gradients():
         all_params = jax.tree.flatten_with_path(nnx.state(attn_model))[0]
         all_grads = jax.tree.flatten_with_path(grads)[0]
 
-        for (param_path, param), (grad_path, grad) in zip(all_params, all_grads):
-            param_name = "_".join(
-                str(key).strip("()").strip("[]").strip("'") for key in param_path
-            )
+        for (param_path, param), (grad_path, grad) in zip(all_params, all_grads, strict=False):
+            param_name = "_".join(str(key).strip("()").strip("[]").strip("'") for key in param_path)
             if "hidden_proj" in param_name:
                 grad_norm = jp.linalg.norm(grad.flatten())
                 print(f"    {param_name}: grad_norm={grad_norm:.2e}")
 
-    print(
-        f"\n❌ Hidden projection still doesn't get gradients even after warmup and multiple steps"
-    )
+    print("\n❌ Hidden projection still doesn't get gradients even after warmup and multiple steps")
     return False
 
 

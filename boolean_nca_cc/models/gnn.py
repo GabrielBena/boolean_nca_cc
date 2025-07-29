@@ -5,16 +5,16 @@ This module provides the main GNN model for evolving boolean circuits
 through message passing.
 """
 
+from functools import partial
+
 import jax
 import jax.numpy as jp
 import jraph
 from flax import nnx
-from typing import List, Tuple
-from functools import partial
 
-from boolean_nca_cc.models.node_update import NodeUpdateModule
+from boolean_nca_cc.models.aggregation import AttentionAggregation, aggregate_sum
 from boolean_nca_cc.models.edge_update import EdgeUpdateModule
-from boolean_nca_cc.models.aggregation import aggregate_sum, AttentionAggregation
+from boolean_nca_cc.models.node_update import NodeUpdateModule
 
 
 class CircuitGNN(nnx.Module):
@@ -135,7 +135,7 @@ class CircuitGNN(nnx.Module):
 @partial(nnx.jit, static_argnames=("num_steps",))
 def run_gnn_scan(
     gnn: CircuitGNN, graph: jraph.GraphsTuple, num_steps: int
-) -> Tuple[jraph.GraphsTuple, List[jraph.GraphsTuple]]:
+) -> tuple[jraph.GraphsTuple, list[jraph.GraphsTuple]]:
     """
     Run the GNN for multiple steps using scan for efficiency.
 
@@ -155,9 +155,7 @@ def run_gnn_scan(
         return new_graph, new_graph
 
     # Run scan
-    final_graph, intermediate_graphs = jax.lax.scan(
-        gnn_step, graph, xs=None, length=num_steps
-    )
+    final_graph, intermediate_graphs = jax.lax.scan(gnn_step, graph, xs=None, length=num_steps)
 
     # Combine initial graph with intermediate results
     all_graphs = [graph] + list(intermediate_graphs)
@@ -169,13 +167,13 @@ def run_gnn_scan_with_loss(
     model: CircuitGNN,
     graph: jraph.GraphsTuple,
     num_steps: int,
-    logits_original_shapes: List[Tuple],
-    wires: List[jp.ndarray],
+    logits_original_shapes: list[tuple],
+    wires: list[jp.ndarray],
     x_data: jp.ndarray,
     y_data: jp.ndarray,
     loss_type: str,
-    layer_sizes: Tuple[Tuple[int, int]],
-) -> Tuple[jraph.GraphsTuple, List[jraph.GraphsTuple], jp.ndarray, List]:
+    layer_sizes: tuple[tuple[int, int]],
+) -> tuple[jraph.GraphsTuple, list[jraph.GraphsTuple], jp.ndarray, list]:
     """
     Run the GNN for multiple steps with loss computation and graph updating at each step.
 
@@ -229,8 +227,6 @@ def run_gnn_scan_with_loss(
         return final_graph, (final_graph, loss, current_logits, aux)
 
     # Run scan
-    final_graph, step_outputs = jax.lax.scan(
-        gnn_step_with_loss, graph, xs=None, length=num_steps
-    )
+    final_graph, step_outputs = jax.lax.scan(gnn_step_with_loss, graph, xs=None, length=num_steps)
 
     return final_graph, step_outputs

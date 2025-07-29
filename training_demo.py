@@ -9,21 +9,28 @@ This demo shows live circuit optimization where:
 No model training occurs - only circuit logit optimization.
 """
 
-import numpy as np
+import IPython
 import jax
 import jax.numpy as jp
+import numpy as np
 import optax
-import PIL.Image, PIL.ImageDraw
-import IPython
+import PIL.Image
+import PIL.ImageDraw
 from flax import nnx
+
+# Import model components
+from imgui_bundle import (
+    hello_imgui,
+    imgui,
+    immapp,
+    implot,
+)
+
+from boolean_nca_cc import generate_layer_sizes
 
 # Import shared training infrastructure
 from boolean_nca_cc.circuits.model import gen_circuit, run_circuit
-from boolean_nca_cc.circuits.tasks import get_task_data, TASKS
-from boolean_nca_cc import generate_layer_sizes
-
-# Import training loop functions
-from boolean_nca_cc.training.utils import load_best_model_from_wandb
+from boolean_nca_cc.circuits.tasks import TASKS, get_task_data
 from boolean_nca_cc.training.evaluation import (
     evaluate_model_stepwise_generator,
     get_loss_from_wires_logits,
@@ -32,15 +39,8 @@ from boolean_nca_cc.training.evaluation import (
 # Import genetic mutation functions
 from boolean_nca_cc.training.pool.perturbation import mutate_wires_swap
 
-# Import model components
-
-from imgui_bundle import (
-    implot,
-    imgui,
-    immapp,
-    hello_imgui,
-)
-
+# Import training loop functions
+from boolean_nca_cc.training.utils import load_best_model_from_wandb
 
 ################## circuit gate and wire use analysis ##################
 
@@ -206,9 +206,7 @@ class CircuitOptimizationDemo:
 
         # Model configuration for consistency with training
         self.model_hidden_dim = self.hidden_dim  # Will be updated when loading models
-        self.model_use_globals = (
-            True  # Will be updated when loading self-attention models
-        )
+        self.model_use_globals = True  # Will be updated when loading self-attention models
 
         # Step-by-step generator for GNN/Self-Attention (unified with training code)
         self.model_generator = None
@@ -261,16 +259,12 @@ class CircuitOptimizationDemo:
         )
 
         # Generate circuit using shared function
-        self.wires, self.logits = gen_circuit(
-            self.wiring_key, self.layer_sizes, arity=self.arity
-        )
+        self.wires, self.logits = gen_circuit(self.wiring_key, self.layer_sizes, arity=self.arity)
 
         # Store initial logits
         self.logits0 = self.logits
 
-        print(
-            f"Circuit initialized with {sum(l.size for l in self.logits0)} parameters"
-        )
+        print(f"Circuit initialized with {sum(l.size for l in self.logits0)} parameters")
         print(f"Layer structure: {self.layer_sizes}")
 
         # Reset gate masks for new circuit structure
@@ -415,9 +409,7 @@ class CircuitOptimizationDemo:
             if self.try_load_wandb_model():
                 print(f"Loaded frozen {method_name} model from WandB")
                 self.logit_optimizer = None  # No optimizer needed for frozen models
-                self.logit_opt_state = (
-                    None  # No optimizer state needed for frozen models
-                )
+                self.logit_opt_state = None  # No optimizer state needed for frozen models
                 # Initialize the generator for step-by-step evaluation
                 self.initialize_model_generator()
             else:
@@ -436,7 +428,7 @@ class CircuitOptimizationDemo:
             # For self-attention models, we need to use the correct hidden_dim from the model
             hidden_dim_for_graph = getattr(self, "model_hidden_dim", self.hidden_dim)
 
-            print(f"Initializing model generator with:")
+            print("Initializing model generator with:")
             print(f"  - hidden_dim: {hidden_dim_for_graph}")
             print(f"  - use_globals: {getattr(self, 'model_use_globals', True)}")
             print(f"  - model type: {type(self.frozen_model).__name__}")
@@ -481,9 +473,7 @@ class CircuitOptimizationDemo:
 
     def mask_unused_gates(self):
         """Mask unused gates based on circuit analysis"""
-        gate_masks, self.wire_masks = calc_gate_use_masks(
-            self.input_n, self.wires, self.logits
-        )
+        gate_masks, self.wire_masks = calc_gate_use_masks(self.input_n, self.wires, self.logits)
         for i in range(len(gate_masks)):
             self.gate_mask[i] = np.array(self.gate_mask[i] * gate_masks[i])
 
@@ -516,13 +506,9 @@ class CircuitOptimizationDemo:
             self.loaded_run_id = loaded_dict.get("run_id", "unknown")
 
             # Extract hidden_dim from loaded config for graph compatibility
-            if hasattr(loaded_config, "model") and hasattr(
-                loaded_config.model, "hidden_dim"
-            ):
+            if hasattr(loaded_config, "model") and hasattr(loaded_config.model, "hidden_dim"):
                 self.model_hidden_dim = loaded_config.model.hidden_dim
-                print(
-                    f"Using model hidden_dim={self.model_hidden_dim} from loaded config"
-                )
+                print(f"Using model hidden_dim={self.model_hidden_dim} from loaded config")
             else:
                 self.model_hidden_dim = self.hidden_dim  # Fallback to demo default
                 print(
@@ -531,13 +517,9 @@ class CircuitOptimizationDemo:
 
             # Extract use_globals from loaded config for self-attention models
             if method_name == "Self-Attention":
-                if hasattr(loaded_config, "model") and hasattr(
-                    loaded_config.model, "use_globals"
-                ):
+                if hasattr(loaded_config, "model") and hasattr(loaded_config.model, "use_globals"):
                     self.model_use_globals = loaded_config.model.use_globals
-                    print(
-                        f"Using model use_globals={self.model_use_globals} from loaded config"
-                    )
+                    print(f"Using model use_globals={self.model_use_globals} from loaded config")
                 else:
                     self.model_use_globals = True  # Default fallback for compatibility
                     print(
@@ -566,12 +548,8 @@ class CircuitOptimizationDemo:
 
             # Update loss logs
             i = self.step_i % len(self.loss_log)
-            self.loss_log[i] = max(
-                min(float(loss), self.max_loss_value), self.min_loss_value
-            )
-            self.hard_log[i] = max(
-                min(float(hard_loss), self.max_loss_value), self.min_loss_value
-            )
+            self.loss_log[i] = max(min(float(loss), self.max_loss_value), self.min_loss_value)
+            self.hard_log[i] = max(min(float(hard_loss), self.max_loss_value), self.min_loss_value)
 
             # Debug output every 100 steps
             if self.is_optimizing and self.step_i % 100 == 0:
@@ -612,11 +590,7 @@ class CircuitOptimizationDemo:
             current_logits, self.wires, self.input_x, self.y0, self.loss_type
         )
 
-        if (
-            self.is_optimizing
-            and hasattr(self, "logit_optimizer")
-            and self.logit_optimizer
-        ):
+        if self.is_optimizing and hasattr(self, "logit_optimizer") and self.logit_optimizer:
             # Compute gradients with respect to logits
             def loss_fn(logits):
                 loss, _ = get_loss_from_wires_logits(
@@ -704,9 +678,7 @@ class CircuitOptimizationDemo:
                 try:
                     # Run circuit to get layer-by-layer activations
                     # This returns [input_acts, layer1_acts, layer2_acts, ..., output_acts]
-                    self.act = run_circuit(
-                        self.logits, self.wires, self.input_x, hard=False
-                    )
+                    self.act = run_circuit(self.logits, self.wires, self.input_x, hard=False)
 
                     # Generate error mask for visualization
                     self.err_mask = self.current_pred_hard != self.y0
@@ -716,9 +688,7 @@ class CircuitOptimizationDemo:
                         f"Warning: Could not generate circuit activations in unified model: {act_e}"
                     )
                     # Fallback: create empty activations
-                    self.act = [
-                        np.zeros((self.case_n, size)) for size, _ in self.layer_sizes
-                    ]
+                    self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
                     self.err_mask = np.zeros((self.case_n, self.output_n), bool)
 
                 return self.last_step_result.loss, self.last_step_result.hard_loss
@@ -866,9 +836,7 @@ class CircuitOptimizationDemo:
                     available_layers.append(i)
 
             if not available_layers:
-                print(
-                    "No layers available for mutation (need at least 2 connections per layer)"
-                )
+                print("No layers available for mutation (need at least 2 connections per layer)")
                 return
 
             # Choose random layer
@@ -911,9 +879,7 @@ class CircuitOptimizationDemo:
             # Refresh activations
             self.initialize_activations()
 
-            print(
-                f"Mutated exactly one wire in layer {layer_to_mutate} (seed: {mutation_seed})"
-            )
+            print(f"Mutated exactly one wire in layer {layer_to_mutate} (seed: {mutation_seed})")
 
         except Exception as e:
             print(f"Error mutating one wire: {e}")
@@ -973,9 +939,7 @@ class CircuitOptimizationDemo:
         # Ensure activations exist and have correct dimensions
         if not hasattr(self, "act") or len(self.act) != len(self.layer_sizes):
             if not hasattr(self, "_activation_warning_shown"):
-                print(
-                    "Warning: Activations not initialized properly, creating empty activations"
-                )
+                print("Warning: Activations not initialized properly, creating empty activations")
                 self._activation_warning_shown = True
             self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
 
@@ -1014,11 +978,7 @@ class CircuitOptimizationDemo:
 
             # Ensure we don't go out of bounds on activations
             if li < len(self.act):
-                act = (
-                    np.array(self.act[li][case])
-                    if case < len(self.act[li])
-                    else np.zeros(gate_n)
-                )
+                act = np.array(self.act[li][case]) if case < len(self.act[li]) else np.zeros(gate_n)
             else:
                 print(f"Warning: Missing activation for layer {li}")
                 act = np.zeros(gate_n)
@@ -1077,26 +1037,19 @@ class CircuitOptimizationDemo:
                 wires = self.wires[li - 1].T
                 masks = self.wire_masks[li - 1].T
                 src_x = prev_gate_x[wires]
-                dst_x = (
-                    group_x
-                    + (np.arange(self.arity) + 0.5) / self.arity * group_w
-                    - group_w / 2
-                )
+                dst_x = group_x + (np.arange(self.arity) + 0.5) / self.arity * group_w - group_w / 2
                 my = (prev_y + y) / 2
 
                 for x0, x1, si, m in zip(
-                    src_x.ravel(), dst_x.ravel(), wires.ravel(), masks.ravel()
+                    src_x.ravel(), dst_x.ravel(), wires.ravel(), masks.ravel(), strict=False
                 ):
                     if not m:
                         continue
-                    activation_intensity = (
-                        int(prev_act[si] * 0x60) if si < len(prev_act) else 0
-                    )
+                    activation_intensity = int(prev_act[si] * 0x60) if si < len(prev_act) else 0
 
                     if (
                         self.use_message_viz
-                        and self.optimization_methods[self.optimization_method_idx]
-                        != "Backprop"
+                        and self.optimization_methods[self.optimization_method_idx] != "Backprop"
                     ):
                         # Colorful visualization for GNN/Self-Attention
                         import random
@@ -1174,9 +1127,7 @@ class CircuitOptimizationDemo:
                         color = 0xFF000000 | (v << 16) | (v << 8) | v
 
                     # Draw line
-                    dl.add_line(
-                        (x_pos, p0[1]), (x_pos, p1[1]), color, 2.0 if is_active else 1.0
-                    )
+                    dl.add_line((x_pos, p0[1]), (x_pos, p1[1]), color, 2.0 if is_active else 1.0)
 
                     # Highlight active case
                     if is_active:
@@ -1227,9 +1178,7 @@ class CircuitOptimizationDemo:
             if imgui.is_item_hovered() and imgui.is_mouse_clicked(0):
                 mx = imgui.get_io().mouse_pos.x - p0[0]
                 mx_ratio = mx / disp_w
-                self.active_case_i = max(
-                    0, min(int(mx_ratio * self.case_n), self.case_n - 1)
-                )
+                self.active_case_i = max(0, min(int(mx_ratio * self.case_n), self.case_n - 1))
 
             # Reserve space
             imgui.dummy((0, disp_h))
@@ -1256,9 +1205,7 @@ class CircuitOptimizationDemo:
             # Optimization progress plot
             if implot.begin_plot("Circuit Optimization Progress", (-1, 200)):
                 implot.setup_legend(implot.Location_.north_east.value)
-                implot.setup_axis_scale(
-                    implot.ImAxis_.y1.value, implot.Scale_.log10.value
-                )
+                implot.setup_axis_scale(implot.ImAxis_.y1.value, implot.Scale_.log10.value)
                 implot.setup_axes(
                     "Step",
                     "Loss",
@@ -1276,14 +1223,10 @@ class CircuitOptimizationDemo:
                 if display_mode in ["Both", "Hard Only"]:
                     implot.plot_line("hard_loss", self.hard_log)
 
-                implot.drag_line_x(
-                    1, self.step_i % len(self.loss_log), (0.8, 0, 0, 0.5)
-                )
+                implot.drag_line_x(1, self.step_i % len(self.loss_log), (0.8, 0, 0, 0.5))
 
                 # Right-click context menu for loss display options
-                if implot.is_plot_hovered() and imgui.is_mouse_clicked(
-                    1
-                ):  # Right click
+                if implot.is_plot_hovered() and imgui.is_mouse_clicked(1):  # Right click
                     imgui.open_popup("loss_display_menu")
 
                 if imgui.begin_popup("loss_display_menu"):
@@ -1318,9 +1261,7 @@ class CircuitOptimizationDemo:
 
             imgui.next_column()
             imgui.text("Expected Output")
-            self.draw_lut(
-                "ground_truth", self.ground_truth_img, self.ground_truth_texture
-            )
+            self.draw_lut("ground_truth", self.ground_truth_img, self.ground_truth_texture)
 
             imgui.columns(1)
             imgui.end_child()
@@ -1354,9 +1295,7 @@ class CircuitOptimizationDemo:
                 "Method", self.optimization_method_idx, self.optimization_methods
             )
             if opt_changed:
-                print(
-                    f"Switching to {self.optimization_methods[self.optimization_method_idx]}"
-                )
+                print(f"Switching to {self.optimization_methods[self.optimization_method_idx]}")
                 self.initialize_optimization_method()
 
             # Method-specific controls
@@ -1491,9 +1430,7 @@ class CircuitOptimizationDemo:
 
             # Task selection
             imgui.separator_text("Task")
-            task_changed, self.task_idx = imgui.combo(
-                "Task", self.task_idx, self.available_tasks
-            )
+            task_changed, self.task_idx = imgui.combo("Task", self.task_idx, self.available_tasks)
             if task_changed:
                 self.update_task()
 
@@ -1504,33 +1441,23 @@ class CircuitOptimizationDemo:
                 if text_changed:
                     self.update_task()
             elif task_name == "noise":
-                noise_changed, self.noise_p = imgui.slider_float(
-                    "Noise p", self.noise_p, 0.0, 1.0
-                )
+                noise_changed, self.noise_p = imgui.slider_float("Noise p", self.noise_p, 0.0, 1.0)
                 if noise_changed:
                     self.update_task()
 
             # Loss type
             imgui.separator_text("Loss Function")
             loss_types = ["l4", "l2", "bce"]
-            loss_idx = (
-                loss_types.index(self.loss_type) if self.loss_type in loss_types else 0
-            )
+            loss_idx = loss_types.index(self.loss_type) if self.loss_type in loss_types else 0
             loss_changed, loss_idx = imgui.combo("Loss Type", loss_idx, loss_types)
             if loss_changed:
                 self.loss_type = loss_types[loss_idx]
 
             # Visualization controls
             imgui.separator_text("Visualization")
-            _, self.use_simple_viz = imgui.checkbox(
-                "Simple visualization", self.use_simple_viz
-            )
-            _, self.use_message_viz = imgui.checkbox(
-                "Message visualization", self.use_message_viz
-            )
-            _, self.auto_scale_plot = imgui.checkbox(
-                "Auto-scale plot", self.auto_scale_plot
-            )
+            _, self.use_simple_viz = imgui.checkbox("Simple visualization", self.use_simple_viz)
+            _, self.use_message_viz = imgui.checkbox("Message visualization", self.use_message_viz)
+            _, self.auto_scale_plot = imgui.checkbox("Auto-scale plot", self.auto_scale_plot)
 
             # Circuit gate mask controls
             imgui.separator_text("Circuit Masks")
@@ -1553,9 +1480,7 @@ class CircuitOptimizationDemo:
             imgui.text(f"Active Input Case: {self.active_case_i}")
             imgui.text(f"Wiring Seed: {self.wiring_seed}")
             imgui.text(f"Wiring Mode: {self.wiring_mode}")
-            imgui.text(
-                f"Loss Display: {self.loss_display_modes[self.loss_display_mode_idx]}"
-            )
+            imgui.text(f"Loss Display: {self.loss_display_modes[self.loss_display_mode_idx]}")
 
             # Model-specific status
             if method_name == "Self-Attention" and self.frozen_model is not None:
@@ -1572,12 +1497,8 @@ class CircuitOptimizationDemo:
                         and self.current_pred.shape == self.y0.shape
                         and self.current_pred_hard.shape == self.y0.shape
                     ):
-                        accuracy = float(
-                            jp.mean(jp.round(self.current_pred) == self.y0)
-                        )
-                        hard_accuracy = float(
-                            jp.mean(self.current_pred_hard == self.y0)
-                        )
+                        accuracy = float(jp.mean(jp.round(self.current_pred) == self.y0))
+                        hard_accuracy = float(jp.mean(self.current_pred_hard == self.y0))
                         imgui.text(f"Soft Accuracy: {accuracy:.3f}")
                         imgui.text(f"Hard Accuracy: {hard_accuracy:.3f}")
                     else:

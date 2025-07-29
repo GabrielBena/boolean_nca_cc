@@ -1,5 +1,4 @@
 from manim import *
-import numpy as np
 
 
 class SelfAttentionArchitectureDiagram(Scene):
@@ -131,9 +130,7 @@ class SelfAttentionArchitectureDiagram(Scene):
         input_text.move_to(UP * 0.25)
 
         # Arrow
-        transform_arrow = Arrow(
-            UP * 0.05, DOWN * 0.05, color=PURPLE, stroke_width=2, buff=0.1
-        )
+        transform_arrow = Arrow(UP * 0.05, DOWN * 0.05, color=PURPLE, stroke_width=2, buff=0.1)
 
         # Output representation
         output_rect = RoundedRectangle(
@@ -169,9 +166,7 @@ class SelfAttentionArchitectureDiagram(Scene):
         )
 
         # Title
-        title = Text(
-            "Multi-Layer\nSelf-Attention", font_size=15, color=RED, weight=BOLD
-        )
+        title = Text("Multi-Layer\nSelf-Attention", font_size=15, color=RED, weight=BOLD)
         title.move_to(attention_box.get_top() + DOWN * 0.35)
 
         # Layer stack with better spacing
@@ -191,9 +186,7 @@ class SelfAttentionArchitectureDiagram(Scene):
             )
             attn_block.move_to(UP * y_pos)
 
-            attn_text = Text(
-                f"Attention {layer_idx + 1}", font_size=9, color=WHITE, weight=BOLD
-            )
+            attn_text = Text(f"Attention {layer_idx + 1}", font_size=9, color=WHITE, weight=BOLD)
             attn_text.move_to(UP * y_pos)
 
             # MLP block
@@ -220,9 +213,7 @@ class SelfAttentionArchitectureDiagram(Scene):
             y_end = y_start - 0.4  # Top of next layer's attention
 
             # Simple central arrow like in feature projection
-            arrow = Arrow(
-                UP * y_start, UP * y_end, color=RED, stroke_width=2, buff=0.05
-            )
+            arrow = Arrow(UP * y_start, UP * y_end, color=RED, stroke_width=2, buff=0.05)
             arrows.add(arrow)
 
         # Components description
@@ -275,9 +266,7 @@ class SelfAttentionArchitectureDiagram(Scene):
         )
         hidden_proj_box.move_to(DOWN * 0.3)
 
-        hidden_proj_text = Text(
-            "Hidden Updates", font_size=10, color=WHITE, weight=BOLD
-        )
+        hidden_proj_text = Text("Hidden Updates", font_size=10, color=WHITE, weight=BOLD)
         hidden_proj_text.move_to(DOWN * 0.3)
 
         hidden_formula = Text("Δhidden", font_size=9, color="#F39C12", weight=BOLD)

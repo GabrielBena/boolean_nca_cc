@@ -16,7 +16,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 dependencies = [
     # Core JAX ecosystem
     "jax>=0.4.0",
@@ -48,8 +48,7 @@ dependencies = [
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
-    "black>=22.0.0",
-    "isort>=5.10.0",
+    "ruff>=0.1.0",
     "mypy>=0.991",
     "pre-commit>=2.20.0",
 ]
@@ -62,8 +61,7 @@ all = [
     # Include all dev dependencies
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
-    "black>=22.0.0",
-    "isort>=5.10.0",
+    "ruff>=0.1.0",
     "mypy>=0.991",
     "pre-commit>=2.20.0",
     # Include all notebook dependencies
@@ -83,17 +81,82 @@ packages = ["boolean_nca_cc"]
 [tool.setuptools.package-data]
 boolean_nca_cc = ["py.typed"]
 
-[tool.black]
-line-length = 88
-target-version = ["py38"]
-include = '\.pyi?$'
+[tool.ruff]
+# Ruff configuration following Python 3.11 best practices
+target-version = "py311"
+line-length = 100
+indent-width = 4
 
-[tool.isort]
-profile = "black"
-line_length = 88
+[tool.ruff.lint]
+# Professional default set - essential rules for code quality
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings  
+    "F",   # Pyflakes
+    "UP",  # pyupgrade (modern Python syntax)
+    "B",   # flake8-bugbear (common bugs)
+    "I",   # isort (import sorting)
+    "N",   # pep8-naming
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+    "RUF", # Ruff-specific rules
+]
+
+ignore = [
+    "E501",  # Line too long (handled by formatter)
+    "B008",  # Do not perform function calls in argument defaults
+    "B904",  # Within an `except` clause, raise exceptions with `raise ... from err`
+    "N806",  # Variable in function should be lowercase (allows single letter vars)
+]
+
+# Allow fix for all enabled rules (when `--fix`) is provided
+fixable = ["ALL"]
+unfixable = []
+
+# Allow unused variables when underscore-prefixed
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.lint.per-file-ignores]
+# Tests can be more relaxed
+"tests/**/*.py" = [
+    "N802",  # Function name should be lowercase
+    "N803",  # Argument name should be lowercase  
+]
+
+# Notebooks can be more relaxed
+"*.ipynb" = [
+    "E402",  # Module level import not at top of file
+    "F401",  # Imported but unused
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["boolean_nca_cc"]
+force-single-line = false
+split-on-trailing-comma = true
+
+[tool.ruff.lint.pyupgrade]
+# Preserve types, even if a file imports `from __future__ import annotations`.
+keep-runtime-typing = true
+
+[tool.ruff.format]
+# Like Black, use double quotes for strings.
+quote-style = "double"
+
+# Like Black, indent with spaces, rather than tabs.
+indent-style = "space"
+
+# Like Black, respect magic trailing commas.
+skip-magic-trailing-comma = false
+
+# Like Black, automatically detect the appropriate line ending.
+line-ending = "auto"
+
+# Enable auto-formatting of code examples in docstrings. Markdown,
+# reStructuredText code/literal blocks and doctests are all supported.
+docstring-code-format = true
 
 [tool.mypy]
-python_version = "3.8"
+python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true

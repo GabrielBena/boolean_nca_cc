@@ -8,11 +8,9 @@ updating node features in a graph neural network.
 import jax
 import jax.numpy as jp
 from flax import nnx
-from typing import List, Dict
-
 
 # Type aliases for clarity
-NodeType = Dict[str, jp.ndarray]
+NodeType = dict[str, jp.ndarray]
 
 
 class NodeUpdateModule(nnx.Module):
@@ -24,7 +22,7 @@ class NodeUpdateModule(nnx.Module):
 
     def __init__(
         self,
-        node_mlp_features: List[int],
+        node_mlp_features: list[int],
         circuit_hidden_dim: int,
         arity: int,
         message_passing: bool = True,
@@ -108,7 +106,7 @@ class NodeUpdateModule(nnx.Module):
         mlp_features = [mlp_input_size, *node_mlp_features, mlp_output_size]
         mlp_layers = []
 
-        for i, (in_f, out_f) in enumerate(zip(mlp_features[:-1], mlp_features[1:])):
+        for i, (in_f, out_f) in enumerate(zip(mlp_features[:-1], mlp_features[1:], strict=False)):
             # Special initialization for the final layer
             if i == len(mlp_features) - 2:
                 # Use small random initialization for weights to ensure gradient flow

@@ -5,12 +5,12 @@ This module provides an alternative to GNN message passing by using
 masked self-attention to update boolean circuit parameters.
 """
 
+from functools import partial
+
 import jax
 import jax.numpy as jp
 import jraph
 from flax import nnx
-from typing import Optional, Dict, Tuple, List
-from functools import partial
 
 
 class SelfAttentionLayer(nnx.Module):
@@ -57,7 +57,7 @@ class SelfAttentionLayer(nnx.Module):
     def __call__(
         self,
         x: jp.ndarray,
-        attention_mask: Optional[jp.ndarray] = None,
+        attention_mask: jp.ndarray | None = None,
     ) -> jp.ndarray:
         """
         Apply masked self-attention.
@@ -131,7 +131,7 @@ class SelfAttentionBlock(nnx.Module):
     def __call__(
         self,
         x: jp.ndarray,
-        attention_mask: Optional[jp.ndarray] = None,
+        attention_mask: jp.ndarray | None = None,
     ) -> jp.ndarray:
         """
         Apply self-attention block.
@@ -242,12 +242,8 @@ class CircuitSelfAttention(nnx.Module):
         self.logit_proj = nnx.Linear(
             self.attention_dim,
             self.logit_dim,
-            kernel_init=nnx.initializers.zeros
-            if zero_init
-            else nnx.initializers.kaiming_normal(),
-            bias_init=nnx.initializers.zeros
-            if zero_init
-            else nnx.initializers.normal(stddev=1e-4),
+            kernel_init=nnx.initializers.zeros if zero_init else nnx.initializers.kaiming_normal(),
+            bias_init=nnx.initializers.zeros if zero_init else nnx.initializers.normal(stddev=1e-4),
             rngs=rngs,
         )
         self.logit_scale = (
@@ -263,12 +259,8 @@ class CircuitSelfAttention(nnx.Module):
         self.hidden_proj = nnx.Linear(
             self.attention_dim,
             circuit_hidden_dim,
-            kernel_init=nnx.initializers.zeros
-            if zero_init
-            else nnx.initializers.kaiming_normal(),
-            bias_init=nnx.initializers.zeros
-            if zero_init
-            else nnx.initializers.normal(stddev=1e-4),
+            kernel_init=nnx.initializers.zeros if zero_init else nnx.initializers.kaiming_normal(),
+            bias_init=nnx.initializers.zeros if zero_init else nnx.initializers.normal(stddev=1e-4),
             rngs=rngs,
         )
         self.hidden_scale = (
@@ -316,7 +308,7 @@ class CircuitSelfAttention(nnx.Module):
         # This format matches the MultiHeadAttention mask format
         return mask[None, None, ...]
 
-    def _extract_features(self, nodes: Dict[str, jp.ndarray]) -> jp.ndarray:
+    def _extract_features(self, nodes: dict[str, jp.ndarray]) -> jp.ndarray:
         """
         Extract and concatenate node features for attention.
 
@@ -347,7 +339,7 @@ class CircuitSelfAttention(nnx.Module):
     def __call__(
         self,
         graph: jraph.GraphsTuple,
-        attention_mask: Optional[jp.ndarray] = None,
+        attention_mask: jp.ndarray | None = None,
     ) -> jraph.GraphsTuple:
         """
         Apply self-attention to update circuit parameters.
@@ -372,9 +364,7 @@ class CircuitSelfAttention(nnx.Module):
 
         # Create attention mask if not provided
         if attention_mask is None:
-            attention_mask = self._create_attention_mask(
-                senders, receivers, bidirectional=True
-            )
+            attention_mask = self._create_attention_mask(senders, receivers, bidirectional=True)
 
         # Project features to the attention dimension
         x = self.feature_proj(features)
@@ -410,7 +400,7 @@ def run_self_attention_scan(
     model: CircuitSelfAttention,
     graph: jraph.GraphsTuple,
     num_steps: int,
-) -> Tuple[jraph.GraphsTuple, List[jraph.GraphsTuple]]:
+) -> tuple[jraph.GraphsTuple, list[jraph.GraphsTuple]]:
     """
     Apply the self-attention model iteratively for multiple steps using jax.lax.scan.
 
@@ -435,9 +425,7 @@ def run_self_attention_scan(
         return updated_graph, updated_graph
 
     # Run the scan
-    final_graph, intermediate_graphs = jax.lax.scan(
-        scan_body, graph, None, length=num_steps
-    )
+    final_graph, intermediate_graphs = jax.lax.scan(scan_body, graph, None, length=num_steps)
 
     # Combine initial graph with intermediate results
     all_graphs = [graph] + list(intermediate_graphs)
@@ -449,13 +437,13 @@ def run_self_attention_scan_with_loss(
     model: CircuitSelfAttention,
     graph: jraph.GraphsTuple,
     num_steps: int,
-    logits_original_shapes: List[Tuple],
-    wires: List[jp.ndarray],
+    logits_original_shapes: list[tuple],
+    wires: list[jp.ndarray],
     x_data: jp.ndarray,
     y_data: jp.ndarray,
     loss_type: str,
-    layer_sizes: Tuple[Tuple[int, int], ...],
-) -> Tuple[jraph.GraphsTuple, List[jraph.GraphsTuple], jp.ndarray, List]:
+    layer_sizes: tuple[tuple[int, int], ...],
+) -> tuple[jraph.GraphsTuple, list[jraph.GraphsTuple], jp.ndarray, list]:
     """
     Run the self-attention model for multiple steps with loss computation and graph updating at each step.
 

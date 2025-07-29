@@ -6,10 +6,11 @@ that exactly match the training distribution patterns, ensuring reproducible eva
 with proper IN-distribution and OUT-of-distribution testing.
 """
 
+import logging
+from typing import Any
+
 import jax
 import jax.numpy as jp
-from typing import List, Tuple, Optional, Dict, Any
-import logging
 
 from boolean_nca_cc.circuits.model import gen_circuit
 
@@ -35,14 +36,14 @@ class UnifiedEvaluationDatasets:
 
     def __init__(
         self,
-        in_distribution_wires: List[jp.ndarray],
-        in_distribution_logits: List[jp.ndarray],
-        out_of_distribution_wires: List[jp.ndarray],
-        out_of_distribution_logits: List[jp.ndarray],
+        in_distribution_wires: list[jp.ndarray],
+        in_distribution_logits: list[jp.ndarray],
+        out_of_distribution_wires: list[jp.ndarray],
+        out_of_distribution_logits: list[jp.ndarray],
         target_batch_size: int,
         in_actual_batch_size: int,
         out_actual_batch_size: int,
-        training_config: Dict[str, Any],
+        training_config: dict[str, Any],
     ):
         self.in_distribution_wires = in_distribution_wires
         self.in_distribution_logits = in_distribution_logits
@@ -74,7 +75,7 @@ def create_unified_evaluation_datasets(
     evaluation_base_seed: int,
     training_wiring_mode: str,
     training_initial_diversity: int,
-    layer_sizes: List[Tuple[int, int]],
+    layer_sizes: list[tuple[int, int]],
     arity: int,
     eval_batch_size: int,
 ) -> UnifiedEvaluationDatasets:
@@ -103,9 +104,7 @@ def create_unified_evaluation_datasets(
 
     # Create deterministic keys for IN and OUT distribution
     in_distribution_key = jax.random.PRNGKey(evaluation_base_seed)
-    out_of_distribution_key = jax.random.PRNGKey(
-        evaluation_base_seed + 10000
-    )  # Clearly separated
+    out_of_distribution_key = jax.random.PRNGKey(evaluation_base_seed + 10000)  # Clearly separated
 
     # 1. Create IN-distribution circuits (matching training pattern)
     log.info("Creating IN-distribution evaluation circuits...")
@@ -159,13 +158,13 @@ def create_unified_evaluation_datasets(
 
 def _create_circuit_batch_with_pattern(
     rng: jax.random.PRNGKey,
-    layer_sizes: List[Tuple[int, int]],
+    layer_sizes: list[tuple[int, int]],
     arity: int,
     batch_size: int,
     wiring_mode: str,
     initial_diversity: int,
     get_all_wirings: bool = False,
-) -> Tuple[List[jp.ndarray], List[jp.ndarray], int]:
+) -> tuple[list[jp.ndarray], list[jp.ndarray], int]:
     """
     Create a batch of circuits using the exact same logic as initialize_graph_pool.
 
@@ -209,25 +208,19 @@ def _create_circuit_batch_with_pattern(
             # Generate ALL unique wirings (not just a subset)
             # This ensures comprehensive evaluation across the full diversity
             rngs = jax.random.split(rng, effective_diversity)
-            vmap_gen_circuit = jax.vmap(
-                lambda rng: gen_circuit(rng, layer_sizes, arity=arity)
-            )
+            vmap_gen_circuit = jax.vmap(lambda rng: gen_circuit(rng, layer_sizes, arity=arity))
             batch_wires, batch_logits = vmap_gen_circuit(rngs)
             actual_batch_size = effective_diversity
         elif effective_diversity >= batch_size and not get_all_wirings:
             # Generate N different wirings and repeat them across the batch
             diversity_rngs = jax.random.split(rng, effective_diversity)[:batch_size]
-            vmap_gen_circuit = jax.vmap(
-                lambda rng: gen_circuit(rng, layer_sizes, arity=arity)
-            )
+            vmap_gen_circuit = jax.vmap(lambda rng: gen_circuit(rng, layer_sizes, arity=arity))
             batch_wires, batch_logits = vmap_gen_circuit(diversity_rngs)
             actual_batch_size = batch_size
         else:
             # Generate N different wirings and repeat them across the batch
             diversity_rngs = jax.random.split(rng, effective_diversity)
-            vmap_gen_circuit = jax.vmap(
-                lambda rng: gen_circuit(rng, layer_sizes, arity=arity)
-            )
+            vmap_gen_circuit = jax.vmap(lambda rng: gen_circuit(rng, layer_sizes, arity=arity))
             diverse_wires, diverse_logits = vmap_gen_circuit(diversity_rngs)
 
             # Calculate how many times to repeat each diverse wiring
@@ -275,9 +268,7 @@ def _create_circuit_batch_with_pattern(
     else:  # wiring_mode == "random"
         # In random mode, generate different wirings for each circuit
         rngs = jax.random.split(rng, batch_size)
-        vmap_gen_circuit = jax.vmap(
-            lambda rng: gen_circuit(rng, layer_sizes, arity=arity)
-        )
+        vmap_gen_circuit = jax.vmap(lambda rng: gen_circuit(rng, layer_sizes, arity=arity))
         batch_wires, batch_logits = vmap_gen_circuit(rngs)
         actual_batch_size = batch_size
 
@@ -286,11 +277,11 @@ def _create_circuit_batch_with_pattern(
 
 def evaluate_circuits_in_chunks(
     eval_fn,
-    wires: List[jp.ndarray],
-    logits: List[jp.ndarray],
+    wires: list[jp.ndarray],
+    logits: list[jp.ndarray],
     target_chunk_size: int,
     **eval_kwargs,
-) -> Dict:
+) -> dict:
     """
     Evaluate circuits in chunks to handle cases where diversity exceeds target batch size.
 
@@ -323,9 +314,7 @@ def evaluate_circuits_in_chunks(
         chunk_logits = [l[start_idx:end_idx] for l in logits]
 
         # Evaluate chunk
-        chunk_result = eval_fn(
-            batch_wires=chunk_wires, batch_logits=chunk_logits, **eval_kwargs
-        )
+        chunk_result = eval_fn(batch_wires=chunk_wires, batch_logits=chunk_logits, **eval_kwargs)
         chunk_results.append(chunk_result)
 
     # Average results across chunks

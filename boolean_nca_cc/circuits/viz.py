@@ -1,7 +1,7 @@
 import jax.numpy as jp
-import numpy as np
-import matplotlib.pyplot as plt
 import matplotlib.collections as collections  # Add this import for PatchCollection
+import matplotlib.pyplot as plt
+import numpy as np
 
 from boolean_nca_cc.circuits.model import run_circuit
 
@@ -137,9 +137,7 @@ def visualize_network(wires, layer_sizes, title="Network Architecture"):
     return fig
 
 
-def evaluate_and_visualize(
-    logits, wires, x, y0, title_prefix="", hard=True, visualize=True
-):
+def evaluate_and_visualize(logits, wires, x, y0, title_prefix="", hard=True, visualize=True):
     """
     Evaluate the circuit, calculate accuracy, and visualize the results.
 
@@ -193,10 +191,10 @@ def evaluate_and_visualize(
         metrics["error_details"] = {
             "input_values": input_values,
             "predicted_values": np.array(
-                [y_pred_rounded[i, j] for i, j in zip(batch_indices, bit_indices)]
+                [y_pred_rounded[i, j] for i, j in zip(batch_indices, bit_indices, strict=False)]
             ),
             "expected_values": np.array(
-                [y0[i, j] for i, j in zip(batch_indices, bit_indices)]
+                [y0[i, j] for i, j in zip(batch_indices, bit_indices, strict=False)]
             ),
         }
 
@@ -224,9 +222,7 @@ def evaluate_and_visualize(
         axes[0].set_ylabel("Output Bit Index")
 
         # Plot Target Output
-        axes[1].imshow(
-            y0_np.T, cmap=cmap, interpolation="nearest", vmin=0, vmax=1, aspect="auto"
-        )
+        axes[1].imshow(y0_np.T, cmap=cmap, interpolation="nearest", vmin=0, vmax=1, aspect="auto")
         axes[1].set_title("Target Output")
         axes[1].set_xlabel("Batch Index")
         axes[1].set_ylabel("Output Bit Index")
@@ -246,9 +242,7 @@ def evaluate_and_visualize(
         axes[2].set_ylabel("Output Bit Index")
 
         # Add overall title with accuracy
-        fig.suptitle(
-            f"{title_prefix}Evaluation - Accuracy: {accuracy:.4f}", fontsize=16
-        )
+        fig.suptitle(f"{title_prefix}Evaluation - Accuracy: {accuracy:.4f}", fontsize=16)
         plt.show()
 
     return metrics

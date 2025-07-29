@@ -4,14 +4,12 @@ Edge update modules for graph neural networks.
 This module provides edge update functions for generating messages between nodes.
 """
 
-from typing import Dict, List
-
 import jax
 import jax.numpy as jp
 from flax import nnx
 
 # Type aliases for clarity
-NodeType = Dict[str, jp.ndarray]
+NodeType = dict[str, jp.ndarray]
 EdgeType = jp.ndarray
 
 
@@ -24,7 +22,7 @@ class EdgeUpdateModule(nnx.Module):
 
     def __init__(
         self,
-        edge_mlp_features: List[int],
+        edge_mlp_features: list[int],
         circuit_hidden_dim: int,
         arity: int,
         *,
@@ -60,7 +58,7 @@ class EdgeUpdateModule(nnx.Module):
         # Define Edge MLP architecture with batch normalization
         edge_mlp_layers = []
         for i, (in_f, out_f) in enumerate(
-            zip(self.mlp_features[:-1], self.mlp_features[1:])
+            zip(self.mlp_features[:-1], self.mlp_features[1:], strict=False)
         ):
             edge_mlp_layers.append(
                 nnx.Linear(

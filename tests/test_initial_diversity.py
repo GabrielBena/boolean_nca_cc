@@ -8,6 +8,7 @@ the number of different initial wirings in genetic mode.
 
 import jax
 import jax.numpy as jp
+
 from boolean_nca_cc.training.pool.pool import initialize_graph_pool
 
 
@@ -72,9 +73,7 @@ def test_initial_diversity():
         # Show the distribution
         wiring_counts = {}
         for i in range(pool_size):
-            wiring = tuple(
-                layer1_wires[i].flatten().tolist()
-            )  # Convert to tuple of Python ints
+            wiring = tuple(layer1_wires[i].flatten().tolist())  # Convert to tuple of Python ints
             wiring_counts[wiring] = wiring_counts.get(wiring, 0) + 1
 
         print(f"  Distribution: {list(wiring_counts.values())}")
@@ -133,9 +132,7 @@ def test_wiring_diversity_measurement():
         )
 
     print()
-    print(
-        "Note: Entropy diversity is normalized (0.0 = all identical, 1.0 = maximum diversity)"
-    )
+    print("Note: Entropy diversity is normalized (0.0 = all identical, 1.0 = maximum diversity)")
     print("For comparison, random mode should give entropy ≈ 1.0")
 
     # Test random mode for comparison

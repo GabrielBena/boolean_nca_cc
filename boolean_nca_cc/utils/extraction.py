@@ -102,9 +102,7 @@ def update_output_node_loss(
 
     # Update the loss feature for output nodes
     updated_loss = (
-        graph.nodes["loss"]
-        .at[output_start_idx:output_end_idx]
-        .set(processed_loss_values)
+        graph.nodes["loss"].at[output_start_idx:output_end_idx].set(processed_loss_values)
     )
 
     # Create updated nodes with the new loss values

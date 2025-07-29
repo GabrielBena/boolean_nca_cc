@@ -192,8 +192,7 @@ def create_and_save_final_results(
         "loss_type": cfg.training.loss_type,
         "learning_rate": cfg.training.learning_rate,
         "epochs_completed": len(model_results["losses"]),
-        "total_epochs_planned": cfg.training.epochs
-        or 2**cfg.training.epochs_power_of_2,
+        "total_epochs_planned": cfg.training.epochs or 2**cfg.training.epochs_power_of_2,
         "early_stopped": model_results.get("early_stopped", False),
         "early_stop_epoch": model_results.get("early_stop_epoch", None),
         "first_threshold_epoch": model_results.get("first_threshold_epoch", None),
@@ -214,12 +213,8 @@ def create_and_save_final_results(
         final_results.update(
             {
                 "eval_in_final_loss": final_in_metrics.get("eval_in/final_loss", None),
-                "eval_in_final_hard_loss": final_in_metrics.get(
-                    "eval_in/final_hard_loss", None
-                ),
-                "eval_in_final_accuracy": final_in_metrics.get(
-                    "eval_in/final_accuracy", None
-                ),
+                "eval_in_final_hard_loss": final_in_metrics.get("eval_in/final_hard_loss", None),
+                "eval_in_final_accuracy": final_in_metrics.get("eval_in/final_accuracy", None),
                 "eval_in_final_hard_accuracy": final_in_metrics.get(
                     "eval_in/final_hard_accuracy", None
                 ),
@@ -230,15 +225,9 @@ def create_and_save_final_results(
         final_out_metrics = eval_results.get("final_metrics_out", {})
         final_results.update(
             {
-                "eval_out_final_loss": final_out_metrics.get(
-                    "eval_out/final_loss", None
-                ),
-                "eval_out_final_hard_loss": final_out_metrics.get(
-                    "eval_out/final_hard_loss", None
-                ),
-                "eval_out_final_accuracy": final_out_metrics.get(
-                    "eval_out/final_accuracy", None
-                ),
+                "eval_out_final_loss": final_out_metrics.get("eval_out/final_loss", None),
+                "eval_out_final_hard_loss": final_out_metrics.get("eval_out/final_hard_loss", None),
+                "eval_out_final_accuracy": final_out_metrics.get("eval_out/final_accuracy", None),
                 "eval_out_final_hard_accuracy": final_out_metrics.get(
                     "eval_out/final_hard_accuracy", None
                 ),
@@ -277,12 +266,8 @@ def create_and_save_final_results(
                     "eval_out_actual_batch_size": eval_datasets_info.get(
                         "out_actual_batch_size", None
                     ),
-                    "eval_in_used_chunking": eval_datasets_info.get(
-                        "in_used_chunking", False
-                    ),
-                    "eval_out_used_chunking": eval_datasets_info.get(
-                        "out_used_chunking", False
-                    ),
+                    "eval_in_used_chunking": eval_datasets_info.get("in_used_chunking", False),
+                    "eval_out_used_chunking": eval_datasets_info.get("out_used_chunking", False),
                     "eval_training_wiring_mode": eval_datasets_info.get(
                         "training_wiring_mode", None
                     ),
@@ -314,7 +299,7 @@ def create_and_save_final_results(
         wandb.log({f"final/{k}": v for k, v in final_results.items() if v is not None})
 
     # Final log (traditional format for backward compatibility)
-    log.info(f"Training complete. Final results:")
+    log.info("Training complete. Final results:")
     log.info(f"  Meta Loss: {model_results['losses'][-1]:.4f}")
     log.info(f"  Meta Hard Loss: {model_results['hard_losses'][-1]:.4f}")
     log.info(f"  Meta Accuracy: {model_results['accuracies'][-1]:.4f}")
@@ -406,9 +391,7 @@ def main(cfg: DictConfig) -> None:
     input_n, output_n = cfg.circuit.input_bits, cfg.circuit.output_bits
     arity = cfg.circuit.arity
     if cfg.circuit.layer_sizes is None:
-        layer_sizes = generate_layer_sizes(
-            input_n, output_n, arity, layer_n=cfg.circuit.num_layers
-        )
+        layer_sizes = generate_layer_sizes(input_n, output_n, arity, layer_n=cfg.circuit.num_layers)
         with open_dict(cfg):
             cfg.circuit.layer_sizes = layer_sizes
     else:
@@ -416,9 +399,7 @@ def main(cfg: DictConfig) -> None:
 
     # Generate dummy circuit
     test_key = jax.random.PRNGKey(cfg.test_seed)
-    wires, logits = gen_circuit(
-        test_key, cfg.circuit.layer_sizes, arity=cfg.circuit.arity
-    )
+    wires, logits = gen_circuit(test_key, cfg.circuit.layer_sizes, arity=cfg.circuit.arity)
 
     # Generate dummy graph
     graph = build_graph(
@@ -437,19 +418,13 @@ def main(cfg: DictConfig) -> None:
 
     # Get task data
     case_n = 1 << input_n
-    x, y0 = get_task_data(
-        cfg.circuit.task, case_n, input_bits=input_n, output_bits=output_n
-    )
+    x, y0 = get_task_data(cfg.circuit.task, case_n, input_bits=input_n, output_bits=output_n)
 
     # Run backpropagation training for comparison if enabled
     bp_results = None
     if cfg.backprop.enabled:
-        bp_results = run_backpropagation_training(
-            cfg, x, y0, loss_type=cfg.training.loss_type
-        )
-        plot_training_curves(
-            bp_results, "Backpropagation", os.path.join(output_dir, "plots")
-        )
+        bp_results = run_backpropagation_training(cfg, x, y0, loss_type=cfg.training.loss_type)
+        plot_training_curves(bp_results, "Backpropagation", os.path.join(output_dir, "plots"))
 
     # Initialize model
     rng, init_rng = jax.random.split(rng)

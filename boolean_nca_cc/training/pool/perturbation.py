@@ -7,15 +7,14 @@ to improve robustness and generalization.
 
 import jax
 import jax.numpy as jp
-from typing import List, Tuple, Dict, Any
 
 
 def mutate_wires_swap(
-    wires: List[jp.ndarray],
+    wires: list[jp.ndarray],
     key: jax.random.PRNGKey,
     mutation_rate: float = 0.1,
     n_swaps_per_layer: int = None,
-) -> List[jp.ndarray]:
+) -> list[jp.ndarray]:
     """
     Mutate circuit wires by swapping connections within each layer.
 
@@ -65,9 +64,7 @@ def mutate_wires_swap(
         else:
             # Use mutation_rate as Bernoulli probability for each connection
             bernoulli_key, layer_key = jax.random.split(layer_key)
-            mutation_mask = (
-                jax.random.uniform(bernoulli_key, (n_connections,)) < mutation_rate
-            )
+            mutation_mask = jax.random.uniform(bernoulli_key, (n_connections,)) < mutation_rate
 
             # Count how many connections are selected for mutation
             n_to_mutate = jp.sum(mutation_mask)
@@ -109,11 +106,11 @@ def mutate_wires_swap(
 
 
 def mutate_wires_batch(
-    batch_wires: List[jp.ndarray],
+    batch_wires: list[jp.ndarray],
     key: jax.random.PRNGKey,
     mutation_rate: float = 0.1,
     n_swaps_per_layer: int = None,
-) -> List[jp.ndarray]:
+) -> list[jp.ndarray]:
     """
     Apply wire mutation to a batch of circuits.
 
@@ -144,17 +141,15 @@ def mutate_wires_batch(
         return mutated_single
 
     # Apply vmap across the batch dimension
-    mutated_batch = jax.vmap(
-        mutate_single_circuit, in_axes=(0,) + (0,) * len(batch_wires)
-    )(keys, *batch_wires)
+    mutated_batch = jax.vmap(mutate_single_circuit, in_axes=(0,) + (0,) * len(batch_wires))(
+        keys, *batch_wires
+    )
 
     # Reorganize the output back into list of batched arrays
     return [mutated_batch[i] for i in range(len(batch_wires))]
 
 
-def shuffle_wires(
-    rng: jax.random.PRNGKey, wires: List, logits: List
-) -> Tuple[List, List]:
+def shuffle_wires(rng: jax.random.PRNGKey, wires: list, logits: list) -> tuple[list, list]:
     """
     Randomly shuffle some wire connections in the circuit.
 
@@ -193,8 +188,8 @@ def shuffle_wires(
 
 
 def perturb_logits(
-    rng: jax.random.PRNGKey, wires: List, logits: List, noise_scale: float = 0.05
-) -> Tuple[List, List]:
+    rng: jax.random.PRNGKey, wires: list, logits: list, noise_scale: float = 0.05
+) -> tuple[list, list]:
     """
     Add small noise perturbations to logits.
 
@@ -221,8 +216,8 @@ def perturb_logits(
 
 
 def apply_damage(
-    rng: jax.random.PRNGKey, wires: List, logits: List, damage_prob: float = 0.05
-) -> Tuple[List, List]:
+    rng: jax.random.PRNGKey, wires: list, logits: list, damage_prob: float = 0.05
+) -> tuple[list, list]:
     """
     Apply random damage to the circuit by zeroing out some logits.
 

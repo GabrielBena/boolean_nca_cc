@@ -1,5 +1,4 @@
 from manim import *
-import numpy as np
 
 
 class GNNArchitectureDiagram(Scene):
@@ -170,9 +169,7 @@ class GNNArchitectureDiagram(Scene):
         )
 
         # Arrow
-        transform_arrow = Arrow(
-            DOWN * 0.3, DOWN * 0.5, color=PURPLE, stroke_width=2, buff=0.1
-        )
+        transform_arrow = Arrow(DOWN * 0.3, DOWN * 0.5, color=PURPLE, stroke_width=2, buff=0.1)
 
         # Output
         output_box = RoundedRectangle(
@@ -311,9 +308,7 @@ class GNNArchitectureDiagram(Scene):
         )
 
         # Arrow
-        transform_arrow = Arrow(
-            DOWN * 0.1, DOWN * 0.3, color=ORANGE, stroke_width=2, buff=0.1
-        )
+        transform_arrow = Arrow(DOWN * 0.1, DOWN * 0.3, color=ORANGE, stroke_width=2, buff=0.1)
 
         # Output
         output_box = RoundedRectangle(

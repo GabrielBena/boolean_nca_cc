@@ -8,20 +8,19 @@ when specific failures occur:
 - Out of memory: divide batch size by 1.5
 """
 
-import os
-import sys
-import subprocess
-import re
-import time
-import logging
 import argparse
-import signal
 import atexit
+import logging
+import os
+import re
+import signal
+import subprocess
+import sys
 import tempfile
-import shutil
+import time
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
-import yaml
+from typing import Any
+
 from omegaconf import OmegaConf, open_dict
 
 # Configure logging
@@ -72,9 +71,7 @@ def cleanup_process():
                         log.info("Training process group terminated gracefully")
                     except subprocess.TimeoutExpired:
                         # If graceful termination fails, force kill the process group
-                        log.warning(
-                            "Graceful termination failed, force killing process group..."
-                        )
+                        log.warning("Graceful termination failed, force killing process group...")
                         os.killpg(pgid, signal.SIGKILL)
                         current_process.wait()
                         log.info("Training process group force killed")
@@ -150,9 +147,7 @@ def delete_wandb_run(run_id: str) -> bool:
 
         except wandb.errors.CommError as e:
             if "not found" in str(e).lower():
-                log.info(
-                    f"Wandb run {run_id} not found (may not have been created yet)"
-                )
+                log.info(f"Wandb run {run_id} not found (may not have been created yet)")
                 return True
             else:
                 log.warning(f"Failed to delete wandb run {run_id}: {e}")
@@ -166,7 +161,7 @@ def delete_wandb_run(run_id: str) -> bool:
         return False
 
 
-def extract_wandb_run_id(stdout: str, stderr: str) -> Optional[str]:
+def extract_wandb_run_id(stdout: str, stderr: str) -> str | None:
     """
     Extract wandb run ID from training output.
 
@@ -237,9 +232,7 @@ class TrainingMonitor:
         self.temp_config_files.clear()
         log.info("Temporary config file cleanup completed")
 
-    def detect_failure_type(
-        self, stdout: str, stderr: str, returncode: int
-    ) -> Optional[str]:
+    def detect_failure_type(self, stdout: str, stderr: str, returncode: int) -> str | None:
         """
         Detect the type of failure from process output.
 
@@ -298,7 +291,7 @@ class TrainingMonitor:
 
     def create_temp_config_with_adjustments(
         self, original_config_path: str, failure_type: str
-    ) -> Optional[str]:
+    ) -> str | None:
         """
         Create a temporary config file with adjustments for the failure type.
         Keeps the original config file untouched.
@@ -349,15 +342,9 @@ class TrainingMonitor:
                     and hasattr(cfg.training.message_steps_schedule, "constant_product")
                     and cfg.training.message_steps_schedule.constant_product is not None
                 ):
-                    current_constant_product = (
-                        cfg.training.message_steps_schedule.constant_product
-                    )
-                    new_constant_product = max(
-                        1, int(current_constant_product / self.alpha)
-                    )
-                    cfg.training.message_steps_schedule.constant_product = (
-                        new_constant_product
-                    )
+                    current_constant_product = cfg.training.message_steps_schedule.constant_product
+                    new_constant_product = max(1, int(current_constant_product / self.alpha))
+                    cfg.training.message_steps_schedule.constant_product = new_constant_product
                     adjustments.append(
                         f"constant_product: {current_constant_product} -> {new_constant_product}"
                     )
@@ -366,9 +353,7 @@ class TrainingMonitor:
                 log.info(f"Out of memory detected. Reducing {adjustment}")
 
             else:
-                log.warning(
-                    f"Unknown failure type: {failure_type}. Cannot adjust config."
-                )
+                log.warning(f"Unknown failure type: {failure_type}. Cannot adjust config.")
                 return None
 
         # Create temporary config file
@@ -399,9 +384,7 @@ class TrainingMonitor:
             log.error(f"Failed to create temporary config: {e}")
             return None
 
-    def run_training(
-        self, train_cmd: list, config_path: str
-    ) -> Tuple[bool, str, str, int]:
+    def run_training(self, train_cmd: list, config_path: str) -> tuple[bool, str, str, int]:
         """
         Run training command and capture output.
 
@@ -410,9 +393,7 @@ class TrainingMonitor:
         """
         global current_process, current_wandb_run_id
 
-        log.info(
-            f"Starting training attempt {self.retry_count + 1}/{self.max_retries + 1}"
-        )
+        log.info(f"Starting training attempt {self.retry_count + 1}/{self.max_retries + 1}")
         log.info(f"Command: {' '.join(train_cmd)}")
         log.info(f"Using config: {config_path}")
 
@@ -426,9 +407,7 @@ class TrainingMonitor:
                 text=True,
                 bufsize=1,
                 universal_newlines=True,
-                preexec_fn=os.setsid
-                if os.name != "nt"
-                else None,  # New process group on Unix
+                preexec_fn=os.setsid if os.name != "nt" else None,  # New process group on Unix
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
                 if os.name == "nt"
                 else 0,  # Windows equivalent
@@ -505,7 +484,7 @@ class TrainingMonitor:
         self.failed_wandb_runs.clear()
 
 
-def parse_hydra_overrides(args: list) -> Dict[str, Any]:
+def parse_hydra_overrides(args: list) -> dict[str, Any]:
     """Parse Hydra-style command line overrides."""
     overrides = {}
     for arg in args:
@@ -532,33 +511,19 @@ def main():
     parser = argparse.ArgumentParser(
         description="Safe training script with automatic failure recovery"
     )
-    parser.add_argument(
-        "--config-path", default="configs", help="Path to config directory"
-    )
-    parser.add_argument(
-        "--config-name", default="config", help="Config file name (without .yaml)"
-    )
-    parser.add_argument(
-        "--max-retries", type=int, default=10, help="Maximum number of retries"
-    )
-    parser.add_argument(
-        "--min-lr", type=float, default=1e-6, help="Minimum learning rate"
-    )
-    parser.add_argument(
-        "--min-batch-size", type=int, default=1, help="Minimum batch size"
-    )
-    parser.add_argument(
-        "--train-script", default="train.py", help="Path to training script"
-    )
+    parser.add_argument("--config-path", default="configs", help="Path to config directory")
+    parser.add_argument("--config-name", default="config", help="Config file name (without .yaml)")
+    parser.add_argument("--max-retries", type=int, default=10, help="Maximum number of retries")
+    parser.add_argument("--min-lr", type=float, default=1e-6, help="Minimum learning rate")
+    parser.add_argument("--min-batch-size", type=int, default=1, help="Minimum batch size")
+    parser.add_argument("--train-script", default="train.py", help="Path to training script")
     parser.add_argument(
         "--no-delete-wandb-runs",
         action="store_false",
         help="Disable automatic deletion of failed wandb runs",
     )
 
-    parser.add_argument(
-        "--alpha", type=float, default=1.5, help="Alpha for parameter reduction"
-    )
+    parser.add_argument("--alpha", type=float, default=1.5, help="Alpha for parameter reduction")
 
     # Parse known args to separate hydra overrides
     args, hydra_args = parser.parse_known_args()
@@ -609,9 +574,7 @@ def main():
                 os.path.splitext(os.path.basename(current_config))[0],
             ] + hydra_args
 
-            success, stdout, stderr, returncode = monitor.run_training(
-                train_cmd, current_config
-            )
+            success, stdout, stderr, returncode = monitor.run_training(train_cmd, current_config)
 
             if success:
                 log.info("Training completed successfully!")
@@ -634,19 +597,17 @@ def main():
                     if temp_config:
                         current_config = temp_config
                         monitor.retry_count += 1
-                        log.info(f"Retrying training with adjusted parameters...")
+                        log.info("Retrying training with adjusted parameters...")
                         time.sleep(2)  # Brief pause before retry
                         continue
                     else:
                         log.error("Cannot adjust parameters further. Stopping.")
                         break
                 else:
-                    log.error(
-                        f"Maximum retries ({args.max_retries}) reached. Stopping."
-                    )
+                    log.error(f"Maximum retries ({args.max_retries}) reached. Stopping.")
                     break
             else:
-                log.error(f"Unrecoverable failure or unknown error. Stopping.")
+                log.error("Unrecoverable failure or unknown error. Stopping.")
                 if stderr:
                     log.error(f"Error output: {stderr}")
                 break

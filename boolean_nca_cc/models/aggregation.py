@@ -4,7 +4,6 @@ Aggregation functions for graph neural networks.
 This module provides different methods for aggregating messages in a graph neural network.
 """
 
-import jax
 import jax.numpy as jp
 import jraph
 from flax import nnx
@@ -13,12 +12,12 @@ from flax import nnx
 def aggregate_sum(messages, indices, num_segments):
     """
     Default aggregation function: sum messages per node.
-    
+
     Args:
         messages: Features of edges targeting a node
         indices: Index of the node targeted by the edge
         num_segments: Total number of nodes in the graph
-        
+
     Returns:
         Aggregated messages per node
     """
@@ -28,14 +27,14 @@ def aggregate_sum(messages, indices, num_segments):
 class AttentionAggregation(nnx.Module):
     """
     Attention-based message aggregation.
-    
+
     Implements a multi-head attention mechanism for aggregating messages in a GNN.
     """
 
     def __init__(self, feature_dim: int, num_heads: int = 4, *, rngs: nnx.Rngs):
         """
         Initialize attention aggregation.
-        
+
         Args:
             feature_dim: Dimension of feature vectors
             num_heads: Number of attention heads
@@ -59,12 +58,12 @@ class AttentionAggregation(nnx.Module):
     ):
         """
         Apply attention-based message aggregation.
-        
+
         Args:
             messages: Features of edges targeting nodes [num_edges, feature_dim]
             receivers: Index of the node targeted by each edge [num_edges]
             num_segments: Total number of nodes in the graph
-            
+
         Returns:
             Aggregated messages per node [num_nodes, feature_dim]
         """
@@ -88,24 +87,18 @@ class AttentionAggregation(nnx.Module):
         message_queries = queries[receivers]  # [num_edges, feature_dim]
 
         # Compute attention scores - shape: [num_edges]
-        attention_scores = jp.sum(message_queries * keys, axis=-1) / jp.sqrt(
-            self.feature_dim
-        )
+        attention_scores = jp.sum(message_queries * keys, axis=-1) / jp.sqrt(self.feature_dim)
 
         # For each receiver, normalize scores with softmax
         # Compute max per receiver for numerical stability
-        max_scores = jraph.segment_max(
-            attention_scores, receivers, num_segments
-        )  # [num_nodes]
+        max_scores = jraph.segment_max(attention_scores, receivers, num_segments)  # [num_nodes]
         edge_max_scores = max_scores[receivers]  # [num_edges]
 
         # Compute exp(score - max_score)
         exp_scores = jp.exp(attention_scores - edge_max_scores)  # [num_edges]
 
         # Sum exp scores per receiver
-        sum_exp_scores = jraph.segment_sum(
-            exp_scores, receivers, num_segments
-        )  # [num_nodes]
+        sum_exp_scores = jraph.segment_sum(exp_scores, receivers, num_segments)  # [num_nodes]
         edge_sum_exp_scores = sum_exp_scores[receivers]  # [num_edges]
 
         # Compute softmax weights
@@ -122,4 +115,4 @@ class AttentionAggregation(nnx.Module):
         # Final projection
         output = self.output_proj(aggregated_values)  # [num_nodes, feature_dim]
 
-        return output 
+        return output

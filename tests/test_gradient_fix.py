@@ -9,13 +9,12 @@ now receive gradients after our initialization fix.
 import jax
 import jax.numpy as jp
 from flax import nnx
-import numpy as np
 
-from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention
-from boolean_nca_cc.utils.graph_builder import build_graph
 from boolean_nca_cc.circuits.model import gen_circuit, generate_layer_sizes
-from boolean_nca_cc.training.utils import check_gradients
+from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention
 from boolean_nca_cc.training.train_loop import get_loss_from_graph
+from boolean_nca_cc.training.utils import check_gradients
+from boolean_nca_cc.utils.graph_builder import build_graph
 
 
 def test_gnn_gradient_flow():
@@ -70,9 +69,7 @@ def test_gnn_gradient_flow():
         from boolean_nca_cc.utils.graph_builder import extract_logits_from_graph
 
         logits_original_shapes = [l.shape for l in logits]
-        current_logits = extract_logits_from_graph(
-            updated_graph, logits_original_shapes
-        )
+        current_logits = extract_logits_from_graph(updated_graph, logits_original_shapes)
 
         # Simple loss computation
         loss, (hard_loss, pred, pred_hard) = get_loss_from_graph(
@@ -83,37 +80,27 @@ def test_gnn_gradient_flow():
 
     # Test gradient computation
     print("  Computing gradients...")
-    (loss, (updated_graph, pred)), grads = nnx.value_and_grad(loss_fn, has_aux=True)(
-        gnn
-    )
+    (loss, (updated_graph, pred)), grads = nnx.value_and_grad(loss_fn, has_aux=True)(gnn)
 
     # Check hidden features are non-zero after update
     hidden_nonzero = updated_graph.nodes["hidden"].any()
     print(f"  Hidden features non-zero after update: {hidden_nonzero}")
 
     # Check gradients
-    has_grads, zero_grad_paths = check_gradients(
-        grads, verbose=False, return_zero_grad_paths=True
-    )
+    has_grads, zero_grad_paths = check_gradients(grads, verbose=False, return_zero_grad_paths=True)
 
     # Count hidden-related parameters with gradients
-    hidden_params_with_grads = sum(
-        1 for path in zero_grad_paths if "hidden" not in path.lower()
-    )
+    hidden_params_with_grads = sum(1 for path in zero_grad_paths if "hidden" not in path.lower())
     total_params = len(jax.tree.leaves(nnx.state(gnn)))
     hidden_grad_ratio = hidden_params_with_grads / total_params
 
-    print(
-        f"  Parameters with gradients: {total_params - len(zero_grad_paths)}/{total_params}"
-    )
+    print(f"  Parameters with gradients: {total_params - len(zero_grad_paths)}/{total_params}")
     print(f"  Loss: {loss:.6f}")
 
     # Update model and check hidden features change
     optimizer.update(grads)
 
-    return has_grads, len(
-        zero_grad_paths
-    ) < 5  # Allow some parameters to have zero grads
+    return has_grads, len(zero_grad_paths) < 5  # Allow some parameters to have zero grads
 
 
 def test_self_attention_gradient_flow():
@@ -136,9 +123,7 @@ def test_self_attention_gradient_flow():
     case_n = 8
     x_data = jp.arange(case_n)
     x_data = ((x_data[:, None] >> jp.arange(input_n)) & 1).astype(jp.float32)
-    y_data = jp.ones(
-        (case_n, output_n), dtype=jp.float32
-    )  # Non-zero target for better gradients
+    y_data = jp.ones((case_n, output_n), dtype=jp.float32)  # Non-zero target for better gradients
 
     # Build graph
     graph = build_graph(logits, wires, input_n, arity, hidden_dim)
@@ -172,9 +157,7 @@ def test_self_attention_gradient_flow():
         from boolean_nca_cc.utils.graph_builder import extract_logits_from_graph
 
         logits_original_shapes = [l.shape for l in logits]
-        current_logits = extract_logits_from_graph(
-            updated_graph, logits_original_shapes
-        )
+        current_logits = extract_logits_from_graph(updated_graph, logits_original_shapes)
 
         # Simple loss computation
         loss, (hard_loss, pred, pred_hard) = get_loss_from_graph(
@@ -192,9 +175,7 @@ def test_self_attention_gradient_flow():
 
     for step in range(3):
         # Compute gradients
-        (loss, (updated_graph, pred)), grads = nnx.value_and_grad(
-            loss_fn, has_aux=True
-        )(attn_model)
+        (loss, (updated_graph, pred)), grads = nnx.value_and_grad(loss_fn, has_aux=True)(attn_model)
 
         # Check if hidden features are changing (this is the real test!)
         hidden_change = jp.mean(jp.abs(updated_graph.nodes["hidden"] - initial_hidden))
@@ -244,26 +225,18 @@ def main():
 
     # Test Self-Attention
     attn_hidden_change, attn_gradient_flow = test_self_attention_gradient_flow()
-    print(
-        f"  ✅ Self-Attention gradients working: {attn_hidden_change and attn_gradient_flow}\n"
-    )
+    print(f"  ✅ Self-Attention gradients working: {attn_hidden_change and attn_gradient_flow}\n")
 
     if gnn_has_grads and gnn_good_grads and attn_hidden_change and attn_gradient_flow:
-        print(
-            "🎉 SUCCESS: Both models now have proper gradient flow to hidden features!"
-        )
+        print("🎉 SUCCESS: Both models now have proper gradient flow to hidden features!")
         print("   • GNN: Hidden features receive gradients immediately")
-        print(
-            "   • Self-Attention: Hidden features change after cold start (as designed)"
-        )
+        print("   • Self-Attention: Hidden features change after cold start (as designed)")
         print("   The zero initialization fix is working correctly.")
     else:
         print("❌ FAILURE: Some models still have gradient flow issues.")
         print("   Check the initialization or model architecture.")
 
-    return (
-        gnn_has_grads and gnn_good_grads and attn_hidden_change and attn_gradient_flow
-    )
+    return gnn_has_grads and gnn_good_grads and attn_hidden_change and attn_gradient_flow
 
 
 if __name__ == "__main__":

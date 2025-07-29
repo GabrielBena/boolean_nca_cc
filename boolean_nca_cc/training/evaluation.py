@@ -5,22 +5,24 @@ This module provides functions for evaluating the performance of GNN
 models on optimizing boolean circuits.
 """
 
+from collections.abc import Generator
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jp
 from tqdm.auto import tqdm
-from typing import List, Dict, Tuple, Generator, NamedTuple
 
+from boolean_nca_cc.circuits.model import run_circuit
+from boolean_nca_cc.circuits.train import (
+    binary_cross_entropy,
+    compute_accuracy,
+    res2loss,
+)
 from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention
 from boolean_nca_cc.utils import (
     build_graph,
     extract_logits_from_graph,
     update_output_node_loss,
-)
-from boolean_nca_cc.circuits.model import run_circuit
-from boolean_nca_cc.circuits.train import (
-    res2loss,
-    binary_cross_entropy,
-    compute_accuracy,
 )
 
 
@@ -34,7 +36,7 @@ class StepResult(NamedTuple):
     hard_accuracy: float
     predictions: jp.ndarray
     hard_predictions: jp.ndarray
-    logits: List[jp.ndarray]
+    logits: list[jp.ndarray]
     graph: jp.ndarray  # The updated graph state
 
 
@@ -79,12 +81,12 @@ def get_loss_from_wires_logits(logits, wires, x, y_target, loss_type: str):
 
 def get_loss_and_update_graph(
     graph: jp.ndarray,
-    logits_original_shapes: List[Tuple],
-    wires: List[jp.ndarray],
+    logits_original_shapes: list[tuple],
+    wires: list[jp.ndarray],
     x_data: jp.ndarray,
     y_data: jp.ndarray,
     loss_type: str,
-    layer_sizes: List[Tuple[int, int]],
+    layer_sizes: list[tuple[int, int]],
 ):
     """
     Extract logits from graph, compute loss and residuals, and update graph with loss information.
@@ -111,26 +113,22 @@ def get_loss_and_update_graph(
     current_logits = extract_logits_from_graph(graph, logits_original_shapes)
 
     # Compute loss and auxiliary data
-    loss, aux = get_loss_from_wires_logits(
-        current_logits, wires, x_data, y_data, loss_type
-    )
+    loss, aux = get_loss_from_wires_logits(current_logits, wires, x_data, y_data, loss_type)
 
     # Extract residuals from aux for updating loss feature
     *_, res, _ = aux
 
     # Update the loss feature for output nodes using residuals
     # We'll use the magnitude of residuals as the loss signal for each output node
-    updated_graph = update_output_node_loss(
-        graph, layer_sizes, jp.abs(res).mean(axis=0)
-    )
+    updated_graph = update_output_node_loss(graph, layer_sizes, jp.abs(res).mean(axis=0))
 
     return updated_graph, loss, current_logits, aux
 
 
 def evaluate_model_stepwise_generator(
     model: CircuitGNN | CircuitSelfAttention,
-    wires: List[jp.ndarray],
-    logits: List[jp.ndarray],
+    wires: list[jp.ndarray],
+    logits: list[jp.ndarray],
     x_data: jp.ndarray,
     y_data: jp.ndarray,
     input_n: int,
@@ -139,7 +137,7 @@ def evaluate_model_stepwise_generator(
     max_steps: int = None,
     loss_type: str = "l4",
     bidirectional_edges: bool = True,
-    layer_sizes: List[Tuple[int, int]] = None,
+    layer_sizes: list[tuple[int, int]] = None,
 ) -> Generator[StepResult, None, None]:
     """
     Generator that yields step-by-step evaluation results for GNN model optimization.
@@ -195,9 +193,7 @@ def evaluate_model_stepwise_generator(
 
     # Initialize graph globals with [loss, update_steps] exactly like training
     current_update_steps = 0
-    graph = graph._replace(
-        globals=jp.array([initial_loss, current_update_steps], dtype=jp.float32)
-    )
+    graph = graph._replace(globals=jp.array([initial_loss, current_update_steps], dtype=jp.float32))
 
     graph = update_output_node_loss(graph, layer_sizes, initial_res.mean(axis=0))
 
@@ -274,8 +270,8 @@ def evaluate_model_stepwise_generator(
 
 def evaluate_model_stepwise(
     model: CircuitGNN | CircuitSelfAttention,
-    wires: List[jp.ndarray],
-    logits: List[jp.ndarray],
+    wires: list[jp.ndarray],
+    logits: list[jp.ndarray],
     x_data: jp.ndarray,
     y_data: jp.ndarray,
     input_n: int,
@@ -284,9 +280,9 @@ def evaluate_model_stepwise(
     n_message_steps: int = 100,
     loss_type: str = "l4",
     bidirectional_edges: bool = True,
-    layer_sizes: List[Tuple[int, int]] = None,
+    layer_sizes: list[tuple[int, int]] = None,
     use_tqdm: bool = False,
-) -> Dict:
+) -> dict:
     """
     Evaluate GNN performance by running message passing steps one by one
     and collecting metrics at each step.
@@ -366,8 +362,8 @@ def evaluate_model_stepwise(
 
 def evaluate_model_stepwise_batched(
     model: CircuitGNN | CircuitSelfAttention,
-    batch_wires: List[jp.ndarray],  # Shape: [batch_size, ...original_wire_shape...]
-    batch_logits: List[jp.ndarray],  # Shape: [batch_size, ...original_logit_shape...]
+    batch_wires: list[jp.ndarray],  # Shape: [batch_size, ...original_wire_shape...]
+    batch_logits: list[jp.ndarray],  # Shape: [batch_size, ...original_logit_shape...]
     x_data: jp.ndarray,
     y_data: jp.ndarray,
     input_n: int,
@@ -376,8 +372,8 @@ def evaluate_model_stepwise_batched(
     n_message_steps: int = 100,
     loss_type: str = "l4",
     bidirectional_edges: bool = True,
-    layer_sizes: List[Tuple[int, int]] = None,
-) -> Dict:
+    layer_sizes: list[tuple[int, int]] = None,
+) -> dict:
     """
     Evaluate GNN performance on a batch of circuits by running message passing steps
     and collecting averaged metrics at each step.
@@ -399,8 +395,6 @@ def evaluate_model_stepwise_batched(
     Returns:
         Dictionary with averaged metrics collected at each step
     """
-    batch_size = batch_wires[0].shape[0]
-
     # Build initial graphs for the batch
     vmap_build_graph = jax.vmap(
         lambda logits, wires: build_graph(
@@ -418,9 +412,7 @@ def evaluate_model_stepwise_batched(
 
     # Calculate initial losses for the batch
     vmap_get_loss = jax.vmap(
-        lambda logits, wires: get_loss_from_wires_logits(
-            logits, wires, x_data, y_data, loss_type
-        )
+        lambda logits, wires: get_loss_from_wires_logits(logits, wires, x_data, y_data, loss_type)
     )
 
     initial_losses, initial_aux = vmap_get_loss(batch_logits, batch_wires)
@@ -464,9 +456,7 @@ def evaluate_model_stepwise_batched(
     step_metrics["logits_mean"].append(float(jp.mean(batch_graphs.nodes["logits"])))
 
     # Store original shapes for reconstruction
-    logits_original_shapes = [
-        logit.shape[1:] for logit in batch_logits
-    ]  # Remove batch dim
+    logits_original_shapes = [logit.shape[1:] for logit in batch_logits]  # Remove batch dim
 
     # Run message passing steps
     current_graphs = batch_graphs
@@ -509,9 +499,7 @@ def evaluate_model_stepwise_batched(
         step_metrics["hard_loss"].append(float(jp.mean(current_hard_losses)))
         step_metrics["soft_accuracy"].append(float(jp.mean(current_accuracies)))
         step_metrics["hard_accuracy"].append(float(jp.mean(current_hard_accuracies)))
-        step_metrics["logits_mean"].append(
-            float(jp.mean(updated_graphs.nodes["logits"]))
-        )
+        step_metrics["logits_mean"].append(float(jp.mean(updated_graphs.nodes["logits"])))
 
         current_graphs = updated_graphs
 

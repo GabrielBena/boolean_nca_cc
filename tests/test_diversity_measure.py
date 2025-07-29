@@ -11,13 +11,12 @@ across various circuit architectures to verify that the metric behaves correctly
 
 import jax
 import jax.numpy as jp
-from boolean_nca_cc.training.pool.pool import initialize_graph_pool
+
 from boolean_nca_cc.circuits.model import generate_layer_sizes
+from boolean_nca_cc.training.pool.pool import initialize_graph_pool
 
 
-def test_single_configuration(
-    input_n, output_n, layer_n, pool_size, arity, hidden_dim, rng
-):
+def test_single_configuration(input_n, output_n, layer_n, pool_size, arity, hidden_dim, rng):
     """Test diversity for a single circuit configuration."""
 
     layer_sizes = generate_layer_sizes(input_n, output_n, arity, layer_n=layer_n)
@@ -156,7 +155,7 @@ def test_wiring_diversity_comprehensive():
         f"{'AVERAGES':<15} {jp.mean(jp.array(fixed_diversities)):<8.4f} {jp.mean(jp.array(random_diversities)):<8.4f} {jp.mean(jp.array(genetic_improvements)):<15.4f} {jp.mean(jp.array(random_diversities)):<12.4f}"
     )
 
-    print(f"\nOverall Statistics:")
+    print("\nOverall Statistics:")
     print(
         f"  Fixed diversity:     {jp.mean(jp.array(fixed_diversities)):.6f} ± {jp.std(jp.array(fixed_diversities)):.6f}"
     )
@@ -172,7 +171,7 @@ def test_wiring_diversity_comprehensive():
     avg_random = jp.mean(jp.array(random_diversities))
     min_genetic_improvement = jp.min(jp.array(genetic_improvements))
 
-    print(f"\nVerification:")
+    print("\nVerification:")
     print(f"  ✓ Fixed diversity < 0.01: {avg_fixed < 0.01} ({avg_fixed:.6f})")
     print(f"  ✓ Random diversity > 0.9: {avg_random > 0.9} ({avg_random:.6f})")
     print(
@@ -180,11 +179,9 @@ def test_wiring_diversity_comprehensive():
     )
 
     if avg_fixed < 0.01 and avg_random > 0.9 and min_genetic_improvement > 0:
-        print(
-            f"\n🎉 All tests passed! Diversity metric works correctly across all configurations."
-        )
+        print("\n🎉 All tests passed! Diversity metric works correctly across all configurations.")
     else:
-        print(f"\n⚠️  Some tests failed. Check the implementation.")
+        print("\n⚠️  Some tests failed. Check the implementation.")
 
     return results
 

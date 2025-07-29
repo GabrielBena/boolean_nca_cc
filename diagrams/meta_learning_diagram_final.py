@@ -1,5 +1,4 @@
 from manim import *
-import numpy as np
 
 
 class MetaLearningCircuitOptimization(Scene):
@@ -87,9 +86,7 @@ class MetaLearningCircuitOptimization(Scene):
                 ]
 
                 for pos in node_positions:
-                    node = Circle(
-                        radius=0.02, color=YELLOW, fill_opacity=0.8, stroke_width=1
-                    )
+                    node = Circle(radius=0.02, color=YELLOW, fill_opacity=0.8, stroke_width=1)
                     node.move_to(pos)
                     nodes.add(node)
 
@@ -181,9 +178,7 @@ class MetaLearningCircuitOptimization(Scene):
         )
 
         # Arrow
-        transform_arrow = Arrow(
-            DOWN * 0.3, DOWN * 0.5, color=BLUE, stroke_width=2, buff=0.1
-        )
+        transform_arrow = Arrow(DOWN * 0.3, DOWN * 0.5, color=BLUE, stroke_width=2, buff=0.1)
 
         # Output
         output_box = RoundedRectangle(
@@ -257,9 +252,7 @@ class MetaLearningCircuitOptimization(Scene):
         )
 
         # Arrow
-        transform_arrow = Arrow(
-            DOWN * 0.1, DOWN * 0.3, color=RED, stroke_width=2, buff=0.1
-        )
+        transform_arrow = Arrow(DOWN * 0.1, DOWN * 0.3, color=RED, stroke_width=2, buff=0.1)
 
         # Output
         output_box = RoundedRectangle(

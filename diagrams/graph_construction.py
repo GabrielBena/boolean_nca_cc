@@ -1,5 +1,5 @@
-from manim import *
 import numpy as np
+from manim import *
 
 
 class GraphConstructionDiagram(Scene):
@@ -34,9 +34,7 @@ class GraphConstructionDiagram(Scene):
     def create_initial_circuit(self):
         """Create the initial circuit structure (left side)"""
         # Title for this stage
-        stage_title = Text(
-            "1. Initial Circuit Structure", font_size=16, color=BLUE, weight=BOLD
-        )
+        stage_title = Text("1. Initial Circuit Structure", font_size=16, color=BLUE, weight=BOLD)
         stage_title.move_to(LEFT * 5 + UP * 2.8)
         self.add(stage_title)
 
@@ -162,9 +160,7 @@ class GraphConstructionDiagram(Scene):
     def create_feature_addition(self):
         """Create the feature addition stage (center)"""
         # Title for this stage
-        stage_title = Text(
-            "2. Feature Addition Process", font_size=16, color=PURPLE, weight=BOLD
-        )
+        stage_title = Text("2. Feature Addition Process", font_size=16, color=PURPLE, weight=BOLD)
         stage_title.move_to(UP * 2.8)
         self.add(stage_title)
 
@@ -382,9 +378,7 @@ class GraphConstructionDiagram(Scene):
 
         for start, end in edge_connections:
             # Forward edge (thicker)
-            forward_edge = Line(
-                start, end, color=RED, stroke_width=3, stroke_opacity=0.8
-            )
+            forward_edge = Line(start, end, color=RED, stroke_width=3, stroke_opacity=0.8)
 
             # Backward edge (offset and different style)
             # Calculate perpendicular offset
@@ -416,9 +410,7 @@ class GraphConstructionDiagram(Scene):
         )
         graphstuple_box.move_to(RIGHT * 5.3 + DOWN * 3.2)
 
-        graphstuple_title = Text(
-            "Final jraph.GraphsTuple", font_size=12, color=RED, weight=BOLD
-        )
+        graphstuple_title = Text("Final jraph.GraphsTuple", font_size=12, color=RED, weight=BOLD)
         graphstuple_title.move_to(RIGHT * 5.3 + DOWN * 2.5)
 
         graphstuple_text = Text(
@@ -442,9 +434,7 @@ class GraphConstructionDiagram(Scene):
         edge_info_box.move_to(RIGHT * 3.2 + UP * 0.5)
 
         edge_info_text = Text(
-            "Bidirectional Edges:\n"
-            "→ Forward message passing\n"
-            "← Backward message passing",
+            "Bidirectional Edges:\n→ Forward message passing\n← Backward message passing",
             font_size=8,
             color=WHITE,
         )
@@ -483,9 +473,7 @@ class GraphConstructionDiagram(Scene):
             stroke_width=3,
             buff=0.2,
         )
-        arrow2_label = Text(
-            "Create\nBidirectional", font_size=10, color="#CCCCCC", weight=BOLD
-        )
+        arrow2_label = Text("Create\nBidirectional", font_size=10, color="#CCCCCC", weight=BOLD)
         arrow2_label.move_to(RIGHT * 3 + UP * 0.3)
 
         self.add(arrow1, arrow1_label, arrow2, arrow2_label)

@@ -53,16 +53,12 @@ def build_graph(
     input_layer_pe = get_positional_encoding(
         jp.zeros(input_n, dtype=jp.int32), pe_dim, max_val=max_layers
     )
-    input_intra_layer_pe = get_positional_encoding(
-        input_layer_indices, pe_dim, max_val=input_n + 1
-    )
+    input_intra_layer_pe = get_positional_encoding(input_layer_indices, pe_dim, max_val=input_n + 1)
     input_nodes = {
         "layer": jp.zeros(input_n, dtype=jp.int32),  # Input layer is layer 0
         "group": jp.zeros(input_n, dtype=jp.int32),  # No groups for inputs
         "gate_id": input_layer_indices,
-        "logits": jp.zeros(
-            (input_n, 2**arity), dtype=jp.float32
-        ),  # Inputs have no logits
+        "logits": jp.zeros((input_n, 2**arity), dtype=jp.float32),  # Inputs have no logits
         "hidden": jp.zeros((input_n, circuit_hidden_dim), dtype=jp.float32),
         "layer_pe": input_layer_pe,
         "intra_layer_pe": input_intra_layer_pe,
@@ -73,10 +69,8 @@ def build_graph(
     # --- End Input Layer ---
 
     # Process gate layers (starting from layer 1)
-    for layer_idx_gates, (layer_logits, layer_wires) in enumerate(zip(logits, wires)):
-        layer_idx_graph = (
-            layer_idx_gates + 1
-        )  # Graph layer index starts from 1 for gates
+    for layer_idx_gates, (layer_logits, layer_wires) in enumerate(zip(logits, wires, strict=False)):
+        layer_idx_graph = layer_idx_gates + 1  # Graph layer index starts from 1 for gates
         # layer_logits: (group_n, group_size, 2^arity)
         # layer_wires: (arity, group_n) -> connects previous layer's nodes to this layer
         group_n, group_size, logit_dim = layer_logits.shape
@@ -95,9 +89,7 @@ def build_graph(
             "gate_id": layer_global_indices,
             "logits": layer_logits.reshape(num_gates_in_layer, logit_dim),
             "hidden": jp.zeros((num_gates_in_layer, circuit_hidden_dim), dtype=jp.float32),
-            "loss": jp.zeros(
-                num_gates_in_layer, dtype=jp.float32
-            ),  # Loss feature for all nodes
+            "loss": jp.zeros(num_gates_in_layer, dtype=jp.float32),  # Loss feature for all nodes
         }
 
         # Add Positional Encodings
@@ -145,9 +137,7 @@ def build_graph(
 
     # Combine node features from all layers
     # Need to handle potentially missing 'logits' in input layer if we decide not to add zeros
-    all_nodes = jax.tree.map(
-        lambda *xs: jp.concatenate(xs, axis=0), *all_nodes_features_list
-    )
+    all_nodes = jax.tree.map(lambda *xs: jp.concatenate(xs, axis=0), *all_nodes_features_list)
 
     # Process edges
     if all_forward_senders:

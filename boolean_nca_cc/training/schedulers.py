@@ -5,17 +5,18 @@ This module provides various scheduling functions for dynamically adjusting
 training parameters over the course of training.
 """
 
+from typing import Any
+
 import jax
 import jax.numpy as jp
 import optax
-from typing import Dict, Any, Optional, Tuple
 
 
 def get_learning_rate_schedule(
     lr_scheduler: str,
     learning_rate: float,
     epochs: int,
-    lr_scheduler_params: Optional[Dict[str, Any]] = None,
+    lr_scheduler_params: dict[str, Any] | None = None,
 ) -> optax.Schedule:
     """
     Create a learning rate schedule based on configuration.
@@ -77,9 +78,7 @@ def get_learning_rate_schedule(
         raise ValueError(f"Unknown lr_scheduler: {lr_scheduler}")
 
 
-def get_reset_interval_scheduler(
-    schedule_config: Dict[str, Any], total_epochs: int
-) -> callable:
+def get_reset_interval_scheduler(schedule_config: dict[str, Any], total_epochs: int) -> callable:
     """
     Create a reset interval scheduler function based on configuration.
 
@@ -111,16 +110,12 @@ def get_reset_interval_scheduler(
     elif schedule_type == "linear":
         # Linear interpolation from initial to final over transition_epochs
         transition_epochs = schedule_config.get("transition_epochs", total_epochs)
-        transition_epochs = (
-            transition_epochs if transition_epochs is not None else total_epochs
-        )
+        transition_epochs = transition_epochs if transition_epochs is not None else total_epochs
 
         def linear_scheduler(epoch: int) -> int:
             # Clamp epoch to transition period
             progress = min(epoch / max(transition_epochs, 1), 1.0)
-            current_interval = initial_interval + progress * (
-                final_interval - initial_interval
-            )
+            current_interval = initial_interval + progress * (final_interval - initial_interval)
             return int(jp.round(current_interval))
 
         return linear_scheduler
@@ -133,9 +128,7 @@ def get_reset_interval_scheduler(
         def exponential_scheduler(epoch: int) -> int:
             # Exponential interpolation from initial to final
             decay_factor = decay_rate**epoch
-            current_interval = (
-                final_interval + (initial_interval - final_interval) * decay_factor
-            )
+            current_interval = final_interval + (initial_interval - final_interval) * decay_factor
             return int(jp.round(current_interval))
 
         return exponential_scheduler
@@ -144,9 +137,7 @@ def get_reset_interval_scheduler(
         raise ValueError(f"Unknown schedule type: {schedule_type}")
 
 
-def get_message_steps_scheduler(
-    schedule_config: Dict[str, Any], total_epochs: int
-) -> callable:
+def get_message_steps_scheduler(schedule_config: dict[str, Any], total_epochs: int) -> callable:
     """
     Create a message steps scheduler function based on configuration.
 
@@ -183,9 +174,7 @@ def get_message_steps_scheduler(
     elif schedule_type == "linear":
         # Linear interpolation from initial to final over transition_epochs
         transition_epochs = schedule_config.get("transition_epochs", total_epochs)
-        transition_epochs = (
-            transition_epochs if transition_epochs is not None else total_epochs
-        )
+        transition_epochs = transition_epochs if transition_epochs is not None else total_epochs
 
         def linear_scheduler(epoch: int) -> int:
             # Clamp epoch to transition period
@@ -213,7 +202,7 @@ def get_message_steps_scheduler(
             "step_intervals",
             [total_epochs // 4, total_epochs // 2, 3 * total_epochs // 4],
         )
-        step_values = schedule_config.get("step_values", None)
+        step_values = schedule_config.get("step_values")
 
         if step_values is None:
             # Auto-generate step values if not provided
@@ -224,9 +213,7 @@ def get_message_steps_scheduler(
             ]
 
         if len(step_values) != len(step_intervals) + 1:
-            raise ValueError(
-                "step_values must have one more element than step_intervals"
-            )
+            raise ValueError("step_values must have one more element than step_intervals")
 
         def step_scheduler(epoch: int) -> int:
             current_steps = step_values[0]  # Start with first value
@@ -264,7 +251,7 @@ def should_reset_pool(epoch: int, reset_interval: int, last_reset_epoch: int) ->
 
 def get_current_reset_interval(
     epoch: int,
-    schedule_config: Dict[str, Any],
+    schedule_config: dict[str, Any],
     total_epochs: int,
     base_interval: int = 128,
 ) -> int:
@@ -289,11 +276,11 @@ def get_current_reset_interval(
 
 def get_current_message_steps_and_batch_size(
     epoch: int,
-    schedule_config: Dict[str, Any],
+    schedule_config: dict[str, Any],
     total_epochs: int,
     base_steps: int = 20,
     base_batch_size: int = 16,
-) -> Tuple[int, int]:
+) -> tuple[int, int]:
     """
     Get the current number of message steps and corresponding batch size for the given epoch.
 
@@ -319,7 +306,7 @@ def get_current_message_steps_and_batch_size(
     current_steps = scheduler(epoch)
 
     # Calculate corresponding batch size to maintain constant product
-    constant_product = schedule_config.get("constant_product", None)
+    constant_product = schedule_config.get("constant_product")
     current_batch_size = (
         max(1, constant_product // current_steps)
         if constant_product is not None
@@ -380,14 +367,8 @@ def get_step_beta(
     max_concentration = beta_max  # Controls how concentrated the distribution is
     min_concentration = beta_min
 
-    beta = (
-        max_concentration * (1.0 - training_progress)
-        + min_concentration * training_progress
-    )
-    alpha = (
-        min_concentration * (1.0 - training_progress)
-        + max_concentration * training_progress
-    )
+    beta = max_concentration * (1.0 - training_progress) + min_concentration * training_progress
+    alpha = min_concentration * (1.0 - training_progress) + max_concentration * training_progress
 
     # Sample from beta distribution
     beta_sample = jax.random.beta(loss_key, alpha, beta)

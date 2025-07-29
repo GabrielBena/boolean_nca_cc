@@ -7,15 +7,15 @@ layer positional encodings and intra-layer positional encodings.
 """
 
 import os
+
+import hydra
 import jax
-import jax.numpy as jp
 import matplotlib.pyplot as plt
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
-import hydra
 
-from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc import generate_layer_sizes
+from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.utils.graph_builder import build_graph
 
 
@@ -39,9 +39,7 @@ def plot_positional_encodings(graph, output_dir="plots"):
     n_nodes, pe_dim = layer_pe.shape
     unique_layers = np.unique(layer_indices)
 
-    print(
-        f"Graph contains {n_nodes} nodes with {pe_dim}-dimensional positional encodings"
-    )
+    print(f"Graph contains {n_nodes} nodes with {pe_dim}-dimensional positional encodings")
     print(f"Layers: {unique_layers}")
 
     # Create a figure with multiple subplots
@@ -50,9 +48,7 @@ def plot_positional_encodings(graph, output_dir="plots"):
     # 1. Layer Positional Encoding Heatmap
     ax1 = plt.subplot(2, 3, 1)
     im1 = ax1.imshow(layer_pe.T, cmap="viridis", aspect="auto")
-    ax1.set_title(
-        "Layer Positional Encoding\n(per node)", fontsize=14, fontweight="bold"
-    )
+    ax1.set_title("Layer Positional Encoding\n(per node)", fontsize=14, fontweight="bold")
     ax1.set_xlabel("Node Index")
     ax1.set_ylabel("PE Dimension")
     plt.colorbar(im1, ax=ax1, shrink=0.8)
@@ -60,9 +56,7 @@ def plot_positional_encodings(graph, output_dir="plots"):
     # 2. Intra-Layer Positional Encoding Heatmap
     ax2 = plt.subplot(2, 3, 2)
     im2 = ax2.imshow(intra_layer_pe.T, cmap="plasma", aspect="auto")
-    ax2.set_title(
-        "Intra-Layer Positional Encoding\n(per node)", fontsize=14, fontweight="bold"
-    )
+    ax2.set_title("Intra-Layer Positional Encoding\n(per node)", fontsize=14, fontweight="bold")
     ax2.set_xlabel("Node Index")
     ax2.set_ylabel("PE Dimension")
     plt.colorbar(im2, ax=ax2, shrink=0.8)
@@ -222,17 +216,13 @@ def create_detailed_plots(graph, output_dir):
                 label=f"Layer {layer_idx} (n={np.sum(mask)})",
             )
 
-    plt.title(
-        "Layer Positional Encodings - Detailed View", fontsize=16, fontweight="bold"
-    )
+    plt.title("Layer Positional Encodings - Detailed View", fontsize=16, fontweight="bold")
     plt.xlabel("Positional Encoding Dimension")
     plt.ylabel("PE Value")
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(
-        os.path.join(output_dir, "layer_pe_detailed.png"), dpi=300, bbox_inches="tight"
-    )
+    plt.savefig(os.path.join(output_dir, "layer_pe_detailed.png"), dpi=300, bbox_inches="tight")
     plt.show()
 
     # Detailed Intra-Layer PE plot
@@ -269,19 +259,19 @@ def print_graph_info(graph):
     n_nodes = int(graph.n_node[0])
     n_edges = int(graph.n_edge[0])
 
-    print(f"\n=== Graph Structure ===")
+    print("\n=== Graph Structure ===")
     print(f"Total nodes: {n_nodes}")
     print(f"Total edges: {n_edges}")
 
     layer_indices = np.array(nodes["layer"])
     unique_layers, layer_counts = np.unique(layer_indices, return_counts=True)
 
-    print(f"\nNodes per layer:")
-    for layer, count in zip(unique_layers, layer_counts):
+    print("\nNodes per layer:")
+    for layer, count in zip(unique_layers, layer_counts, strict=False):
         layer_type = "Input" if layer == 0 else f"Gate Layer {layer}"
         print(f"  {layer_type}: {count} nodes")
 
-    print(f"\nNode feature shapes:")
+    print("\nNode feature shapes:")
     for key, value in nodes.items():
         print(f"  {key}: {value.shape}")
 
@@ -313,13 +303,11 @@ def main(cfg: DictConfig) -> None:
     arity = cfg.circuit.arity
 
     if cfg.circuit.layer_sizes is None:
-        layer_sizes = generate_layer_sizes(
-            input_n, output_n, arity, layer_n=cfg.circuit.num_layers
-        )
+        layer_sizes = generate_layer_sizes(input_n, output_n, arity, layer_n=cfg.circuit.num_layers)
     else:
         layer_sizes = cfg.circuit.layer_sizes
 
-    print(f"\nCircuit configuration:")
+    print("\nCircuit configuration:")
     print(f"  Input bits: {input_n}")
     print(f"  Output bits: {output_n}")
     print(f"  Arity: {arity}")
@@ -344,10 +332,10 @@ def main(cfg: DictConfig) -> None:
     print_graph_info(graph)
 
     # Plot positional encodings
-    print(f"\n=== Creating Positional Encoding Visualizations ===")
+    print("\n=== Creating Positional Encoding Visualizations ===")
     plot_positional_encodings(graph, output_dir)
 
-    print(f"\n=== Visualization Complete ===")
+    print("\n=== Visualization Complete ===")
     print(f"All plots saved to: {output_dir}")
 
 

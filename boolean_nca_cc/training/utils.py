@@ -1,19 +1,19 @@
-import flax
-import pickle
-from flax import nnx
-import matplotlib.pyplot as plt
-import os
-import wandb
-from omegaconf import OmegaConf
 import logging
+import os
+import pickle
+
+import flax
 import hydra
 import jax
-import glob
+import matplotlib.pyplot as plt
 import numpy as np
-from boolean_nca_cc.circuits.model import gen_circuit, run_circuit
-from boolean_nca_cc.circuits.model import generate_layer_sizes
-from boolean_nca_cc.utils.graph_builder import build_graph
+from flax import nnx
+from omegaconf import OmegaConf
+
+import wandb
+from boolean_nca_cc.circuits.model import gen_circuit, generate_layer_sizes
 from boolean_nca_cc.training.schedulers import get_learning_rate_schedule
+from boolean_nca_cc.utils.graph_builder import build_graph
 
 log = logging.getLogger(__name__)
 
@@ -96,9 +96,7 @@ def plot_training_curves(metrics, title, output_dir):
     ax.grid(True)
     plt.tight_layout()
 
-    loss_plot_path = os.path.join(
-        output_dir, f"{title.lower().replace(' ', '_')}_loss.png"
-    )
+    loss_plot_path = os.path.join(output_dir, f"{title.lower().replace(' ', '_')}_loss.png")
     plt.savefig(loss_plot_path)
     if wandb.run is not None:
         wandb.log({f"{title} Loss": wandb.Image(fig)})
@@ -115,9 +113,7 @@ def plot_training_curves(metrics, title, output_dir):
     ax.grid(True)
     plt.tight_layout()
 
-    acc_plot_path = os.path.join(
-        output_dir, f"{title.lower().replace(' ', '_')}_accuracy.png"
-    )
+    acc_plot_path = os.path.join(output_dir, f"{title.lower().replace(' ', '_')}_accuracy.png")
     plt.savefig(acc_plot_path)
     if wandb.run is not None:
         wandb.log({f"{title} Accuracy": wandb.Image(fig)})
@@ -141,9 +137,7 @@ def plot_inner_loop_metrics(step_metrics, title, output_dir):
     ax.grid(True)
     plt.tight_layout()
 
-    loss_plot_path = os.path.join(
-        output_dir, f"{title.lower().replace(' ', '_')}_inner_loss.png"
-    )
+    loss_plot_path = os.path.join(output_dir, f"{title.lower().replace(' ', '_')}_inner_loss.png")
     plt.savefig(loss_plot_path)
     if wandb.run is not None:
         wandb.log({f"{title} Inner Loop Loss": wandb.Image(fig)})
@@ -172,10 +166,10 @@ def plot_inner_loop_metrics(step_metrics, title, output_dir):
     if wandb.run is not None:
         wandb.log(
             {
-                f"inner_loop/final_soft_loss": step_metrics["soft_loss"][-1],
-                f"inner_loop/final_hard_loss": step_metrics["hard_loss"][-1],
-                f"inner_loop/final_soft_accuracy": step_metrics["soft_accuracy"][-1],
-                f"inner_loop/final_hard_accuracy": step_metrics["hard_accuracy"][-1],
+                "inner_loop/final_soft_loss": step_metrics["soft_loss"][-1],
+                "inner_loop/final_hard_loss": step_metrics["hard_loss"][-1],
+                "inner_loop/final_soft_accuracy": step_metrics["soft_accuracy"][-1],
+                "inner_loop/final_hard_accuracy": step_metrics["hard_accuracy"][-1],
             }
         )
 
@@ -229,9 +223,7 @@ def compare_with_backprop(gnn_metrics, bp_metrics, title, output_dir):
     plt.suptitle(f"{title} - GNN vs Backprop Comparison")
 
     # Save the figure
-    comp_plot_path = os.path.join(
-        output_dir, f"{title.lower().replace(' ', '_')}_comparison.png"
-    )
+    comp_plot_path = os.path.join(output_dir, f"{title.lower().replace(' ', '_')}_comparison.png")
 
     if wandb.run is not None:
         wandb.log({f"{title} Comparison": wandb.Image(fig)})
@@ -276,9 +268,7 @@ def plot_lr_schedule(
 
     # Evaluate the schedule over all epochs
     epoch_steps = np.arange(epochs)
-    lr_values = np.array(
-        [float(schedule_fn(step)) for step in range(0, epochs, eval_every_n)]
-    )
+    lr_values = np.array([float(schedule_fn(step)) for step in range(0, epochs, eval_every_n)])
     # lr_values = np.maximum(np.array(lr_values), 1e-6)
 
     # Create the plot
@@ -301,9 +291,7 @@ def plot_lr_schedule(
         ax.legend()
 
     # Format y-axis for better readability
-    if (
-        max(lr_values) / lr_values[lr_values > 0].min() > 100
-    ):  # Use log scale for large ranges
+    if max(lr_values) / lr_values[lr_values > 0].min() > 100:  # Use log scale for large ranges
         ax.set_yscale("log")
 
     plt.tight_layout()
@@ -489,17 +477,11 @@ def load_best_model_from_wandb(
     expected_checkpoint_path = None
     if run_id:
         local_artifact_dir = os.path.join(download_dir, f"run_{run_id}")
-        expected_checkpoint_path = os.path.join(
-            local_artifact_dir, f"{filename}.{filetype}"
-        )
+        expected_checkpoint_path = os.path.join(local_artifact_dir, f"{filename}.{filetype}")
         print(f"Checking for local checkpoint at: {expected_checkpoint_path}")
 
         # Check if we should use local cache
-        if (
-            use_cache
-            and not force_download
-            and os.path.exists(expected_checkpoint_path)
-        ):
+        if use_cache and not force_download and os.path.exists(expected_checkpoint_path):
             print(f"Found cached checkpoint for run {run_id}. Loading from disk.")
             try:
                 with open(expected_checkpoint_path, "rb") as f:
@@ -560,9 +542,7 @@ def load_best_model_from_wandb(
 
                 return model, loaded_dict, config
             except Exception as e:
-                print(
-                    f"Error loading model from local checkpoint {expected_checkpoint_path}: {e}"
-                )
+                print(f"Error loading model from local checkpoint {expected_checkpoint_path}: {e}")
                 print("Proceeding to download from WandB.")
         elif force_download:
             print("Force download enabled, skipping local cache.")
@@ -606,9 +586,7 @@ def load_best_model_from_wandb(
     artifact_dir = latest_best.download(
         root=download_path
     )  # Use root to control download folder precisely
-    checkpoint_path = os.path.join(
-        artifact_dir, f"{filename}.{filetype}"
-    )  # Adjusted path
+    checkpoint_path = os.path.join(artifact_dir, f"{filename}.{filetype}")  # Adjusted path
 
     # Load the saved state
     print(f"Loading model from {checkpoint_path}")
@@ -631,24 +609,20 @@ def load_best_model_from_wandb(
     # Convert the OmegaConf node for the model to a standard Python dictionary.
     # This dictionary will contain parameters like `circuit_hidden_dim`, `edge_mlp_features`, etc.,
     # and also `_target_` if present.
-    model_params_from_config = OmegaConf.to_container(
-        current_config_model_node, resolve=True
-    )
+    model_params_from_config = OmegaConf.to_container(current_config_model_node, resolve=True)
 
     if not isinstance(model_params_from_config, dict):
         print(
             f"Error: Model config from WandB did not resolve to a dictionary. Got: {type(model_params_from_config)}"
         )
-        raise TypeError(
-            f"Expected model config to be a dict, got {type(model_params_from_config)}"
-        )
+        raise TypeError(f"Expected model config to be a dict, got {type(model_params_from_config)}")
 
     # Get the class path from _target_ and remove it from the params dict.
     class_path = model_params_from_config.pop("_target_", None)
 
     if class_path is None:
         print(
-            f"Warning: '_target_' was missing in the resolved model parameters. Defaulting to 'boolean_nca_cc.models.CircuitGNN'"
+            "Warning: '_target_' was missing in the resolved model parameters. Defaulting to 'boolean_nca_cc.models.CircuitGNN'"
         )
         class_path = "boolean_nca_cc.models.CircuitGNN"
 
@@ -675,9 +649,7 @@ def load_best_model_from_wandb(
         n_nodes = compute_n_nodes_from_config(config)
         final_constructor_kwargs["n_node"] = n_nodes
 
-    print(
-        f"Attempting to instantiate {ModelClazz} with kwargs: {final_constructor_kwargs}"
-    )
+    print(f"Attempting to instantiate {ModelClazz} with kwargs: {final_constructor_kwargs}")
 
     # Instantiate the model directly
     try:
@@ -753,9 +725,9 @@ def cleanup_redundant_wandb_artifacts(
         - artifacts_kept: Number of artifacts kept
         - deleted_artifacts: List of deleted artifact names (empty if dry_run=True)
     """
-    import wandb
     from collections import defaultdict
-    from datetime import datetime
+
+    import wandb
 
     # Initialize WandB API
     api = wandb.Api()
@@ -812,11 +784,7 @@ def cleanup_redundant_wandb_artifacts(
 
             for artifact in artifacts:
                 # Extract base name without version
-                base_name = (
-                    artifact.name.split(":")[0]
-                    if ":" in artifact.name
-                    else artifact.name
-                )
+                base_name = artifact.name.split(":")[0] if ":" in artifact.name else artifact.name
 
                 # Apply artifact name pattern filter if specified
                 if artifact_name_pattern and artifact_name_pattern not in base_name:
@@ -841,9 +809,7 @@ def cleanup_redundant_wandb_artifacts(
                     group_artifacts.sort(key=lambda x: x.created_at, reverse=True)
                 except Exception as e:
                     if verbose:
-                        print(
-                            f"Warning: Could not sort artifacts by creation time: {e}"
-                        )
+                        print(f"Warning: Could not sort artifacts by creation time: {e}")
                     # Fallback: try to sort by version if available
                     try:
                         group_artifacts.sort(key=lambda x: x.version, reverse=True)
@@ -862,9 +828,7 @@ def cleanup_redundant_wandb_artifacts(
                     artifact_tags = getattr(artifact, "tags", []) or []
                     if any(tag in artifact_tags for tag in keep_tags):
                         should_keep = True
-                        matching_tags = [
-                            tag for tag in artifact_tags if tag in keep_tags
-                        ]
+                        matching_tags = [tag for tag in artifact_tags if tag in keep_tags]
                         keep_reason.append(f"has important tags: {matching_tags}")
 
                     # Keep recent artifacts regardless of tags
@@ -879,9 +843,7 @@ def cleanup_redundant_wandb_artifacts(
                     else:
                         artifacts_to_delete.append(artifact)
                         if verbose:
-                            print(
-                                f"  DELETE: {artifact.name} (no important tags, not recent)"
-                            )
+                            print(f"  DELETE: {artifact.name} (no important tags, not recent)")
 
                 # Update statistics
                 total_stats["artifacts_kept"] += len(artifacts_to_keep)
@@ -897,9 +859,7 @@ def cleanup_redundant_wandb_artifacts(
                             if verbose:
                                 print(f"  Deleting: {artifact.name}")
                             artifact.delete()
-                            total_stats["deleted_artifacts"].append(
-                                f"{run.id}:{artifact.name}"
-                            )
+                            total_stats["deleted_artifacts"].append(f"{run.id}:{artifact.name}")
                         except Exception as e:
                             error_msg = f"Failed to delete {artifact.name}: {e}"
                             total_stats["errors"].append(error_msg)
@@ -907,9 +867,7 @@ def cleanup_redundant_wandb_artifacts(
                                 print(f"  ERROR: {error_msg}")
                 elif artifacts_to_delete:
                     if verbose:
-                        print(
-                            f"DRY RUN: Would delete {len(artifacts_to_delete)} artifacts"
-                        )
+                        print(f"DRY RUN: Would delete {len(artifacts_to_delete)} artifacts")
                         for artifact in artifacts_to_delete:
                             print(f"  Would delete: {artifact.name}")
 
@@ -921,14 +879,12 @@ def cleanup_redundant_wandb_artifacts(
 
     # Print summary
     if verbose:
-        print(f"\n=== Cleanup Summary ===")
+        print("\n=== Cleanup Summary ===")
         print(f"Total artifacts found: {total_stats['total_artifacts']}")
         print(f"Artifacts kept: {total_stats['artifacts_kept']}")
         print(f"Artifacts marked for deletion: {total_stats['artifacts_to_delete']}")
         if not dry_run:
-            print(
-                f"Artifacts actually deleted: {len(total_stats['deleted_artifacts'])}"
-            )
+            print(f"Artifacts actually deleted: {len(total_stats['deleted_artifacts'])}")
         else:
             print("DRY RUN: No artifacts were actually deleted")
 
@@ -991,9 +947,7 @@ def check_gradients(grads, verbose=True, return_zero_grad_paths=False):
     return has_grads
 
 
-def gradient_check_step(
-    model, optimizer, loss_fn, *loss_args, verbose=True, **loss_kwargs
-):
+def gradient_check_step(model, optimizer, loss_fn, *loss_args, verbose=True, **loss_kwargs):
     """
     Perform a gradient check step: compute gradients, update optimizer, check for zero gradients.
 
@@ -1013,9 +967,7 @@ def gradient_check_step(
             - zero_grad_paths: List of parameter paths with zero gradients
     """
     # Compute gradients
-    (loss, aux), grads = nnx.value_and_grad(loss_fn, has_aux=True)(
-        model, *loss_args, **loss_kwargs
-    )
+    (loss, aux), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model, *loss_args, **loss_kwargs)
 
     # Update optimizer
     optimizer.update(grads)

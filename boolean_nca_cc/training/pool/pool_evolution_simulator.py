@@ -6,22 +6,22 @@ This utility simulates the evolution of pool reset steps over training epochs
 to visualize how the pool dynamics work with different reset strategies.
 """
 
+import logging
 import os
+
+import hydra
 import jax
 import jax.numpy as jp
-import numpy as np
 import matplotlib.pyplot as plt
-from typing import List, Tuple, Dict, Any
-import hydra
+import numpy as np
 from omegaconf import DictConfig, OmegaConf
-import logging
 from tqdm.auto import tqdm
+
 from boolean_nca_cc.training.schedulers import (
+    get_current_reset_interval,
     get_step_beta,
     should_reset_pool,
-    get_current_reset_interval,
 )
-from functools import partial
 
 log = logging.getLogger(__name__)
 
@@ -34,9 +34,9 @@ def _generate_step_advances_beta(
 ) -> jp.ndarray:
     """Generate step advances using beta distribution."""
     step_keys = jax.random.split(key, n_updates)
-    step_advances = jax.vmap(
-        lambda k: get_step_beta(k, n_message_steps, training_progress)
-    )(step_keys)
+    step_advances = jax.vmap(lambda k: get_step_beta(k, n_message_steps, training_progress))(
+        step_keys
+    )
     return step_advances
 
 
@@ -79,10 +79,10 @@ def simulate_pool_reset_evolution(
     meta_batch_size: int,
     reset_strategy: str = "steps_biased",
     use_beta_loss_step: bool = True,
-    reset_interval_schedule: Dict = None,
+    reset_interval_schedule: dict = None,
     jump_size: int = 1,
     seed: int = 42,
-) -> Dict[str, List]:
+) -> dict[str, list]:
     """
     Simulate the evolution of pool reset steps over training epochs.
 
@@ -128,7 +128,7 @@ def simulate_pool_reset_evolution(
     if reset_interval_schedule is None:
         reset_interval_schedule = {"enabled": False}
 
-    log.info(f"Starting pool evolution simulation:")
+    log.info("Starting pool evolution simulation:")
     log.info(f"  Pool size: {pool_size}")
     log.info(f"  Epochs: {epochs}")
     log.info(f"  Jump size: {jump_size}")
@@ -138,18 +138,14 @@ def simulate_pool_reset_evolution(
     log.info(f"  Reset strategy: {reset_strategy}")
     log.info(f"  Use beta distribution: {use_beta_loss_step}")
 
-    print(
-        f"Starting pool evolution simulation for {epochs} epochs (jump size: {jump_size})"
-    )
+    print(f"Starting pool evolution simulation for {epochs} epochs (jump size: {jump_size})")
 
     # Calculate effective iterations based on jump size
     simulation_steps = list(range(0, epochs, jump_size))
     if simulation_steps[-1] != epochs - 1:
         simulation_steps.append(epochs - 1)  # Ensure we end at the final epoch
 
-    for step_idx, epoch in enumerate(
-        tqdm(simulation_steps, desc="Simulating pool evolution")
-    ):
+    for step_idx, epoch in enumerate(tqdm(simulation_steps, desc="Simulating pool evolution")):
         # Determine how many epochs we're jumping (usually jump_size, except for last step)
         if step_idx < len(simulation_steps) - 1:
             current_jump = simulation_steps[step_idx + 1] - epoch
@@ -165,9 +161,7 @@ def simulate_pool_reset_evolution(
 
         # Sample circuits to update (with replacement to match real training sampling)
         rng, sample_key = jax.random.split(rng)
-        update_idxs = jax.random.choice(
-            sample_key, pool_size, shape=(total_updates,), replace=True
-        )
+        update_idxs = jax.random.choice(sample_key, pool_size, shape=(total_updates,), replace=True)
 
         # Calculate step advances for the sampled circuits using optimized functions
         if use_beta_loss_step:
@@ -179,9 +173,7 @@ def simulate_pool_reset_evolution(
             )
         else:
             # Fixed step advancement
-            step_advances = _generate_step_advances_fixed(
-                total_updates, n_message_steps
-            )
+            step_advances = _generate_step_advances_fixed(total_updates, n_message_steps)
 
         # Update the sampled circuits efficiently using JIT-compiled function
         # Note: If a circuit is sampled multiple times, it gets updated multiple times
@@ -193,9 +185,7 @@ def simulate_pool_reset_evolution(
             epoch, reset_interval_schedule, epochs, reset_pool_interval
         )
 
-        should_reset = should_reset_pool(
-            epoch, current_reset_interval, last_reset_epoch
-        )
+        should_reset = should_reset_pool(epoch, current_reset_interval, last_reset_epoch)
 
         if should_reset:
             # Step 3: Select circuits to reset using steps_biased strategy
@@ -256,7 +246,7 @@ def simulate_pool_reset_evolution(
 
 
 def plot_pool_evolution(
-    simulation_results: Dict[str, List],
+    simulation_results: dict[str, list],
     title: str = "Pool Reset Step Evolution",
     save_path: str = None,
 ):
@@ -295,9 +285,7 @@ def plot_pool_evolution(
     ax2 = axes[0, 1]
     k = len(pool_diversity) // 100
     pool_diversity = np.convolve(pool_diversity, np.ones(k) / k, mode="same")
-    ax2.plot(
-        epochs, pool_diversity, "g-", linewidth=2, label="Pool Diversity (Std Dev)"
-    )
+    ax2.plot(epochs, pool_diversity, "g-", linewidth=2, label="Pool Diversity (Std Dev)")
 
     ax2.set_xlabel("Epoch")
     ax2.set_ylabel("Standard Deviation of Steps")
@@ -374,9 +362,7 @@ def main(cfg: DictConfig) -> None:
     target_steps = 150
     jump_size = max(1, epochs // target_steps)
 
-    log.info(
-        f"Using jump size: {jump_size} (will simulate ~{epochs // jump_size} steps)"
-    )
+    log.info(f"Using jump size: {jump_size} (will simulate ~{epochs // jump_size} steps)")
 
     # Run simulation
     log.info("Running pool evolution simulation...")
@@ -400,7 +386,7 @@ def main(cfg: DictConfig) -> None:
     os.makedirs(plots_dir, exist_ok=True)
 
     # Plot results
-    plot_title = f"Pool Evolution Simulation (Steps Biased Reset)"
+    plot_title = "Pool Evolution Simulation (Steps Biased Reset)"
     save_path = os.path.join(plots_dir, "pool_evolution_simulation.png")
 
     plot_pool_evolution(results, title=plot_title, save_path=save_path)
@@ -424,7 +410,7 @@ def main(cfg: DictConfig) -> None:
 
     # Show step distribution statistics
     final_steps = results["final_pool_steps"]
-    log.info(f"Final step distribution:")
+    log.info("Final step distribution:")
     log.info(f"  Min: {jp.min(final_steps):.1f}")
     log.info(f"  Max: {jp.max(final_steps):.1f}")
     log.info(f"  Mean: {jp.mean(final_steps):.1f}")

@@ -5,18 +5,19 @@ This module provides a Pool class that manages a collection of circuits
 for training with partial updates between steps.
 """
 
+from functools import partial
+from typing import Any
+
 import jax
 import jax.numpy as jp
-from flax import struct
-from typing import Dict, List, Tuple, Any, Union, Optional
-from jax import Array
-from functools import partial
 import jraph
+from flax import struct
+from jax import Array
 
 from boolean_nca_cc.circuits.model import gen_circuit
-from boolean_nca_cc.utils.graph_builder import build_graph
-from boolean_nca_cc.utils.extraction import extract_logits_from_graph
 from boolean_nca_cc.training.pool.perturbation import mutate_wires_batch
+from boolean_nca_cc.utils.extraction import extract_logits_from_graph
+from boolean_nca_cc.utils.graph_builder import build_graph
 
 PyTree = Any
 
@@ -38,7 +39,7 @@ class GraphPool(struct.PyTreeNode):
     # logits is a list of weight matrices corresponding to each graph
     logits: PyTree = None
     # Reset counter to track which elements were reset recently
-    reset_counter: Optional[Array] = None
+    reset_counter: Array | None = None
 
     @classmethod
     def create(
@@ -46,7 +47,7 @@ class GraphPool(struct.PyTreeNode):
         batched_graphs: jraph.GraphsTuple,
         wires: PyTree = None,
         logits: PyTree = None,
-        reset_counter: Optional[Array] = None,
+        reset_counter: Array | None = None,
     ) -> "GraphPool":
         """
         Create a new GraphPool instance from a batched GraphsTuple.
@@ -65,9 +66,7 @@ class GraphPool(struct.PyTreeNode):
         # If build_graph produces n_node of shape (1,), vmap makes it (pool_size, 1).
         # So, shape[0] gives the pool_size.
         if batched_graphs.n_node is None:
-            raise ValueError(
-                "batched_graphs.n_node cannot be None for GraphPool.create"
-            )
+            raise ValueError("batched_graphs.n_node cannot be None for GraphPool.create")
         size = batched_graphs.n_node.shape[0]
 
         # Initialize reset counter if not provided
@@ -149,8 +148,7 @@ class GraphPool(struct.PyTreeNode):
             mapped_fn,
             self.graphs,  # Tree 1 (pool's current graphs)
             batch_of_graphs,  # Tree 2 (graphs to update with)
-            is_leaf=lambda x: x
-            is None,  # Tells tree_map to treat None values as leaves
+            is_leaf=lambda x: x is None,  # Tells tree_map to treat None values as leaves
         )
 
         # Update wires if provided
@@ -170,18 +168,14 @@ class GraphPool(struct.PyTreeNode):
             )
         if self.logits is not None:
             updated_logits = jax.tree.map(
-                lambda pool_logits, batch_logits: pool_logits.at[idxs].set(
-                    batch_logits
-                ),
+                lambda pool_logits, batch_logits: pool_logits.at[idxs].set(batch_logits),
                 self.logits,
                 batch_of_logits,
             )
 
         # Reset the counter for the indices that were updated
         updated_reset_counter = (
-            self.reset_counter.at[idxs].set(0)
-            if self.reset_counter is not None
-            else None
+            self.reset_counter.at[idxs].set(0) if self.reset_counter is not None else None
         )
 
         return self.replace(
@@ -194,7 +188,7 @@ class GraphPool(struct.PyTreeNode):
     @partial(jax.jit, static_argnames=("batch_size",))
     def sample(
         self, key: Array, batch_size: int
-    ) -> Tuple[Array, jraph.GraphsTuple, Optional[PyTree], Optional[PyTree]]:
+    ) -> tuple[Array, jraph.GraphsTuple, PyTree | None, PyTree | None]:
         """
         Sample a batch of graphs from the pool.
 
@@ -249,7 +243,7 @@ class GraphPool(struct.PyTreeNode):
         update_steps = self.graphs.globals[indices, 1]
         return float(jp.mean(update_steps))
 
-    def get_wiring_diversity(self, layer_sizes: List[Tuple[int, int]] = None) -> float:
+    def get_wiring_diversity(self, layer_sizes: list[tuple[int, int]] = None) -> float:
         """
         Calculate the wiring diversity of the pool using entropy-based measurement.
 
@@ -341,11 +335,11 @@ class GraphPool(struct.PyTreeNode):
         new_wires: PyTree = None,
         new_logits: PyTree = None,
         reset_strategy: str = "uniform",  # Options: "uniform", "steps_biased", "loss_biased", or "combined"
-        combined_weights: Tuple[float, float] = (
+        combined_weights: tuple[float, float] = (
             0.5,
             0.5,
         ),  # Weights for [loss, steps] in combined strategy
-    ) -> Tuple["GraphPool", float]:
+    ) -> tuple["GraphPool", float]:
         """
         Reset a random fraction of the pool with fresh graphs.
 
@@ -411,8 +405,8 @@ class GraphPool(struct.PyTreeNode):
         key: Array,
         fraction: float,
         reset_strategy: str = "uniform",
-        combined_weights: Tuple[float, float] = (0.5, 0.5),
-    ) -> Tuple[Array, float]:
+        combined_weights: tuple[float, float] = (0.5, 0.5),
+    ) -> tuple[Array, float]:
         """
         Get indices of circuits to reset based on the specified strategy.
 
@@ -432,16 +426,12 @@ class GraphPool(struct.PyTreeNode):
 
         # Select elements to reset based on the reset strategy
         if reset_strategy == "uniform":
-            reset_idxs = jax.random.choice(
-                key, self.size, shape=(num_reset,), replace=False
-            )
+            reset_idxs = jax.random.choice(key, self.size, shape=(num_reset,), replace=False)
         elif reset_strategy == "steps_biased":
             # Selection biased by update steps
             if self.graphs.globals is None:
                 # Fallback to uniform selection if no update steps
-                reset_idxs = jax.random.choice(
-                    key, self.size, shape=(num_reset,), replace=False
-                )
+                reset_idxs = jax.random.choice(key, self.size, shape=(num_reset,), replace=False)
             else:
                 # Extract update steps for each graph
                 update_steps = self.graphs.globals[..., 1]
@@ -462,9 +452,7 @@ class GraphPool(struct.PyTreeNode):
             # Selection biased by loss value (higher loss = higher probability of reset)
             if self.graphs.globals is None:
                 # Fallback to uniform selection if no loss values
-                reset_idxs = jax.random.choice(
-                    key, self.size, shape=(num_reset,), replace=False
-                )
+                reset_idxs = jax.random.choice(key, self.size, shape=(num_reset,), replace=False)
             else:
                 # Extract loss values for each graph
                 loss_values = self.graphs.globals[..., 0]
@@ -485,9 +473,7 @@ class GraphPool(struct.PyTreeNode):
             # Combine both loss values and update steps for selection
             if self.graphs.globals is None:
                 # Fallback to uniform selection if no globals
-                reset_idxs = jax.random.choice(
-                    key, self.size, shape=(num_reset,), replace=False
-                )
+                reset_idxs = jax.random.choice(key, self.size, shape=(num_reset,), replace=False)
             else:
                 # Extract loss values and update steps
                 loss_values = self.graphs.globals[..., 0]
@@ -529,15 +515,15 @@ class GraphPool(struct.PyTreeNode):
         self,
         key: Array,
         fraction: float,
-        layer_sizes: List[Tuple[int, int]],
+        layer_sizes: list[tuple[int, int]],
         input_n: int,
         arity: int,
         circuit_hidden_dim: int,
         mutation_rate: float = 0.1,
         n_swaps_per_layer: int = 1,
         reset_strategy: str = "uniform",
-        combined_weights: Tuple[float, float] = (0.5, 0.5),
-    ) -> Tuple["GraphPool", float]:
+        combined_weights: tuple[float, float] = (0.5, 0.5),
+    ) -> tuple["GraphPool", float]:
         """
         Reset a fraction of the pool using genetic mutation of existing circuits.
 
@@ -574,9 +560,7 @@ class GraphPool(struct.PyTreeNode):
 
         # Sample existing circuits from the pool for mutation
         # We'll mutate random circuits from the pool, not necessarily the ones being reset
-        source_idxs = jax.random.choice(
-            mutation_key, self.size, shape=(num_reset,), replace=True
-        )
+        source_idxs = jax.random.choice(mutation_key, self.size, shape=(num_reset,), replace=True)
 
         # Extract wires from the source circuits
         source_wires = jax.tree.map(lambda leaf: leaf[source_idxs], self.wires)
@@ -611,9 +595,7 @@ class GraphPool(struct.PyTreeNode):
         mutated_graphs = vmap_build_graph(fresh_logits, mutated_wires)
 
         # Update the pool with mutated circuits
-        updated_pool = self.update(
-            reset_idxs, mutated_graphs, mutated_wires, fresh_logits
-        )
+        updated_pool = self.update(reset_idxs, mutated_graphs, mutated_wires, fresh_logits)
 
         # Increment the reset counter for all elements
         if updated_pool.reset_counter is not None:
@@ -625,7 +607,7 @@ class GraphPool(struct.PyTreeNode):
 
 def initialize_graph_pool(
     rng: jax.random.PRNGKey,
-    layer_sizes: List[Tuple[int, int]],
+    layer_sizes: list[tuple[int, int]],
     pool_size: int,
     input_n: int,
     arity: int = 2,
@@ -678,16 +660,12 @@ def initialize_graph_pool(
             # Each circuit gets a unique wiring (same as random mode)
             # We however need to make sure we are not always generating the same wirings
             rngs = jax.random.split(rng, pool_size)
-            vmap_gen_circuit = jax.vmap(
-                lambda rng: gen_circuit(rng, layer_sizes, arity=arity)
-            )
+            vmap_gen_circuit = jax.vmap(lambda rng: gen_circuit(rng, layer_sizes, arity=arity))
             all_wires, all_logits = vmap_gen_circuit(rngs)
         else:
             # Generate N different wirings and repeat them across the pool
             diversity_rngs = jax.random.split(rng, effective_diversity)
-            vmap_gen_circuit = jax.vmap(
-                lambda rng: gen_circuit(rng, layer_sizes, arity=arity)
-            )
+            vmap_gen_circuit = jax.vmap(lambda rng: gen_circuit(rng, layer_sizes, arity=arity))
             diverse_wires, diverse_logits = vmap_gen_circuit(diversity_rngs)
 
             # Calculate how many times to repeat each diverse wiring
@@ -734,9 +712,7 @@ def initialize_graph_pool(
     else:  # wiring_mode == "random"
         # In random mode, generate different wirings for each circuit (ignore initial_diversity)
         rngs = jax.random.split(rng, pool_size)
-        vmap_gen_circuit = jax.vmap(
-            lambda rng: gen_circuit(rng, layer_sizes, arity=arity)
-        )
+        vmap_gen_circuit = jax.vmap(lambda rng: gen_circuit(rng, layer_sizes, arity=arity))
         all_wires, all_logits = vmap_gen_circuit(rngs)
 
     # Generate graphs in parallel using vmap

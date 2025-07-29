@@ -10,10 +10,7 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 import hydra
 import jax
-import jax.numpy as jp
-import numpy as np
 from flax import nnx
-from omegaconf import DictConfig, OmegaConf
 
 from boolean_nca_cc import generate_layer_sizes
 from boolean_nca_cc.circuits.model import gen_circuit
@@ -70,7 +67,7 @@ def test_sequential_batching():
     chunk_size = 8  # Will create 4 chunks
     epochs = 5
 
-    print(f"Testing sequential batching:")
+    print("Testing sequential batching:")
     print(f"Meta batch size: {meta_batch_size}")
     print(f"Chunk size: {chunk_size}")
     print(f"Expected chunks: {(meta_batch_size + chunk_size - 1) // chunk_size}")
@@ -146,9 +143,7 @@ def test_sequential_batching():
     print("-" * 55)
 
     max_diff = 0.0
-    for i in range(
-        min(len(results_regular["losses"]), len(results_sequential["losses"]))
-    ):
+    for i in range(min(len(results_regular["losses"]), len(results_sequential["losses"]))):
         regular_loss = results_regular["losses"][i]
         sequential_loss = results_sequential["losses"][i]
         diff = abs(regular_loss - sequential_loss)

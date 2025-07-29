@@ -11,18 +11,18 @@ The package is organized into the following submodules:
 """
 
 from boolean_nca_cc.circuits.model import (
-    generate_layer_sizes,
     gen_circuit,
+    generate_layer_sizes,
     run_circuit,
     run_layer,
 )
 from boolean_nca_cc.circuits.train import TrainState, train_step
-from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
 from boolean_nca_cc.models import CircuitGNN, run_gnn_scan
 from boolean_nca_cc.training import (
-    train_model,
     evaluate_model_stepwise,
+    train_model,
 )
+from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
 
 __version__ = "0.1.0"
 
