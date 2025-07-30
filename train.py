@@ -22,6 +22,7 @@ from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.circuits.tasks import get_task_data
 from boolean_nca_cc import generate_layer_sizes
 from boolean_nca_cc.circuits.train import TrainState, loss_f_l4, loss_f_bce, train_step
+from boolean_nca_cc.circuits.train import train_step_with_knockout
 
 from boolean_nca_cc.training.train_loop import (
     train_model,
@@ -33,6 +34,125 @@ from boolean_nca_cc.training.utils import (
 
 # Configure logging
 log = logging.getLogger(__name__)
+
+
+def run_backpropagation_training(cfg, x_data, y_data, loss_type="l4"):
+    """
+    Run standard backpropagation training for comparison.
+
+    Args:
+        cfg: Configuration object
+        x_data: Input data
+        y_data: Target data
+        loss_type: Loss function type ('l4' or 'bce')
+
+    Returns:
+        Dictionary of training results
+    """
+    log.info("Running baseline backpropagation training")
+
+    # Generate circuit
+    key = jax.random.PRNGKey(cfg.test_seed)
+    wires, logits = gen_circuit(key, cfg.circuit.layer_sizes, arity=cfg.circuit.arity)
+
+    # Setup optimizer
+    if cfg.backprop.optimizer == "adamw":
+        opt = optax.adamw(
+            cfg.backprop.learning_rate,
+            b1=cfg.backprop.beta1,
+            b2=cfg.backprop.beta2,
+            weight_decay=cfg.backprop.weight_decay,
+        )
+    else:
+        opt = optax.adam(cfg.backprop.learning_rate)
+
+    state = TrainState(params=logits, opt_state=opt.init(logits))
+
+    # Training loop
+    losses = []
+    hard_losses = []
+    accuracies = []
+    hard_accuracies = []
+
+    # Partial function for train_step to avoid passing opt and wires repeatedly
+    # Note: optax optimizers are not JAX types, so they cannot be static arguments for JIT
+    # if we were to JIT the loop here. train_step itself handles JITting of grad computation.
+    _train_step_fn = partial(
+        train_step,
+        opt=opt,
+        wires=wires,
+        x=x_data,
+        y0=y_data,
+        loss_type=loss_type,
+        do_train=True,
+    )
+
+    pbar = tqdm(range(cfg.backprop.epochs), desc="Backprop training")
+    for i in pbar:
+        loss, aux_metrics, new_state = _train_step_fn(state=state)
+        state = new_state  # Update state for the next iteration
+
+        accuracy = float(aux_metrics["accuracy"])
+        hard_accuracy = float(aux_metrics["hard_accuracy"])
+        hard_loss = float(aux_metrics["hard_loss"])
+
+        # Log metrics
+        if i % cfg.logging.log_interval == 0:
+            log.info(
+                f"BP Epoch {i}: Loss={loss:.4f}, Acc={accuracy:.4f}, Hard Acc={hard_accuracy:.4f}"
+            )
+            if cfg.wandb.enabled:
+                wandb.log(
+                    {
+                        "bp/loss": float(loss),
+                        "bp/hard_loss": hard_loss,
+                        "bp/accuracy": accuracy,
+                        "bp/hard_accuracy": hard_accuracy,
+                        "bp/epoch": i,
+                    }
+                )
+
+        # Store metrics
+        losses.append(float(loss))
+        hard_losses.append(hard_loss)
+        accuracies.append(accuracy)
+        hard_accuracies.append(hard_accuracy)
+
+        # Update tqdm postfix
+        pbar.set_postfix(
+            loss=loss,
+            acc=accuracy,
+            hard_acc=hard_accuracy,
+            hard_loss=hard_loss,
+        )
+
+    # Final evaluation (using the appropriate loss function directly for clarity)
+    loss_fn = loss_f_l4 if loss_type == "l4" else loss_f_bce
+    final_loss, final_aux_metrics = loss_fn(state.params, wires, x_data, y_data)
+    final_accuracy = float(final_aux_metrics["accuracy"])
+    final_hard_accuracy = float(final_aux_metrics["hard_accuracy"])
+    final_hard_loss = float(final_aux_metrics["hard_loss"])
+
+    log.info(
+        f"BP Final: Loss={final_loss:.4f}, Acc={final_accuracy:.4f}, Hard Acc={final_hard_accuracy:.4f}"
+    )
+
+    results = {
+        "losses": losses,
+        "hard_losses": hard_losses,
+        "accuracies": accuracies,
+        "hard_accuracies": hard_accuracies,
+        "final_loss": float(final_loss),
+        "final_hard_loss": final_hard_loss,
+        "final_accuracy": final_accuracy,
+        "final_hard_accuracy": final_hard_accuracy,
+        "params": state.params,
+        "wires": wires,
+    }
+
+    return results
+
+
 
 @hydra.main(version_base=None, config_path="configs", config_name="config")
 def main(cfg: DictConfig) -> None:
@@ -109,6 +229,16 @@ def main(cfg: DictConfig) -> None:
         cfg.circuit.task, case_n, input_bits=input_n, output_bits=output_n
     )
 
+
+        # Run backpropagation training for comparison if enabled
+    bp_results = None
+    if cfg.backprop.enabled:
+        bp_results = run_backpropagation_training(
+            cfg, x, y0, loss_type=cfg.training.loss_type
+        )
+        # plot_training_curves(
+        #     bp_results, "Backpropagation", os.path.join(output_dir, "plots")
+        # )
     # Initialize model
     rng, init_rng = jax.random.split(rng)
 

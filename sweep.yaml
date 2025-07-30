@@ -11,13 +11,22 @@ metric:
 
 # Parameters to sweep over
 parameters:
-  pool.persistent_knockout.knockout_diversity:
+  # pool.persistent_knockout.knockout_diversity:
+  #   values:
+  #     - 1
+  #     - 16
+  #     - 64
+  #     - 128
+
+      # - 512
+  #     # - 1024
+
+  pool.persistent_knockout.damage_prob:
     values:
-      - 1
-      - 16
-      - 128
-      - 512
-      # - 1024
+      - 20
+      - 50
+      - 100
+      - 160
 
 # Add this command block to format arguments correctly for Hydra
 command:

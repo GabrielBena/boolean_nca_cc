@@ -97,10 +97,10 @@ def compute_accuracy(y_pred, y_true):
 
 
 # Define loss functions for both types (L4 and BCE)
-def loss_f_l4(logits, wires, x, y0):
+def loss_f_l4(logits, wires, x, y0, gate_mask=None):
     """L4 loss function variant (for JIT compilation)"""
-    act = run_circuit(logits, wires, x)
-    hard_act = run_circuit(logits, wires, x, hard=True)
+    act = run_circuit(logits, wires, x, gate_mask=gate_mask)
+    hard_act = run_circuit(logits, wires, x, gate_mask=gate_mask, hard=True)
     y = act[-1]
     hard_y = hard_act[-1]
     res = y - y0
@@ -119,10 +119,10 @@ def loss_f_l4(logits, wires, x, y0):
     )
 
 
-def loss_f_bce(logits, wires, x, y0):
+def loss_f_bce(logits, wires, x, y0, gate_mask=None):
     """BCE loss function variant (for JIT compilation)"""
-    act = run_circuit(logits, wires, x)
-    hard_act = run_circuit(logits, wires, x, hard=True)
+    act = run_circuit(logits, wires, x, gate_mask=gate_mask)
+    hard_act = run_circuit(logits, wires, x, gate_mask=gate_mask, hard=True)
     y = act[-1]
     hard_y = hard_act[-1]
     loss = binary_cross_entropy(y, y0)
@@ -139,13 +139,72 @@ def loss_f_bce(logits, wires, x, y0):
     )
 
 
-# Pre-compile gradient functions for both loss types
+# Pre-compile gradient functions for both loss types (with gate_mask support)
 grad_loss_f_l4 = jax.jit(jax.value_and_grad(loss_f_l4, has_aux=True))
 grad_loss_f_bce = jax.jit(jax.value_and_grad(loss_f_bce, has_aux=True))
 
 
-# Function dispatcher for loss computation (not used in training loop)
-def loss_f(logits, wires, x, y0, loss_type="l4"):
+# Knockout-related functions
+def create_gate_mask_from_knockout_pattern(knockout_pattern, layer_sizes):
+    """
+    Convert knockout pattern to gate_mask for run_circuit.
+  
+    Args:
+        knockout_pattern: Boolean array where True = knocked out
+        layer_sizes: List of (total_gates, group_size) for each layer
+  
+    Returns:
+        List of gate masks for each layer
+    """
+    gate_masks = []
+    current_idx = 0
+  
+    for total_gates, group_size in layer_sizes:
+        layer_end = current_idx + total_gates
+        layer_pattern = knockout_pattern[current_idx:layer_end]
+      
+        # Create mask: 1.0 for active gates, 0.0 for knocked out
+        layer_mask = jp.where(layer_pattern, 0.0, 1.0)
+        gate_masks.append(layer_mask)
+      
+        current_idx = layer_end
+  
+    return gate_masks
+
+
+# def apply_knockout_mask_to_gradients(grads, knockout_pattern, layer_sizes):
+#     """
+#     Zero out gradients for knocked out parameters.
+  
+#     Args:
+#         grads: Gradient tree structure matching logits structure
+#         knockout_pattern: Boolean array where True = knocked out
+#         layer_sizes: List of (total_gates, group_size) for each layer
+  
+#     Returns:
+#         Masked gradients with knocked out parameters zeroed
+#     """
+#     masked_grads = []
+#     current_idx = 0
+  
+#     for grad_layer, (total_gates, group_size) in zip(grads, layer_sizes):
+#         layer_end = current_idx + total_gates
+#         layer_pattern = knockout_pattern[current_idx:layer_end]
+      
+#         # Create active mask for this layer
+#         active_mask = ~layer_pattern
+      
+#         # Apply mask to gradients (zero out knocked out parameters)
+#         masked_grad_layer = grad_layer * active_mask[:, None, None]  # Broadcast to logit dimensions
+#         masked_grads.append(masked_grad_layer)
+      
+#         current_idx = layer_end
+  
+#     return masked_grads
+
+
+# Function dispatcher for loss computation (deprecated - use loss functions directly)
+def loss_f(logits, wires, x, y0, loss_type="l4", gate_mask=None):
     """
     Compute loss for a circuit given input and target output.
 
@@ -155,15 +214,16 @@ def loss_f(logits, wires, x, y0, loss_type="l4"):
         x: Input tensor
         y0: Target output tensor
         loss_type: Type of loss to use ('l4' for L4 norm or 'bce' for binary cross-entropy)
+        gate_mask: Optional gate mask for knockout experiments
 
     Returns:
         Tuple of (loss_value, auxiliary_dict) where auxiliary_dict contains
         intermediate activations and accuracy
     """
     if loss_type == "bce":
-        return loss_f_bce(logits, wires, x, y0)
+        return loss_f_bce(logits, wires, x, y0, gate_mask)
     else:  # Default to L4 norm
-        return loss_f_l4(logits, wires, x, y0)
+        return loss_f_l4(logits, wires, x, y0, gate_mask)
 
 
 # Define a named tuple for training state to improve code clarity
@@ -178,9 +238,10 @@ def update_params(grad, opt_state, opt, logits):
     return new_logits, new_opt_state
 
 
-def train_step(state, opt, wires, x, y0, loss_type="l4", do_train=True):
+def train_step(state, opt, wires, x, y0, loss_type="l4", do_train=True, 
+               knockout_pattern=None, layer_sizes=None):
     """
-    Perform a single training step.
+    Unified training step that handles both masked and unmasked training.
 
     Args:
         state: TrainState containing current parameters and optimizer state
@@ -189,30 +250,41 @@ def train_step(state, opt, wires, x, y0, loss_type="l4", do_train=True):
         x: Input batch
         y0: Target output batch
         loss_type: Type of loss to use ('l4' or 'bce')
+        do_train: Whether to perform training or just evaluation
+        knockout_pattern: Optional knockout pattern (if None, no masking)
+        layer_sizes: Required if knockout_pattern is provided
 
     Returns:
-        Tuple of (loss_value, accuracy, new_state) with updated parameters
+        Tuple of (loss_value, aux_dict, new_state) with updated parameters
     """
     logits, opt_state = state
 
-    # Use pre-compiled gradient function based on loss type
-    if do_train:
-        if loss_type == "bce":
-            (loss, aux), grad = grad_loss_f_bce(logits, wires, x, y0)
-        else:  # Default to L4 norm
-            (loss, aux), grad = grad_loss_f_l4(logits, wires, x, y0)
+    # Create gate_mask if knockout_pattern is provided
+    gate_mask = None
+    if knockout_pattern is not None:
+        gate_mask = create_gate_mask_from_knockout_pattern(knockout_pattern, layer_sizes)
 
-        # Update parameters (without JIT since optimizer is a function)
+    if do_train:
+        # Use pre-compiled gradient functions for efficiency
+        if loss_type == "bce":
+            (loss, aux), grad = grad_loss_f_bce(logits, wires, x, y0, gate_mask)
+        else:  # Default to L4 norm
+            (loss, aux), grad = grad_loss_f_l4(logits, wires, x, y0, gate_mask)
+        
+        # # Apply knockout mask to gradients if knockout_pattern is provided
+        # if knockout_pattern is not None:
+        #     grad = apply_knockout_mask_to_gradients(grad, knockout_pattern, layer_sizes)
+
+        # Update parameters
         new_logits, new_opt_state = update_params(grad, opt_state, opt, logits)
 
     else:
-        loss, aux = loss_f(logits, wires, x, y0, loss_type)
+        # Evaluation logic
+        if loss_type == "bce":
+            loss, aux = loss_f_bce(logits, wires, x, y0, gate_mask)
+        else:
+            loss, aux = loss_f_l4(logits, wires, x, y0, gate_mask)
         new_logits = logits
         new_opt_state = opt_state
 
-    # Return loss, accuracy, and new state
-    return (
-        loss,
-        aux,
-        TrainState(new_logits, new_opt_state),
-    )
+    return (loss, aux, TrainState(new_logits, new_opt_state))

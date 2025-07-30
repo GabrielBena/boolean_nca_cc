@@ -67,7 +67,7 @@ pool:
   persistent_knockout:
     fraction: 0.8 # 
     damage_prob: 20.0 
-    knockout_diversity: 1  # Vocabulary size for knockout patterns
+    knockout_diversity: 128  # Vocabulary size for knockout patterns
 
 eval:
   # Periodic evaluation parameters
