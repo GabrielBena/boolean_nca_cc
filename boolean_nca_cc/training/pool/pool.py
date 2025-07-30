@@ -29,6 +29,7 @@ class GraphPool(struct.PyTreeNode):
     Stores a single batched jraph.GraphsTuple and allows
     sampling and updating batches. Also tracks wires and logits in parallel
     for computing functional circuit loss without redundant extraction.
+    Now also tracks gate masks for knockout patterns.
     """
 
     size: int = struct.field(pytree_node=False)
@@ -38,6 +39,9 @@ class GraphPool(struct.PyTreeNode):
     wires: PyTree = None
     # logits is a list of weight matrices corresponding to each graph
     logits: PyTree = None
+    # gate_masks is a list of mask matrices for knockout patterns, in flat format
+    # Each element has shape [pool_size, total_gates] where total_gates = sum(gate_n for gate_n, _ in layer_sizes)
+    gate_masks: jp.ndarray | None = None
     # Reset counter to track which elements were reset recently
     reset_counter: Array | None = None
 
@@ -47,6 +51,7 @@ class GraphPool(struct.PyTreeNode):
         batched_graphs: jraph.GraphsTuple,
         wires: PyTree = None,
         logits: PyTree = None,
+        gate_masks: jp.ndarray | None = None,
         reset_counter: Array | None = None,
     ) -> "GraphPool":
         """
@@ -57,6 +62,7 @@ class GraphPool(struct.PyTreeNode):
                             has a leading batch dimension (pool_size).
             wires: The wire matrices corresponding to each graph.
             logits: The logit matrices corresponding to each graph.
+            gate_masks: Optional flat gate masks with shape (pool_size, total_gates)
             reset_counter: Optional counter to track reset operations.
 
         Returns:
@@ -78,6 +84,7 @@ class GraphPool(struct.PyTreeNode):
             graphs=batched_graphs,
             wires=wires,
             logits=logits,
+            gate_masks=gate_masks,
             reset_counter=reset_counter,
         )
 
@@ -88,6 +95,7 @@ class GraphPool(struct.PyTreeNode):
         batch_of_graphs: jraph.GraphsTuple,
         batch_of_wires: PyTree = None,
         batch_of_logits: PyTree = None,
+        batch_of_gate_masks: jp.ndarray | None = None,
     ) -> "GraphPool":
         """
         Update graphs in the pool at the specified indices with a batch of graphs.
@@ -101,6 +109,8 @@ class GraphPool(struct.PyTreeNode):
                            If None, wires remain unchanged.
             batch_of_logits: Optional PyTree of logits corresponding to batch_of_graphs.
                            If None, logits remain unchanged.
+            batch_of_gate_masks: Optional flat gate masks with shape (batch_size, total_gates).
+                               If None, gate masks remain unchanged.
 
         Returns:
             A new GraphPool instance with the updated graphs.
@@ -170,6 +180,17 @@ class GraphPool(struct.PyTreeNode):
                 batch_of_logits,
             )
 
+        # Update gate_masks if provided
+        updated_gate_masks = self.gate_masks
+        if batch_of_gate_masks is not None and self.gate_masks is not None:
+            updated_gate_masks = jax.tree.map(
+                lambda pool_gate_masks, batch_gate_masks: pool_gate_masks.at[idxs].set(
+                    batch_gate_masks
+                ),
+                self.gate_masks,
+                batch_of_gate_masks,
+            )
+
         # Reset the counter for the indices that were updated
         updated_reset_counter = (
             self.reset_counter.at[idxs].set(0) if self.reset_counter is not None else None
@@ -179,13 +200,14 @@ class GraphPool(struct.PyTreeNode):
             graphs=updated_graphs_data,
             wires=updated_wires,
             logits=updated_logits,
+            gate_masks=updated_gate_masks,
             reset_counter=updated_reset_counter,
         )
 
     @partial(jax.jit, static_argnames=("batch_size",))
     def sample(
         self, key: Array, batch_size: int
-    ) -> tuple[Array, jraph.GraphsTuple, PyTree | None, PyTree | None]:
+    ) -> tuple[Array, jraph.GraphsTuple, PyTree | None, PyTree | None, jp.ndarray | None]:
         """
         Sample a batch of graphs from the pool.
 
@@ -200,6 +222,7 @@ class GraphPool(struct.PyTreeNode):
                                   according to idxs, representing the sampled batch.
                 - sampled_wires: Corresponding wires if available, otherwise None.
                 - sampled_logits: Corresponding logits if available, otherwise None.
+                - sampled_gate_masks: Corresponding gate masks if available, otherwise None.
         """
         idxs = jax.random.choice(key, self.size, shape=(batch_size,))
 
@@ -220,7 +243,12 @@ class GraphPool(struct.PyTreeNode):
         if self.logits is not None:
             sampled_logits = jax.tree.map(_safe_slice_leaf, self.logits)
 
-        return idxs, sampled_graphs, sampled_wires, sampled_logits
+        # Sample gate masks if they exist
+        sampled_gate_masks = None
+        if self.gate_masks is not None:
+            sampled_gate_masks = _safe_slice_leaf(self.gate_masks)
+
+        return idxs, sampled_graphs, sampled_wires, sampled_logits, sampled_gate_masks
 
     # Method to get average update steps of graphs in the pool
     def get_average_update_steps(self) -> float:
@@ -331,6 +359,7 @@ class GraphPool(struct.PyTreeNode):
         new_graphs: jraph.GraphsTuple,
         new_wires: PyTree = None,
         new_logits: PyTree = None,
+        new_gate_masks: jp.ndarray | None = None,
         reset_strategy: str = "uniform",  # Options: "uniform", "steps_biased", "loss_biased", or "combined"
         combined_weights: tuple[float, float] = (
             0.5,
@@ -346,6 +375,7 @@ class GraphPool(struct.PyTreeNode):
             new_graphs: Fresh graphs to use for reset
             new_wires: Fresh wires to use for reset
             new_logits: Fresh logits to use for reset
+            new_gate_masks: Fresh gate masks to use for reset (flat format)
             reset_strategy: Strategy for selecting graphs to reset:
                             "uniform" - uniform random selection
                             "steps_biased" - bias by update steps (more steps = higher probability)
@@ -387,8 +417,15 @@ class GraphPool(struct.PyTreeNode):
         if new_logits is not None:
             reset_logits = jax.tree.map(lambda leaf: leaf[sample_idxs], new_logits)
 
+        # Sample gate masks if provided
+        reset_gate_masks = None
+        if new_gate_masks is not None:
+            reset_gate_masks = new_gate_masks[sample_idxs]
+
         # Update the pool with reset elements
-        reset_pool = self.update(reset_idxs, reset_graphs, reset_wires, reset_logits)
+        reset_pool = self.update(
+            reset_idxs, reset_graphs, reset_wires, reset_logits, reset_gate_masks
+        )
 
         # Increment the reset counter for all elements
         if reset_pool.reset_counter is not None:
@@ -579,7 +616,7 @@ class GraphPool(struct.PyTreeNode):
 
         # Build new graphs with mutated wires and fresh logits
         vmap_build_graph = jax.vmap(
-            lambda logit, wires: build_graph(
+            lambda logit, wires, gate_knockout_mask: build_graph(
                 logits=logit,
                 wires=wires,
                 input_n=input_n,
@@ -587,12 +624,31 @@ class GraphPool(struct.PyTreeNode):
                 circuit_hidden_dim=circuit_hidden_dim,
                 loss_value=0.0,  # Reset loss
                 update_steps=0,  # Reset update steps
+                gate_knockout_mask=gate_knockout_mask,
+                knockout_strategy="untouched",  # Fresh circuits have no knockouts
+                faulty_logit_value=-10.0,  # Default faulty value for fresh circuits
             )
         )
-        mutated_graphs = vmap_build_graph(fresh_logits, mutated_wires)
+
+        # For genetic mutation, use fresh gate masks (all active)
+        if self.gate_masks is not None:
+            total_gates = self.gate_masks.shape[1]
+            fresh_gate_masks = jp.ones((num_reset, total_gates), dtype=jp.float32)
+        else:
+            fresh_gate_masks = jp.zeros((num_reset, 0), dtype=jp.float32)  # Empty mask
+
+        mutated_graphs = vmap_build_graph(fresh_logits, mutated_wires, fresh_gate_masks)
 
         # Update the pool with mutated circuits
         updated_pool = self.update(reset_idxs, mutated_graphs, mutated_wires, fresh_logits)
+
+        # Reset gate masks for mutated circuits (all active)
+        if self.gate_masks is not None:
+            total_gates = self.gate_masks.shape[1]
+            fresh_gate_masks = jp.ones((num_reset, total_gates), dtype=jp.float32)
+            updated_pool = updated_pool.update(
+                reset_idxs, mutated_graphs, mutated_wires, fresh_logits, fresh_gate_masks
+            )
 
         # Increment the reset counter for all elements
         if updated_pool.reset_counter is not None:
@@ -600,6 +656,207 @@ class GraphPool(struct.PyTreeNode):
             updated_pool = updated_pool.replace(reset_counter=new_counter)
 
         return updated_pool, avg_steps_reset
+
+    def apply_gate_knockouts_to_fraction(
+        self,
+        key: Array,
+        fraction: float,
+        layer_sizes: list[tuple[int, int]],
+        number_knockouts: float,
+        input_n: int,
+        arity: int,
+        circuit_hidden_dim: int,
+        faulty_value: float = -10.0,
+        selection_strategy: str = "uniform",
+        combined_weights: tuple[float, float] = (0.5, 0.5),
+    ) -> tuple["GraphPool", float]:
+        """
+        Apply permanent gate knockouts to a fraction of existing pool elements.
+
+        This method applies structural damage where knocked-out gates:
+        1. Have their logits set to faulty values (produce zero output)
+        2. Cannot receive model updates (permanent damage)
+        3. Can still send messages but cannot recover
+
+        Args:
+            key: Random key for knockout generation and selection
+            fraction: Fraction of pool to apply knockouts to
+            layer_sizes: Circuit layer sizes
+            number_knockouts: Number of gates to permanently knock out per circuit
+            input_n: Number of input nodes
+            arity: Number of inputs per gate
+            circuit_hidden_dim: Hidden dimension for graphs
+            faulty_value: Value for knocked-out gate logits
+            selection_strategy: Strategy for selecting circuits to perturb
+            combined_weights: Weights for combined selection strategy
+
+        Returns:
+            Tuple of (updated_pool, avg_steps_of_perturbed_circuits)
+        """
+        from boolean_nca_cc.training.pool.structural_perturbation import (
+            apply_gate_knockout_to_pool_batch,
+            batch_layered_to_flat_mask,
+        )
+        from boolean_nca_cc.utils.graph_builder import build_graph
+
+        # Split keys for different operations
+        selection_key, knockout_key = jax.random.split(key)
+
+        # Get indices of circuits to apply knockouts to
+        knockout_idxs, avg_steps_knocked_out = self.get_reset_indices(
+            selection_key, fraction, selection_strategy, combined_weights
+        )
+
+        num_knockout = len(knockout_idxs)
+
+        # Extract logits and wires for the selected circuits
+        selected_logits = jax.tree.map(lambda leaf: leaf[knockout_idxs], self.logits)
+        selected_wires = jax.tree.map(lambda leaf: leaf[knockout_idxs], self.wires)
+
+        # Apply permanent knockouts to the selected circuits
+        modified_logits, _, layered_knockout_masks = apply_gate_knockout_to_pool_batch(
+            knockout_key,
+            selected_logits,
+            selected_wires,
+            layer_sizes,
+            number_knockouts,
+            faulty_value,
+        )
+
+        # Convert layered masks to flat format for pool storage
+        flat_knockout_masks = batch_layered_to_flat_mask(layered_knockout_masks)
+
+        # Build new graphs with modified logits and knockout masks
+        vmap_build_graph = jax.vmap(
+            lambda logit, wires, knockout_mask: build_graph(
+                logits=logit,
+                wires=wires,
+                input_n=input_n,
+                arity=arity,
+                circuit_hidden_dim=circuit_hidden_dim,
+                loss_value=0.0,  # Reset loss after knockout
+                update_steps=0,  # Reset update steps after knockout
+                gate_knockout_mask=knockout_mask,  # Use new knockout mask parameter
+                knockout_strategy="no_receive",  # Knocked-out gates can't receive messages
+                faulty_logit_value=faulty_value,
+            )
+        )
+        modified_graphs = vmap_build_graph(modified_logits, selected_wires, flat_knockout_masks)
+
+        # Update the pool with knocked-out circuits
+        updated_pool = self.update(
+            knockout_idxs, modified_graphs, selected_wires, modified_logits, flat_knockout_masks
+        )
+
+        # Increment the reset counter for knocked-out elements
+        if updated_pool.reset_counter is not None:
+            new_counter = updated_pool.reset_counter + 1
+            updated_pool = updated_pool.replace(reset_counter=new_counter)
+
+        return updated_pool, avg_steps_knocked_out
+
+    def apply_logits_perturbations_to_fraction(
+        self,
+        key: Array,
+        fraction: float,
+        layer_sizes: list[tuple[int, int]],
+        number_perturbations: float,
+        input_n: int,
+        arity: int,
+        circuit_hidden_dim: int,
+        perturbation_type: str = "noise",
+        noise_scale: float = 1.0,
+        faulty_value: float = -10.0,
+        selection_strategy: str = "uniform",
+        combined_weights: tuple[float, float] = (0.5, 0.5),
+    ) -> tuple["GraphPool", float]:
+        """
+        Apply recoverable logits perturbations to a fraction of existing pool elements.
+
+        This method applies temporary interference where perturbed gates:
+        1. Have their logits modified but can still receive model updates
+        2. Can potentially recover through message passing
+        3. Represent temporary interference rather than permanent damage
+
+        Args:
+            key: Random key for perturbation generation and selection
+            fraction: Fraction of pool to apply perturbations to
+            layer_sizes: Circuit layer sizes
+            number_perturbations: Number of gates to perturb per circuit
+            input_n: Number of input nodes
+            arity: Number of inputs per gate
+            circuit_hidden_dim: Hidden dimension for graphs
+            perturbation_type: Type of perturbation ("noise", "zero", "negative")
+            noise_scale: Scale of noise for "noise" perturbation
+            faulty_value: Value for "negative" perturbation
+            selection_strategy: Strategy for selecting circuits to perturb
+            combined_weights: Weights for combined selection strategy
+
+        Returns:
+            Tuple of (updated_pool, avg_steps_of_perturbed_circuits)
+        """
+        from boolean_nca_cc.training.pool.structural_perturbation import (
+            apply_logits_perturbation_to_pool_batch,
+            batch_layered_to_flat_mask,
+        )
+        from boolean_nca_cc.utils.graph_builder import build_graph
+
+        # Split keys for different operations
+        selection_key, perturbation_key = jax.random.split(key)
+
+        # Get indices of circuits to apply perturbations to
+        perturb_idxs, avg_steps_perturbed = self.get_reset_indices(
+            selection_key, fraction, selection_strategy, combined_weights
+        )
+
+        num_perturb = len(perturb_idxs)
+
+        # Extract logits and wires for the selected circuits
+        selected_logits = jax.tree.map(lambda leaf: leaf[perturb_idxs], self.logits)
+        selected_wires = jax.tree.map(lambda leaf: leaf[perturb_idxs], self.wires)
+
+        # Apply recoverable perturbations to the selected circuits
+        modified_logits, _, layered_perturbation_masks = apply_logits_perturbation_to_pool_batch(
+            perturbation_key,
+            selected_logits,
+            selected_wires,
+            layer_sizes,
+            number_perturbations,
+            perturbation_type,
+            noise_scale,
+            faulty_value,
+        )
+
+        # Convert layered masks to flat format for pool storage
+        flat_perturbation_masks = batch_layered_to_flat_mask(layered_perturbation_masks)
+
+        # Build new graphs with modified logits and perturbation masks
+        vmap_build_graph = jax.vmap(
+            lambda logit, wires, perturbation_mask: build_graph(
+                logits=logit,
+                wires=wires,
+                input_n=input_n,
+                arity=arity,
+                circuit_hidden_dim=circuit_hidden_dim,
+                loss_value=0.0,  # Reset loss after perturbation
+                update_steps=0,  # Reset update steps after perturbation
+                perturbation_mask=perturbation_mask,  # Use new perturbation mask parameter
+                knockout_strategy="untouched",  # Perturbed gates can still participate in message passing
+                faulty_logit_value=faulty_value,
+            )
+        )
+        modified_graphs = vmap_build_graph(modified_logits, selected_wires, flat_perturbation_masks)
+
+        # For perturbations, we don't update the gate_masks field since these are recoverable
+        # The perturbation information is tracked in the graph nodes themselves
+        updated_pool = self.update(perturb_idxs, modified_graphs, selected_wires, modified_logits)
+
+        # Increment the reset counter for perturbed elements
+        if updated_pool.reset_counter is not None:
+            new_counter = updated_pool.reset_counter + 1
+            updated_pool = updated_pool.replace(reset_counter=new_counter)
+
+        return updated_pool, avg_steps_perturbed
 
 
 def initialize_graph_pool(
@@ -612,6 +869,7 @@ def initialize_graph_pool(
     loss_value: float = 0.0,
     wiring_mode: str = "random",
     initial_diversity: int = 1,
+    initialize_gate_masks: bool = True,
 ) -> GraphPool:
     """
     Initialize a pool of graphs using a provided graph creation function.
@@ -632,6 +890,7 @@ def initialize_graph_pool(
                           - 1: All circuits start with identical wiring (original behavior)
                           - N: Pool starts with N different wirings, each repeated pool_size//N times
                           - If N >= pool_size: Each circuit gets a unique wiring (same as "random" mode)
+        initialize_gate_masks: Whether to initialize gate masks (all active initially)
 
     Returns:
         Initialized GraphPool
@@ -712,23 +971,50 @@ def initialize_graph_pool(
         vmap_gen_circuit = jax.vmap(lambda rng: gen_circuit(rng, layer_sizes, arity=arity))
         all_wires, all_logits = vmap_gen_circuit(rngs)
 
+    # Initialize gate masks first
+    if initialize_gate_masks:
+        # Calculate total number of gates across all layers
+        total_gates = sum(gate_n for gate_n, _group_size in layer_sizes)
+        # Initialize all gate masks to 1.0 (active)
+        all_gate_masks = jp.ones((pool_size, total_gates), dtype=jp.float32)
+    else:
+        all_gate_masks = None
+
     # Generate graphs in parallel using vmap
     # Create globals with both loss value and update steps counter (initialized to 0)
     # The globals structure will be [loss_value, update_steps]
-    vmap_build_graph = jax.vmap(
-        lambda logit, wires: build_graph(
-            logits=logit,
-            wires=wires,
-            input_n=input_n,
-            arity=arity,
-            circuit_hidden_dim=circuit_hidden_dim,
-            loss_value=loss_value,
-            update_steps=0,  # Initialize update steps counter to 0
+    if initialize_gate_masks:
+        vmap_build_graph = jax.vmap(
+            lambda logit, wires, gate_knockout_mask: build_graph(
+                logits=logit,
+                wires=wires,
+                input_n=input_n,
+                arity=arity,
+                circuit_hidden_dim=circuit_hidden_dim,
+                loss_value=loss_value,
+                update_steps=0,  # Initialize update steps counter to 0
+                gate_knockout_mask=gate_knockout_mask,
+                knockout_strategy="untouched",  # Initial circuits have no knockouts
+                faulty_logit_value=-10.0,  # Default faulty value
+            )
         )
-    )
-    graphs = vmap_build_graph(all_logits, all_wires)
+        graphs = vmap_build_graph(all_logits, all_wires, all_gate_masks)
+    else:
+        vmap_build_graph = jax.vmap(
+            lambda logit, wires: build_graph(
+                logits=logit,
+                wires=wires,
+                input_n=input_n,
+                arity=arity,
+                circuit_hidden_dim=circuit_hidden_dim,
+                loss_value=loss_value,
+                update_steps=0,  # Initialize update steps counter to 0
+                faulty_logit_value=-10.0,  # Default faulty value (not used without gate masks)
+            )
+        )
+        graphs = vmap_build_graph(all_logits, all_wires)
 
     # Initialize reset counter
     reset_counter = jp.zeros(pool_size, dtype=jp.int32)
 
-    return GraphPool.create(graphs, all_wires, all_logits, reset_counter)
+    return GraphPool.create(graphs, all_wires, all_logits, all_gate_masks, reset_counter)

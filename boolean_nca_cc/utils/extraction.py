@@ -26,7 +26,8 @@ def extract_logits_from_graph(
     """
     all_logits_flat = graph.nodes["logits"]
     extracted_logits_list = []
-    current_node_idx = 0
+    # start after input layer
+    current_node_idx = (graph.nodes["layer"] == 0).sum()
 
     # Precompute sizes and start indices for dynamic slicing
     layer_sizes = []

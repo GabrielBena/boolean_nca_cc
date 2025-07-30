@@ -36,16 +36,16 @@ circuit:
 training:
   # WIRING MODE : "random" or "fixed"
   wiring_mode: "random"  # Options: "fixed", "genetic", or "random"
-  initial_diversity: 1024
+  initial_diversity: 256
   # INNER LOOP
-  n_message_steps: 10  # Number of message passing steps per training iteration
+  n_message_steps: 5  # Number of message passing steps per training iteration
   # LOSS TYPE
   loss_type: "l4"  # Options: "l4", "l2", or "bce"
-  random_loss_step: true  # Use random message passing step for loss computation
-  use_beta_loss_step: true  # Use beta distribution for random loss step (varies from early to late steps through training)
+  random_loss_step: false  # Use random message passing step for loss computation
+  use_beta_loss_step: false  # Use beta distribution for random loss step (varies from early to late steps through training)
   # BATCH SIZE
-  meta_batch_size: 1024
-  batch_chunk_size: 64  # Sequential batch processing chunk size (null means use meta_batch_size)
+  meta_batch_size: 256
+  batch_chunk_size: 128  # Sequential batch processing chunk size (null means use meta_batch_size)
   # OPTIMIZATION
   learning_rate: 1e-4
   weight_decay: 1e-5
@@ -74,7 +74,7 @@ pool:
   n_swaps_per_layer: null # For genetic mutation number of swaps per layer
   initial_diversity: ${training.initial_diversity} # For genetic mutation number of initial wires
 
-  # Gate knockout ("hard" LUT zeroing - resets globals)
+  # Gate knockout
   gate_knockout:
     active: false
     fraction: 0.1
@@ -83,7 +83,7 @@ pool:
     damage_prob: 0.05  # Probability of zeroing an entire LUT in selected circuits
     combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined strategy
 
-  # Soft LUT damage ("soft" LUT zeroing - preserves globals)
+  # Soft LUT damage
   soft_lut_damage:
     active: false
     fraction: 0.01

@@ -96,10 +96,10 @@ def compute_accuracy(y_pred, y_true):
 
 
 # Define loss functions for both types (L4 and BCE)
-def loss_f_l4(logits, wires, x, y0):
+def loss_f_l4(logits, wires, x, y0, gate_mask=None):
     """L4 loss function variant (for JIT compilation)"""
-    act = run_circuit(logits, wires, x)
-    hard_act = run_circuit(logits, wires, x, hard=True)
+    act = run_circuit(logits, wires, x, gate_mask=gate_mask)
+    hard_act = run_circuit(logits, wires, x, gate_mask=gate_mask, hard=True)
     y = act[-1]
     hard_y = hard_act[-1]
     res = y - y0
@@ -118,10 +118,10 @@ def loss_f_l4(logits, wires, x, y0):
     }
 
 
-def loss_f_bce(logits, wires, x, y0):
+def loss_f_bce(logits, wires, x, y0, gate_mask=None):
     """BCE loss function variant (for JIT compilation)"""
-    act = run_circuit(logits, wires, x)
-    hard_act = run_circuit(logits, wires, x, hard=True)
+    act = run_circuit(logits, wires, x, gate_mask=gate_mask)
+    hard_act = run_circuit(logits, wires, x, gate_mask=gate_mask, hard=True)
     y = act[-1]
     hard_y = hard_act[-1]
     loss = binary_cross_entropy(y, y0)
@@ -144,7 +144,7 @@ grad_loss_f_bce = jax.jit(jax.value_and_grad(loss_f_bce, has_aux=True))
 
 
 # Function dispatcher for loss computation (not used in training loop)
-def loss_f(logits, wires, x, y0, loss_type="l4"):
+def loss_f(logits, wires, x, y0, loss_type="l4", gate_mask=None):
     """
     Compute loss for a circuit given input and target output.
 
@@ -160,9 +160,9 @@ def loss_f(logits, wires, x, y0, loss_type="l4"):
         intermediate activations and accuracy
     """
     if loss_type == "bce":
-        return loss_f_bce(logits, wires, x, y0)
+        return loss_f_bce(logits, wires, x, y0, gate_mask=gate_mask)
     else:  # Default to L4 norm
-        return loss_f_l4(logits, wires, x, y0)
+        return loss_f_l4(logits, wires, x, y0, gate_mask=gate_mask)
 
 
 # Define a named tuple for training state to improve code clarity
@@ -177,7 +177,7 @@ def update_params(grad, opt_state, opt, logits):
     return new_logits, new_opt_state
 
 
-def train_step(state, opt, wires, x, y0, loss_type="l4", do_train=True):
+def train_step(state, opt, wires, x, y0, loss_type="l4", do_train=True, gate_mask=None):
     """
     Perform a single training step.
 
@@ -197,15 +197,15 @@ def train_step(state, opt, wires, x, y0, loss_type="l4", do_train=True):
     # Use pre-compiled gradient function based on loss type
     if do_train:
         if loss_type == "bce":
-            (loss, aux), grad = grad_loss_f_bce(logits, wires, x, y0)
+            (loss, aux), grad = grad_loss_f_bce(logits, wires, x, y0, gate_mask=gate_mask)
         else:  # Default to L4 norm
-            (loss, aux), grad = grad_loss_f_l4(logits, wires, x, y0)
+            (loss, aux), grad = grad_loss_f_l4(logits, wires, x, y0, gate_mask=gate_mask)
 
         # Update parameters (without JIT since optimizer is a function)
         new_logits, new_opt_state = update_params(grad, opt_state, opt, logits)
 
     else:
-        loss, aux = loss_f(logits, wires, x, y0, loss_type)
+        loss, aux = loss_f(logits, wires, x, y0, loss_type, gate_mask=gate_mask)
         new_logits = logits
         new_opt_state = opt_state
 

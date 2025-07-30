@@ -234,17 +234,30 @@ class NodeUpdateModule(nnx.Module):
 
         # Apply residual update only to non-input nodes (layer > 0)
         is_gate_node = nodes["layer"] > 0
+
+        # Check for gate knockout mask to prevent updates to knocked-out gates
+        gate_knockout_mask = nodes.get("gate_knockout_mask", None)
+        if gate_knockout_mask is not None:
+            # Knocked-out gates (mask == 0.0) should not receive updates
+            # Only allow updates to active gates (mask == 1.0) that are also gate nodes
+            update_allowed_logits = is_gate_node & (gate_knockout_mask == 1.0)
+            update_allowed_hidden = is_gate_node & (gate_knockout_mask == 1.0)
+        else:
+            # No knockout mask, allow updates to all gate nodes
+            update_allowed_logits = is_gate_node
+            update_allowed_hidden = is_gate_node
+
         # Ensure mask matches feature dimensions for broadcasting
-        is_gate_node_logits_mask = is_gate_node[:, None]
-        is_gate_node_hidden_mask = is_gate_node[:, None]
+        update_allowed_logits_mask = update_allowed_logits[:, None]
+        update_allowed_hidden_mask = update_allowed_hidden[:, None]
 
         updated_logits = jp.where(
-            is_gate_node_logits_mask,
+            update_allowed_logits_mask,
             current_logits + scaled_delta_logits,
             current_logits,
         )
         updated_hidden = jp.where(
-            is_gate_node_hidden_mask,
+            update_allowed_hidden_mask,
             current_hidden + scaled_delta_hidden,
             current_hidden,
         )

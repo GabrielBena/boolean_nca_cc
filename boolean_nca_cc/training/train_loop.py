@@ -1324,7 +1324,9 @@ def train_model(
             # Pool-based training
             # Sample a batch from the pool using the current (potentially dynamic) batch size
             rng, sample_key, loss_key = jax.random.split(rng, 3)
-            idxs, graphs, wires, logits = circuit_pool.sample(sample_key, meta_batch_size)
+            idxs, graphs, wires, logits, _gate_masks = circuit_pool.sample(
+                sample_key, meta_batch_size
+            )
 
             # Perform pool training step (sequential or standard)
             if use_sequential_batching:

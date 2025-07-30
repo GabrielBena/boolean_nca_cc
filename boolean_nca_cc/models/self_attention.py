@@ -242,6 +242,7 @@ class CircuitSelfAttention(nnx.Module):
         self.logit_proj = nnx.Linear(
             self.attention_dim,
             self.logit_dim,
+            use_bias=True,
             kernel_init=nnx.initializers.zeros if zero_init else nnx.initializers.kaiming_normal(),
             bias_init=nnx.initializers.zeros if zero_init else nnx.initializers.normal(stddev=1e-4),
             rngs=rngs,
@@ -259,6 +260,7 @@ class CircuitSelfAttention(nnx.Module):
         self.hidden_proj = nnx.Linear(
             self.attention_dim,
             circuit_hidden_dim,
+            use_bias=True,
             kernel_init=nnx.initializers.zeros if zero_init else nnx.initializers.kaiming_normal(),
             bias_init=nnx.initializers.zeros if zero_init else nnx.initializers.normal(stddev=1e-4),
             rngs=rngs,
@@ -383,6 +385,22 @@ class CircuitSelfAttention(nnx.Module):
         # Remove batch dimension
         logit_updates = logit_updates[0]
         hidden_updates = hidden_updates[0]
+
+        # Check for gate knockout mask to prevent updates to knocked-out gates
+        gate_knockout_mask = nodes.get("gate_knockout_mask", None)
+        if gate_knockout_mask is not None:
+            # Knocked-out gates (mask == 0.0) should not receive updates
+            # Only allow updates to active gates (mask == 1.0)
+            update_allowed_logits = gate_knockout_mask == 1.0
+            update_allowed_hidden = gate_knockout_mask == 1.0
+
+            # Ensure mask matches feature dimensions for broadcasting
+            update_allowed_logits_mask = update_allowed_logits[:, None]
+            update_allowed_hidden_mask = update_allowed_hidden[:, None]
+
+            # Apply updates only to allowed gates, zero out updates for knocked-out gates
+            logit_updates = jp.where(update_allowed_logits_mask, logit_updates, 0.0)
+            hidden_updates = jp.where(update_allowed_hidden_mask, hidden_updates, 0.0)
 
         # Update logits and hidden features in a residual manner
         updated_logits = nodes["logits"] + self.logit_scale * logit_updates
