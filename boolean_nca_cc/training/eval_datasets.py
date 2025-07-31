@@ -63,7 +63,10 @@ class UnifiedEvaluationDatasets:
             f"diversity={self.training_config['initial_diversity']})\n"
             f"  - OUT-of-distribution: {self.out_actual_batch_size} circuits (random wiring)\n"
         )
-        if self.in_actual_batch_size > self.target_batch_size:
+        if (
+            self.in_actual_batch_size is not None
+            and self.in_actual_batch_size > self.target_batch_size
+        ):
             summary += (
                 f"  - Note: IN-distribution size exceeds target ({self.target_batch_size}) "
                 f"to ensure full diversity coverage\n"
@@ -106,18 +109,21 @@ def create_unified_evaluation_datasets(
     in_distribution_key = jax.random.PRNGKey(evaluation_base_seed)
     out_of_distribution_key = jax.random.PRNGKey(evaluation_base_seed + 10000)  # Clearly separated
 
-    # 1. Create IN-distribution circuits (matching training pattern)
-    log.info("Creating IN-distribution evaluation circuits...")
-    in_distribution_wires, in_distribution_logits, in_actual_batch_size = (
-        _create_circuit_batch_with_pattern(
-            rng=in_distribution_key,
-            layer_sizes=layer_sizes,
-            arity=arity,
-            batch_size=eval_batch_size,
-            wiring_mode=training_wiring_mode,
-            initial_diversity=training_initial_diversity,
+    # 1. Create IN-distribution circuits (matching training pattern) (only for fixed and genetic)
+    if training_wiring_mode in ["fixed", "genetic"]:
+        log.info("Creating IN-distribution evaluation circuits...")
+        in_distribution_wires, in_distribution_logits, in_actual_batch_size = (
+            _create_circuit_batch_with_pattern(
+                rng=in_distribution_key,
+                layer_sizes=layer_sizes,
+                arity=arity,
+                batch_size=eval_batch_size,
+                wiring_mode=training_wiring_mode,
+                initial_diversity=training_initial_diversity,
+            )
         )
-    )
+    else:
+        in_distribution_wires, in_distribution_logits, in_actual_batch_size = (None, None, None)
 
     # 2. Create OUT-of-distribution circuits (always random)
     log.info("Creating OUT-of-distribution evaluation circuits...")

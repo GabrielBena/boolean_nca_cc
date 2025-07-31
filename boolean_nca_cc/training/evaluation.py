@@ -375,8 +375,10 @@ def evaluate_model_stepwise_batched(
     layer_sizes: list[tuple[int, int]] | None = None,
 ) -> dict:
     """
-    Evaluate GNN performance on a batch of circuits by running message passing steps
-    and collecting averaged metrics at each step.
+    Vectorized evaluation of GNN performance on a batch of circuits.
+
+    This mirrors the exact computation path of evaluate_model_stepwise but processes
+    all circuits in the batch simultaneously using vectorized operations.
 
     Args:
         model: Trained CircuitGNN or CircuitSelfAttention model
@@ -395,49 +397,7 @@ def evaluate_model_stepwise_batched(
     Returns:
         Dictionary with averaged metrics collected at each step
     """
-    # Build initial graphs for the batch
-    vmap_build_graph = jax.vmap(
-        lambda logits, wires: build_graph(
-            logits=logits,
-            wires=wires,
-            input_n=input_n,
-            arity=arity,
-            circuit_hidden_dim=circuit_hidden_dim,
-            loss_value=0.0,  # Will be calculated properly
-            bidirectional_edges=bidirectional_edges,
-        )
-    )
-
-    batch_graphs = vmap_build_graph(batch_logits, batch_wires)
-
-    # Calculate initial losses for the batch
-    vmap_get_loss = jax.vmap(
-        lambda logits, wires: get_loss_from_wires_logits(logits, wires, x_data, y_data, loss_type)
-    )
-
-    initial_losses, initial_aux = vmap_get_loss(batch_logits, batch_wires)
-    (
-        initial_hard_losses,
-        _,
-        _,
-        initial_accuracies,
-        initial_hard_accuracies,
-        initial_res,
-        _,
-    ) = list(initial_aux)
-
-    # Update graph globals with initial losses
-    batch_graphs = batch_graphs._replace(
-        globals=jp.stack([initial_losses, jp.zeros_like(initial_losses)], axis=1)
-    )
-
-    # Update output node losses for each graph in the batch
-    vmap_update_loss = jax.vmap(
-        lambda graph, res: update_output_node_loss(graph, layer_sizes, res.mean(axis=0))
-    )
-    batch_graphs = vmap_update_loss(batch_graphs, initial_res)
-
-    # Initialize metric storage
+    # Initialize metric storage - same structure as original
     step_metrics = {
         "step": [],
         "soft_loss": [],
@@ -447,7 +407,53 @@ def evaluate_model_stepwise_batched(
         "logits_mean": [],
     }
 
-    # Store initial metrics (averaged across batch)
+    # Store original shapes for reconstruction (EXACTLY like generator)
+    logits_original_shapes = [logit.shape[1:] for logit in batch_logits]  # Remove batch dim
+
+    # Calculate initial losses for the batch (EXACTLY like generator)
+    vmap_get_loss = jax.vmap(
+        lambda logits, wires: get_loss_from_wires_logits(logits, wires, x_data, y_data, loss_type)
+    )
+
+    initial_losses, initial_aux = vmap_get_loss(batch_logits, batch_wires)
+    (
+        initial_hard_losses,
+        initial_preds,
+        initial_pred_hards,
+        initial_accuracies,
+        initial_hard_accuracies,
+        initial_res,
+        initial_hard_res,
+    ) = initial_aux
+
+    # Build initial graphs using the same function as generator (vectorized)
+    # We need to handle the loss_value parameter carefully to avoid concretization issues
+    vmap_build_graph = jax.vmap(
+        lambda logits, wires: build_graph(
+            logits,
+            wires,
+            input_n,
+            arity,
+            circuit_hidden_dim,
+            loss_value=0.0,  # Use dummy value, will be set in globals later
+            bidirectional_edges=bidirectional_edges,
+        )
+    )
+    batch_graphs = vmap_build_graph(batch_logits, batch_wires)
+
+    # Initialize graph globals with [loss, update_steps] exactly like generator
+    current_update_steps = jp.zeros(initial_losses.shape[0])
+    batch_graphs = batch_graphs._replace(
+        globals=jp.stack([initial_losses, current_update_steps], axis=1)
+    )
+
+    # Update output node losses (vectorized)
+    vmap_update_loss = jax.vmap(
+        lambda graph, res: update_output_node_loss(graph, layer_sizes, res.mean(axis=0))
+    )
+    batch_graphs = vmap_update_loss(batch_graphs, initial_res)
+
+    # Yield initial state (step 0) - same as generator
     step_metrics["step"].append(0)
     step_metrics["soft_loss"].append(float(jp.mean(initial_losses)))
     step_metrics["hard_loss"].append(float(jp.mean(initial_hard_losses)))
@@ -455,52 +461,61 @@ def evaluate_model_stepwise_batched(
     step_metrics["hard_accuracy"].append(float(jp.mean(initial_hard_accuracies)))
     step_metrics["logits_mean"].append(float(jp.mean(batch_graphs.nodes["logits"])))
 
-    # Store original shapes for reconstruction
-    logits_original_shapes = [logit.shape[1:] for logit in batch_logits]  # Remove batch dim
-
-    # Run message passing steps
+    # Run optimization steps (EXACTLY like the generator loop)
     current_graphs = batch_graphs
 
     for step in range(1, n_message_steps + 1):
-        # Apply model to all graphs in batch
+        # Extract the current update_steps count from graph globals (EXACTLY like generator)
+        current_update_steps = jp.zeros(current_graphs.globals.shape[0])
+        if current_graphs.globals is not None and current_graphs.globals.shape[-1] > 1:
+            current_update_steps = current_graphs.globals[..., 1]
+
+        # Apply one step of model processing (vectorized - EXACTLY like generator)
         vmap_model = jax.vmap(model)
         updated_graphs = vmap_model(current_graphs)
 
-        # Extract logits from updated graphs
-        vmap_extract_logits = jax.vmap(
-            lambda graph: extract_logits_from_graph(graph, logits_original_shapes)
+        # Use the unified get_loss_and_update_graph function for consistency (vectorized)
+        vmap_get_loss_and_update = jax.vmap(
+            lambda graph, wires: get_loss_and_update_graph(
+                graph,
+                logits_original_shapes,
+                wires,
+                x_data,
+                y_data,
+                loss_type,
+                layer_sizes,
+            )
         )
-        current_batch_logits = vmap_extract_logits(updated_graphs)
 
-        # Calculate losses for the batch
-        current_losses, current_aux = vmap_get_loss(current_batch_logits, batch_wires)
+        updated_graphs, losses, current_logits, aux_data = vmap_get_loss_and_update(
+            updated_graphs, batch_wires
+        )
+
+        # Extract auxiliary data (vectorized)
         (
-            current_hard_losses,
-            _,
-            _,
-            current_accuracies,
-            current_hard_accuracies,
-            current_res,
-            _,
-        ) = list(current_aux)
+            hard_losses,
+            preds,
+            pred_hards,
+            accuracies,
+            hard_accuracies,
+            res,
+            hard_res,
+        ) = aux_data
 
-        # Update output node losses
-        updated_graphs = vmap_update_loss(updated_graphs, current_res)
-
-        # Update globals with new losses and incremented steps
-        current_steps = updated_graphs.globals[:, 1] + 1
+        # Update with the computed loss and incremented update_steps (EXACTLY like generator)
         updated_graphs = updated_graphs._replace(
-            globals=jp.stack([current_losses, current_steps], axis=1)
+            globals=jp.stack([losses, current_update_steps + 1], axis=1)
         )
 
-        # Store averaged metrics
-        step_metrics["step"].append(step)
-        step_metrics["soft_loss"].append(float(jp.mean(current_losses)))
-        step_metrics["hard_loss"].append(float(jp.mean(current_hard_losses)))
-        step_metrics["soft_accuracy"].append(float(jp.mean(current_accuracies)))
-        step_metrics["hard_accuracy"].append(float(jp.mean(current_hard_accuracies)))
-        step_metrics["logits_mean"].append(float(jp.mean(updated_graphs.nodes["logits"])))
-
+        # Update the graphs for next iteration
         current_graphs = updated_graphs
+
+        # Store averaged metrics (same as generator yields)
+        step_metrics["step"].append(step)
+        step_metrics["soft_loss"].append(float(jp.mean(losses)))
+        step_metrics["hard_loss"].append(float(jp.mean(hard_losses)))
+        step_metrics["soft_accuracy"].append(float(jp.mean(accuracies)))
+        step_metrics["hard_accuracy"].append(float(jp.mean(hard_accuracies)))
+        step_metrics["logits_mean"].append(float(jp.mean(current_graphs.nodes["logits"])))
 
     return step_metrics

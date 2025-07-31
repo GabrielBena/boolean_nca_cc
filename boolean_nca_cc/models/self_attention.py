@@ -279,7 +279,6 @@ class CircuitSelfAttention(nnx.Module):
         self,
         senders: jp.ndarray,
         receivers: jp.ndarray,
-        bidirectional: bool = True,
     ) -> jp.ndarray:
         """
         Create an attention mask based on the circuit wiring.
@@ -298,10 +297,6 @@ class CircuitSelfAttention(nnx.Module):
         if len(senders) > 0:
             # Set mask[receiver, sender] = True for all edges
             mask = mask.at[receivers, senders].set(True)
-
-            if bidirectional:
-                # Also set mask[sender, receiver] = True for bidirectional attention
-                mask = mask.at[senders, receivers].set(True)
 
         # Add self-connections (diagonal of True)
         mask = mask | jp.eye(self.n_node, dtype=jp.bool_)
@@ -366,7 +361,7 @@ class CircuitSelfAttention(nnx.Module):
 
         # Create attention mask if not provided
         if attention_mask is None:
-            attention_mask = self._create_attention_mask(senders, receivers, bidirectional=True)
+            attention_mask = self._create_attention_mask(senders, receivers)
 
         # Project features to the attention dimension
         x = self.feature_proj(features)
@@ -432,9 +427,7 @@ def run_self_attention_scan(
         all_graphs: List of graphs from each step (including initial)
     """
     # --- Compute the mask *once* before the scan ---
-    attention_mask = model._create_attention_mask(
-        graph.senders, graph.receivers, bidirectional=True
-    )
+    attention_mask = model._create_attention_mask(graph.senders, graph.receivers)
     # ---------------------------------------------
 
     def scan_body(carry_graph, _):
@@ -488,9 +481,7 @@ def run_self_attention_scan_with_loss(
     from boolean_nca_cc.training.evaluation import get_loss_and_update_graph
 
     # --- Compute the mask *once* before the scan ---
-    attention_mask = model._create_attention_mask(
-        graph.senders, graph.receivers, bidirectional=True
-    )
+    attention_mask = model._create_attention_mask(graph.senders, graph.receivers)
     # ---------------------------------------------
 
     def attention_step_with_loss(carry, _):
