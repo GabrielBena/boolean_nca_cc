@@ -25,9 +25,9 @@ wandb:
 # Circuit configuration
 circuit:
   task: "binary_multiply"
-  input_bits: 8
-  output_bits: 8
-  arity: 4
+  input_bits: 4
+  output_bits: 4
+  arity: 2
   num_layers: 3
   layer_sizes: null  # Auto-generate if null 
   circuit_hidden_dim: 32
@@ -51,8 +51,7 @@ training:
     exponent: 1
     alpha: 1e-1 # final lr = 1% of initial lr
   # NUMBER OF EPOCHS
-  epochs: 8192 # 512
-  epochs_power_of_2: 12 # 2^n
+  epochs: 4096 # 512
   # USE SCAN
   use_scan: false
 
@@ -67,13 +66,13 @@ pool:
   persistent_knockout:
     fraction: 0.8 # 
     damage_prob: 20.0 
-    knockout_diversity: 128  # Vocabulary size for knockout patterns
+    knockout_diversity: 2  # Vocabulary size for knockout patterns
 
 eval:
   # Periodic evaluation parameters
-  periodic_eval_enabled: true
+  periodic_eval_enabled: false
   periodic_eval_inner_steps: 100
-  periodic_eval_interval: 512
+  periodic_eval_interval: 128
   periodic_eval_test_seed: 42
   periodic_eval_log_stepwise: false
   periodic_eval_batch_size: ${pool.persistent_knockout.knockout_diversity}  # Batch size for knockout evaluation (should match knockout_diversity)
@@ -82,8 +81,29 @@ eval:
   knockout_eval:
     enabled: true
     damage_prob: ${pool.persistent_knockout.damage_prob}
+  
+  # Final BP vs SA comparison evaluation
+  final_eval_enabled: true
+  final_eval_inner_steps: ${eval.periodic_eval_inner_steps}
+  final_eval_seed: 999
 
 # Logging configuration
 logging:
   log_interval: 16  # Log metrics every N epochs
   level: "INFO" 
+
+# Backpropagation baseline configuration
+backprop:
+  enabled: true
+  epochs: 200 
+  learning_rate: 1
+  weight_decay: 1e-1
+  optimizer: "adamw"
+  beta1: 0.8
+  beta2: 0.8
+  
+  # Knockout vocabulary configuration for backprop training
+  knockout_vocabulary:
+    enabled: true  # Set to true to enable knockout patterns in backprop
+    size: ${pool.persistent_knockout.knockout_diversity}  # Number of knockout patterns to test
+    damage_prob: ${pool.persistent_knockout.damage_prob}  # Number of gates to knock out per pattern 

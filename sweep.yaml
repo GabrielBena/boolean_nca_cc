@@ -21,12 +21,18 @@ parameters:
       # - 512
   #     # - 1024
 
-  pool.persistent_knockout.damage_prob:
+  training.loss_type:
     values:
-      - 20
-      - 50
-      - 100
-      - 160
+      - "l4"
+      - "l2"
+      - "bce"
+
+  # pool.persistent_knockout.damage_prob:
+  #   values:
+  #     - 20
+  #     - 50
+  #     - 100
+  #     - 160
 
 # Add this command block to format arguments correctly for Hydra
 command:

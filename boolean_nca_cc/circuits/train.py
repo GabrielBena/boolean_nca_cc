@@ -147,60 +147,34 @@ grad_loss_f_bce = jax.jit(jax.value_and_grad(loss_f_bce, has_aux=True))
 # Knockout-related functions
 def create_gate_mask_from_knockout_pattern(knockout_pattern, layer_sizes):
     """
-    Convert knockout pattern to gate_mask for run_circuit.
-  
+    Convert a knockout pattern to a gate_mask compatible with run_circuit.
+    
     Args:
-        knockout_pattern: Boolean array where True = knocked out
+        knockout_pattern: 1D boolean array where True = knocked out, False = active
         layer_sizes: List of (total_gates, group_size) for each layer
-  
+        
     Returns:
-        List of gate masks for each layer
+        List of gate masks for each layer, where 1.0 = active, 0.0 = knocked out
     """
     gate_masks = []
     current_idx = 0
-  
-    for total_gates, group_size in layer_sizes:
+    
+    for layer_idx, (total_gates, group_size) in enumerate(layer_sizes):
         layer_end = current_idx + total_gates
-        layer_pattern = knockout_pattern[current_idx:layer_end]
-      
-        # Create mask: 1.0 for active gates, 0.0 for knocked out
-        layer_mask = jp.where(layer_pattern, 0.0, 1.0)
+        
+        # Extract the knockout pattern for this layer
+        layer_knockout = knockout_pattern[current_idx:layer_end]
+        
+        # Convert boolean to float (False -> 1.0, True -> 0.0)
+        # This inverts the knockout pattern since gate_mask uses opposite convention
+        layer_mask = jp.where(layer_knockout, 0.0, 1.0)
+        
         gate_masks.append(layer_mask)
-      
+        
         current_idx = layer_end
-  
+    
     return gate_masks
 
-
-# def apply_knockout_mask_to_gradients(grads, knockout_pattern, layer_sizes):
-#     """
-#     Zero out gradients for knocked out parameters.
-  
-#     Args:
-#         grads: Gradient tree structure matching logits structure
-#         knockout_pattern: Boolean array where True = knocked out
-#         layer_sizes: List of (total_gates, group_size) for each layer
-  
-#     Returns:
-#         Masked gradients with knocked out parameters zeroed
-#     """
-#     masked_grads = []
-#     current_idx = 0
-  
-#     for grad_layer, (total_gates, group_size) in zip(grads, layer_sizes):
-#         layer_end = current_idx + total_gates
-#         layer_pattern = knockout_pattern[current_idx:layer_end]
-      
-#         # Create active mask for this layer
-#         active_mask = ~layer_pattern
-      
-#         # Apply mask to gradients (zero out knocked out parameters)
-#         masked_grad_layer = grad_layer * active_mask[:, None, None]  # Broadcast to logit dimensions
-#         masked_grads.append(masked_grad_layer)
-      
-#         current_idx = layer_end
-  
-#     return masked_grads
 
 
 # Function dispatcher for loss computation (deprecated - use loss functions directly)
@@ -271,10 +245,6 @@ def train_step(state, opt, wires, x, y0, loss_type="l4", do_train=True,
         else:  # Default to L4 norm
             (loss, aux), grad = grad_loss_f_l4(logits, wires, x, y0, gate_mask)
         
-        # # Apply knockout mask to gradients if knockout_pattern is provided
-        # if knockout_pattern is not None:
-        #     grad = apply_knockout_mask_to_gradients(grad, knockout_pattern, layer_sizes)
-
         # Update parameters
         new_logits, new_opt_state = update_params(grad, opt_state, opt, logits)
 

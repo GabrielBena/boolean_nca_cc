@@ -17,12 +17,13 @@ from tqdm.auto import tqdm
 from functools import partial
 from flax import nnx
 import pandas as pd
+import matplotlib.pyplot as plt
 
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.circuits.tasks import get_task_data
 from boolean_nca_cc import generate_layer_sizes
 from boolean_nca_cc.circuits.train import TrainState, loss_f_l4, loss_f_bce, train_step
-from boolean_nca_cc.circuits.train import train_step_with_knockout
+from boolean_nca_cc.circuits.train import create_gate_mask_from_knockout_pattern
 
 from boolean_nca_cc.training.train_loop import (
     train_model,
@@ -31,12 +32,13 @@ from boolean_nca_cc.utils.graph_builder import build_graph
 from boolean_nca_cc.training.utils import (
     cleanup_redundant_wandb_artifacts,
 )
+from boolean_nca_cc.training.pool.structural_perturbation import create_knockout_vocabulary
 
 # Configure logging
 log = logging.getLogger(__name__)
 
 
-def run_backpropagation_training(cfg, x_data, y_data, loss_type="l4"):
+def run_backpropagation_training(cfg, x_data, y_data, loss_type="l4", knockout_patterns=None):
     """
     Run standard backpropagation training for comparison.
 
@@ -45,12 +47,27 @@ def run_backpropagation_training(cfg, x_data, y_data, loss_type="l4"):
         x_data: Input data
         y_data: Target data
         loss_type: Loss function type ('l4' or 'bce')
+        knockout_patterns: Optional array of knockout patterns to test. If provided,
+                          training will be run for each pattern in the vocabulary.
 
     Returns:
-        Dictionary of training results
+        Dictionary of training results. If knockout_patterns is provided, returns
+        structured results with performance per pattern.
     """
-    log.info("Running baseline backpropagation training")
+    if knockout_patterns is not None:
+        log.info(f"Running backpropagation training with {len(knockout_patterns)} knockout patterns")
+        return _run_backpropagation_training_with_knockouts(
+            cfg, x_data, y_data, loss_type, knockout_patterns
+        )
+    else:
+        log.info("Running baseline backpropagation training")
+        return _run_backpropagation_training_single(cfg, x_data, y_data, loss_type)
 
+
+def _run_backpropagation_training_single(cfg, x_data, y_data, loss_type="l4"):
+    """
+    Run standard backpropagation training for a single circuit (no knockouts).
+    """
     # Generate circuit
     key = jax.random.PRNGKey(cfg.test_seed)
     wires, logits = gen_circuit(key, cfg.circuit.layer_sizes, arity=cfg.circuit.arity)
@@ -153,6 +170,147 @@ def run_backpropagation_training(cfg, x_data, y_data, loss_type="l4"):
     return results
 
 
+def _run_backpropagation_training_with_knockouts(cfg, x_data, y_data, loss_type, knockout_patterns):
+    """
+    Run backpropagation training for each knockout pattern in the vocabulary.
+    """
+    # Generate circuit
+    key = jax.random.PRNGKey(cfg.test_seed)
+    wires, logits = gen_circuit(key, cfg.circuit.layer_sizes, arity=cfg.circuit.arity)
+
+    # Setup optimizer
+    if cfg.backprop.optimizer == "adamw":
+        opt = optax.adamw(
+            cfg.backprop.learning_rate,
+            b1=cfg.backprop.beta1,
+            b2=cfg.backprop.beta2,
+            weight_decay=cfg.backprop.weight_decay,
+        )
+    else:
+        opt = optax.adam(cfg.backprop.learning_rate)
+
+    patterns_performance = []
+    
+    # Train on each knockout pattern
+    for pattern_idx, knockout_pattern in enumerate(knockout_patterns):
+        log.info(f"Training on knockout pattern {pattern_idx + 1}/{len(knockout_patterns)}")
+        
+        # Initialize fresh state for each pattern
+        state = TrainState(params=logits, opt_state=opt.init(logits))
+        
+        # Training loop for this pattern
+        losses = []
+        hard_losses = []
+        accuracies = []
+        hard_accuracies = []
+
+        # Partial function for train_step with knockout pattern
+        _train_step_fn = partial(
+            train_step,
+            opt=opt,
+            wires=wires,
+            x=x_data,
+            y0=y_data,
+            loss_type=loss_type,
+            do_train=True,
+            knockout_pattern=knockout_pattern,
+            layer_sizes=cfg.circuit.layer_sizes,
+        )
+
+        pbar = tqdm(range(cfg.backprop.epochs), desc=f"BP pattern {pattern_idx + 1}")
+        for i in pbar:
+            loss, aux_metrics, new_state = _train_step_fn(state=state)
+            state = new_state
+
+            accuracy = float(aux_metrics["accuracy"])
+            hard_accuracy = float(aux_metrics["hard_accuracy"])
+            hard_loss = float(aux_metrics["hard_loss"])
+
+            # Log metrics
+            if i % cfg.logging.log_interval == 0:
+                log.info(
+                    f"BP Pattern {pattern_idx + 1} Epoch {i}: Loss={loss:.4f}, Acc={accuracy:.4f}, Hard Acc={hard_accuracy:.4f}"
+                )
+
+            # Store metrics
+            losses.append(float(loss))
+            hard_losses.append(hard_loss)
+            accuracies.append(accuracy)
+            hard_accuracies.append(hard_accuracy)
+
+            # Update tqdm postfix
+            pbar.set_postfix(
+                loss=loss,
+                acc=accuracy,
+                hard_acc=hard_accuracy,
+                hard_loss=hard_loss,
+            )
+
+        # Final evaluation for this pattern
+        loss_fn = loss_f_l4 if loss_type == "l4" else loss_f_bce
+        final_loss, final_aux_metrics = loss_fn(
+            state.params, wires, x_data, y_data, 
+            gate_mask=create_gate_mask_from_knockout_pattern(knockout_pattern, cfg.circuit.layer_sizes)
+        )
+        final_accuracy = float(final_aux_metrics["accuracy"])
+        final_hard_accuracy = float(final_aux_metrics["hard_accuracy"])
+        final_hard_loss = float(final_aux_metrics["hard_loss"])
+
+        log.info(
+            f"BP Pattern {pattern_idx + 1} Final: Loss={final_loss:.4f}, Acc={final_accuracy:.4f}, Hard Acc={final_hard_accuracy:.4f}"
+        )
+
+        # Store results for this pattern
+        pattern_results = {
+            "pattern_idx": pattern_idx,
+            "knockout_pattern": knockout_pattern,
+            "losses": losses,
+            "hard_losses": hard_losses,
+            "accuracies": accuracies,
+            "hard_accuracies": hard_accuracies,
+            "final_loss": float(final_loss),
+            "final_hard_loss": final_hard_loss,
+            "final_accuracy": final_accuracy,
+            "final_hard_accuracy": final_hard_accuracy,
+            "params": state.params,
+        }
+        
+        patterns_performance.append(pattern_results)
+
+    # Calculate aggregate metrics
+    final_losses = [p["final_loss"] for p in patterns_performance]
+    final_accuracies = [p["final_accuracy"] for p in patterns_performance]
+    final_hard_accuracies = [p["final_hard_accuracy"] for p in patterns_performance]
+    
+    best_pattern_idx = min(range(len(final_losses)), key=lambda i: final_losses[i])
+    worst_pattern_idx = max(range(len(final_losses)), key=lambda i: final_losses[i])
+    
+    aggregate_metrics = {
+        "mean_final_loss": float(jax.numpy.mean(jax.numpy.array(final_losses))),
+        "std_final_loss": float(jax.numpy.std(jax.numpy.array(final_losses))),
+        "mean_final_accuracy": float(jax.numpy.mean(jax.numpy.array(final_accuracies))),
+        "std_final_accuracy": float(jax.numpy.std(jax.numpy.array(final_accuracies))),
+        "mean_final_hard_accuracy": float(jax.numpy.mean(jax.numpy.array(final_hard_accuracies))),
+        "std_final_hard_accuracy": float(jax.numpy.std(jax.numpy.array(final_hard_accuracies))),
+        "best_pattern_idx": best_pattern_idx,
+        "worst_pattern_idx": worst_pattern_idx,
+        "best_final_loss": final_losses[best_pattern_idx],
+        "worst_final_loss": final_losses[worst_pattern_idx],
+    }
+
+    log.info(f"Knockout training complete. Mean final loss: {aggregate_metrics['mean_final_loss']:.4f}")
+    log.info(f"Best pattern: {best_pattern_idx}, Worst pattern: {worst_pattern_idx}")
+
+    results = {
+        "patterns_performance": patterns_performance,
+        "vocabulary_patterns": knockout_patterns,
+        "aggregate_metrics": aggregate_metrics,
+        "wires": wires,  # Same wires for all patterns
+    }
+
+    return results
+
+
 
 @hydra.main(version_base=None, config_path="configs", config_name="config")
 def main(cfg: DictConfig) -> None:
@@ -229,16 +387,25 @@ def main(cfg: DictConfig) -> None:
         cfg.circuit.task, case_n, input_bits=input_n, output_bits=output_n
     )
 
+    # Generate knockout vocabulary for backprop training if enabled
+    knockout_vocabulary = None
+    if cfg.backprop.enabled and hasattr(cfg.backprop, 'knockout_vocabulary') and cfg.backprop.knockout_vocabulary.enabled:
+        log.info("Generating knockout vocabulary for backprop training")
+        rng, vocab_key = jax.random.split(rng)
+        knockout_vocabulary = create_knockout_vocabulary(
+            rng=vocab_key,
+            vocabulary_size=cfg.backprop.knockout_vocabulary.size,
+            layer_sizes=layer_sizes,
+            damage_prob=cfg.backprop.knockout_vocabulary.damage_prob,
+        )
+        log.info(f"Generated knockout vocabulary with {len(knockout_vocabulary)} patterns")
 
-        # Run backpropagation training for comparison if enabled
+    # Run backpropagation training for comparison if enabled
     bp_results = None
     if cfg.backprop.enabled:
         bp_results = run_backpropagation_training(
-            cfg, x, y0, loss_type=cfg.training.loss_type
+            cfg, x, y0, loss_type=cfg.training.loss_type, knockout_patterns=knockout_vocabulary
         )
-        # plot_training_curves(
-        #     bp_results, "Backpropagation", os.path.join(output_dir, "plots")
-        # )
     # Initialize model
     rng, init_rng = jax.random.split(rng)
 
@@ -303,7 +470,7 @@ def main(cfg: DictConfig) -> None:
         # Training hyperparameters
         learning_rate=cfg.training.learning_rate,
         weight_decay=cfg.training.weight_decay,
-        epochs=cfg.training.epochs or 2**cfg.training.epochs_power_of_2,
+        epochs=cfg.training.epochs,
         n_message_steps=cfg.training.n_message_steps,
         use_scan=cfg.training.use_scan,
         # Loss parameters
@@ -338,6 +505,52 @@ def main(cfg: DictConfig) -> None:
         log_interval=cfg.logging.log_interval,
         wandb_run_config=OmegaConf.to_container(cfg, resolve=True),
     )
+
+    # Run final BP vs SA comparison evaluation if enabled
+    if (cfg.backprop.enabled and bp_results is not None and 
+        cfg.eval.get("final_eval_enabled", False)):
+        
+        log.info("Running final BP vs SA comparison evaluation")
+        
+        # Import the comparison function
+        from boolean_nca_cc.training.utils import run_final_bp_sa_comparison, plot_bp_vs_sa_comparison
+        
+        # Run final comparison evaluation
+        comparison_results = run_final_bp_sa_comparison(
+            model=model_results["model"],
+            bp_results=bp_results,
+            knockout_vocabulary=knockout_vocabulary,
+            cfg=cfg,
+            x_data=x,
+            y_data=y0,
+            layer_sizes=layer_sizes,
+            input_n=input_n,
+            arity=arity,
+            circuit_hidden_dim=cfg.model.circuit_hidden_dim,
+            n_message_steps=cfg.eval.get("final_eval_inner_steps", 100),
+            loss_type=cfg.training.loss_type,
+        )
+        
+        # Create comparison plot and save locally
+        comparison_plot = plot_bp_vs_sa_comparison(comparison_results)
+        
+        # Create results/visuals directory if it doesn't exist
+        os.makedirs("results/visuals", exist_ok=True)
+        
+        # Save plot locally
+        plot_filename = f"results/visuals/bp_vs_sa_comparison_{cfg.wandb.run_name or 'run'}.png"
+        comparison_plot.savefig(plot_filename, dpi=300, bbox_inches='tight')
+        plt.close(comparison_plot)
+        
+        log.info(f"BP vs SA comparison plot saved to: {plot_filename}")
+        
+        # Log comparison results to wandb (metrics only, no plot)
+        if cfg.wandb.enabled:
+            wandb.log(comparison_results)
+            log.info("BP vs SA comparison metrics logged to wandb")
+        
+        # Add comparison results to model_results for return
+        model_results["bp_sa_comparison"] = comparison_results
 
     # Close wandb if enabled
     if cfg.wandb.enabled:

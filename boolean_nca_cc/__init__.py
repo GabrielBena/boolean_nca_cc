@@ -20,7 +20,6 @@ from boolean_nca_cc.circuits.train import (
     TrainState, 
     train_step, 
     create_gate_mask_from_knockout_pattern,
-    apply_knockout_mask_to_gradients
 )
 from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
 from boolean_nca_cc.models import CircuitSelfAttention
@@ -39,9 +38,7 @@ __all__ = [
     "run_layer",
     "TrainState",
     "train_step",
-    "train_step_with_knockout",
     "create_gate_mask_from_knockout_pattern",
-    "apply_knockout_mask_to_gradients",
     # Models
     "CircuitSelfAttention",
     # Utils
