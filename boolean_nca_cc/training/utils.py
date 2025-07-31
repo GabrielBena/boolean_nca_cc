@@ -10,22 +10,14 @@ instead of relying on framework-specific serialization.
 import logging
 import os
 import pickle
-import sys
-from types import ModuleType
 
-import flax
-import hydra
 import jax
 import matplotlib.pyplot as plt
 import numpy as np
 from flax import nnx
-from omegaconf import OmegaConf
 
 import wandb
-from boolean_nca_cc.circuits.model import gen_circuit, generate_layer_sizes
 from boolean_nca_cc.training.schedulers import get_learning_rate_schedule
-from boolean_nca_cc.utils.flax_compatibility import setup_complete_flax_compatibility
-from boolean_nca_cc.utils.graph_builder import build_graph
 
 log = logging.getLogger(__name__)
 
