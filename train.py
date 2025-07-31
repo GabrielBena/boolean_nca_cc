@@ -26,6 +26,7 @@ from boolean_nca_cc import generate_layer_sizes
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.circuits.tasks import get_task_data
 from boolean_nca_cc.circuits.train import TrainState, loss_f_bce, loss_f_l4, train_step
+from boolean_nca_cc.training.checkpointing import save_checkpoint
 from boolean_nca_cc.training.eval_datasets import (
     create_unified_evaluation_datasets,
 )
@@ -36,7 +37,6 @@ from boolean_nca_cc.training.train_loop import (
 from boolean_nca_cc.training.utils import (
     cleanup_redundant_wandb_artifacts,
     plot_training_curves,
-    save_checkpoint,
 )
 from boolean_nca_cc.utils.graph_builder import build_graph
 
