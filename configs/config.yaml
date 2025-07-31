@@ -24,7 +24,7 @@ wandb:
 
 # Circuit configuration
 circuit:
-  task: "reverse"
+  task: "binary_multiply"
   input_bits: 8
   output_bits: 8
   arity: 4
@@ -47,7 +47,7 @@ training:
   meta_batch_size: 256
   batch_chunk_size: 128  # Sequential batch processing chunk size (null means use meta_batch_size)
   # OPTIMIZATION
-  learning_rate: 1e-4
+  learning_rate: 2e-4
   weight_decay: 1e-5
   # LEARNING RATE SCHEDULER
   lr_scheduler: "linear_warmup"  # Options: "constant", "exponential", "cosine", "linear_warmup"
@@ -74,6 +74,13 @@ pool:
   n_swaps_per_layer: null # For genetic mutation number of swaps per layer
   initial_diversity: ${training.initial_diversity} # For genetic mutation number of initial wires
 
+  # Wire shuffling
+  wire_shuffling:
+    active: false
+    fraction: 0.125
+    interval: ${pool.reset_interval}
+    strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
+  
   # Gate knockout
   gate_knockout:
     active: false

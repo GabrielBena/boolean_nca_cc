@@ -707,8 +707,6 @@ class GraphPool(struct.PyTreeNode):
             selection_key, fraction, selection_strategy, combined_weights
         )
 
-        num_knockout = len(knockout_idxs)
-
         # Extract logits and wires for the selected circuits
         selected_logits = jax.tree.map(lambda leaf: leaf[knockout_idxs], self.logits)
         selected_wires = jax.tree.map(lambda leaf: leaf[knockout_idxs], self.wires)
@@ -808,8 +806,6 @@ class GraphPool(struct.PyTreeNode):
         perturb_idxs, avg_steps_perturbed = self.get_reset_indices(
             selection_key, fraction, selection_strategy, combined_weights
         )
-
-        num_perturb = len(perturb_idxs)
 
         # Extract logits and wires for the selected circuits
         selected_logits = jax.tree.map(lambda leaf: leaf[perturb_idxs], self.logits)
