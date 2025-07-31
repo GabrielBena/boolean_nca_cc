@@ -491,6 +491,7 @@ class CircuitOptimizationDemo:
                 "config.circuit.num_layers": self.layer_n,
                 "config.model.type": model_type,
                 "config.training.wiring_mode": self.wiring_mode,
+                "config.circuit.task": self.available_tasks[self.task_idx],
             }
 
             # Load frozen model
@@ -501,8 +502,8 @@ class CircuitOptimizationDemo:
                 entity=self.wandb_entity,
                 download_dir=self.wandb_download_dir,
                 filename="latest_checkpoint",
-                select_by_best_metric=True,
-                metric_name="training/hard_accuracy",
+                select_by_best_metric=False,
+                run_from_last=2 if self.available_tasks[self.task_idx] == "reverse" else 1,
             )
 
             self.frozen_model = model
