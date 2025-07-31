@@ -25,6 +25,9 @@ dependencies = [
     "optax>=0.1.7",
     "jraph>=0.0.6.dev0",
     
+    # Checkpointing (robust cross-version compatibility)
+    "orbax-checkpoint>=0.5.0",
+    
     # Scientific computing
     "numpy>=1.21.0",
     

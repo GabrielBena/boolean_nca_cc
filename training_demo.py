@@ -31,6 +31,9 @@ from boolean_nca_cc import generate_layer_sizes
 # Import shared training infrastructure
 from boolean_nca_cc.circuits.model import gen_circuit, run_circuit
 from boolean_nca_cc.circuits.tasks import TASKS, get_task_data
+
+# Import training loop functions
+from boolean_nca_cc.training.checkpointing import load_best_model_from_wandb
 from boolean_nca_cc.training.evaluation import (
     evaluate_model_stepwise_generator,
     get_loss_from_wires_logits,
@@ -38,9 +41,6 @@ from boolean_nca_cc.training.evaluation import (
 
 # Import genetic mutation functions
 from boolean_nca_cc.training.pool.perturbation import mutate_wires_swap
-
-# Import training loop functions
-from boolean_nca_cc.training.utils import load_best_model_from_wandb
 
 ################## circuit gate and wire use analysis ##################
 
@@ -155,9 +155,9 @@ class CircuitOptimizationDemo:
 
     def __init__(self):
         # Circuit configuration
-        self.input_n = 4
-        self.output_n = 4
-        self.arity = 2
+        self.input_n = 8
+        self.output_n = 8
+        self.arity = 4
         self.layer_n = 3
         self.hidden_dim = 64
 
@@ -166,7 +166,7 @@ class CircuitOptimizationDemo:
 
         # Wiring configuration
         self.wiring_modes = ["fixed", "random"]
-        self.wiring_mode_idx = 0
+        self.wiring_mode_idx = 1
         self.wiring_mode = self.wiring_modes[self.wiring_mode_idx]
         self.wiring_seed = 42  # Direct control over wiring seed
         self.wiring_key = jax.random.PRNGKey(self.wiring_seed)
@@ -181,7 +181,7 @@ class CircuitOptimizationDemo:
 
         # Task configuration
         self.available_tasks = [*list(TASKS.keys()), "text", "noise"]
-        self.task_idx = 0
+        self.task_idx = 6
         self.task_text = "Hello Neural CA"
         self.noise_p = 0.5
         self.sample_noise()
@@ -442,7 +442,7 @@ class CircuitOptimizationDemo:
                 y_data=self.y0,
                 input_n=self.input_n,
                 arity=self.arity,
-                hidden_dim=hidden_dim_for_graph,  # Use model's hidden_dim
+                circuit_hidden_dim=hidden_dim_for_graph,  # Use model's hidden_dim
                 max_steps=None,  # Infinite steps for live demo
                 loss_type=self.loss_type,
                 bidirectional_edges=True,
@@ -497,10 +497,12 @@ class CircuitOptimizationDemo:
             model, loaded_dict, loaded_config = load_best_model_from_wandb(
                 run_id=self.run_id,
                 filters=filters if not self.run_id else None,
-                seed=42,
                 project=self.wandb_project,
                 entity=self.wandb_entity,
                 download_dir=self.wandb_download_dir,
+                filename="latest_checkpoint",
+                select_by_best_metric=True,
+                metric_name="training/hard_accuracy",
             )
 
             self.frozen_model = model
@@ -510,6 +512,11 @@ class CircuitOptimizationDemo:
             if hasattr(loaded_config, "model") and hasattr(loaded_config.model, "hidden_dim"):
                 self.model_hidden_dim = loaded_config.model.hidden_dim
                 print(f"Using model hidden_dim={self.model_hidden_dim} from loaded config")
+            elif hasattr(loaded_config, "circuit") and hasattr(
+                loaded_config.circuit, "circuit_hidden_dim"
+            ):
+                self.model_hidden_dim = loaded_config.circuit.circuit_hidden_dim
+                print(f"Using circuit hidden_dim={self.model_hidden_dim} from loaded config")
             else:
                 self.model_hidden_dim = self.hidden_dim  # Fallback to demo default
                 print(
@@ -765,7 +772,7 @@ class CircuitOptimizationDemo:
         self.update_task()
 
         # Reinitialize optimization method
-        self.initialize_optimization_method()
+        # self.initialize_optimization_method()
 
         # Reset optimization progress
         self.step_i = 0

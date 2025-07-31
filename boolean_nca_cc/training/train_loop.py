@@ -20,6 +20,7 @@ from tqdm.auto import tqdm
 
 import wandb
 from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention
+from boolean_nca_cc.training.checkpointing import save_checkpoint
 from boolean_nca_cc.training.eval_datasets import (
     UnifiedEvaluationDatasets,
     create_unified_evaluation_datasets,
@@ -35,7 +36,6 @@ from boolean_nca_cc.training.schedulers import (
     get_step_beta,
     should_reset_pool,
 )
-from boolean_nca_cc.training.utils import save_checkpoint
 
 # Type alias for PyTree
 PyTree = Any
@@ -389,6 +389,7 @@ def _get_metric_value(
     elif metric_source == "eval":
         if eval_metrics is None:
             raise ValueError("Evaluation metrics not available for eval source")
+
         # Map to evaluation metric keys (use IN-distribution evaluation for consistency)
         eval_key_map = {
             "loss": "eval_in/final_loss",
@@ -396,7 +397,25 @@ def _get_metric_value(
             "accuracy": "eval_in/final_accuracy",
             "hard_accuracy": "eval_in/final_hard_accuracy",
         }
-        return eval_metrics[eval_key_map[metric_name]]
+
+        # Fallback map to OUT-of-distribution evaluation metrics
+        eval_out_key_map = {
+            "loss": "eval_out/final_loss",
+            "hard_loss": "eval_out/final_hard_loss",
+            "accuracy": "eval_out/final_accuracy",
+            "hard_accuracy": "eval_out/final_hard_accuracy",
+        }
+
+        # Try IN-distribution metrics first, fallback to OUT-of-distribution if not available
+        primary_key = eval_key_map[metric_name]
+        fallback_key = eval_out_key_map[metric_name]
+
+        if primary_key in eval_metrics:
+            return eval_metrics[primary_key]
+        elif fallback_key in eval_metrics:
+            return eval_metrics[fallback_key]
+        else:
+            raise KeyError(f"Neither {primary_key} nor {fallback_key} found in evaluation metrics")
     else:
         raise ValueError(f"Unknown metric source: {metric_source}")
 
@@ -455,73 +474,91 @@ def run_unified_periodic_evaluation(
     try:
         # 1. Run IN-distribution evaluation (matches training pattern)
         # Use chunked evaluation to handle cases where diversity exceeds target batch size
-        log.info(
-            f"Running IN-distribution evaluation ({datasets.in_actual_batch_size} circuits)..."
-        )
-        if datasets.in_actual_batch_size > datasets.target_batch_size:
-            log.info(f"Using chunked evaluation (chunks of {datasets.target_batch_size})")
 
-        step_metrics_in = evaluate_circuits_in_chunks(
-            eval_fn=evaluate_model_stepwise_batched,
-            wires=datasets.in_distribution_wires,
-            logits=datasets.in_distribution_logits,
-            target_chunk_size=datasets.target_batch_size,
-            model=model,
-            x_data=x_data,
-            y_data=y_data,
-            input_n=input_n,
-            arity=arity,
-            circuit_hidden_dim=circuit_hidden_dim,
-            n_message_steps=n_message_steps,
-            loss_type=loss_type,
-            layer_sizes=layer_sizes,
-        )
+        if datasets.in_distribution_wires is not None:
+            log.info(
+                f"Running IN-distribution evaluation ({datasets.in_actual_batch_size} circuits)..."
+            )
+            if (
+                datasets.in_actual_batch_size is not None
+                and datasets.in_actual_batch_size > datasets.target_batch_size
+            ):
+                log.info(f"Using chunked evaluation (chunks of {datasets.target_batch_size})")
 
-        # Get final metrics (last step) for IN-distribution
-        final_metrics_in = {
-            "eval_in/final_loss": step_metrics_in["soft_loss"][-1],
-            "eval_in/final_hard_loss": step_metrics_in["hard_loss"][-1],
-            "eval_in/final_accuracy": step_metrics_in["soft_accuracy"][-1],
-            "eval_in/final_hard_accuracy": step_metrics_in["hard_accuracy"][-1],
-            "eval_in/epoch": epoch,
-        }
+            step_metrics_in = evaluate_circuits_in_chunks(
+                eval_fn=evaluate_model_stepwise_batched,
+                wires=datasets.in_distribution_wires,
+                logits=datasets.in_distribution_logits,
+                target_chunk_size=datasets.target_batch_size,
+                model=model,
+                x_data=x_data,
+                y_data=y_data,
+                input_n=input_n,
+                arity=arity,
+                circuit_hidden_dim=circuit_hidden_dim,
+                n_message_steps=n_message_steps,
+                loss_type=loss_type,
+                layer_sizes=layer_sizes,
+            )
 
-        # 2. Run OUT-of-distribution evaluation (always random)
-        log.info(
-            f"Running OUT-of-distribution evaluation ({datasets.out_actual_batch_size} circuits)..."
-        )
-        if datasets.out_actual_batch_size > datasets.target_batch_size:
-            log.info(f"Using chunked evaluation (chunks of {datasets.target_batch_size})")
+            # Get final metrics (last step) for IN-distribution
+            final_metrics_in = {
+                "eval_in/final_loss": step_metrics_in["soft_loss"][-1],
+                "eval_in/final_hard_loss": step_metrics_in["hard_loss"][-1],
+                "eval_in/final_accuracy": step_metrics_in["soft_accuracy"][-1],
+                "eval_in/final_hard_accuracy": step_metrics_in["hard_accuracy"][-1],
+                "eval_in/epoch": epoch,
+            }
+        else:
+            log.info("No IN-distribution evaluation data available.")
+            step_metrics_in = None
+            final_metrics_in = None
 
-        step_metrics_out = evaluate_circuits_in_chunks(
-            eval_fn=evaluate_model_stepwise_batched,
-            wires=datasets.out_of_distribution_wires,
-            logits=datasets.out_of_distribution_logits,
-            target_chunk_size=datasets.target_batch_size,
-            model=model,
-            x_data=x_data,
-            y_data=y_data,
-            input_n=input_n,
-            arity=arity,
-            circuit_hidden_dim=circuit_hidden_dim,
-            n_message_steps=n_message_steps,
-            loss_type=loss_type,
-            layer_sizes=layer_sizes,
-        )
+        if datasets.out_of_distribution_wires is not None:
+            # 2. Run OUT-of-distribution evaluation (always random)
+            log.info(
+                f"Running OUT-of-distribution evaluation ({datasets.out_actual_batch_size} circuits)..."
+            )
+            if datasets.out_actual_batch_size > datasets.target_batch_size:
+                log.info(f"Using chunked evaluation (chunks of {datasets.target_batch_size})")
 
-        # Get final metrics (last step) for OUT-of-distribution
-        final_metrics_out = {
-            "eval_out/final_loss": step_metrics_out["soft_loss"][-1],
-            "eval_out/final_hard_loss": step_metrics_out["hard_loss"][-1],
-            "eval_out/final_accuracy": step_metrics_out["soft_accuracy"][-1],
-            "eval_out/final_hard_accuracy": step_metrics_out["hard_accuracy"][-1],
-            "eval_out/epoch": epoch,
-        }
+            step_metrics_out = evaluate_circuits_in_chunks(
+                eval_fn=evaluate_model_stepwise_batched,
+                wires=datasets.out_of_distribution_wires,
+                logits=datasets.out_of_distribution_logits,
+                target_chunk_size=datasets.target_batch_size,
+                model=model,
+                x_data=x_data,
+                y_data=y_data,
+                input_n=input_n,
+                arity=arity,
+                circuit_hidden_dim=circuit_hidden_dim,
+                n_message_steps=n_message_steps,
+                loss_type=loss_type,
+                layer_sizes=layer_sizes,
+            )
+
+            # Get final metrics (last step) for OUT-of-distribution
+            final_metrics_out = {
+                "eval_out/final_loss": step_metrics_out["soft_loss"][-1],
+                "eval_out/final_hard_loss": step_metrics_out["hard_loss"][-1],
+                "eval_out/final_accuracy": step_metrics_out["soft_accuracy"][-1],
+                "eval_out/final_hard_accuracy": step_metrics_out["hard_accuracy"][-1],
+                "eval_out/epoch": epoch,
+            }
+        else:
+            log.info("No OUT-of-distribution evaluation data available.")
+            step_metrics_out = None
+            final_metrics_out = None
+
+        if final_metrics_in is None and final_metrics_out is None:
+            log.info("No evaluation data available.")
+            return {}
 
         # Combine all metrics for logging
         combined_metrics = {
-            **final_metrics_in,
-            **final_metrics_out,
+            **(final_metrics_in or {}),
+            **(final_metrics_out or {}),
         }
 
         # Log to wandb if enabled
@@ -534,35 +571,44 @@ def run_unified_periodic_evaluation(
             # Optionally log step-by-step metrics for both evaluations
             if log_stepwise:
                 # IN-distribution step-wise metrics
-                for step_idx in range(len(step_metrics_in["step"])):
-                    step_data_in = {
-                        "eval_in_steps/step": step_metrics_in["step"][step_idx],
-                        "eval_in_steps/loss": step_metrics_in["soft_loss"][step_idx],
-                        "eval_in_steps/hard_loss": step_metrics_in["hard_loss"][step_idx],
-                        "eval_in_steps/accuracy": step_metrics_in["soft_accuracy"][step_idx],
-                        "eval_in_steps/hard_accuracy": step_metrics_in["hard_accuracy"][step_idx],
-                        "eval_in_steps/epoch": epoch,
-                    }
-                    wandb_run.log(step_data_in)
+                if step_metrics_in is not None:
+                    for step_idx in range(len(step_metrics_in["step"])):
+                        step_data_in = {
+                            "eval_in_steps/step": step_metrics_in["step"][step_idx],
+                            "eval_in_steps/loss": step_metrics_in["soft_loss"][step_idx],
+                            "eval_in_steps/hard_loss": step_metrics_in["hard_loss"][step_idx],
+                            "eval_in_steps/accuracy": step_metrics_in["soft_accuracy"][step_idx],
+                            "eval_in_steps/hard_accuracy": step_metrics_in["hard_accuracy"][
+                                step_idx
+                            ],
+                            "eval_in_steps/epoch": epoch,
+                        }
+                        wandb_run.log(step_data_in)
 
                 # OUT-of-distribution step-wise metrics
-                for step_idx in range(len(step_metrics_out["step"])):
-                    step_data_out = {
-                        "eval_out_steps/step": step_metrics_out["step"][step_idx],
-                        "eval_out_steps/loss": step_metrics_out["soft_loss"][step_idx],
-                        "eval_out_steps/hard_loss": step_metrics_out["hard_loss"][step_idx],
-                        "eval_out_steps/accuracy": step_metrics_out["soft_accuracy"][step_idx],
-                        "eval_out_steps/hard_accuracy": step_metrics_out["hard_accuracy"][step_idx],
-                        "eval_out_steps/epoch": epoch,
-                    }
-                    wandb_run.log(step_data_out)
+                if step_metrics_out is not None:
+                    for step_idx in range(len(step_metrics_out["step"])):
+                        step_data_out = {
+                            "eval_out_steps/step": step_metrics_out["step"][step_idx],
+                            "eval_out_steps/loss": step_metrics_out["soft_loss"][step_idx],
+                            "eval_out_steps/hard_loss": step_metrics_out["hard_loss"][step_idx],
+                            "eval_out_steps/accuracy": step_metrics_out["soft_accuracy"][step_idx],
+                            "eval_out_steps/hard_accuracy": step_metrics_out["hard_accuracy"][
+                                step_idx
+                            ],
+                            "eval_out_steps/epoch": epoch,
+                        }
+                        wandb_run.log(step_data_out)
 
         # Log summary to console
         training_config = datasets.training_config
 
         # Add chunking info if used
         in_chunk_info = ""
-        if datasets.in_actual_batch_size > datasets.target_batch_size:
+        if (
+            datasets.in_actual_batch_size is not None
+            and datasets.in_actual_batch_size > datasets.target_batch_size
+        ):
             num_in_chunks = (
                 datasets.in_actual_batch_size + datasets.target_batch_size - 1
             ) // datasets.target_batch_size
@@ -575,18 +621,31 @@ def run_unified_periodic_evaluation(
             ) // datasets.target_batch_size
             out_chunk_info = f", {num_out_chunks} chunks"
 
-        log_message = (
-            f"Unified Eval (epoch {epoch}):\n"
-            f"  IN-distribution ({datasets.in_actual_batch_size} circuits{in_chunk_info}, "
-            f"mode={training_config['wiring_mode']}, diversity={training_config['initial_diversity']}): "
-            f"Loss={final_metrics_in['eval_in/final_loss']:.4f}, "
-            f"Acc={final_metrics_in['eval_in/final_accuracy']:.4f}, "
-            f"Hard Acc={final_metrics_in['eval_in/final_hard_accuracy']:.4f}\n"
-            f"  OUT-of-distribution ({datasets.out_actual_batch_size} circuits{out_chunk_info}, random): "
-            f"Loss={final_metrics_out['eval_out/final_loss']:.4f}, "
-            f"Acc={final_metrics_out['eval_out/final_accuracy']:.4f}, "
-            f"Hard Acc={final_metrics_out['eval_out/final_hard_accuracy']:.4f}"
-        )
+        # Construct log message conditionally based on available data
+        log_message_parts = [f"Unified Eval (epoch {epoch}):"]
+
+        if final_metrics_in is not None:
+            log_message_parts.append(
+                f"  IN-distribution ({datasets.in_actual_batch_size} circuits{in_chunk_info}, "
+                f"mode={training_config['wiring_mode']}, diversity={training_config['initial_diversity']}): "
+                f"Loss={final_metrics_in['eval_in/final_loss']:.4f}, "
+                f"Acc={final_metrics_in['eval_in/final_accuracy']:.4f}, "
+                f"Hard Acc={final_metrics_in['eval_in/final_hard_accuracy']:.4f}"
+            )
+        else:
+            log_message_parts.append(
+                f"  IN-distribution: Not available (training mode: {training_config['wiring_mode']})"
+            )
+
+        if final_metrics_out is not None:
+            log_message_parts.append(
+                f"  OUT-of-distribution ({datasets.out_actual_batch_size} circuits{out_chunk_info}, random): "
+                f"Loss={final_metrics_out['eval_out/final_loss']:.4f}, "
+                f"Acc={final_metrics_out['eval_out/final_accuracy']:.4f}, "
+                f"Hard Acc={final_metrics_out['eval_out/final_hard_accuracy']:.4f}"
+            )
+
+        log_message = "\n".join(log_message_parts)
 
         log.info(log_message)
 
@@ -601,7 +660,8 @@ def run_unified_periodic_evaluation(
                 "in_actual_batch_size": datasets.in_actual_batch_size,
                 "out_actual_batch_size": datasets.out_actual_batch_size,
                 "target_batch_size": datasets.target_batch_size,
-                "in_used_chunking": datasets.in_actual_batch_size > datasets.target_batch_size,
+                "in_used_chunking": datasets.in_actual_batch_size is not None
+                and datasets.in_actual_batch_size > datasets.target_batch_size,
                 "out_used_chunking": datasets.out_actual_batch_size > datasets.target_batch_size,
                 "training_wiring_mode": datasets.training_config["wiring_mode"],
                 "training_initial_diversity": datasets.training_config["initial_diversity"],
@@ -624,10 +684,6 @@ def train_model(
     # Model architecture parameters
     arity: int = 2,
     circuit_hidden_dim: int = 16,
-    message_passing: bool = True,
-    node_mlp_features: list[int] | None = None,
-    edge_mlp_features: list[int] | None = None,
-    use_attention: bool = False,
     # Training hyperparameters
     learning_rate: float = 1e-3,
     weight_decay: float = 1e-4,

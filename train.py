@@ -210,29 +210,37 @@ def create_and_save_final_results(
     if eval_results:
         # IN-distribution evaluation (matches training pattern)
         final_in_metrics = eval_results.get("final_metrics_in", {})
-        final_results.update(
-            {
-                "eval_in_final_loss": final_in_metrics.get("eval_in/final_loss", None),
-                "eval_in_final_hard_loss": final_in_metrics.get("eval_in/final_hard_loss", None),
-                "eval_in_final_accuracy": final_in_metrics.get("eval_in/final_accuracy", None),
-                "eval_in_final_hard_accuracy": final_in_metrics.get(
-                    "eval_in/final_hard_accuracy", None
-                ),
-            }
-        )
+        if final_in_metrics is not None:
+            final_results.update(
+                {
+                    "eval_in_final_loss": final_in_metrics.get("eval_in/final_loss", None),
+                    "eval_in_final_hard_loss": final_in_metrics.get(
+                        "eval_in/final_hard_loss", None
+                    ),
+                    "eval_in_final_accuracy": final_in_metrics.get("eval_in/final_accuracy", None),
+                    "eval_in_final_hard_accuracy": final_in_metrics.get(
+                        "eval_in/final_hard_accuracy", None
+                    ),
+                }
+            )
 
         # OUT-of-distribution evaluation (always random)
         final_out_metrics = eval_results.get("final_metrics_out", {})
-        final_results.update(
-            {
-                "eval_out_final_loss": final_out_metrics.get("eval_out/final_loss", None),
-                "eval_out_final_hard_loss": final_out_metrics.get("eval_out/final_hard_loss", None),
-                "eval_out_final_accuracy": final_out_metrics.get("eval_out/final_accuracy", None),
-                "eval_out_final_hard_accuracy": final_out_metrics.get(
-                    "eval_out/final_hard_accuracy", None
-                ),
-            }
-        )
+        if final_out_metrics is not None:
+            final_results.update(
+                {
+                    "eval_out_final_loss": final_out_metrics.get("eval_out/final_loss", None),
+                    "eval_out_final_hard_loss": final_out_metrics.get(
+                        "eval_out/final_hard_loss", None
+                    ),
+                    "eval_out_final_accuracy": final_out_metrics.get(
+                        "eval_out/final_accuracy", None
+                    ),
+                    "eval_out_final_hard_accuracy": final_out_metrics.get(
+                        "eval_out/final_hard_accuracy", None
+                    ),
+                }
+            )
 
     # Circuit and model architecture info
     final_results.update(

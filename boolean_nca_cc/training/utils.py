@@ -1,3 +1,12 @@
+"""
+Training utilities for Boolean NCA Circuit Compiler.
+
+This module provides version-agnostic checkpoint saving and loading functions
+that work across different JAX/Flax versions by extracting raw numpy arrays
+instead of relying on framework-specific serialization.
+
+"""
+
 import logging
 import os
 import pickle
@@ -19,66 +28,6 @@ from boolean_nca_cc.utils.flax_compatibility import setup_complete_flax_compatib
 from boolean_nca_cc.utils.graph_builder import build_graph
 
 log = logging.getLogger(__name__)
-
-
-def save_checkpoint(model, optimizer, metrics, cfg, step, output_dir, filename=None):
-    """Save a checkpoint of the model and optimizer.
-
-    Args:
-        model: The model to save
-        optimizer: The optimizer to save
-        metrics: Dictionary of training metrics
-        cfg: Configuration object or dictionary
-        step: Current training step
-        output_dir: Directory to save the checkpoint
-        filename: Optional custom filename for the checkpoint
-
-    Returns:
-        Path to the saved checkpoint
-    """
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    checkpoint = {
-        "model": nnx.state(model),
-        "optimizer": nnx.state(optimizer),
-        "metrics": metrics,
-        "config": OmegaConf.to_container(cfg, resolve=True)
-        if hasattr(cfg, "to_container")
-        else cfg,
-        "step": step,
-    }
-
-    if filename is None:
-        checkpoint_path = os.path.join(output_dir, f"checkpoint_{step}.pkl")
-    else:
-        checkpoint_path = os.path.join(output_dir, filename)
-
-    with open(checkpoint_path, "wb") as f:
-        pickle.dump(checkpoint, f)
-
-    # log.info(f"Saved checkpoint to {checkpoint_path}")
-    if hasattr(cfg, "wandb") and cfg.wandb.enabled:
-        try:
-            import wandb
-
-            if wandb.run:
-                wandb.save(checkpoint_path)
-        except ImportError:
-            log.warning("wandb not installed, skipping checkpoint logging to W&B")
-        except Exception as e:
-            log.warning(f"Error logging checkpoint to W&B: {e}")
-
-    return checkpoint_path
-
-
-def load_checkpoint(checkpoint_path):
-    """Load a checkpoint of the model and optimizer."""
-    with open(checkpoint_path, "rb") as f:
-        checkpoint_bytes = f.read()
-        checkpoint = flax.serialization.from_bytes(None, checkpoint_bytes)
-
-    return checkpoint
 
 
 def plot_training_curves(metrics, title, output_dir):
@@ -320,379 +269,6 @@ def plot_lr_schedule(
         plt.close(fig) if not save_plot else None
 
     return fig, ax, lr_values
-
-
-def load_best_model_from_wandb(
-    run_id=None,
-    filters=None,
-    seed=0,
-    project="boolean-nca-cc",
-    entity="m2snn",
-    download_dir="saves",
-    filename="best_model_hard_accuracy",
-    filetype="pkl",
-    run_from_last=1,
-    use_cache=True,
-    force_download=False,
-    select_by_best_metric=False,
-    metric_name="hard_accuracy",
-):
-    """Load the best model from wandb artifacts.
-
-    Cache System Behavior:
-    - use_cache=True, force_download=False (default): Use local cache if available, otherwise download
-    - use_cache=True, force_download=True: Always download fresh from wandb, update cache
-    - use_cache=False: Always download from wandb, don't use or update cache
-
-    Examples:
-        # Normal usage - use cache if available
-        model, loaded_dict, config = load_best_model_from_wandb(run_id="abc123")
-
-        # Force fresh download (e.g., if wandb has new artifacts)
-        model, loaded_dict, config = load_best_model_from_wandb(
-            run_id="abc123",
-            force_download=True
-        )
-
-        # Disable caching entirely
-        model, loaded_dict, config = load_best_model_from_wandb(
-            run_id="abc123",
-            use_cache=False
-        )
-
-    Args:
-        run_id: Optional specific run ID to load from
-        filters: Optional dictionary of filters to find runs
-        seed: Seed for RNG initialization
-        project: WandB project name
-        entity: WandB entity/username
-        download_dir: Directory to download artifacts to
-        filename: Filename of the best model
-        filetype: Filetype of the best model
-        run_from_last: Index from the end of runs list to select (when select_by_best_metric is False)
-        use_cache: Whether to use locally cached artifacts if available
-        force_download: If True, always download from wandb even if local cache exists
-        select_by_best_metric: If True, select run with highest metric instead of using run_from_last
-        metric_name: Name of the metric to maximize when select_by_best_metric is True
-
-    Returns:
-        Tuple of (loaded_model, loaded_dict, config) containing the instantiated model,
-        full loaded state, and the complete hydra config used during training
-    """
-
-    setup_complete_flax_compatibility()
-
-    def compute_n_nodes_from_config(config):
-        """Compute n_nodes for CircuitSelfAttention models by building a dummy graph."""
-        # Generate circuit layer sizes
-        input_n, output_n = config.circuit.input_bits, config.circuit.output_bits
-        arity = config.circuit.arity
-
-        if config.circuit.layer_sizes is None:
-            layer_sizes = generate_layer_sizes(
-                input_n, output_n, arity, layer_n=config.circuit.num_layers
-            )
-        else:
-            layer_sizes = config.circuit.layer_sizes
-
-        # Generate dummy circuit
-        test_key = jax.random.PRNGKey(config.get("test_seed", 42))
-        wires, logits = gen_circuit(test_key, layer_sizes, arity=arity)
-
-        # Generate dummy graph
-        graph = build_graph(
-            wires=wires,
-            logits=logits,
-            input_n=input_n,
-            arity=arity,
-            circuit_hidden_dim=config.model.circuit_hidden_dim,
-        )
-
-        n_nodes = int(graph.n_node[0])
-        print(f"Computed n_nodes for CircuitSelfAttention: {n_nodes}")
-        return n_nodes
-
-    # Construct the potential local path
-
-    # Initialize WandB API
-    api = wandb.Api()
-
-    # Find the run
-    if run_id:
-        print(f"Looking for run with ID: {run_id}")
-        run = api.run(f"{entity}/{project}/{run_id}")
-        print(f"Found run: {run.name}")
-    else:
-        if not filters:
-            filters = {}
-        print(f"Looking for runs with filters: {filters}")
-        runs = api.runs(f"{entity}/{project}", filters=filters)
-
-        if not runs:
-            raise ValueError(f"No runs found matching filters: {filters}")
-
-        print(f"Found {len(runs)} matching runs.")
-
-        if select_by_best_metric:
-            print(f"Selecting run with highest {metric_name} metric...")
-            best_run = None
-            best_metric_value = float("-inf")
-
-            for candidate_run in runs:
-                if candidate_run.state == "running":
-                    print(
-                        f"Run {candidate_run.name} (ID: {candidate_run.id}): Skipping unfinished run"
-                    )
-                    continue
-
-                # Get the summary metrics for this run
-                summary = candidate_run.summary
-
-                # Try to get the metric value
-                metric_value = summary.get(metric_name)
-                if metric_value is not None:
-                    print(
-                        f"Run {candidate_run.name} (ID: {candidate_run.id}): {metric_name} = {metric_value}"
-                    )
-                    if metric_value > best_metric_value:
-                        best_metric_value = metric_value
-                        best_run = candidate_run
-                else:
-                    print(
-                        f"Run {candidate_run.name} (ID: {candidate_run.id}): {metric_name} not found in summary"
-                    )
-
-            if best_run is None:
-                print(
-                    f"Warning: No runs found with {metric_name} metric. Falling back to run_from_last selection."
-                )
-                run = runs[len(runs) - run_from_last]
-            else:
-                run = best_run
-                print(
-                    f"Selected run with highest {metric_name} ({best_metric_value}): {run.name} (ID: {run.id})"
-                )
-        else:
-            print(f"Using run_from_last={run_from_last} to select run.")
-            run = runs[len(runs) - run_from_last]  # Most recent run first
-            print(f"Selected run: {run.name} (ID: {run.id})")
-
-        run_id = run.id
-
-    expected_checkpoint_path = None
-    if run_id:
-        local_artifact_dir = os.path.join(download_dir, f"run_{run_id}")
-        expected_checkpoint_path = os.path.join(local_artifact_dir, f"{filename}.{filetype}")
-        print(f"Checking for local checkpoint at: {expected_checkpoint_path}")
-
-        # Check if we should use local cache
-        if use_cache and not force_download and os.path.exists(expected_checkpoint_path):
-            print(f"Found cached checkpoint for run {run_id}. Loading from disk.")
-            try:
-                with open(expected_checkpoint_path, "rb") as f:
-                    loaded_dict = pickle.load(f)
-
-                # Get config (assuming it's stored or can be fetched if needed for instantiation)
-                # For simplicity, we assume config is part of loaded_dict or can be inferred.
-                # If full config is needed and not in pickle, this part might need adjustment
-                # or fetching from wandb api.run(run_id).config
-                api = wandb.Api()
-                run_config = api.run(f"{entity}/{project}/{run_id}").config
-                config = OmegaConf.create(run_config)
-                print(
-                    f"Instantiating model using config from run {run_id}: {config.model._target_}"
-                )
-
-                rng = nnx.Rngs(params=jax.random.PRNGKey(seed))
-
-                # Common overrides for hydra.instantiate
-                instantiate_overrides = {"arity": config.circuit.arity, "rngs": rng}
-
-                # Check if this is a self-attention model and add n_node if needed
-                if (
-                    config.model.get("type") == "self_attention"
-                    or "self_attention" in config.model.get("_target_", "").lower()
-                ):
-                    n_nodes = compute_n_nodes_from_config(config)
-                    instantiate_overrides["n_node"] = n_nodes
-
-                model = hydra.utils.instantiate(config.model, **instantiate_overrides)
-
-                if "model" in loaded_dict:
-                    try:
-                        nnx.update(model, loaded_dict["model"])
-                    except (AttributeError, TypeError) as e:
-                        print(f"Direct update failed with error: {e}")
-                        print("Trying alternative update approach for local load...")
-                        model_state = loaded_dict["model"]
-                        if hasattr(model_state, "_state_dict"):
-                            model_state = model_state._state_dict
-                        for collection_name, collection in model_state.items():
-                            for var_name, value in collection.items():
-                                try:
-                                    path = f"{collection_name}.{var_name}"
-                                    model.put(path, value)
-                                except Exception as inner_e:
-                                    print(
-                                        f"Warning: Failed to update {path} during local load: {inner_e}"
-                                    )
-                else:
-                    print("Warning: No 'model' key found in local loaded dictionary")
-
-                # Ensure essential keys are present in loaded_dict
-                if "run_id" not in loaded_dict:
-                    loaded_dict["run_id"] = run_id
-                if "config" not in loaded_dict:
-                    loaded_dict["config"] = config  # Add config if not present
-
-                return model, loaded_dict, config
-            except Exception as e:
-                print(f"Error loading model from local checkpoint {expected_checkpoint_path}: {e}")
-                print("Proceeding to download from WandB.")
-        elif force_download:
-            print("Force download enabled, skipping local cache.")
-        elif not use_cache:
-            print("Cache disabled, downloading from WandB.")
-
-    # Get artifacts and find best model
-    print("Retrieving artifacts...")
-    artifacts = run.logged_artifacts()
-
-    # Print all available artifacts for debugging
-    print("Available artifacts:")
-    for a in artifacts:
-        print(f"  - {a.name}")
-
-    best_models = [a for a in artifacts if filename in a.name]
-
-    if not best_models:
-        print(f"No artifacts found matching '{filename}'")
-        # Try to find any model artifacts
-        model_artifacts = [a for a in artifacts if "model" in a.name.lower()]
-        if model_artifacts:
-            print("Found other model artifacts:")
-            for a in model_artifacts:
-                print(f"  - {a.name}")
-            raise ValueError(
-                f"No {filename} artifacts found for run {run.id}, but found other model artifacts. Please check the artifact names."
-            )
-        else:
-            raise ValueError(f"No model artifacts found for run {run.id}")
-
-    latest_best = best_models[-1]
-    print(f"Found best model artifact: {latest_best.name}")
-
-    # Create download directory if it doesn't exist
-    download_path = os.path.join(download_dir, f"run_{run.id}")
-    os.makedirs(download_path, exist_ok=True)
-
-    # Download the artifact
-    print(f"Downloading artifact to {download_path}")
-    artifact_dir = latest_best.download(
-        root=download_path
-    )  # Use root to control download folder precisely
-    checkpoint_path = os.path.join(artifact_dir, f"{filename}.{filetype}")  # Adjusted path
-
-    # Load the saved state
-    print(f"Loading model from {checkpoint_path}")
-    try:
-        with open(checkpoint_path, "rb") as f:
-            loaded_dict = pickle.load(f)
-    except Exception as e:
-        print(f"Error loading checkpoint from {checkpoint_path}: {e}")
-        raise
-
-    # Get config from run
-    config = OmegaConf.create(run.config)
-    print(f"Instantiating model using original _target_: {config.model._target_}")
-
-    # Initialize rngs for the model constructor
-    rng = nnx.Rngs(params=jax.random.PRNGKey(seed))
-
-    current_config_model_node = config.model
-
-    # Convert the OmegaConf node for the model to a standard Python dictionary.
-    # This dictionary will contain parameters like `circuit_hidden_dim`, `edge_mlp_features`, etc.,
-    # and also `_target_` if present.
-    model_params_from_config = OmegaConf.to_container(current_config_model_node, resolve=True)
-
-    if not isinstance(model_params_from_config, dict):
-        print(
-            f"Error: Model config from WandB did not resolve to a dictionary. Got: {type(model_params_from_config)}"
-        )
-        raise TypeError(f"Expected model config to be a dict, got {type(model_params_from_config)}")
-
-    # Get the class path from _target_ and remove it from the params dict.
-    class_path = model_params_from_config.pop("_target_", None)
-
-    if class_path is None:
-        print(
-            "Warning: '_target_' was missing in the resolved model parameters. Defaulting to 'boolean_nca_cc.models.CircuitGNN'"
-        )
-        class_path = "boolean_nca_cc.models.CircuitGNN"
-
-    # Get the actual class type using Hydra's utility
-    try:
-        ModelClazz = hydra.utils.get_class(class_path)
-    except Exception as e:
-        print(f"Error getting class '{class_path}': {e}")
-        raise
-
-    # Prepare the full set of keyword arguments for the model's constructor
-    final_constructor_kwargs = (
-        model_params_from_config.copy()
-    )  # Start with params from saved config
-    final_constructor_kwargs["arity"] = config.circuit.arity  # Add arity
-    final_constructor_kwargs["rngs"] = rng  # Add the runtime rngs object
-
-    # Check if this is a self-attention model and add n_node if needed
-    if (
-        config.model.get("type") == "self_attention"
-        or "self_attention" in class_path.lower()
-        or "CircuitSelfAttention" in class_path
-    ):
-        n_nodes = compute_n_nodes_from_config(config)
-        final_constructor_kwargs["n_node"] = n_nodes
-
-    print(f"Attempting to instantiate {ModelClazz} with kwargs: {final_constructor_kwargs}")
-
-    # Instantiate the model directly
-    try:
-        model = ModelClazz(**final_constructor_kwargs)
-    except Exception as e:
-        print(
-            f"Error during manual instantiation of {ModelClazz} with {final_constructor_kwargs}: {e}"
-        )
-        raise
-
-    # Update model with loaded state (weights from the checkpoint)
-    print("Updating model with loaded state")
-    if "model" in loaded_dict:
-        try:
-            nnx.update(model, loaded_dict["model"])
-        except (AttributeError, TypeError) as e:
-            print(f"Direct update failed with error: {e}")
-            print("Trying alternative update approach...")
-            model_state = loaded_dict["model"]
-            if hasattr(model_state, "_state_dict"):
-                model_state = model_state._state_dict
-            for collection_name, collection in model_state.items():
-                for var_name, value in collection.items():
-                    try:
-                        path = f"{collection_name}.{var_name}"
-                        model.put(path, value)
-                    except Exception as inner_e:
-                        print(f"Warning: Failed to update {path}: {inner_e}")
-    else:
-        print("Warning: No 'model' key found in loaded dictionary")
-
-    # Ensure essential keys are present in loaded_dict
-    if "run_id" not in loaded_dict:
-        loaded_dict["run_id"] = run.id
-    if "config" not in loaded_dict:
-        loaded_dict["config"] = config
-
-    return model, loaded_dict, config
 
 
 def cleanup_redundant_wandb_artifacts(
@@ -989,3 +565,58 @@ def gradient_check_step(model, optimizer, loss_fn, *loss_args, verbose=True, **l
         raise RuntimeError("No gradients found - all parameters have zero gradients!")
 
     return loss, aux, has_grads, zero_grad_paths
+
+
+def check_checkpoint_format(checkpoint_path):
+    """Check the format and contents of a checkpoint file.
+
+    Args:
+        checkpoint_path: Path to the checkpoint file
+
+    Returns:
+        Dictionary with checkpoint information
+    """
+    try:
+        with open(checkpoint_path, "rb") as f:
+            checkpoint = pickle.load(f)
+    except Exception as e:
+        return {"error": f"Failed to load checkpoint: {e}"}
+
+    info = {
+        "file_path": checkpoint_path,
+        "file_size_mb": os.path.getsize(checkpoint_path) / (1024 * 1024),
+    }
+
+    # Check if this is version-agnostic format
+    if checkpoint.get("checkpoint_version") == "v2_agnostic":
+        info["format"] = "version-agnostic (v2)"
+        info["jax_version"] = checkpoint.get("jax_version", "unknown")
+        info["flax_version"] = checkpoint.get("flax_version", "unknown")
+        info["save_timestamp"] = checkpoint.get("save_timestamp", "unknown")
+        info["has_model_params"] = checkpoint.get("model_params") is not None
+        info["has_optimizer_params"] = checkpoint.get("optimizer_params") is not None
+    else:
+        info["format"] = "legacy (JAX/Flax serialized)"
+        info["has_model"] = "model" in checkpoint
+        info["has_optimizer"] = "optimizer" in checkpoint
+
+        # Try to detect potential compatibility issues
+        if "model" in checkpoint:
+            try:
+                model_state = checkpoint["model"]
+                if hasattr(model_state, "__dict__"):
+                    for attr_name in dir(model_state):
+                        if "var_metadata" in attr_name.lower():
+                            info["potential_compatibility_issues"] = (
+                                "VariableState metadata detected"
+                            )
+                            break
+            except Exception:
+                pass
+
+    # Common fields
+    info["has_config"] = "config" in checkpoint
+    info["has_metrics"] = "metrics" in checkpoint
+    info["step"] = checkpoint.get("step", "unknown")
+
+    return info
