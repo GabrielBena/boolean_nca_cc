@@ -1,6 +1,7 @@
 import logging
 import os
 import pickle
+import warnings
 from typing import Any
 
 import hydra
@@ -14,6 +15,271 @@ from boolean_nca_cc.utils.graph_builder import build_graph
 
 # Setup logging
 log = logging.getLogger(__name__)
+
+
+def load_checkpoint_with_compatibility_working(checkpoint_path):
+    """
+    Working compatibility loader that handles Flax and JAX version issues.
+
+    This loader handles:
+    - flax.nnx.nnx -> flax.nnx module remapping
+    - Missing _var_metadata attributes in VariableState objects
+    - JAX version compatibility (MainTrace location changes)
+    """
+    log.info(f"Loading checkpoint with compatibility handling: {checkpoint_path}")
+
+    try:
+
+        class WorkingCompatibilityUnpickler(pickle.Unpickler):
+            def find_class(self, module, name):
+                # Handle flax.nnx.nnx -> flax.nnx remapping
+                if module.startswith("flax.nnx.nnx"):
+                    log.debug(f"Remapping {module}.{name}")
+
+                    if name == "State":
+                        # Return a custom State class that can handle the old format
+                        class CompatibleState(dict):
+                            def __init__(self, *args, **kwargs):
+                                super().__init__()
+                                if args and isinstance(args[0], dict):
+                                    self.update(args[0])
+                                if kwargs:
+                                    self.update(kwargs)
+
+                            def __setstate__(self, state):
+                                if isinstance(state, dict):
+                                    self.clear()
+                                    self.update(state)
+
+                        return CompatibleState
+
+                    elif name == "VariableState":
+                        # Return a custom VariableState that can handle missing _var_metadata
+                        class CompatibleVariableState:
+                            def __init__(self, *args, **kwargs):
+                                self.type = kwargs.get("type", nnx.Param)
+                                self.value = kwargs.get("value")
+                                for key, value in kwargs.items():
+                                    if key not in ["_var_metadata"] and not hasattr(self, key):
+                                        setattr(self, key, value)
+
+                            def __setstate__(self, state):
+                                if isinstance(state, dict):
+                                    for key, value in state.items():
+                                        if key != "_var_metadata":
+                                            setattr(self, key, value)
+
+                            def __getattr__(self, name):
+                                if name == "_var_metadata":
+                                    return None
+                                raise AttributeError(
+                                    f"'{self.__class__.__name__}' object has no attribute '{name}'"
+                                )
+
+                        return CompatibleVariableState
+
+                    elif name == "Param":
+                        # Return a custom Param class
+                        class CompatibleParam:
+                            def __init__(self, *args, **kwargs):
+                                if args:
+                                    self.value = args[0]
+                                else:
+                                    self.value = kwargs.get("value", None)
+                                for key, value in kwargs.items():
+                                    if key not in ["_var_metadata"] and key != "value":
+                                        setattr(self, key, value)
+
+                            def __setstate__(self, state):
+                                if isinstance(state, dict):
+                                    for key, value in state.items():
+                                        if key != "_var_metadata":
+                                            setattr(self, key, value)
+
+                        return CompatibleParam
+
+                    else:
+                        # Generic compatible class
+                        class CompatibleGeneric:
+                            def __init__(self, *args, **kwargs):
+                                for key, value in kwargs.items():
+                                    if key != "_var_metadata":
+                                        setattr(self, key, value)
+
+                            def __setstate__(self, state):
+                                if isinstance(state, dict):
+                                    for key, value in state.items():
+                                        if key != "_var_metadata":
+                                            setattr(self, key, value)
+
+                        return CompatibleGeneric
+
+                # Handle JAX compatibility issues
+                if "jax" in module and name == "MainTrace":
+                    log.debug(f"Handling JAX compatibility for {module}.{name}")
+                    try:
+                        import jax
+
+                        if hasattr(jax._src.core, "MainTrace"):
+                            return jax._src.core.MainTrace
+                        else:
+
+                            class CompatibleMainTrace:
+                                def __init__(self, *args, **kwargs):
+                                    pass
+
+                            return CompatibleMainTrace
+                    except Exception:
+
+                        class CompatibleMainTrace:
+                            def __init__(self, *args, **kwargs):
+                                pass
+
+                        return CompatibleMainTrace
+
+                return super().find_class(module, name)
+
+        with open(checkpoint_path, "rb") as f:
+            unpickler = WorkingCompatibilityUnpickler(f)
+            checkpoint = unpickler.load()
+
+        log.info("Successfully loaded checkpoint with working compatibility loader")
+
+        # Convert compatible objects back to real nnx objects
+        if "model" in checkpoint:
+            checkpoint["model"] = convert_compatible_to_nnx(checkpoint["model"])
+            log.info("Converted compatible objects to nnx format")
+
+        return checkpoint
+
+    except Exception as e:
+        log.error(f"Working compatibility loading failed: {e}")
+        raise
+
+
+def convert_compatible_to_nnx(obj):
+    """
+    Convert compatible objects created during loading back to real nnx objects.
+
+    This ensures that the loaded state can be properly used to update the model.
+    """
+    if hasattr(obj, "__class__") and "Compatible" in obj.__class__.__name__:
+        class_name = obj.__class__.__name__.replace("Compatible", "")
+
+        if class_name == "VariableState":
+            # Convert to real VariableState
+            try:
+                var_type = getattr(obj, "type", nnx.Param)
+                value = getattr(obj, "value", None)
+                if value is not None:
+                    return nnx.VariableState(type=var_type, value=value)
+                else:
+                    # Return as dict if we can't create the proper object
+                    return {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
+            except Exception as e:
+                log.warning(f"Could not convert VariableState: {e}")
+                return {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
+
+        elif class_name == "Param":
+            # Convert to real Param
+            try:
+                value = getattr(obj, "value", None)
+                if value is not None:
+                    return nnx.Param(value)
+                else:
+                    return getattr(obj, "value", None)
+            except Exception as e:
+                log.warning(f"Could not convert Param: {e}")
+                return getattr(obj, "value", None)
+
+        elif class_name == "State":
+            # Convert State (usually a dict-like collection)
+            if isinstance(obj, dict):
+                return {k: convert_compatible_to_nnx(v) for k, v in obj.items()}
+            else:
+                return {
+                    k: convert_compatible_to_nnx(v)
+                    for k, v in obj.__dict__.items()
+                    if not k.startswith("_")
+                }
+
+        else:
+            # Generic conversion - return as dict
+            return {
+                k: convert_compatible_to_nnx(v)
+                for k, v in obj.__dict__.items()
+                if not k.startswith("_")
+            }
+
+    elif isinstance(obj, dict):
+        # Recursively convert dictionary values
+        return {k: convert_compatible_to_nnx(v) for k, v in obj.items()}
+
+    elif isinstance(obj, (list, tuple)):
+        # Recursively convert list/tuple items
+        converted = [convert_compatible_to_nnx(item) for item in obj]
+        return type(obj)(converted)
+
+    else:
+        # Return as-is for regular objects
+        return obj
+
+
+def load_checkpoint_with_compatibility(checkpoint_path):
+    """
+    Load a checkpoint with backward compatibility for older Flax versions.
+
+    This uses the working compatibility loader that handles:
+    - flax.nnx.nnx -> flax.nnx module remapping
+    - Missing _var_metadata attributes
+    - JAX version compatibility issues
+
+    Args:
+        checkpoint_path: Path to the checkpoint file
+
+    Returns:
+        Dictionary containing the checkpoint data
+    """
+    return load_checkpoint_with_compatibility_working(checkpoint_path)
+
+
+# Removed old manual reconstruction code - no longer needed
+
+
+# Removed old state conversion function - no longer needed with working loader
+
+
+def configure_notebook_logging(level=logging.INFO):
+    """
+    Configure logging for Jupyter notebook usage.
+
+    Call this function in your notebook before using load_best_model_from_wandb
+    to see detailed progress information.
+
+    Args:
+        level: Logging level (default: logging.INFO)
+
+    Example:
+        >>> from boolean_nca_cc.training.checkpointing import configure_notebook_logging
+        >>> configure_notebook_logging()
+        >>> # Now you'll see logs from load_best_model_from_wandb
+    """
+    # Configure root logger for notebook display
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        force=True,  # Override any existing configuration
+    )
+
+    # Set the level for this specific logger, but don't add additional handlers
+    # since basicConfig already sets up the root logger with a console handler
+    log.setLevel(level)
+
+    # Prevent duplication by ensuring we don't add extra handlers
+    # The root logger configured by basicConfig will handle the output
+    log.propagate = True  # This is the default, but being explicit
+
+    print(f"Logging configured for notebooks. Level: {logging.getLevelName(level)}")
 
 
 def instantiate_model_from_config(config, seed=0):
@@ -138,8 +404,16 @@ def save_checkpoint(model, optimizer, metrics, cfg, step, output_dir, filename=N
     return checkpoint_path
 
 
+# Removed old load_old_checkpoint_safe - functionality integrated into main loader
+
+
 def load_checkpoint(checkpoint_path):
-    """Load a checkpoint from a file."""
+    """Load a checkpoint from a file with backward compatibility."""
+    return load_checkpoint_with_compatibility(checkpoint_path)
+
+
+def load_checkpoint_legacy(checkpoint_path):
+    """Load a checkpoint from a file using standard pickle (legacy method)."""
     with open(checkpoint_path, "rb") as f:
         return pickle.load(f)
 
@@ -263,7 +537,7 @@ def load_best_model_from_wandb(
             log.info(f"Found cached checkpoint for run {run_id}. Loading from disk.")
             try:
                 # Use the unified loading function
-                loaded_dict = load_checkpoint(expected_checkpoint_path)
+                loaded_dict = load_checkpoint_with_compatibility(expected_checkpoint_path)
 
                 # Get config from loaded dict or fetch from wandb
                 if "config" in loaded_dict:
@@ -275,6 +549,8 @@ def load_best_model_from_wandb(
 
                 # Instantiate model using the reusable function
                 model = instantiate_model_from_config(config, seed=seed)
+
+                # Update model with loaded state (compatibility handled during loading)
                 nnx.update(model, loaded_dict["model"])
 
                 # Ensure essential keys are present in loaded_dict
@@ -334,7 +610,7 @@ def load_best_model_from_wandb(
     # Load the saved state using unified loading
     log.info(f"Loading model from {checkpoint_path}")
     try:
-        loaded_dict = load_checkpoint(checkpoint_path)
+        loaded_dict = load_checkpoint_with_compatibility(checkpoint_path)
     except Exception as e:
         log.error(f"Error loading checkpoint from {checkpoint_path}: {e}")
         raise
@@ -344,6 +620,8 @@ def load_best_model_from_wandb(
 
     # Instantiate model using the reusable function
     model = instantiate_model_from_config(config, seed=seed)
+
+    # Update model with loaded state (compatibility handled during loading)
     nnx.update(model, loaded_dict["model"])
 
     # Ensure essential keys are present in loaded_dict
