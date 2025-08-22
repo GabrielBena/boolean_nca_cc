@@ -58,21 +58,23 @@ def _init_wandb(
     try:
         import wandb
 
-        if not wandb.run:
-            # Only initialize wandb if not already initialized
+        if wandb.run:
+            # wandb is already initialized (likely by train.py), just return it
+            log.info(f"Using existing WandB run ID: {wandb.run.id}")
+            return wandb
+        else:
+            # Initialize wandb if not already initialized
             wandb.init(
                 config=wandb_run_config,
                 resume="allow",
             )
-
-        # Get the unique run ID for checkpointing
-        log.info(f"WandB run ID: {wandb.run.id}")
-        return wandb
+            log.info(f"Initialized new WandB run ID: {wandb.run.id}")
+            return wandb
     except ImportError:
         log.warning("wandb not installed. Running without wandb logging.")
         return None
     except Exception as e:
-        log.warning(f"Error initializing wandb: {e}. Running without wandb logging.")
+        log.warning(f"Error with wandb: {e}. Running without wandb logging.")
         return None
 
 

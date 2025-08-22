@@ -25,9 +25,9 @@ wandb:
 # Circuit configuration
 circuit:
   task: "binary_multiply"
-  input_bits: 4
-  output_bits: 4
-  arity: 2
+  input_bits: 8 
+  output_bits: 8
+  arity: 4
   num_layers: 3
   layer_sizes: null  # Auto-generate if null 
   circuit_hidden_dim: 32
@@ -63,15 +63,15 @@ pool:
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
 
   # Sample-based damage (applied post-step, independent of resets)
-  damage_pool_enabled: false
-  damage_pool_interval: 0
-  damage_pool_fraction: 0.0
+  damage_pool_enabled: true
+  damage_pool_interval: 128
+  damage_pool_fraction: 0.15
   damage_strategy: "uniform"
   damage_combined_weights: [0.5, 0.5]
   # Number of gates to knock out when generating fresh patterns (ignored if vocabulary is used)
-  damage_prob: 0.0
+  damage_prob: 20.0
   # Damage-specific vocabulary size (decoupled from legacy persistent_knockout)
-  damage_knockout_diversity: 0
+  damage_knockout_diversity: 4
 
   # # Persistent structural knockout (injected periodically)
   # persistent_knockout:
@@ -83,7 +83,7 @@ eval:
   # Periodic evaluation parameters
   periodic_eval_enabled: false
   periodic_eval_inner_steps: 100
-  periodic_eval_interval: 128
+  periodic_eval_interval: 256
   periodic_eval_test_seed: 42
   periodic_eval_log_stepwise: false
   periodic_eval_batch_size: ${pool.damage_knockout_diversity}  # Batch size for knockout evaluation (should match knockout_diversity)
@@ -116,5 +116,5 @@ backprop:
   # Knockout vocabulary configuration for backprop training
   knockout_vocabulary:
     enabled: true  # Set to true to enable knockout patterns in backprop
-    size: ${pool.persistent_knockout.knockout_diversity}  # Number of knockout patterns to test
-    damage_prob: ${pool.persistent_knockout.damage_prob}  # Number of gates to knock out per pattern 
+    size: ${pool.damage_knockout_diversity}  # Number of knockout patterns to test
+    damage_prob: ${pool.damage_prob}  # Number of gates to knock out per pattern 

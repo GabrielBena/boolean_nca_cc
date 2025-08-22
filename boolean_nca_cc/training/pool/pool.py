@@ -393,7 +393,14 @@ class GraphPool(struct.PyTreeNode):
 
         return self.replace(knockout_patterns=updated_knockout_patterns)
 
-    @partial(jax.jit, static_argnames=("layer_sizes",))
+    # @partial(
+    #     jax.jit,
+    #     static_argnames=(
+    #         "layer_sizes",
+    #         "selection_strategy",
+    #         "combined_weights",
+    #     ),
+    # )
     def damage_fraction(
         self,
         key: Array,
