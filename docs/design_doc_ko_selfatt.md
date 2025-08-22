@@ -16,8 +16,10 @@ this codebase uses the 'metabool' conda environment. IMPORTANT: conda activate m
 
 ### 1. Boolean Circuit Foundation
 
+Circuits are layered networks of LUTs as nodes, with N inputs and M outputs. Circuit-level tasks are defined as eg binary multiply, reverse of input bit processing. Loss is the element-wise difference between circuit output and target pattern at output bits. 
+
 - **`boolean_nca_cc/circuits/model.py`**
-  - Implements differentiable boolean circuits with lookup tables
+  - Implements differentiable boolean circuits with lookup tables as gates
   - Provides circuit generation (`gen_circuit`) and execution (`run_circuit`)
   - Core functions: `make_nops`, `run_layer`, `gen_wires`
 
@@ -27,7 +29,7 @@ this codebase uses the 'metabool' conda environment. IMPORTANT: conda activate m
 
   - Converts boolean circuits into graph structures compatible with JAX/Jraph
   - Creates node features (logits, hidden states, positional encodings)
-  - Establishes connectivity patterns for attention mechanisms
+  - Establishes connectivity patterns for graph attention mechanisms
   - Main function: `build_graph`
 - **`boolean_nca_cc/utils/extraction.py`**
 
@@ -65,12 +67,12 @@ this codebase uses the 'metabool' conda environment. IMPORTANT: conda activate m
   - Key function: `train_model`
 - **`boolean_nca_cc/training/evaluation.py`**
 
+
   - Central evaluation pipeline for knockout experiments
   - Processes knockout patterns and computes performance metrics
   - Key functions: `evaluate_model_stepwise_batched`, `get_loss_and_update_graph`, `evaluate_circuits_in_chunks`
   - Handles batched circuit evaluation with knockout pattern application
 - **`train.py`**
-
   - Entry point script using Hydra configuration
   - Orchestrates model instantiation and training
   - Manages experiment configuration and logging
@@ -106,4 +108,8 @@ this codebase uses the 'metabool' conda environment. IMPORTANT: conda activate m
     - Transformer architecture variants
   - Optimization parameters for attention-based updates
 
-  The primary experiment is the effect of knocking out some gates and introducing these as part of the periodic reset to the pool. The model is then trained on meta-batches, so that some of the sampled circuits in a given batch will have a knockout pattern associated with them. The eval is then on N inner loop steps, starting from NOPs circuits with knockout patterns to see if a configuration can be found that produces the target output bits. The exact configuration is expected to differ for different knockout masks, meaning that the exact LUT configurations of a circuit vary depending on the exact knockout pattern applied to the circuit.
+  The primary experiment is the effect of knocking out some gates and introducing these as part of the periodic reset to the pool. The model is then trained on meta-batches, so that some of the sampled circuits in a given batch will have a knockout pattern associated with them. The eval is then on K inner loop steps, starting from NOPs circuits with knockout patterns to see if a configuration can be found that produces the target output bits. The exact configuration is expected to differ for different knockout masks, meaning that the exact LUT configurations of a circuit vary depending on the exact knockout pattern applied to the circuit.
+
+  Currently, knockouts are introduced as part of the reset: A fraction of pool is reset, and a fraction of the reset fraction is concurrently damaged before entering the pool. Thus, damage is only applied to NOPs-initialised circuits. 
+
+  Next goal: Transition to sample-based damage: Rather than limiting damage to resets, periodically sample a fraction of existing circuits in the pool, apply the damage mask equivalently to how it is currently done in reset-based mode, and return to pool. This ensures that damage can occur at any point during the optimisation of a given circuit. Ultimately in late stages of pool training, the pool will be saturated with optimised circuits. Sampling these and damaging them will pose the following task: functioning circuit -> damaged -> **reconfiguration** to alternative working circuit.

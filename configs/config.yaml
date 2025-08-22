@@ -62,11 +62,22 @@ pool:
   reset_strategy: "combined"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
 
-  # Persistent structural knockout (injected periodically)
-  persistent_knockout:
-    fraction: 0.8 # 
-    damage_prob: 20.0 
-    knockout_diversity: 2  # Vocabulary size for knockout patterns
+  # Sample-based damage (applied post-step, independent of resets)
+  damage_pool_enabled: false
+  damage_pool_interval: 0
+  damage_pool_fraction: 0.0
+  damage_strategy: "uniform"
+  damage_combined_weights: [0.5, 0.5]
+  # Number of gates to knock out when generating fresh patterns (ignored if vocabulary is used)
+  damage_prob: 0.0
+  # Damage-specific vocabulary size (decoupled from legacy persistent_knockout)
+  damage_knockout_diversity: 0
+
+  # # Persistent structural knockout (injected periodically)
+  # persistent_knockout:
+  #   fraction: 0 # 
+  #   damage_prob: 0 
+  #   knockout_diversity: 0  # Vocabulary size for knockout patterns
 
 eval:
   # Periodic evaluation parameters
@@ -75,12 +86,12 @@ eval:
   periodic_eval_interval: 128
   periodic_eval_test_seed: 42
   periodic_eval_log_stepwise: false
-  periodic_eval_batch_size: ${pool.persistent_knockout.knockout_diversity}  # Batch size for knockout evaluation (should match knockout_diversity)
+  periodic_eval_batch_size: ${pool.damage_knockout_diversity}  # Batch size for knockout evaluation (should match knockout_diversity)
   
   # Knockout evaluation
   knockout_eval:
     enabled: true
-    damage_prob: ${pool.persistent_knockout.damage_prob}
+    damage_prob: ${pool.damage_prob}
   
   # Final BP vs SA comparison evaluation
   final_eval_enabled: true

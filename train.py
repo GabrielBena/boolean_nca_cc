@@ -483,9 +483,16 @@ def main(cfg: DictConfig) -> None:
         reset_pool_fraction=cfg.pool.reset_fraction,
         reset_strategy=cfg.pool.reset_strategy,
         reset_pool_interval=cfg.pool.reset_interval,
+        # Damage (sample-based knockout) parameters
+        damage_pool_enabled=cfg.pool.get("damage_pool_enabled", False),
+        damage_pool_interval=cfg.pool.get("damage_pool_interval", 0),
+        damage_pool_fraction=cfg.pool.get("damage_pool_fraction", 0.0),
+        damage_strategy=cfg.pool.get("damage_strategy", "uniform"),
+        damage_combined_weights=tuple(cfg.pool.get("damage_combined_weights", [0.5, 0.5])),
+        damage_pool_damage_prob=cfg.pool.get("damage_prob", cfg.pool.get("persistent_knockout", {}).get("damage_prob", 0.0)),
         # Perturbation configurations
-        persistent_knockout_config=cfg.pool.persistent_knockout,
-        knockout_diversity=cfg.pool.persistent_knockout.knockout_diversity,
+        persistent_knockout_config=cfg.pool.get("persistent_knockout", None),
+        knockout_diversity=cfg.pool.get("damage_knockout_diversity", cfg.pool.get("persistent_knockout", {}).get("knockout_diversity", 0)),
         # Learning rate scheduling
         lr_scheduler=cfg.training.lr_scheduler,
         lr_scheduler_params=cfg.training.lr_scheduler_params,

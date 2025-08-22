@@ -278,7 +278,6 @@ class GraphPool(struct.PyTreeNode):
         update_steps = self.graphs.globals[indices, 1]
         return float(jp.mean(update_steps))
 
-
     def reset_fraction(
         self,
         key: Array,
@@ -364,6 +363,112 @@ class GraphPool(struct.PyTreeNode):
             reset_pool = reset_pool.replace(reset_counter=new_counter)
 
         return reset_pool, avg_steps_reset
+
+    @jax.jit
+    def apply_knockouts(
+        self,
+        idxs: Array,
+        new_knockout_patterns: Array,
+    ) -> "GraphPool":
+        """
+        Apply new knockout patterns at the specified indices and return an updated pool.
+
+        Only `knockout_patterns` are mutated; graphs, wires, logits, and reset_counter
+        remain unchanged.
+
+        Args:
+            idxs: 1D indices in the pool to update.
+            new_knockout_patterns: Boolean knockout masks aligned with `idxs`.
+
+        Returns:
+            Updated GraphPool with modified `knockout_patterns`.
+        """
+        if self.knockout_patterns is None:
+            # Nothing to update if knockout storage is not initialized
+            return self
+
+        updated_knockout_patterns = self.knockout_patterns.at[idxs].set(
+            new_knockout_patterns
+        )
+
+        return self.replace(knockout_patterns=updated_knockout_patterns)
+
+    @partial(jax.jit, static_argnames=("layer_sizes",))
+    def damage_fraction(
+        self,
+        key: Array,
+        fraction: float,
+        layer_sizes: List[Tuple[int, int]],
+        damage_prob: float,
+        selection_strategy: str = "uniform",
+        combined_weights: Tuple[float, float] = (0.5, 0.5),
+        knockout_vocabulary: Optional[Array] = None,
+    ) -> Tuple["GraphPool", Array]:
+        """
+        Apply sample-based damage (persistent knockouts) to a fraction of pool entries.
+
+        Only `knockout_patterns` are updated for the selected entries. The graphs, wires,
+        logits, and reset_counter remain unchanged. Selection mirrors reset semantics via
+        `get_reset_indices`.
+
+        Args:
+            key: Random key for selection and pattern generation.
+            fraction: Fraction of pool to damage (0..1). Minimum of 1 entry affected.
+            layer_sizes: Circuit layer sizes used to shape knockout patterns.
+            damage_prob: Probability of knockout per node when generating new patterns.
+            selection_strategy: One of {"uniform","steps_biased","loss_biased","combined"}.
+            combined_weights: Weights for combined selection strategy as (loss, steps).
+            knockout_vocabulary: Optional [V, num_nodes] boolean masks; if provided,
+                                 sample with replacement from the vocabulary.
+
+        Returns:
+            Tuple of (updated_pool, damaged_indices).
+        """
+        # Split key for selection and downstream sampling/generation
+        selection_key, op_key = jax.random.split(key)
+
+        # Reuse reset index selection semantics
+        damaged_idxs, _avg_steps_unused = self.get_reset_indices(
+            selection_key, fraction, selection_strategy, combined_weights
+        )
+
+        num_damaged = damaged_idxs.shape[0]
+
+        # Early out if nothing to do (should not happen due to floor=1, but guard anyway)
+        def _no_op_fn(_: Array) -> Tuple["GraphPool", Array]:
+            return self, damaged_idxs
+
+        def _apply_damage(_: Array) -> Tuple["GraphPool", Array]:
+            # Prepare knockout patterns, either from provided vocabulary or by generation
+            if knockout_vocabulary is not None:
+                vocab_size = knockout_vocabulary.shape[0]
+                sample_keys = op_key  # reuse
+                vocab_indices = jax.random.choice(
+                    sample_keys, vocab_size, shape=(num_damaged,), replace=True
+                )
+                new_patterns = knockout_vocabulary[vocab_indices]
+            else:
+                # Generate fresh patterns
+                pattern_keys = jax.random.split(op_key, num_damaged)
+                vmapped_pattern_creator = jax.vmap(
+                    lambda k: create_reproducible_knockout_pattern(
+                        key=k,
+                        layer_sizes=layer_sizes,
+                        damage_prob=damage_prob,
+                    )
+                )
+                new_patterns = vmapped_pattern_creator(pattern_keys)
+
+            # Apply into pool
+            updated_pool = self.apply_knockouts(damaged_idxs, new_patterns)
+            return updated_pool, damaged_idxs
+
+        # Use a conditional to keep shapes consistent under jit (though floor=1 normally)
+        updated_pool, out_idxs = jax.lax.cond(
+            num_damaged > 0, _apply_damage, _no_op_fn, damaged_idxs
+        )
+
+        return updated_pool, out_idxs
 
     def get_reset_indices(
         self,

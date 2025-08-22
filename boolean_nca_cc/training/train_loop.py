@@ -461,9 +461,17 @@ def train_model(
         0.5,
         0.5,
     ),  # Weights for [loss, steps] in combined strategy
+    # Damage (sample-based knockout) parameters
+    damage_pool_enabled: bool = False,
+    damage_pool_interval: int = 0,
+    damage_pool_fraction: float = 0.0,
+    damage_strategy: str = "uniform",
+    damage_combined_weights: Tuple[float, float] = (0.5, 0.5),
     # Perturbation configurations
     persistent_knockout_config: Optional[Dict] = None,
     knockout_diversity: Optional[int] = None,  # Size of knockout pattern vocabulary for shared training/evaluation patterns
+    # Damage-specific generation control (decoupled from legacy persistent_knockout)
+    damage_pool_damage_prob: float = 0.0,
     knockout_eval: Optional[Dict] = None,
     # Learning rate scheduling
     lr_scheduler: str = "constant",  # Options: "constant", "exponential", "cosine", "linear_warmup"
@@ -762,9 +770,8 @@ def train_model(
     # Initialize knockout vocabulary if knockout_diversity is configured
     knockout_vocabulary = None
     log.info(f"DEBUG: train_loop received knockout_diversity = {knockout_diversity}")
-    log.info(f"DEBUG: train_loop received persistent_knockout_config = {persistent_knockout_config}")
-    if (persistent_knockout_config and knockout_diversity is not None and 
-        knockout_diversity > 0 and persistent_knockout_config.get("fraction", 0.0) > 0.0):
+    log.info(f"DEBUG: train_loop received damage_pool_damage_prob = {damage_pool_damage_prob}")
+    if knockout_diversity is not None and knockout_diversity > 0:
         log.info(f"Creating knockout pattern vocabulary with {knockout_diversity} patterns")
         
         # Use the same seed as evaluation to ensure pattern space is identical
@@ -779,7 +786,7 @@ def train_model(
             rng=vocab_rng,
             vocabulary_size=knockout_diversity,
             layer_sizes=true_layer_sizes,
-            damage_prob=persistent_knockout_config.get("damage_prob", 10.0),
+            damage_prob=damage_pool_damage_prob,
         )
         
         log.info(f"Generated knockout vocabulary with shape: {knockout_vocabulary.shape}")
@@ -835,37 +842,37 @@ def train_model(
                 # Use consistent key generation for pool resets
                 reset_pool_key = wiring_fixed_key
 
-                # Sample knockout patterns from vocabulary if available, otherwise use config
-                sampled_knockout_patterns = None
-                if knockout_vocabulary is not None:
-                    # Sample patterns with replacement from the vocabulary
-                    pattern_sample_key = jax.random.fold_in(reset_key, 42)  # Use different key for pattern sampling
-                    pattern_indices = jax.random.choice(
-                            pattern_sample_key, len(knockout_vocabulary), shape=(num_to_reset,), replace=True
-                    )
-                    sampled_knockout_patterns = knockout_vocabulary[pattern_indices]
+                # # Sample knockout patterns from vocabulary if available, otherwise use config
+                # sampled_knockout_patterns = None
+                # if knockout_vocabulary is not None:
+                #     # Sample patterns with replacement from the vocabulary
+                #     pattern_sample_key = jax.random.fold_in(reset_key, 42)  # Use different key for pattern sampling
+                #     pattern_indices = jax.random.choice(
+                #             pattern_sample_key, len(knockout_vocabulary), shape=(num_to_reset,), replace=True
+                #     )
+                #     sampled_knockout_patterns = knockout_vocabulary[pattern_indices]
 
 
                 # Create a pool of fresh circuits, applying knockout patterns
-                damaged_pool = initialize_graph_pool(
+                reset_pool = initialize_graph_pool(
                     rng=reset_pool_key,
                     layer_sizes=layer_sizes,
                     pool_size=num_to_reset,  # Only create circuits we need
                     input_n=input_n,
                     arity=arity,
                     circuit_hidden_dim=circuit_hidden_dim,
-                    knockout_config=persistent_knockout_config if knockout_vocabulary is None else None,  # Use config only if no vocabulary
-                    knockout_patterns=sampled_knockout_patterns,  # Pass sampled patterns
+                    knockout_config=None, # resets no longer introduce damage
+                    knockout_patterns=None,
                 )
 
                 # Reset a fraction of the pool and get avg steps of reset graphs
                 circuit_pool, avg_steps_reset = circuit_pool.reset_fraction(
                     reset_key,
                     reset_pool_fraction,
-                    damaged_pool.graphs,
-                    damaged_pool.wires,
-                    damaged_pool.logits,
-                    damaged_pool.knockout_patterns,  # Pass patterns
+                    reset_pool.graphs,
+                    reset_pool.wires,
+                    reset_pool.logits,
+                    None,
                     reset_strategy=reset_strategy,
                     combined_weights=combined_weights,
                 )
@@ -873,6 +880,39 @@ def train_model(
                 # Update last reset epoch
                 last_reset_epoch = epoch
                 # diversity = circuit_pool.get_wiring_diversity(layer_sizes)
+            
+            # Apply sample-based damage to a fraction of the pool (independent of resets)
+            if (
+                damage_pool_enabled
+                and damage_pool_interval > 0
+                and damage_pool_fraction > 0.0
+                and (damage_pool_damage_prob > 0.0 or knockout_vocabulary is not None)
+                and (epoch % damage_pool_interval == 0)
+            ):
+                rng, damage_key = jax.random.split(rng)
+                circuit_pool, damaged_idxs = circuit_pool.damage_fraction(
+                    key=damage_key,
+                    fraction=damage_pool_fraction,
+                    layer_sizes=tuple(layer_sizes),
+                    damage_prob=float(damage_pool_damage_prob),
+                    selection_strategy=damage_strategy,
+                    combined_weights=damage_combined_weights,
+                    knockout_vocabulary=knockout_vocabulary,
+                )
+
+                damaged_count = int(damaged_idxs.shape[0]) if hasattr(damaged_idxs, "shape") else 0
+                damaged_frac = damaged_count / float(pool_size) if pool_size > 0 else 0.0
+                log.info(
+                    f"Damage applied at epoch {epoch}: count={damaged_count}, fraction={damaged_frac:.4f}"
+                )
+                if wandb_run:
+                    wandb_run.log(
+                        {
+                            "pool/damaged_count": damaged_count,
+                            "pool/damaged_fraction": damaged_frac,
+                            "training/epoch": epoch,
+                        }
+                    )
 
             if jp.isnan(loss):
                 log.warning(
