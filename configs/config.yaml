@@ -24,7 +24,7 @@ wandb:
 
 # Circuit configuration
 circuit:
-  task: "binary_multiply"
+  task: "reverse"
   input_bits: 8
   output_bits: 8
   arity: 4
