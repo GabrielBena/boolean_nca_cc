@@ -170,10 +170,74 @@ TrainState = namedtuple("TrainState", "params opt_state")
 
 
 # Remove JIT from this function since it has a non-tensor argument (opt)
-def update_params(grad, opt_state, opt, logits):
-    """Parameter update function"""
+@jax.jit
+def _preserve_knocked_out_params(updated_logits, original_logits, gate_masks):
+    """
+    JIT-compiled function to preserve knocked out parameters efficiently.
+
+    Since gradients are automatically zero for knocked out gates (due to
+    masking in run_circuit), we only need to preserve parameter values
+    after optimizer updates to handle momentum, weight decay, etc.
+
+    Args:
+        updated_logits: List of updated logit arrays
+        original_logits: List of original logit arrays
+        gate_masks: List of gate masks (excluding input layer)
+
+    Returns:
+        Logits with knocked out gates preserved
+    """
+    preserved_logits = []
+
+    for updated_layer, original_layer, layer_mask in zip(
+        updated_logits, original_logits, gate_masks, strict=True
+    ):
+        group_n, group_size, lut_size = updated_layer.shape
+
+        # Reshape mask and broadcast to match logits
+        mask_reshaped = layer_mask.reshape(group_n, group_size, 1)
+        mask_broadcast = jp.broadcast_to(mask_reshaped, updated_layer.shape)
+
+        # Preserve knocked out gates (mask == 0), keep updated for active gates (mask == 1)
+        preserved_layer = jp.where(
+            mask_broadcast == 0.0,
+            original_layer,  # Preserve original for knocked out gates
+            updated_layer,  # Use updated for active gates
+        )
+        preserved_logits.append(preserved_layer)
+
+    return preserved_logits
+
+
+def update_params(grad, opt_state, opt, logits, gate_mask=None):
+    """
+    Parameter update function with gate mask support.
+
+    Since gradients are automatically zero for knocked out gates (due to masking
+    in run_circuit), we only need to preserve their parameter values after
+    optimizer updates to prevent momentum, weight decay, etc. from affecting them.
+
+    Args:
+        grad: Gradients for logits (already zero for knocked out gates)
+        opt_state: Optimizer state
+        opt: Optimizer instance
+        logits: Current logit parameters
+        gate_mask: Optional gate mask (layered format) where 0.0 = knocked out
+
+    Returns:
+        Tuple of (new_logits, new_opt_state)
+    """
+    # Apply optimizer update normally (gradients are already zero for knocked out gates)
     upd, new_opt_state = opt.update(grad, opt_state, logits)
-    new_logits = optax.apply_updates(logits, upd)
+    updated_logits = optax.apply_updates(logits, upd)
+
+    if gate_mask is not None:
+        # Only need to preserve parameter values after optimizer update
+        logit_gate_masks = gate_mask[1:]  # Skip input layer
+        new_logits = _preserve_knocked_out_params(updated_logits, logits, logit_gate_masks)
+    else:
+        new_logits = updated_logits
+
     return new_logits, new_opt_state
 
 
@@ -202,7 +266,7 @@ def train_step(state, opt, wires, x, y0, loss_type="l4", do_train=True, gate_mas
             (loss, aux), grad = grad_loss_f_l4(logits, wires, x, y0, gate_mask=gate_mask)
 
         # Update parameters (without JIT since optimizer is a function)
-        new_logits, new_opt_state = update_params(grad, opt_state, opt, logits)
+        new_logits, new_opt_state = update_params(grad, opt_state, opt, logits, gate_mask)
 
     else:
         loss, aux = loss_f(logits, wires, x, y0, loss_type, gate_mask=gate_mask)
