@@ -1437,6 +1437,7 @@ class CircuitOptimizationDemo:
             task_changed, self.task_idx = imgui.combo("Task", self.task_idx, self.available_tasks)
             if task_changed:
                 self.update_task()
+                self.initialize_optimization_method()
 
             # Task-specific controls
             task_name = self.available_tasks[self.task_idx]
