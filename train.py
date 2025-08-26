@@ -613,6 +613,7 @@ def main(cfg: DictConfig) -> None:
         log_stepwise=False,
         layer_sizes=layer_sizes,
         log_pool_scatter=False,
+        log_circuit_visualization=True,  # Enable circuit visualization logging
     )
 
     if "metrics" in model_results:

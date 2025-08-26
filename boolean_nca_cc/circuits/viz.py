@@ -246,3 +246,155 @@ def evaluate_and_visualize(logits, wires, x, y0, title_prefix="", hard=True, vis
         plt.show()
 
     return metrics
+
+
+def evaluate_and_log_to_wandb(logits, wires, x, y0, wandb_run, epoch, title_prefix="", hard=True):
+    """
+    Evaluate the circuit and log visualization images to wandb.
+
+    This is a wandb-compatible version of evaluate_and_visualize that creates
+    images and logs them to wandb instead of showing matplotlib plots.
+
+    Args:
+        logits: List of logits for each layer (trained parameters).
+        wires: List of wire connection patterns for the circuit.
+        x: Input data tensor.
+        y0: Target output data tensor.
+        wandb_run: WandB run object for logging.
+        epoch: Current epoch number.
+        title_prefix: Optional string to prepend to the plot title.
+        hard: Whether to run the circuit in hard mode (True) or soft mode (False).
+
+    Returns:
+        Dictionary containing evaluation metrics.
+    """
+    if wandb_run is None:
+        # Fall back to regular evaluation without visualization
+        return evaluate_and_visualize(logits, wires, x, y0, title_prefix, hard, visualize=False)
+
+    try:
+        # 1. Run the circuit to get predictions
+        acts = run_circuit(logits, wires, x, hard=hard)
+        y_pred = acts[-1]
+
+        # 2. Calculate accuracy
+        y_pred_rounded = jp.round(y_pred) if not hard else y_pred
+        correct_predictions = jp.equal(y_pred_rounded, y0)
+        accuracy = jp.mean(correct_predictions)
+
+        # 3. Calculate the difference map (errors)
+        errors = jp.not_equal(y_pred_rounded, y0).astype(jp.float32)
+
+        # 4. Create metrics dictionary
+        metrics = {
+            "accuracy": float(accuracy),
+            "error_count": int(jp.sum(errors)),
+            "total_bits": int(errors.size),
+            "error_rate": float(jp.sum(errors) / errors.size),
+        }
+
+        # 5. Create visualization images for wandb logging
+        # Convert to NumPy for image creation
+        y_pred_np = np.array(y_pred_rounded)
+        y0_np = np.array(y0)
+        errors_np = np.array(errors)
+        x_np = np.array(x)
+
+        # Create the visualization figure
+        fig, axes = plt.subplots(4, 1, figsize=(20, 8), constrained_layout=True)
+        cmap = "viridis"
+
+        # Plot Input
+        axes[0].imshow(
+            x_np.T,
+            cmap=cmap,
+            interpolation="nearest",
+            vmin=0,
+            vmax=1,
+            aspect="auto",
+        )
+        axes[0].set_title("Input")
+        axes[0].set_xlabel("Batch Index")
+        axes[0].set_ylabel("Input Bit Index")
+
+        # Plot Predicted Output
+        axes[1].imshow(
+            y_pred_np.T,
+            cmap=cmap,
+            interpolation="nearest",
+            vmin=0,
+            vmax=1,
+            aspect="auto",
+        )
+        axes[1].set_title("Predicted Output")
+        axes[1].set_xlabel("Batch Index")
+        axes[1].set_ylabel("Output Bit Index")
+
+        # Plot Target Output
+        axes[2].imshow(y0_np.T, cmap=cmap, interpolation="nearest", vmin=0, vmax=1, aspect="auto")
+        axes[2].set_title("Target Output")
+        axes[2].set_xlabel("Batch Index")
+        axes[2].set_ylabel("Output Bit Index")
+
+        # Plot Errors (highlighting incorrect bits)
+        cmap_errors = plt.cm.colors.ListedColormap(["lightgray", "red"])
+        axes[3].imshow(
+            errors_np.T,
+            cmap=cmap_errors,
+            interpolation="nearest",
+            vmin=0,
+            vmax=1,
+            aspect="auto",
+        )
+        axes[3].set_title("Errors (Incorrect Bits)")
+        axes[3].set_xlabel("Batch Index")
+        axes[3].set_ylabel("Output Bit Index")
+
+        # Add overall title with accuracy
+        fig.suptitle(f"{title_prefix}Circuit Evaluation - Accuracy: {accuracy:.4f}", fontsize=16)
+
+        # Log to wandb
+        import wandb
+
+        wandb_run.log(
+            {
+                "circuit_viz/evaluation": wandb.Image(fig),
+                "circuit_viz/accuracy": accuracy,
+                "circuit_viz/error_rate": float(jp.sum(errors) / errors.size),
+                "circuit_viz/epoch": epoch,
+            }
+        )
+
+        # Close the figure to free memory
+        plt.close(fig)
+
+        return metrics
+
+    except Exception as e:
+        print(f"Error in evaluate_and_log_to_wandb: {e}")
+        # Fall back to regular evaluation without visualization
+        return evaluate_and_visualize(logits, wires, x, y0, title_prefix, hard, visualize=False)
+
+
+def create_single_seed_evaluation_circuit(layer_sizes, arity, eval_seed=42):
+    """
+    Create a single deterministic circuit for visualization purposes.
+
+    This creates a simple circuit with a fixed seed that can be used consistently
+    for visualization across training epochs.
+
+    Args:
+        layer_sizes: List of tuples (nodes, group_size) for each layer
+        arity: Number of inputs per gate
+        eval_seed: Seed for deterministic circuit generation
+
+    Returns:
+        Tuple of (wires, initial_logits) for the evaluation circuit
+    """
+    import jax.random
+
+    from boolean_nca_cc.circuits.model import gen_circuit
+
+    eval_key = jax.random.PRNGKey(eval_seed)
+    wires, logits = gen_circuit(eval_key, layer_sizes, arity=arity)
+    return wires, logits

@@ -447,6 +447,7 @@ def run_unified_periodic_evaluation(
     log_stepwise=False,
     layer_sizes: list[tuple[int, int]] | None = None,
     log_pool_scatter: bool = False,
+    log_circuit_visualization: bool = True,
 ) -> dict:
     """
     Run unified periodic evaluation with only IN-distribution and OUT-of-distribution testing.
@@ -467,6 +468,7 @@ def run_unified_periodic_evaluation(
         log_stepwise: Whether to log step-by-step metrics
         layer_sizes: Circuit layer sizes
         log_pool_scatter: Whether to log pool scatterplot (loss vs steps)
+        log_circuit_visualization: Whether to log circuit output visualization to wandb
 
     Returns:
         Dictionary with evaluation metrics from IN-distribution and OUT-of-distribution evaluations
@@ -599,6 +601,55 @@ def run_unified_periodic_evaluation(
                             "eval_out_steps/epoch": epoch,
                         }
                         wandb_run.log(step_data_out)
+
+            # Log circuit visualization if enabled
+            if log_circuit_visualization and layer_sizes is not None:
+                try:
+                    from boolean_nca_cc.circuits.viz import (
+                        create_single_seed_evaluation_circuit,
+                        evaluate_and_log_to_wandb,
+                    )
+                    from boolean_nca_cc.training.evaluation import evaluate_model_stepwise_batched
+
+                    # Create a single deterministic circuit for consistent visualization
+                    viz_wires, viz_initial_logits = create_single_seed_evaluation_circuit(
+                        layer_sizes, arity, eval_seed=42
+                    )
+
+                    # Evaluate the model on this single circuit to get final optimized logits
+                    viz_step_metrics = evaluate_model_stepwise_batched(
+                        model=model,
+                        wires=[viz_wires],  # Single circuit in batch format
+                        logits=[viz_initial_logits],  # Single circuit in batch format
+                        x_data=x_data,
+                        y_data=y_data,
+                        input_n=input_n,
+                        arity=arity,
+                        circuit_hidden_dim=circuit_hidden_dim,
+                        n_message_steps=n_message_steps,
+                        loss_type=loss_type,
+                        layer_sizes=layer_sizes,
+                    )
+
+                    # Get the final optimized logits (last step)
+                    viz_final_logits = viz_step_metrics["logits"][-1][
+                        0
+                    ]  # Extract single circuit from batch
+
+                    # Create and log the visualization
+                    evaluate_and_log_to_wandb(
+                        logits=viz_final_logits,
+                        wires=viz_wires,
+                        x=x_data,
+                        y0=y_data,
+                        wandb_run=wandb_run,
+                        epoch=epoch,
+                        title_prefix="Periodic Eval - ",
+                        hard=True,
+                    )
+
+                except Exception as viz_e:
+                    log.warning(f"Error creating circuit visualization at epoch {epoch}: {viz_e}")
 
         # Log summary to console
         training_config = datasets.training_config
@@ -1625,6 +1676,7 @@ def train_model(
                         log_stepwise=periodic_eval_log_stepwise,
                         layer_sizes=layer_sizes,
                         log_pool_scatter=periodic_eval_log_pool_scatter,
+                        log_circuit_visualization=True,  # Enable circuit visualization logging
                     )
                     # Extract final metrics for best model tracking (use IN-distribution metrics)
                     current_eval_metrics = eval_results.get("final_metrics_in", None)
