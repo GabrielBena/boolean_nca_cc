@@ -25,13 +25,13 @@ wandb:
 # Circuit configuration
 circuit:
   task: "text"
-  input_bits: 8
+  input_bits: 6
   output_bits: 8
   arity: 4
   num_layers: 3
   layer_sizes: null  # Auto-generate if null 
   circuit_hidden_dim: 32
-  text: "Hello Neural CA! Self-Organizing Circuits  are Real!"
+  text: "Hello NCAs!"
 
 # Training parameters
 training:

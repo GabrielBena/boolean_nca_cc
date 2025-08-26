@@ -188,7 +188,7 @@ class CircuitOptimizationDemo:
         # Task configuration
         self.available_tasks = list(TASKS.keys())
         self.task_idx = 6
-        self.task_text = "Hello Neural CA"
+        self.task_text = "Hello Neural CA"  # Shorter text works better with performance mode
         self.noise_p = 0.5
         self.update_task()
 
@@ -220,6 +220,7 @@ class CircuitOptimizationDemo:
         # Visualization settings
         self.use_simple_viz = False
         self.use_message_viz = False  # For circuit visualization
+        self.use_full_resolution = False  # Toggle for full resolution vs performance mode
         self.max_loss_value = 10.0
         self.min_loss_value = 1e-6
         self.auto_scale_plot = True
@@ -249,6 +250,9 @@ class CircuitOptimizationDemo:
 
         # Initialize visualization
         self.setup_visualization()
+
+        # Debug flag for printing dimensions
+        self._debug_printed = False
 
         # Initialize optimization method
         self.initialize_optimization_method()
@@ -330,14 +334,16 @@ class CircuitOptimizationDemo:
 
     def setup_visualization(self):
         """Setup visualization using shared functions"""
-        # Create input visualization
+        # Use consistent zoom factor like in notebook
+        zoom_factor = 8
+
+        # Create input visualization - transpose to match notebook format
         inp_img = self.input_x.T
-        zoom_factor = max(4, int(8 // self.input_n * 2))
         inp_img = np.dstack([inp_img] * 3)
         inp_img = zoom(inp_img, zoom_factor)
         self.inputs_img = np.uint8(inp_img.clip(0, 1) * 255)
 
-        # Create ground truth visualization
+        # Create ground truth visualization - transpose to match notebook format
         gt_img = self.y0.T
         gt_img = np.dstack([gt_img] * 3)
         gt_img = zoom(gt_img, zoom_factor)
@@ -745,7 +751,7 @@ class CircuitOptimizationDemo:
         if not hasattr(self, "current_pred_hard"):
             return
 
-        # Create output visualization
+        # Create output visualization - transpose to match notebook format
         oimg = self.current_pred.T
         oimg = np.dstack([oimg] * 3)
 
@@ -754,8 +760,8 @@ class CircuitOptimizationDemo:
         m = err_mask[..., None] * 0.5
         oimg = oimg * (1.0 - m) + m * np.float32([1, 0, 0])
 
-        # Apply zoom
-        zoom_factor = max(4, int(8 // self.output_n * 2))
+        # Use consistent zoom factor like in notebook
+        zoom_factor = 8
         oimg = zoom(oimg, zoom_factor)
         self.outputs_img = np.uint8(oimg.clip(0, 1) * 255)
 
@@ -1100,18 +1106,28 @@ class CircuitOptimizationDemo:
             view_w = imgui.get_content_region_avail().x
             img_h, img_w = img.shape[:2]
 
-            # Calculate aspect ratio
-            if name == "inputs":
-                natural_aspect = self.input_n / (2**self.input_n)
-                reference_aspect = 8.0 / (2**8)
-                aspect = natural_aspect * (reference_aspect / natural_aspect) * 3.0
-            else:
-                natural_aspect = self.output_n / (2**self.output_n)
-                reference_aspect = 8.0 / (2**8)
-                aspect = natural_aspect * (reference_aspect / natural_aspect) * 3.0
+            # Debug: print image dimensions for text task
+            if (
+                name in ["outputs", "ground_truth"]
+                and hasattr(self, "_debug_printed")
+                and not self._debug_printed
+            ):
+                print(f"Debug {name}: img shape = {img.shape}, aspect = {img_h / img_w:.4f}")
+                self._debug_printed = True
 
-            # Clamp aspect ratio
-            aspect = max(0.02, min(aspect, 0.3))
+            # Simple aspect ratio based on actual image dimensions
+            # This matches how the notebook displays the data
+            natural_aspect = img_h / img_w
+
+            # For text tasks with very wide, short images, we need to respect
+            # the true aspect ratio to show the full 256×8 data properly
+            if natural_aspect < 0.05:  # Very wide image (like 64×2048)
+                # Use the natural aspect ratio but ensure it's visible
+                aspect = max(0.03, natural_aspect)  # Allow very wide aspect ratios
+            elif natural_aspect < 0.2:  # Moderately wide
+                aspect = max(0.1, natural_aspect)
+            else:
+                aspect = max(0.1, min(natural_aspect, 1.0))
 
             disp_w = view_w
             disp_h = disp_w * aspect
@@ -1154,10 +1170,26 @@ class CircuitOptimizationDemo:
                             thickness=2.0,
                         )
             else:
-                # Limit resolution for performance
-                max_blocks = 64
-                x_step = max(1, img_w // max_blocks)
-                y_step = max(1, img_h // max_blocks)
+                if self.use_full_resolution:
+                    # Full resolution mode - show every pixel (slower but more detailed)
+                    x_step = 1
+                    y_step = 1
+                else:
+                    # Performance mode - intelligent downsampling that preserves text readability
+                    # For very wide images (like text), preserve more horizontal detail
+                    aspect_ratio = img_h / img_w
+
+                    if aspect_ratio < 0.1:  # Very wide image (likely text)
+                        # Preserve horizontal resolution for text readability
+                        max_horizontal_samples = min(256, img_w // 4)  # Sample every 4th pixel
+                        max_vertical_samples = min(64, img_h)  # Full vertical resolution
+                        x_step = max(1, img_w // max_horizontal_samples)
+                        y_step = max(1, img_h // max_vertical_samples)
+                    else:
+                        # Regular images - use original 64x64 approach
+                        max_blocks = 64
+                        x_step = max(1, img_w // max_blocks)
+                        y_step = max(1, img_h // max_blocks)
 
                 for y in range(0, img_h, y_step):
                     for x in range(0, img_w, x_step):
@@ -1264,17 +1296,11 @@ class CircuitOptimizationDemo:
             self.draw_circuit(H=max(H, 300))  # Minimum height of 300
 
             # Output vs Ground Truth
-            imgui.separator_text("Outputs vs Ground Truth")
-            imgui.columns(2, "output_columns")
-
-            imgui.text("Current Output")
+            imgui.separator_text("Current Output")
             self.draw_lut("outputs", self.outputs_img, self.output_texture)
 
-            imgui.next_column()
-            imgui.text("Expected Output")
+            imgui.separator_text("Expected Output")
             self.draw_lut("ground_truth", self.ground_truth_img, self.ground_truth_texture)
-
-            imgui.columns(1)
             imgui.end_child()
             imgui.same_line()
 
@@ -1470,6 +1496,9 @@ class CircuitOptimizationDemo:
             imgui.separator_text("Visualization")
             _, self.use_simple_viz = imgui.checkbox("Simple visualization", self.use_simple_viz)
             _, self.use_message_viz = imgui.checkbox("Message visualization", self.use_message_viz)
+            _, self.use_full_resolution = imgui.checkbox(
+                "Full resolution (slower)", self.use_full_resolution
+            )
             _, self.auto_scale_plot = imgui.checkbox("Auto-scale plot", self.auto_scale_plot)
 
             # Circuit gate mask controls
