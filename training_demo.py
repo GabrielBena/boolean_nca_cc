@@ -14,8 +14,6 @@ import jax
 import jax.numpy as jp
 import numpy as np
 import optax
-import PIL.Image
-import PIL.ImageDraw
 from flax import nnx
 
 # Import model components
@@ -180,11 +178,10 @@ class CircuitOptimizationDemo:
         self.initialize_circuit()
 
         # Task configuration
-        self.available_tasks = [*list(TASKS.keys()), "text", "noise"]
+        self.available_tasks = list(TASKS.keys())
         self.task_idx = 6
         self.task_text = "Hello Neural CA"
         self.noise_p = 0.5
-        self.sample_noise()
         self.update_task()
 
         # Optimization state
@@ -278,50 +275,35 @@ class CircuitOptimizationDemo:
         self.model_generator = None
         self.last_step_result = None
 
-    def sample_noise(self):
-        """Sample noise for noise task"""
-        self.noise = np.random.rand(self.case_n, self.output_n)
-
     def update_task(self):
         """Update current task using shared task infrastructure"""
         task_name = self.available_tasks[self.task_idx]
 
-        if task_name == "text":
-            # Text-based task
-            im = PIL.Image.new("L", (self.case_n, self.output_n))
-            draw = PIL.ImageDraw.Draw(im)
-            draw.text((2, -2), self.task_text, fill=255)
-            self.y0 = jp.float32(np.array(im) > 100).T
+        # Use shared task infrastructure for all tasks
+        try:
+            # Prepare task-specific parameters
+            task_kwargs = {
+                "input_bits": self.input_n,
+                "output_bits": self.output_n,
+            }
 
+            # Add task-specific parameters
+            if task_name == "text":
+                task_kwargs["text"] = self.task_text
+            elif task_name == "noise":
+                task_kwargs["noise_p"] = self.noise_p
+                # Use a consistent seed for reproducibility during demo
+                task_kwargs["seed"] = 42
+
+            self.input_x, self.y0 = get_task_data(task_name, self.case_n, **task_kwargs)
+        except Exception as e:
+            print(f"Error loading task '{task_name}': {e}")
+            # Fallback to copy task
             x = jp.arange(self.case_n)
             self.input_x = unpack(x, bit_n=self.input_n)
-
-        elif task_name == "noise":
-            # Noise-based task
-            if self.noise.shape != (self.case_n, self.output_n):
-                self.sample_noise()
-            self.y0 = jp.float32(self.noise < self.noise_p)
-
-            x = jp.arange(self.case_n)
-            self.input_x = unpack(x, bit_n=self.input_n)
-
-        else:
-            # Use shared task infrastructure
-            try:
-                self.input_x, self.y0 = get_task_data(
-                    task_name,
-                    self.case_n,
-                    input_bits=self.input_n,
-                    output_bits=self.output_n,
-                )
-            except Exception as e:
-                print(f"Error loading task '{task_name}': {e}")
-                # Fallback to copy task
-                x = jp.arange(self.case_n)
-                self.input_x = unpack(x, bit_n=self.input_n)
-                max_output_value = (1 << self.output_n) - 1
-                clipped_output = np.minimum(x, max_output_value)
-                self.y0 = jp.float32(unpack(clipped_output, bit_n=self.output_n))
+            max_output_value = (1 << self.output_n) - 1
+            clipped_output = np.minimum(x, max_output_value)
+            self.y0 = jp.float32(unpack(clipped_output, bit_n=self.output_n))
 
         # Reset optimization progress
         self.step_i = 0
@@ -627,7 +609,9 @@ class CircuitOptimizationDemo:
 
             # Run circuit to get layer-by-layer activations
             # This returns [input_acts, layer1_acts, layer2_acts, ..., output_acts]
-            self.act = run_circuit(current_logits, self.wires, self.input_x, hard=False)
+            self.act = run_circuit(
+                current_logits, self.wires, self.input_x, hard=False, gate_mask=self.gate_mask
+            )
 
             # Generate error mask for visualization
             self.err_mask = pred_hard != self.y0
@@ -687,7 +671,9 @@ class CircuitOptimizationDemo:
                 try:
                     # Run circuit to get layer-by-layer activations
                     # This returns [input_acts, layer1_acts, layer2_acts, ..., output_acts]
-                    self.act = run_circuit(self.logits, self.wires, self.input_x, hard=False)
+                    self.act = run_circuit(
+                        self.logits, self.wires, self.input_x, hard=False, gate_mask=self.gate_mask
+                    )
 
                     # Generate error mask for visualization
                     self.err_mask = self.current_pred_hard != self.y0
@@ -769,7 +755,6 @@ class CircuitOptimizationDemo:
             delattr(self, "current_pred_hard")
 
         # Update task and visualization
-        self.sample_noise()
         self.update_task()
 
         # Reinitialize optimization method
@@ -1531,7 +1516,9 @@ class CircuitOptimizationDemo:
 
             # Run circuit to get layer-by-layer activations
             # This returns [input_acts, layer1_acts, layer2_acts, ..., output_acts]
-            self.act = run_circuit(self.logits, self.wires, self.input_x, hard=False)
+            self.act = run_circuit(
+                self.logits, self.wires, self.input_x, hard=False, gate_mask=self.gate_mask
+            )
 
             # Generate error mask for visualization - use final output from activations
             final_output = self.act[-1] if self.act else jp.zeros_like(self.y0)

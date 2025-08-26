@@ -426,7 +426,13 @@ def main(cfg: DictConfig) -> None:
 
     # Get task data
     case_n = 1 << input_n
-    x, y0 = get_task_data(cfg.circuit.task, case_n, input_bits=input_n, output_bits=output_n)
+    x, y0 = get_task_data(
+        cfg.circuit.task,
+        case_n,
+        input_bits=input_n,
+        output_bits=output_n,
+        text=cfg.circuit.get("text", None),
+    )
 
     # Run backpropagation training for comparison if enabled
     bp_results = None
