@@ -19,6 +19,7 @@ from flax import nnx
 from tqdm.auto import tqdm
 
 import wandb
+from boolean_nca_cc.circuits.viz import create_wandb_visualization
 from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention
 from boolean_nca_cc.training.checkpointing import save_checkpoint
 from boolean_nca_cc.training.eval_datasets import (
@@ -431,6 +432,98 @@ def _log_pool_scatter(pool, epoch, wandb_run):
     wandb_run.log({"pool/scatter": wandb.plot.scatter(table, "steps", "loss")})
 
 
+def _create_single_circuit_visualization(
+    model,
+    wires_batch,
+    logits_batch,
+    x_data,
+    y_data,
+    input_n,
+    arity,
+    circuit_hidden_dim,
+    n_message_steps,
+    loss_type,
+    layer_sizes,
+    circuit_idx=0,
+    eval_type="eval_in",
+):
+    """
+    Create a wandb visualization for a single circuit from the evaluation batch.
+
+    Args:
+        model: The model to use for optimization
+        wires_batch: Batch of wires (we'll take circuit_idx)
+        logits_batch: Batch of logits (we'll take circuit_idx)
+        x_data: Input data
+        y_data: Target data
+        input_n: Number of input nodes
+        arity: Arity of gates
+        circuit_hidden_dim: Hidden dimension
+        n_message_steps: Number of message steps for evaluation
+        loss_type: Loss function type
+        layer_sizes: Circuit layer sizes
+        circuit_idx: Index of circuit to visualize (default 0)
+        eval_type: Type of evaluation ("eval_in" or "eval_out")
+
+    Returns:
+        Dictionary with visualization results or None if failed
+    """
+    try:
+        # Extract single circuit from batch
+        single_wires = [layer_wires[circuit_idx] for layer_wires in wires_batch]
+        single_logits = [layer_logits[circuit_idx] for layer_logits in logits_batch]
+
+        # Run the model to optimize the single circuit
+        from boolean_nca_cc.training.evaluation import evaluate_model_stepwise_generator
+
+        # Create generator for single circuit
+        generator = evaluate_model_stepwise_generator(
+            model=model,
+            wires=single_wires,
+            logits=single_logits,
+            x_data=x_data,
+            y_data=y_data,
+            input_n=input_n,
+            arity=arity,
+            circuit_hidden_dim=circuit_hidden_dim,
+            max_steps=n_message_steps,
+            loss_type=loss_type,
+            bidirectional_edges=True,
+            layer_sizes=layer_sizes,
+        )
+
+        # Run to completion
+        final_result = None
+        for result in generator:
+            final_result = result
+
+        if final_result is None:
+            return None
+
+        # Create visualization with optimized logits
+        viz_result = create_wandb_visualization(
+            logits=final_result.logits,
+            wires=single_wires,
+            x=x_data,
+            y0=y_data,
+            title_prefix=f"{eval_type.upper()} Circuit {circuit_idx} - ",
+            hard=True,
+        )
+
+        return {
+            "figure": viz_result["figure"],
+            "accuracy": viz_result["accuracy"],
+            "error_count": viz_result["error_count"],
+            "total_bits": viz_result["total_bits"],
+            "final_loss": float(final_result.loss),
+            "final_hard_loss": float(final_result.hard_loss),
+        }
+
+    except Exception as e:
+        log.warning(f"Error creating circuit visualization: {e}")
+        return None
+
+
 def run_unified_periodic_evaluation(
     model,
     datasets: UnifiedEvaluationDatasets,
@@ -447,7 +540,6 @@ def run_unified_periodic_evaluation(
     log_stepwise=False,
     layer_sizes: list[tuple[int, int]] | None = None,
     log_pool_scatter: bool = False,
-    log_circuit_visualization: bool = True,
 ) -> dict:
     """
     Run unified periodic evaluation with only IN-distribution and OUT-of-distribution testing.
@@ -468,7 +560,6 @@ def run_unified_periodic_evaluation(
         log_stepwise: Whether to log step-by-step metrics
         layer_sizes: Circuit layer sizes
         log_pool_scatter: Whether to log pool scatterplot (loss vs steps)
-        log_circuit_visualization: Whether to log circuit output visualization to wandb
 
     Returns:
         Dictionary with evaluation metrics from IN-distribution and OUT-of-distribution evaluations
@@ -570,6 +661,85 @@ def run_unified_periodic_evaluation(
             if log_pool_scatter:
                 _log_pool_scatter(pool, epoch, wandb_run)
 
+            # Create and log circuit visualizations
+            try:
+                # Create visualization for IN-distribution circuit (if available)
+                if (
+                    datasets.in_distribution_wires is not None
+                    and datasets.in_distribution_logits is not None
+                ):
+                    viz_in = _create_single_circuit_visualization(
+                        model=model,
+                        wires_batch=datasets.in_distribution_wires,
+                        logits_batch=datasets.in_distribution_logits,
+                        x_data=x_data,
+                        y_data=y_data,
+                        input_n=input_n,
+                        arity=arity,
+                        circuit_hidden_dim=circuit_hidden_dim,
+                        n_message_steps=n_message_steps,
+                        loss_type=loss_type,
+                        layer_sizes=layer_sizes,
+                        circuit_idx=0,
+                        eval_type="eval_in",
+                    )
+
+                    if viz_in is not None:
+                        # Log the visualization figure
+                        wandb_run.log(
+                            {
+                                "eval_in/circuit_visualization": wandb_run.Image(viz_in["figure"]),
+                                "eval_in/viz_accuracy": viz_in["accuracy"],
+                                "eval_in/viz_error_count": viz_in["error_count"],
+                                "eval_in/viz_final_loss": viz_in["final_loss"],
+                            }
+                        )
+                        # Close the figure to free memory
+                        import matplotlib.pyplot as plt
+
+                        plt.close(viz_in["figure"])
+
+                # Create visualization for OUT-of-distribution circuit (if available)
+                if (
+                    datasets.out_of_distribution_wires is not None
+                    and datasets.out_of_distribution_logits is not None
+                ):
+                    viz_out = _create_single_circuit_visualization(
+                        model=model,
+                        wires_batch=datasets.out_of_distribution_wires,
+                        logits_batch=datasets.out_of_distribution_logits,
+                        x_data=x_data,
+                        y_data=y_data,
+                        input_n=input_n,
+                        arity=arity,
+                        circuit_hidden_dim=circuit_hidden_dim,
+                        n_message_steps=n_message_steps,
+                        loss_type=loss_type,
+                        layer_sizes=layer_sizes,
+                        circuit_idx=0,
+                        eval_type="eval_out",
+                    )
+
+                    if viz_out is not None:
+                        # Log the visualization figure
+                        wandb_run.log(
+                            {
+                                "eval_out/circuit_visualization": wandb_run.Image(
+                                    viz_out["figure"]
+                                ),
+                                "eval_out/viz_accuracy": viz_out["accuracy"],
+                                "eval_out/viz_error_count": viz_out["error_count"],
+                                "eval_out/viz_final_loss": viz_out["final_loss"],
+                            }
+                        )
+                        # Close the figure to free memory
+                        import matplotlib.pyplot as plt
+
+                        plt.close(viz_out["figure"])
+
+            except Exception as e:
+                log.warning(f"Error creating wandb circuit visualizations: {e}")
+
             # Optionally log step-by-step metrics for both evaluations
             if log_stepwise:
                 # IN-distribution step-wise metrics
@@ -601,55 +771,6 @@ def run_unified_periodic_evaluation(
                             "eval_out_steps/epoch": epoch,
                         }
                         wandb_run.log(step_data_out)
-
-            # Log circuit visualization if enabled
-            if log_circuit_visualization and layer_sizes is not None:
-                try:
-                    from boolean_nca_cc.circuits.viz import (
-                        create_single_seed_evaluation_circuit,
-                        evaluate_and_log_to_wandb,
-                    )
-                    from boolean_nca_cc.training.evaluation import evaluate_model_stepwise_batched
-
-                    # Create a single deterministic circuit for consistent visualization
-                    viz_wires, viz_initial_logits = create_single_seed_evaluation_circuit(
-                        layer_sizes, arity, eval_seed=42
-                    )
-
-                    # Evaluate the model on this single circuit to get final optimized logits
-                    viz_step_metrics = evaluate_model_stepwise_batched(
-                        model=model,
-                        wires=[viz_wires],  # Single circuit in batch format
-                        logits=[viz_initial_logits],  # Single circuit in batch format
-                        x_data=x_data,
-                        y_data=y_data,
-                        input_n=input_n,
-                        arity=arity,
-                        circuit_hidden_dim=circuit_hidden_dim,
-                        n_message_steps=n_message_steps,
-                        loss_type=loss_type,
-                        layer_sizes=layer_sizes,
-                    )
-
-                    # Get the final optimized logits (last step)
-                    viz_final_logits = viz_step_metrics["logits"][-1][
-                        0
-                    ]  # Extract single circuit from batch
-
-                    # Create and log the visualization
-                    evaluate_and_log_to_wandb(
-                        logits=viz_final_logits,
-                        wires=viz_wires,
-                        x=x_data,
-                        y0=y_data,
-                        wandb_run=wandb_run,
-                        epoch=epoch,
-                        title_prefix="Periodic Eval - ",
-                        hard=True,
-                    )
-
-                except Exception as viz_e:
-                    log.warning(f"Error creating circuit visualization at epoch {epoch}: {viz_e}")
 
         # Log summary to console
         training_config = datasets.training_config
@@ -1676,7 +1797,6 @@ def train_model(
                         log_stepwise=periodic_eval_log_stepwise,
                         layer_sizes=layer_sizes,
                         log_pool_scatter=periodic_eval_log_pool_scatter,
-                        log_circuit_visualization=True,  # Enable circuit visualization logging
                     )
                     # Extract final metrics for best model tracking (use IN-distribution metrics)
                     current_eval_metrics = eval_results.get("final_metrics_in", None)
