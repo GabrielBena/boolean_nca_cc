@@ -146,16 +146,20 @@ def text_task(case_n, input_bits=8, output_bits=8, text=None):
             temp_center_x = case_n // 2
             temp_center_y = output_bits // 2
             bbox = temp_draw.textbbox((temp_center_x, temp_center_y), candidate_text, anchor="mm")
-            
+
             # Calculate actual text bounds
             text_left = bbox[0]
-            text_top = bbox[1] 
+            text_top = bbox[1]
             text_right = bbox[2]
             text_bottom = bbox[3]
 
             # Check if text fits with some margin
-            if (text_left >= 0 and text_top >= 0 and 
-                text_right <= case_n and text_bottom <= output_bits):
+            if (
+                text_left >= 0
+                and text_top >= 0
+                and text_right <= case_n
+                and text_bottom <= output_bits
+            ):
                 text = candidate_text
                 break
 

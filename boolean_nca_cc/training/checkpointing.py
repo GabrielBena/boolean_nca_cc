@@ -419,10 +419,9 @@ def load_checkpoint_legacy(checkpoint_path):
 
 
 # WandB integration functions
-def load_best_model_from_wandb(
+def load_config_from_wandb(
     run_id: str | None = None,
     filters: dict[str, Any] | None = None,
-    seed: int = 0,
     project: str = "boolean-nca-cc",
     entity: str = "m2snn",
     download_dir: str = "saves",
@@ -433,17 +432,17 @@ def load_best_model_from_wandb(
     force_download: bool = False,
     select_by_best_metric: bool = False,
     metric_name: str = "hard_accuracy",
-) -> tuple[Any, dict[str, Any], Any]:
+) -> tuple[Any, str, str]:
     """
-    Load the best model from WandB artifacts with full backward compatibility.
+    Load config and checkpoint information from WandB artifacts.
 
-    This function handles both old pickle-based artifacts and new Orbax-based
-    checkpoints seamlessly, providing a unified interface for model loading.
+    This function finds the appropriate run, downloads the checkpoint if needed,
+    and returns the config along with checkpoint path information. This allows
+    for config modification before model instantiation.
 
     Args:
         run_id: Optional specific run ID to load from
         filters: Optional dictionary of filters to find runs
-        seed: Seed for RNG initialization
         project: WandB project name
         entity: WandB entity/username
         download_dir: Directory to download artifacts to
@@ -456,8 +455,8 @@ def load_best_model_from_wandb(
         metric_name: Name of the metric to maximize when select_by_best_metric is True
 
     Returns:
-        Tuple of (loaded_model, loaded_dict, config) containing the instantiated model,
-        full loaded state, and the complete hydra config used during training
+        Tuple of (config, checkpoint_path, run_id) containing the hydra config,
+        path to the checkpoint file, and the run ID
     """
 
     # Initialize WandB API
@@ -534,35 +533,16 @@ def load_best_model_from_wandb(
 
         # Check if we should use local cache
         if use_cache and not force_download and os.path.exists(expected_checkpoint_path):
-            log.info(f"Found cached checkpoint for run {run_id}. Loading from disk.")
+            log.info(f"Found cached checkpoint for run {run_id}. Loading config from disk.")
             try:
-                # Use the unified loading function
-                loaded_dict = load_checkpoint_with_compatibility(expected_checkpoint_path)
+                api = wandb.Api()
+                run_config = api.run(f"{entity}/{project}/{run_id}").config
+                config = OmegaConf.create(run_config)
 
-                # Get config from loaded dict or fetch from wandb
-                if "config" in loaded_dict:
-                    config = OmegaConf.create(loaded_dict["config"])
-                else:
-                    api = wandb.Api()
-                    run_config = api.run(f"{entity}/{project}/{run_id}").config
-                    config = OmegaConf.create(run_config)
-
-                # Instantiate model using the reusable function
-                model = instantiate_model_from_config(config, seed=seed)
-
-                # Update model with loaded state (compatibility handled during loading)
-                nnx.update(model, loaded_dict["model"])
-
-                # Ensure essential keys are present in loaded_dict
-                if "run_id" not in loaded_dict:
-                    loaded_dict["run_id"] = run_id
-                if "config" not in loaded_dict:
-                    loaded_dict["config"] = config
-
-                return model, loaded_dict, config
+                return config, expected_checkpoint_path, run_id
             except Exception as e:
                 log.info(
-                    f"Error loading model from local checkpoint {expected_checkpoint_path}: {e}"
+                    f"Error loading config from local checkpoint {expected_checkpoint_path}: {e}"
                 )
                 log.info("Proceeding to download from WandB.")
         elif force_download:
@@ -607,6 +587,35 @@ def load_best_model_from_wandb(
     artifact_dir = latest_best.download(root=download_path)
     checkpoint_path = os.path.join(artifact_dir, f"{filename}.{filetype}")
 
+    # Get config from run
+    config = OmegaConf.create(run.config)
+
+    return config, checkpoint_path, run.id
+
+
+def load_model_from_config_and_checkpoint(
+    config: Any,
+    checkpoint_path: str,
+    run_id: str,
+    seed: int = 0,
+) -> tuple[Any, dict[str, Any]]:
+    """
+    Load a model from config and checkpoint file.
+
+    This function takes a config (which can be modified) and loads the model
+    from the specified checkpoint path.
+
+    Args:
+        config: The hydra config (can be modified from original)
+        checkpoint_path: Path to the checkpoint file
+        run_id: The WandB run ID
+        seed: Seed for RNG initialization
+
+    Returns:
+        Tuple of (loaded_model, loaded_dict) containing the instantiated model
+        and full loaded state
+    """
+
     # Load the saved state using unified loading
     log.info(f"Loading model from {checkpoint_path}")
     try:
@@ -614,9 +623,6 @@ def load_best_model_from_wandb(
     except Exception as e:
         log.error(f"Error loading checkpoint from {checkpoint_path}: {e}")
         raise
-
-    # Get config from run
-    config = OmegaConf.create(run.config)
 
     # Instantiate model using the reusable function
     model = instantiate_model_from_config(config, seed=seed)
@@ -626,8 +632,79 @@ def load_best_model_from_wandb(
 
     # Ensure essential keys are present in loaded_dict
     if "run_id" not in loaded_dict:
-        loaded_dict["run_id"] = run.id
+        loaded_dict["run_id"] = run_id
     if "config" not in loaded_dict:
         loaded_dict["config"] = config
+
+    return model, loaded_dict
+
+
+def load_best_model_from_wandb(
+    run_id: str | None = None,
+    filters: dict[str, Any] | None = None,
+    seed: int = 0,
+    project: str = "boolean-nca-cc",
+    entity: str = "m2snn",
+    download_dir: str = "saves",
+    filename: str = "best_model_hard_accuracy",
+    filetype: str = "pkl",
+    run_from_last: int = 1,
+    use_cache: bool = True,
+    force_download: bool = False,
+    select_by_best_metric: bool = False,
+    metric_name: str = "hard_accuracy",
+) -> tuple[Any, dict[str, Any], Any]:
+    """
+    Load the best model from WandB artifacts with full backward compatibility.
+
+    This function handles both old pickle-based artifacts and new Orbax-based
+    checkpoints seamlessly, providing a unified interface for model loading.
+
+    This is now a convenience wrapper around the split functions load_config_from_wandb
+    and load_model_from_config_and_checkpoint.
+
+    Args:
+        run_id: Optional specific run ID to load from
+        filters: Optional dictionary of filters to find runs
+        seed: Seed for RNG initialization
+        project: WandB project name
+        entity: WandB entity/username
+        download_dir: Directory to download artifacts to
+        filename: Filename of the best model
+        filetype: Filetype of the best model
+        run_from_last: Index from the end of runs list to select
+        use_cache: Whether to use locally cached artifacts if available
+        force_download: If True, always download from wandb even if local cache exists
+        select_by_best_metric: If True, select run with highest metric
+        metric_name: Name of the metric to maximize when select_by_best_metric is True
+
+    Returns:
+        Tuple of (loaded_model, loaded_dict, config) containing the instantiated model,
+        full loaded state, and the complete hydra config used during training
+    """
+
+    # Load config and checkpoint information
+    config, checkpoint_path, run_id = load_config_from_wandb(
+        run_id=run_id,
+        filters=filters,
+        project=project,
+        entity=entity,
+        download_dir=download_dir,
+        filename=filename,
+        filetype=filetype,
+        run_from_last=run_from_last,
+        use_cache=use_cache,
+        force_download=force_download,
+        select_by_best_metric=select_by_best_metric,
+        metric_name=metric_name,
+    )
+
+    # Load model from config and checkpoint
+    model, loaded_dict = load_model_from_config_and_checkpoint(
+        config=config,
+        checkpoint_path=checkpoint_path,
+        run_id=run_id,
+        seed=seed,
+    )
 
     return model, loaded_dict, config

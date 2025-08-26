@@ -9,12 +9,17 @@ This demo shows live circuit optimization where:
 No model training occurs - only circuit logit optimization.
 """
 
+import logging
+
 import IPython
 import jax
 import jax.numpy as jp
 import numpy as np
 import optax
 from flax import nnx
+
+# Configure logging to show INFO messages
+logging.basicConfig(level=logging.INFO, format="%(name)s - %(levelname)s - %(message)s")
 
 # Import model components
 from imgui_bundle import (
@@ -31,7 +36,10 @@ from boolean_nca_cc.circuits.model import gen_circuit, run_circuit
 from boolean_nca_cc.circuits.tasks import TASKS, get_task_data
 
 # Import training loop functions
-from boolean_nca_cc.training.checkpointing import load_best_model_from_wandb
+from boolean_nca_cc.training.checkpointing import (
+    load_config_from_wandb,
+    load_model_from_config_and_checkpoint,
+)
 from boolean_nca_cc.training.evaluation import (
     evaluate_model_stepwise_generator,
     get_loss_from_wires_logits,
@@ -470,14 +478,14 @@ class CircuitOptimizationDemo:
                 "config.circuit.input_bits": self.input_n,
                 "config.circuit.output_bits": self.output_n,
                 "config.circuit.arity": self.arity,
-                "config.circuit.num_layers": self.layer_n,
+                # "config.circuit.num_layers": self.layer_n,
                 "config.model.type": model_type,
                 "config.training.wiring_mode": self.wiring_mode,
                 "config.circuit.task": self.available_tasks[self.task_idx],
             }
 
             # Load frozen model
-            model, loaded_dict, loaded_config = load_best_model_from_wandb(
+            loaded_config, checkpoint_path, run_id = load_config_from_wandb(
                 run_id=self.run_id,
                 filters=filters if not self.run_id else None,
                 project=self.wandb_project,
@@ -485,7 +493,21 @@ class CircuitOptimizationDemo:
                 download_dir=self.wandb_download_dir,
                 filename="latest_checkpoint",
                 select_by_best_metric=False,
-                run_from_last=2 if self.available_tasks[self.task_idx] == "reverse" else 1,
+                run_from_last=1,
+                use_cache=True,
+            )
+
+            if loaded_config.circuit.num_layers != self.layer_n:
+                print(
+                    f"Layer number mismatch: {loaded_config.circuit.num_layers} != {self.layer_n}"
+                )
+                print(f"Using layer number: {self.layer_n}")
+                loaded_config.circuit.num_layers = self.layer_n
+
+            model, loaded_dict = load_model_from_config_and_checkpoint(
+                config=loaded_config,
+                checkpoint_path=checkpoint_path,
+                run_id=run_id,
             )
 
             self.frozen_model = model
@@ -1358,6 +1380,7 @@ class CircuitOptimizationDemo:
             ):
                 try:
                     self.regenerate_circuit()
+                    self.initialize_optimization_method()
                 except Exception as e:
                     print(f"Error regenerating circuit: {e}")
                     # Revert
