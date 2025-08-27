@@ -7,13 +7,108 @@ computing loss, and performing optimization steps.
 """
 
 from collections import namedtuple
+from functools import partial
 
 import jax
 import jax.numpy as jp
 import numpy as np
 import optax
+from flax import nnx
 
 from boolean_nca_cc.circuits.model import run_circuit
+
+
+@partial(nnx.jit, static_argnames=["sparsity_type"])
+def compute_lut_sparsity_loss(logits, sparsity_type="l1"):
+    """
+    Compute sparsity regularization loss for LUTs to encourage simpler boolean functions.
+
+    Args:
+        logits: List of logit tensors for each layer
+        sparsity_type: Type of sparsity regularization
+            - "l1": L1 penalty on sigmoid outputs (encourages 0s and 1s)
+            - "binary": Penalty for non-binary values (encourages discrete decisions)
+            - "entropy": Entropy-based penalty (encourages low-entropy distributions)
+
+    Returns:
+        Sparsity loss value (scalar)
+    """
+    total_sparsity_loss = 0.0
+
+    for lgt in logits:
+        # Convert logits to LUT probabilities
+        lut_probs = jax.nn.sigmoid(lgt)
+
+        if sparsity_type == "l1":
+            # L1 penalty on sigmoid outputs - encourages values close to 0 or 1
+            sparsity_loss = jp.sum(jp.minimum(lut_probs, 1.0 - lut_probs))
+
+        elif sparsity_type == "binary":
+            # Penalty for non-binary values - encourages discrete 0/1 decisions
+            sparsity_loss = jp.sum(lut_probs * (1.0 - lut_probs))
+
+        elif sparsity_type == "entropy":
+            # Entropy-based penalty - encourages low-entropy (deterministic) LUTs
+            eps = 1e-7  # Small epsilon to avoid log(0)
+            lut_probs_safe = jp.clip(lut_probs, eps, 1.0 - eps)
+            entropy = -lut_probs_safe * jp.log(lut_probs_safe) - (1.0 - lut_probs_safe) * jp.log(
+                1.0 - lut_probs_safe
+            )
+            sparsity_loss = jp.sum(entropy)
+
+        else:
+            raise ValueError(f"Unknown sparsity_type: {sparsity_type}")
+
+        total_sparsity_loss += sparsity_loss
+
+    return total_sparsity_loss
+
+
+def create_sparse_optimizer(base_optimizer, sparsity_weight=1e-3, sparsity_type="l1"):
+    """
+    Create a custom optimizer that includes LUT sparsity regularization.
+
+    Args:
+        base_optimizer: Base optax optimizer (e.g., optax.adamw(...))
+        sparsity_weight: Weight for sparsity regularization term
+        sparsity_type: Type of sparsity regularization ("l1", "binary", or "entropy")
+
+    Returns:
+        Custom optimizer with sparsity regularization
+    """
+
+    def sparse_gradient_transform(updates, state, params=None):
+        """Transform gradients to include sparsity regularization."""
+        if params is None:
+            return base_optimizer.update(updates, state, params)
+
+        # Compute sparsity gradients
+        def sparsity_loss_fn(logits):
+            return compute_lut_sparsity_loss(logits, sparsity_type)
+
+        sparsity_grads = jax.grad(sparsity_loss_fn)(params)
+
+        # Add sparsity gradients to existing gradients
+        combined_updates = []
+        for update, sparsity_grad in zip(updates, sparsity_grads, strict=True):
+            combined_update = update + sparsity_weight * sparsity_grad
+            combined_updates.append(combined_update)
+
+        # Apply base optimizer
+        return base_optimizer.update(combined_updates, state, params)
+
+    # Create a custom optimizer that wraps the base optimizer
+    class SparseOptimizer:
+        def __init__(self):
+            self.base_optimizer = base_optimizer
+
+        def init(self, params):
+            return self.base_optimizer.init(params)
+
+        def update(self, updates, state, params=None):
+            return sparse_gradient_transform(updates, state, params)
+
+    return SparseOptimizer()
 
 
 def unpack(x, bit_n=8):
@@ -241,41 +336,70 @@ def update_params(grad, opt_state, opt, logits, gate_mask=None):
     return new_logits, new_opt_state
 
 
-def train_step(state, opt, wires, x, y0, loss_type="l4", do_train=True, gate_mask=None):
+def train_step(
+    state,
+    opt,
+    wires,
+    x,
+    y0,
+    loss_type="l4",
+    do_train=True,
+    gate_mask=None,
+    x_test=None,
+    y_test=None,
+):
     """
-    Perform a single training step.
+    Perform a single training step, optionally evaluating on test data.
 
     Args:
         state: TrainState containing current parameters and optimizer state
         opt: Optax optimizer
         wires: Wiring configuration for the circuit
-        x: Input batch
-        y0: Target output batch
+        x: Training input batch
+        y0: Training target output batch
         loss_type: Type of loss to use ('l4' or 'bce')
+        do_train: Whether to perform parameter updates (default True)
+        gate_mask: Optional gate mask for circuit pruning
+        x_test: Optional test input batch
+        y_test: Optional test target output batch
 
     Returns:
-        Tuple of (loss_value, accuracy, new_state) with updated parameters
+        If test data is provided:
+            Tuple of (train_loss, train_aux, test_loss, test_aux, new_state)
+        If no test data:
+            Tuple of (train_loss, train_aux, new_state) - maintains backward compatibility
     """
     logits, opt_state = state
 
-    # Use pre-compiled gradient function based on loss type
+    # Training step
     if do_train:
         if loss_type == "bce":
-            (loss, aux), grad = grad_loss_f_bce(logits, wires, x, y0, gate_mask=gate_mask)
+            (train_loss, train_aux), grad = grad_loss_f_bce(
+                logits, wires, x, y0, gate_mask=gate_mask
+            )
         else:  # Default to L4 norm
-            (loss, aux), grad = grad_loss_f_l4(logits, wires, x, y0, gate_mask=gate_mask)
+            (train_loss, train_aux), grad = grad_loss_f_l4(
+                logits, wires, x, y0, gate_mask=gate_mask
+            )
 
         # Update parameters (without JIT since optimizer is a function)
         new_logits, new_opt_state = update_params(grad, opt_state, opt, logits, gate_mask)
 
     else:
-        loss, aux = loss_f(logits, wires, x, y0, loss_type, gate_mask=gate_mask)
+        train_loss, train_aux = loss_f(logits, wires, x, y0, loss_type, gate_mask=gate_mask)
         new_logits = logits
         new_opt_state = opt_state
 
-    # Return loss, accuracy, and new state
-    return (
-        loss,
-        aux,
-        TrainState(new_logits, new_opt_state),
-    )
+    new_state = TrainState(new_logits, new_opt_state)
+
+    # If test data is provided, evaluate on test set
+    if x_test is not None and y_test is not None:
+        # Evaluate on test data (no training, use updated parameters)
+        test_loss, test_aux = loss_f(
+            new_logits, wires, x_test, y_test, loss_type, gate_mask=gate_mask
+        )
+
+        return train_loss, train_aux, test_loss, test_aux, new_state
+    else:
+        # Backward compatibility: return original format when no test data
+        return train_loss, train_aux, new_state

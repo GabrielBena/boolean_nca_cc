@@ -40,6 +40,9 @@ from boolean_nca_cc.training.checkpointing import (
     load_config_from_wandb,
     load_model_from_config_and_checkpoint,
 )
+from boolean_nca_cc.training.eval_datasets import (
+    _create_circuit_batch_with_pattern,
+)
 from boolean_nca_cc.training.evaluation import (
     evaluate_model_stepwise_generator,
     get_loss_from_wires_logits,
@@ -177,6 +180,16 @@ class CircuitOptimizationDemo:
         self.wiring_seed = 42  # Direct control over wiring seed
         self.wiring_key = jax.random.PRNGKey(self.wiring_seed)
 
+        # Training-consistent wire generation
+        self.initial_diversity = 1  # Number of different wirings to use (like in training)
+        self.evaluation_base_seed = 42  # Base seed for evaluation datasets
+        self.use_training_wires = False  # Whether to use training-consistent wire generation
+        self.distribution_modes = ["IN-distribution", "OUT-of-distribution"]
+        self.distribution_mode_idx = 0  # Default to IN-distribution
+        self.current_wire_idx = 0  # Index of current wire within the distribution
+        self.available_wires = []  # List of available wire sets for current distribution
+        self.available_logits = []  # List of available logit sets for current distribution
+
         # Optimization configuration
         self.loss_type = "l4"
         self.learning_rate = 1.0  # Learning rate for backprop
@@ -267,8 +280,18 @@ class CircuitOptimizationDemo:
             self.input_n, self.output_n, self.arity, self.layer_n
         )
 
-        # Generate circuit using shared function
-        self.wires, self.logits = gen_circuit(self.wiring_key, self.layer_sizes, arity=self.arity)
+        if self.use_training_wires and self.wiring_mode == "fixed":
+            # Use training-consistent wire generation
+            self._initialize_training_consistent_wires()
+        else:
+            # Use original circuit generation
+            self.wires, self.logits = gen_circuit(
+                self.wiring_key, self.layer_sizes, arity=self.arity
+            )
+            # Clear available wires when not using training wires
+            self.available_wires = []
+            self.available_logits = []
+            self.current_wire_idx = 0
 
         # Store initial logits
         self.logits0 = self.logits
@@ -286,6 +309,138 @@ class CircuitOptimizationDemo:
         # Reset the model generator when circuit changes
         self.model_generator = None
         self.last_step_result = None
+
+    def _initialize_training_consistent_wires(self):
+        """Initialize wires using training-consistent generation (like in eval_datasets)"""
+        try:
+            distribution_mode = self.distribution_modes[self.distribution_mode_idx]
+
+            if distribution_mode == "IN-distribution":
+                # Use IN-distribution (matches training pattern)
+                wiring_mode = "fixed"
+                initial_diversity = self.initial_diversity
+                base_seed = self.evaluation_base_seed
+            else:
+                # Use OUT-of-distribution (always random)
+                wiring_mode = "random"
+                initial_diversity = 16  # Use higher diversity for OOD
+                base_seed = self.evaluation_base_seed + 10000
+
+            # Create wire batch using the same logic as training evaluation
+            batch_wires, batch_logits, actual_batch_size = _create_circuit_batch_with_pattern(
+                rng=jax.random.PRNGKey(base_seed),
+                layer_sizes=self.layer_sizes,
+                arity=self.arity,
+                batch_size=initial_diversity,  # Generate multiple wires to choose from
+                wiring_mode=wiring_mode,
+                initial_diversity=initial_diversity,
+                get_all_wirings=True,  # Get all available wirings
+            )
+
+            # Store available wires and logits
+            self.available_wires = [
+                jax.tree.map(lambda x, idx=i: x[idx], batch_wires) for i in range(actual_batch_size)
+            ]
+            self.available_logits = [
+                jax.tree.map(lambda x, idx=i: x[idx], batch_logits)
+                for i in range(actual_batch_size)
+            ]
+
+            # Use the current wire index (clamped to available range)
+            self.current_wire_idx = min(self.current_wire_idx, len(self.available_wires) - 1)
+            self.wires = self.available_wires[self.current_wire_idx]
+            self.logits = self.available_logits[self.current_wire_idx]
+
+            print(
+                f"Initialized {distribution_mode} wires: {actual_batch_size} available, using index {self.current_wire_idx}"
+            )
+            print(f"  - Wiring mode: {wiring_mode}, Initial diversity: {initial_diversity}")
+
+        except Exception as e:
+            print(f"Error initializing training-consistent wires: {e}")
+            import traceback
+
+            print(f"Traceback: {traceback.format_exc()}")
+            # Fallback to original generation
+            self.wires, self.logits = gen_circuit(
+                self.wiring_key, self.layer_sizes, arity=self.arity
+            )
+            self.available_wires = []
+            self.available_logits = []
+            self.current_wire_idx = 0
+
+    def switch_to_wire_index(self, wire_idx: int):
+        """Switch to a specific wire within the current distribution"""
+        if not self.available_wires or not self.use_training_wires:
+            print("No training wires available to switch to")
+            return
+
+        if wire_idx < 0 or wire_idx >= len(self.available_wires):
+            print(f"Wire index {wire_idx} out of range [0, {len(self.available_wires) - 1}]")
+            return
+
+        self.current_wire_idx = wire_idx
+        self.wires = self.available_wires[self.current_wire_idx]
+        self.logits = self.available_logits[self.current_wire_idx]
+        self.logits0 = self.logits  # Update initial logits
+
+        # Reset optimization state but keep the same task
+        self.step_i = 0
+        self.loss_log = np.zeros(max_trainstep_n, np.float32)
+        self.hard_log = np.zeros(max_trainstep_n, np.float32)
+
+        # Reset the model generator when wires change
+        self.model_generator = None
+        self.last_step_result = None
+
+        # Reinitialize optimization method for new circuit
+        self.initialize_optimization_method()
+
+        # Update gate masks for new wiring
+        self.reset_gate_mask()
+
+        # Refresh activations
+        self.initialize_activations()
+
+        distribution_mode = self.distribution_modes[self.distribution_mode_idx]
+        print(f"Switched to {distribution_mode} wire {wire_idx} of {len(self.available_wires)}")
+
+    def switch_distribution_mode(self, mode_idx: int):
+        """Switch between IN-distribution and OUT-of-distribution modes"""
+        if mode_idx < 0 or mode_idx >= len(self.distribution_modes):
+            print(f"Distribution mode index {mode_idx} out of range")
+            return
+
+        old_mode = self.distribution_modes[self.distribution_mode_idx]
+        self.distribution_mode_idx = mode_idx
+        new_mode = self.distribution_modes[self.distribution_mode_idx]
+
+        if old_mode != new_mode:
+            print(f"Switching from {old_mode} to {new_mode}")
+            # Reset wire index when switching distributions
+            self.current_wire_idx = 0
+            # Reinitialize with new distribution
+            if self.use_training_wires and self.wiring_mode == "fixed":
+                self._initialize_training_consistent_wires()
+                self.logits0 = self.logits  # Update initial logits
+
+                # Reset optimization state
+                self.step_i = 0
+                self.loss_log = np.zeros(max_trainstep_n, np.float32)
+                self.hard_log = np.zeros(max_trainstep_n, np.float32)
+
+                # Reset the model generator when distribution changes
+                self.model_generator = None
+                self.last_step_result = None
+
+                # Reinitialize optimization method
+                self.initialize_optimization_method()
+
+                # Update gate masks
+                self.reset_gate_mask()
+
+                # Refresh activations
+                self.initialize_activations()
 
     def update_task(self):
         """Update current task using shared task infrastructure"""
@@ -1448,6 +1603,77 @@ class CircuitOptimizationDemo:
                 self.wiring_key = jax.random.PRNGKey(self.wiring_seed)
                 self.regenerate_circuit()  # This will invalidate cache
 
+            # Training-consistent wiring controls
+            imgui.separator_text("Training-Consistent Wiring")
+
+            # Enable/disable training wires (only available in fixed mode)
+            if self.wiring_mode == "fixed":
+                training_wires_changed, self.use_training_wires = imgui.checkbox(
+                    "Use Training Wires", self.use_training_wires
+                )
+                if training_wires_changed:
+                    self.regenerate_circuit()
+
+                if self.use_training_wires:
+                    # Initial diversity control
+                    diversity_changed, self.initial_diversity = imgui.slider_int(
+                        "Initial Diversity", self.initial_diversity, 1, 16
+                    )
+                    if diversity_changed:
+                        self.regenerate_circuit()
+
+                    # Evaluation base seed control
+                    eval_seed_changed, self.evaluation_base_seed = imgui.input_int(
+                        "Evaluation Seed", self.evaluation_base_seed
+                    )
+                    if eval_seed_changed:
+                        self.evaluation_base_seed = max(0, self.evaluation_base_seed)
+                        if self.use_training_wires:
+                            self.regenerate_circuit()
+
+                    # Distribution mode selection
+                    dist_changed, self.distribution_mode_idx = imgui.combo(
+                        "Distribution", self.distribution_mode_idx, self.distribution_modes
+                    )
+                    if dist_changed:
+                        self.switch_distribution_mode(self.distribution_mode_idx)
+
+                    # Wire switching controls
+                    if self.available_wires:
+                        num_wires = len(self.available_wires)
+                        imgui.text(f"Available wires: {num_wires}")
+
+                        # Wire index slider
+                        wire_changed, new_wire_idx = imgui.slider_int(
+                            "Wire Index", self.current_wire_idx, 0, num_wires - 1
+                        )
+                        if wire_changed:
+                            self.switch_to_wire_index(new_wire_idx)
+
+                        # Previous/Next wire buttons
+                        if imgui.button("← Previous Wire") and self.current_wire_idx > 0:
+                            self.switch_to_wire_index(self.current_wire_idx - 1)
+
+                        imgui.same_line()
+                        if imgui.button("Next Wire →") and self.current_wire_idx < num_wires - 1:
+                            self.switch_to_wire_index(self.current_wire_idx + 1)
+
+                        # Show current distribution and wire info
+                        current_dist = self.distribution_modes[self.distribution_mode_idx]
+                        imgui.text_colored(
+                            imgui.ImVec4(0.0, 1.0, 0.0, 1.0),
+                            f"Current: {current_dist} wire {self.current_wire_idx + 1}/{num_wires}",
+                        )
+                    else:
+                        imgui.text_colored(
+                            imgui.ImVec4(1.0, 1.0, 0.0, 1.0), "No training wires loaded"
+                        )
+            else:
+                imgui.text_colored(
+                    imgui.ImVec4(0.7, 0.7, 0.7, 1.0),
+                    "Training wires only available in 'fixed' mode",
+                )
+
             # Mutation controls
             imgui.separator()
 
@@ -1523,6 +1749,17 @@ class CircuitOptimizationDemo:
             imgui.text(f"Wiring Seed: {self.wiring_seed}")
             imgui.text(f"Wiring Mode: {self.wiring_mode}")
             imgui.text(f"Loss Display: {self.loss_display_modes[self.loss_display_mode_idx]}")
+
+            # Training wire status
+            if self.use_training_wires:
+                current_dist = self.distribution_modes[self.distribution_mode_idx]
+                imgui.text(f"Training Wires: {current_dist}")
+                if self.available_wires:
+                    imgui.text(f"Wire: {self.current_wire_idx + 1}/{len(self.available_wires)}")
+                imgui.text(f"Initial Diversity: {self.initial_diversity}")
+                imgui.text(f"Eval Seed: {self.evaluation_base_seed}")
+            else:
+                imgui.text("Training Wires: Disabled")
 
             # Model-specific status
             if method_name == "Self-Attention" and self.frozen_model is not None:

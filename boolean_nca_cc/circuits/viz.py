@@ -1,3 +1,4 @@
+import jax
 import jax.numpy as jp
 import matplotlib.collections as collections  # Add this import for PatchCollection
 import matplotlib.pyplot as plt
@@ -137,9 +138,21 @@ def visualize_network(wires, layer_sizes, title="Network Architecture"):
     return fig
 
 
-def evaluate_and_visualize(logits, wires, x, y0, title_prefix="", hard=True, visualize=True):
+def evaluate_and_visualize(
+    logits,
+    wires,
+    x,
+    y0,
+    title_prefix="",
+    hard=True,
+    visualize=True,
+    train_test_split=False,
+    test_ratio=0.2,
+    split_seed=None,
+):
     """
     Evaluate the circuit, calculate accuracy, and visualize the results.
+    Optionally split data into train/test sets for memorization vs generalization analysis.
 
     Args:
         logits: List of logits for each layer (trained parameters).
@@ -149,11 +162,76 @@ def evaluate_and_visualize(logits, wires, x, y0, title_prefix="", hard=True, vis
         title_prefix: Optional string to prepend to the plot title.
         hard: Whether to run the circuit in hard mode (True) or soft mode (False).
         visualize: Whether to generate and display visualization plots.
+        train_test_split: If True, split data into train/test and show separate visualizations.
+        test_ratio: Fraction of data to use for testing (default 0.2 for 80/20 split).
+        split_seed: Random seed for reproducible splitting (required if train_test_split=True).
 
     Returns:
-        Dictionary containing evaluation metrics and error information.
+        If train_test_split=False: Dictionary containing evaluation metrics
+        If train_test_split=True: Tuple of (train_metrics, test_metrics) dictionaries
     """
-    # 1. Run the circuit in hard mode to get binary predictions
+    if not train_test_split:
+        # Traditional mode: evaluate all data together
+        return _evaluate_single_dataset(logits, wires, x, y0, title_prefix, hard, visualize)
+
+    else:
+        # Train/test split mode: split data and evaluate separately
+        if split_seed is None:
+            raise ValueError("split_seed is required when train_test_split=True")
+
+        # Perform train/test split using the same logic as get_task_data
+        case_n = x.shape[0]
+        key = jax.random.PRNGKey(split_seed)
+
+        # Generate random permutation indices
+        indices = jax.random.permutation(key, case_n)
+
+        # Calculate split point
+        test_size = int(case_n * test_ratio)
+        train_size = case_n - test_size
+
+        # Split indices
+        train_indices = indices[:train_size]
+        test_indices = indices[train_size:]
+
+        # Split data
+        x_train = x[train_indices]
+        y_train = y0[train_indices]
+        x_test = x[test_indices]
+        y_test = y0[test_indices]
+
+        # Evaluate both sets
+        train_metrics = _evaluate_single_dataset(
+            logits, wires, x_train, y_train, f"{title_prefix}Training Set - ", hard, visualize
+        )
+
+        test_metrics = _evaluate_single_dataset(
+            logits, wires, x_test, y_test, f"{title_prefix}Test Set - ", hard, visualize
+        )
+
+        # Create combined visualization if requested
+        if visualize:
+            _create_train_test_comparison_plot(
+                logits,
+                wires,
+                x_train,
+                y_train,
+                x_test,
+                y_test,
+                train_metrics,
+                test_metrics,
+                title_prefix,
+                hard,
+            )
+
+        return train_metrics, test_metrics
+
+
+def _evaluate_single_dataset(logits, wires, x, y0, title_prefix="", hard=True, visualize=True):
+    """
+    Helper function to evaluate a single dataset (used for both traditional and split modes).
+    """
+    # 1. Run the circuit to get predictions
     acts = run_circuit(logits, wires, x, hard=hard)
     y_pred = acts[-1]
 
@@ -246,6 +324,114 @@ def evaluate_and_visualize(logits, wires, x, y0, title_prefix="", hard=True, vis
         plt.show()
 
     return metrics
+
+
+def _create_train_test_comparison_plot(
+    logits,
+    wires,
+    x_train,
+    y_train,
+    x_test,
+    y_test,
+    train_metrics,
+    test_metrics,
+    title_prefix="",
+    hard=True,
+):
+    """
+    Create a side-by-side comparison visualization of training and test performance.
+    """
+    # Get predictions for both sets
+    train_acts = run_circuit(logits, wires, x_train, hard=hard)
+    test_acts = run_circuit(logits, wires, x_test, hard=hard)
+
+    train_pred = jp.round(train_acts[-1]) if not hard else train_acts[-1]
+    test_pred = jp.round(test_acts[-1]) if not hard else test_acts[-1]
+
+    # Calculate errors
+    train_errors = jp.not_equal(train_pred, y_train).astype(jp.float32)
+    test_errors = jp.not_equal(test_pred, y_test).astype(jp.float32)
+
+    # Convert to numpy
+    train_pred_np = np.array(train_pred)
+    test_pred_np = np.array(test_pred)
+    train_target_np = np.array(y_train)
+    test_target_np = np.array(y_test)
+    train_errors_np = np.array(train_errors)
+    test_errors_np = np.array(test_errors)
+
+    # Create comprehensive comparison plot
+    fig, axes = plt.subplots(3, 2, figsize=(24, 10), constrained_layout=True)
+    cmap = "viridis"
+    cmap_errors = plt.cm.colors.ListedColormap(["lightgray", "red"])
+
+    # Training set visualizations (left column)
+    axes[0, 0].imshow(
+        train_pred_np.T, cmap=cmap, interpolation="nearest", vmin=0, vmax=1, aspect="auto"
+    )
+    axes[0, 0].set_title(f"Training Predictions (Acc: {train_metrics['accuracy']:.4f})")
+    axes[0, 0].set_xlabel("Sample Index")
+    axes[0, 0].set_ylabel("Output Bit")
+
+    axes[1, 0].imshow(
+        train_target_np.T, cmap=cmap, interpolation="nearest", vmin=0, vmax=1, aspect="auto"
+    )
+    axes[1, 0].set_title("Training Targets")
+    axes[1, 0].set_xlabel("Sample Index")
+    axes[1, 0].set_ylabel("Output Bit")
+
+    axes[2, 0].imshow(
+        train_errors_np.T, cmap=cmap_errors, interpolation="nearest", vmin=0, vmax=1, aspect="auto"
+    )
+    axes[2, 0].set_title(f"Training Errors ({train_metrics['error_count']} total)")
+    axes[2, 0].set_xlabel("Sample Index")
+    axes[2, 0].set_ylabel("Output Bit")
+
+    # Test set visualizations (right column)
+    axes[0, 1].imshow(
+        test_pred_np.T, cmap=cmap, interpolation="nearest", vmin=0, vmax=1, aspect="auto"
+    )
+    axes[0, 1].set_title(f"Test Predictions (Acc: {test_metrics['accuracy']:.4f})")
+    axes[0, 1].set_xlabel("Sample Index")
+    axes[0, 1].set_ylabel("Output Bit")
+
+    axes[1, 1].imshow(
+        test_target_np.T, cmap=cmap, interpolation="nearest", vmin=0, vmax=1, aspect="auto"
+    )
+    axes[1, 1].set_title("Test Targets")
+    axes[1, 1].set_xlabel("Sample Index")
+    axes[1, 1].set_ylabel("Output Bit")
+
+    axes[2, 1].imshow(
+        test_errors_np.T, cmap=cmap_errors, interpolation="nearest", vmin=0, vmax=1, aspect="auto"
+    )
+    axes[2, 1].set_title(f"Test Errors ({test_metrics['error_count']} total)")
+    axes[2, 1].set_xlabel("Sample Index")
+    axes[2, 1].set_ylabel("Output Bit")
+
+    # Add overall title with generalization analysis
+    acc_diff = train_metrics["accuracy"] - test_metrics["accuracy"]
+    if acc_diff > 0.1:
+        generalization_status = "Likely Memorizing"
+        status_color = "red"
+    elif acc_diff > 0.05:
+        generalization_status = "Possible Overfitting"
+        status_color = "orange"
+    else:
+        generalization_status = "Good Generalization"
+        status_color = "green"
+
+    fig.suptitle(
+        f"{title_prefix}Train vs Test Comparison - {generalization_status}\n"
+        f"Train Acc: {train_metrics['accuracy']:.4f} | Test Acc: {test_metrics['accuracy']:.4f} | "
+        f"Diff: {acc_diff:.4f}",
+        fontsize=16,
+        color=status_color,
+    )
+
+    plt.show()
+
+    return fig
 
 
 def create_wandb_visualization(logits, wires, x, y0, title_prefix="", hard=True):

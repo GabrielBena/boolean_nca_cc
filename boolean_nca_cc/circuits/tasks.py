@@ -4,6 +4,7 @@ Boolean Circuit Tasks
 Pure functional implementation of boolean tasks for training circuits.
 """
 
+import jax
 import jax.numpy as jp
 import numpy as np
 import PIL.Image
@@ -232,8 +233,22 @@ TASKS = {
 }
 
 
-def get_task_data(task_name, case_n, **kwargs):
-    """Get a task by name and generate its data"""
+def get_task_data(task_name, case_n, train_test_split=False, test_ratio=0.2, seed=None, **kwargs):
+    """
+    Get a task by name and generate its data, optionally split into train/test sets.
+
+    Args:
+        task_name: Name of the task to generate
+        case_n: Total number of cases to generate
+        train_test_split: If True, split data into train/test sets
+        test_ratio: Fraction of data to use for testing (default 0.2 for 80/20 split)
+        seed: Random seed for reproducible splitting (optional)
+        **kwargs: Additional task-specific arguments
+
+    Returns:
+        If train_test_split=False: (x, y0) - input and output data
+        If train_test_split=True: ((x_train, y_train), (x_test, y_test)) - split data
+    """
     if task_name not in TASKS:
         raise ValueError(f"Unknown task: {task_name}. Available: {list(TASKS.keys())}")
 
@@ -242,4 +257,34 @@ def get_task_data(task_name, case_n, **kwargs):
         for k, v in kwargs.items()
         if k in TASKS[task_name].__code__.co_varnames[: TASKS[task_name].__code__.co_argcount]
     }
-    return TASKS[task_name](case_n, **task_specific_kwargs)
+
+    # Generate full dataset
+    x, y0 = TASKS[task_name](case_n, **task_specific_kwargs)
+
+    if not train_test_split:
+        return x, y0
+
+    # Perform train/test split
+    if seed is not None:
+        key = jax.random.PRNGKey(seed)
+    else:
+        key = jax.random.PRNGKey(42)  # Default seed for reproducibility
+
+    # Generate random permutation indices
+    indices = jax.random.permutation(key, case_n)
+
+    # Calculate split point
+    test_size = int(case_n * test_ratio)
+    train_size = case_n - test_size
+
+    # Split indices
+    train_indices = indices[:train_size]
+    test_indices = indices[train_size:]
+
+    # Split data using advanced indexing
+    x_train = x[train_indices]
+    y_train = y0[train_indices]
+    x_test = x[test_indices]
+    y_test = y0[test_indices]
+
+    return (x_train, y_train), (x_test, y_test), (x, y0)
