@@ -11,7 +11,7 @@ import jraph
 from tqdm.auto import tqdm
 from typing import List, Dict, Tuple, Generator, NamedTuple, Optional
 
-from boolean_nca_cc.models import CircuitSelfAttention
+from boolean_nca_cc.models import CircuitSelfAttention, CircuitGNN
 from boolean_nca_cc.utils import (
     build_graph,
     extract_logits_from_graph,
@@ -273,96 +273,96 @@ def evaluate_model_stepwise_generator(
         )
 
 
-# def evaluate_model_stepwise(
-#     model: CircuitGNN | CircuitSelfAttention,
-#     wires: List[jp.ndarray],
-#     logits: List[jp.ndarray],
-#     x_data: jp.ndarray,
-#     y_data: jp.ndarray,
-#     input_n: int,
-#     arity: int = 2,
-#     circuit_hidden_dim: int = 16,
-#     n_message_steps: int = 100,
-#     loss_type: str = "l4",
-#     bidirectional_edges: bool = True,
-#     layer_sizes: List[Tuple[int, int]] = None,
-#     use_tqdm: bool = False,
-# ) -> Dict:
-#     """
-#     Evaluate GNN performance by running message passing steps one by one
-#     and collecting metrics at each step.
+def evaluate_model_stepwise(
+    model: CircuitGNN | CircuitSelfAttention,
+    wires: List[jp.ndarray],
+    logits: List[jp.ndarray],
+    x_data: jp.ndarray,
+    y_data: jp.ndarray,
+    input_n: int,
+    arity: int = 2,
+    circuit_hidden_dim: int = 16,
+    n_message_steps: int = 100,
+    loss_type: str = "l4",
+    bidirectional_edges: bool = True,
+    layer_sizes: List[Tuple[int, int]] = None,
+    use_tqdm: bool = False,
+) -> Dict:
+    """
+    Evaluate GNN performance by running message passing steps one by one
+    and collecting metrics at each step.
 
-#     This function now uses the generator implementation to ensure consistency
-#     with the step-by-step evaluation used in demos.
+    This function now uses the generator implementation to ensure consistency
+    with the step-by-step evaluation used in demos.
 
-#     Args:
-#         model: Trained CircuitGNN or CircuitSelfAttention model
-#         wires: List of wire connection patterns
-#         logits: List of initial logit tensors for each layer
-#         x_data: Input data for evaluation
-#         y_data: Target output data
-#         input_n: Number of input nodes
-#         arity: Number of inputs per gate
-#         circuit_hidden_dim: Dimension of hidden features
-#         n_message_steps: Maximum number of message passing steps to run
-#         loss_type: Loss function to use
-#         bidirectional_edges: Whether to use bidirectional edges
+    Args:
+        model: Trained CircuitGNN or CircuitSelfAttention model
+        wires: List of wire connection patterns
+        logits: List of initial logit tensors for each layer
+        x_data: Input data for evaluation
+        y_data: Target output data
+        input_n: Number of input nodes
+        arity: Number of inputs per gate
+        circuit_hidden_dim: Dimension of hidden features
+        n_message_steps: Maximum number of message passing steps to run
+        loss_type: Loss function to use
+        bidirectional_edges: Whether to use bidirectional edges
 
-#     Returns:
-#         Dictionary with metrics collected at each step
-#     """
-#     # Initialize metric storage
-#     step_metrics = {
-#         "step": [],
-#         "soft_loss": [],
-#         "hard_loss": [],
-#         "soft_accuracy": [],
-#         "hard_accuracy": [],
-#         "logits_mean": [],
-#     }
+    Returns:
+        Dictionary with metrics collected at each step
+    """
+    # Initialize metric storage
+    step_metrics = {
+        "step": [],
+        "soft_loss": [],
+        "hard_loss": [],
+        "soft_accuracy": [],
+        "hard_accuracy": [],
+        "logits_mean": [],
+    }
 
-#     # Use the generator to collect all results
-#     generator = evaluate_model_stepwise_generator(
-#         model=model,
-#         wires=wires,
-#         logits=logits,
-#         x_data=x_data,
-#         y_data=y_data,
-#         input_n=input_n,
-#         arity=arity,
-#         circuit_hidden_dim=circuit_hidden_dim,
-#         max_steps=n_message_steps,
-#         loss_type=loss_type,
-#         bidirectional_edges=bidirectional_edges,
-#         layer_sizes=layer_sizes,
-#     )
+    # Use the generator to collect all results
+    generator = evaluate_model_stepwise_generator(
+        model=model,
+        wires=wires,
+        logits=logits,
+        x_data=x_data,
+        y_data=y_data,
+        input_n=input_n,
+        arity=arity,
+        circuit_hidden_dim=circuit_hidden_dim,
+        max_steps=n_message_steps,
+        loss_type=loss_type,
+        bidirectional_edges=bidirectional_edges,
+        layer_sizes=layer_sizes,
+    )
 
-#     # Create progress bar for evaluation
-#     if use_tqdm:
-#         pbar = tqdm(generator, total=n_message_steps + 1, desc="Evaluating model steps")
-#     else:
-#         pbar = generator
+    # Create progress bar for evaluation
+    if use_tqdm:
+        pbar = tqdm(generator, total=n_message_steps + 1, desc="Evaluating model steps")
+    else:
+        pbar = generator
 
-#     # Collect all results
-#     for result in pbar:
-#         step_metrics["step"].append(result.step)
-#         step_metrics["soft_loss"].append(result.loss)
-#         step_metrics["hard_loss"].append(result.hard_loss)
-#         step_metrics["soft_accuracy"].append(result.accuracy)
-#         step_metrics["hard_accuracy"].append(result.hard_accuracy)
-#         step_metrics["logits_mean"].append(float(result.graph.nodes["logits"].mean()))
+    # Collect all results
+    for result in pbar:
+        step_metrics["step"].append(result.step)
+        step_metrics["soft_loss"].append(result.loss)
+        step_metrics["hard_loss"].append(result.hard_loss)
+        step_metrics["soft_accuracy"].append(result.accuracy)
+        step_metrics["hard_accuracy"].append(result.hard_accuracy)
+        step_metrics["logits_mean"].append(float(result.graph.nodes["logits"].mean()))
 
-#         if use_tqdm:
-#             # Update progress bar
-#             pbar.set_postfix(
-#                 {
-#                     "Loss": f"{result.loss:.4f}",
-#                     "Accuracy": f"{result.accuracy:.4f}",
-#                     "Hard Acc": f"{result.hard_accuracy:.4f}",
-#                 }
-#             )
+        if use_tqdm:
+            # Update progress bar
+            pbar.set_postfix(
+                {
+                    "Loss": f"{result.loss:.4f}",
+                    "Accuracy": f"{result.accuracy:.4f}",
+                    "Hard Acc": f"{result.hard_accuracy:.4f}",
+                }
+            )
 
-#     return step_metrics
+    return step_metrics
 
 
 def evaluate_model_stepwise_batched(
