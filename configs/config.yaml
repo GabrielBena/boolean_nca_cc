@@ -66,7 +66,8 @@ training:
 # Pool configuration for meta-learning
 pool:
   size: 4096
-  reset_fraction: 0.125
+  # reset_fraction: 0.125 # Good for batch size 256
+  reset_fraction: 0.05
   reset_interval: 64
   reset_strategy: "combined"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
