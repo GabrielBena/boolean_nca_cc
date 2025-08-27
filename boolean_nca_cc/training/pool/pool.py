@@ -12,6 +12,10 @@ from typing import Dict, List, Tuple, Any, Union, Optional
 from jax import Array
 from functools import partial
 import jraph
+import logging
+
+# Setup logging
+log = logging.getLogger(__name__)
 
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.utils.graph_builder import build_graph
@@ -410,6 +414,8 @@ class GraphPool(struct.PyTreeNode):
         selection_strategy: str = "uniform",
         combined_weights: Tuple[float, float] = (0.5, 0.5),
         knockout_vocabulary: Optional[Array] = None,
+        min_pool_updates: Optional[int] = None,
+        max_pool_updates: Optional[int] = None,
     ) -> Tuple["GraphPool", Array]:
         """
         Apply sample-based damage (persistent knockouts) to a fraction of pool entries.
@@ -427,6 +433,8 @@ class GraphPool(struct.PyTreeNode):
             combined_weights: Weights for combined selection strategy as (loss, steps).
             knockout_vocabulary: Optional [V, num_nodes] boolean masks; if provided,
                                  sample with replacement from the vocabulary.
+            min_pool_updates: Optional minimum pool updates before circuit can be damaged.
+            max_pool_updates: Optional maximum pool updates before circuit becomes too fragile.
 
         Returns:
             Tuple of (updated_pool, damaged_indices).
@@ -434,10 +442,16 @@ class GraphPool(struct.PyTreeNode):
         # Split key for selection and downstream sampling/generation
         selection_key, op_key = jax.random.split(key)
 
-        # Reuse reset index selection semantics
+        # Reuse reset index selection semantics with pool update filtering for damage mode
         damaged_idxs, _avg_steps_unused = self.get_reset_indices(
-            selection_key, fraction, selection_strategy, combined_weights
+            selection_key, fraction, selection_strategy, combined_weights, 
+            invert_loss=True, 
+            min_pool_updates_for_damage=min_pool_updates,
+            max_pool_updates_for_damage=max_pool_updates
         )
+        
+        # Log the pool update filtering application
+        log.info(f"Damage selection applied pool update filtering: circuits with {min_pool_updates}-{max_pool_updates} accumulated pool updates eligible")
 
         num_damaged = damaged_idxs.shape[0]
 
@@ -483,6 +497,9 @@ class GraphPool(struct.PyTreeNode):
         fraction: float,
         reset_strategy: str = "uniform",
         combined_weights: Tuple[float, float] = (0.5, 0.5),
+        invert_loss: bool = False,  # For damage mode
+        max_pool_updates_for_damage: Optional[int] = None,  # Max pool updates for damage mode only
+        min_pool_updates_for_damage: Optional[int] = None,  # Min pool updates for damage mode only
     ) -> Tuple[Array, float]:
         """
         Get indices of circuits to reset based on the specified strategy.
@@ -547,6 +564,11 @@ class GraphPool(struct.PyTreeNode):
                 else:
                     probs = probs / jp.sum(probs)
 
+                # Invert if requested (for damage mode)
+                if invert_loss:
+                    probs = 1.0 - probs
+                    probs = probs / jp.sum(probs)
+
                 # Sample indices based on these probabilities
                 reset_idxs = jax.random.choice(
                     key, self.size, shape=(num_reset,), replace=False, p=probs
@@ -579,7 +601,17 @@ class GraphPool(struct.PyTreeNode):
 
                 # Combine the two scores with configured weights
                 combined_scores = loss_weight * loss_scores + steps_weight * step_scores
-                probs = combined_scores / jp.sum(combined_scores)
+                
+                # Invert loss component if requested (for damage mode)
+                if invert_loss:
+                    # Simply invert the loss scores for damage mode
+                    loss_scores = 1.0 - loss_scores
+                    combined_scores = loss_weight * loss_scores + steps_weight * step_scores
+                    combined_scores = combined_scores / jp.sum(combined_scores)
+                else:
+                    combined_scores = combined_scores / jp.sum(combined_scores)
+                
+                probs = combined_scores
 
                 # Sample indices based on combined probabilities
                 reset_idxs = jax.random.choice(
@@ -590,6 +622,37 @@ class GraphPool(struct.PyTreeNode):
                 f"Unknown reset_strategy: {reset_strategy}. "
                 f"Must be 'uniform', 'steps_biased', 'loss_biased', or 'combined'."
             )
+
+        # Apply damage mode pool update filtering if specified
+        if (max_pool_updates_for_damage is not None or min_pool_updates_for_damage is not None) and self.graphs.globals is not None:
+            update_steps = self.graphs.globals[..., 1]
+            
+            # Build eligibility mask
+            eligible_mask = jp.ones(self.size, dtype=jp.bool_)
+            
+            if max_pool_updates_for_damage is not None:
+                eligible_mask = eligible_mask & (update_steps < max_pool_updates_for_damage)
+            
+            if min_pool_updates_for_damage is not None:
+                eligible_mask = eligible_mask & (update_steps >= min_pool_updates_for_damage)
+            
+            if not jp.any(eligible_mask):
+                # Fallback to uniform selection if no circuits meet criteria
+                log.warning(f"No circuits meet damage criteria: min_pool_updates={min_pool_updates_for_damage}, max_pool_updates={max_pool_updates_for_damage}")
+                reset_idxs = jax.random.choice(
+                    key, self.size, shape=(num_reset,), replace=False
+                )
+            else:
+                # Only select from eligible circuits
+                eligible_indices = jp.where(eligible_mask)[0]
+                if len(eligible_indices) < num_reset:
+                    # If not enough eligible circuits, take all available
+                    reset_idxs = eligible_indices
+                else:
+                    # Sample from eligible circuits
+                    reset_idxs = jax.random.choice(
+                        key, eligible_indices, shape=(num_reset,), replace=False
+                    )
 
         # Calculate average update steps of graphs being reset
         avg_steps_reset = self.get_average_update_steps_for_indices(reset_idxs)

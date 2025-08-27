@@ -425,7 +425,7 @@ class CircuitSelfAttention(nnx.Module):
             )
             current_hidden = nodes["hidden"] * active_mask[:, None]
     
-            # Zero out updates for knocked-out nodes (EXISTING)
+            # Zero out updates for knocked-out nodes
             logit_updates = logit_updates * active_mask[:, None]
             hidden_updates = hidden_updates * active_mask[:, None]
     

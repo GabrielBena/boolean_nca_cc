@@ -112,14 +112,16 @@ if (
 - JIT-wrap new pool methods; avoid Python loops (`vmap` for pattern generation).
 - Evaluation upgrades will consume pool state; KO masks are applied whenever entries are evaluated.
 
+
+- Event-driven damage evaluation [implemented]
+  - Immediately after `damage_fraction(...)` returns `damaged_idxs`, sample those entries’ `wires/logits/knockout_patterns`, run `evaluate_circuits_in_chunks` for N inner steps, and log under `eval_damage_pool/*` (loss, hard_loss, accuracy, hard_accuracy).
+  - No pool mutation; uses the true damaged pool state.
+  - this should eventually replace current version of run_knockout_periodic_evaluation. Note: Since eval will become event driven (ie on patterns sampled from knockout vocabulary), it will correspond to in-distribution eval mode within run_knockout_periodic_evaluation. We have to consider how to also allow for an OOD even-driven eval, perhaps sampling damage patterns randomly (no vocab). Not top priority for now, as in-distribution is first goal.
+
 ---
 
 ### Next Steps
 
-- Event-driven damage evaluation
-  - Immediately after `damage_fraction(...)` returns `damaged_idxs`, sample those entries’ `wires/logits/knockout_patterns`, run `evaluate_circuits_in_chunks` for N inner steps, and log under `eval_damage_pool/*` (loss, hard_loss, accuracy, hard_accuracy).
-  - No pool mutation; uses the true damaged pool state.
-  - this should eventually replace current version of run_knockout_periodic_evaluation. Note: Since eval will become event driven (ie on patterns sampled from knockout vocabulary), it will correspond to in-distribution eval mode within run_knockout_periodic_evaluation. We have to consider how to also allow for an OOD even-driven eval, perhaps sampling damage patterns randomly (no vocab). Not top priority for now, as in-distribution is first goal.
 
 - Selection semantics for damage
   - Implement a damage-specific lowest-loss policy: either a new `loss_lowest` strategy or an inversion flag when `selection_strategy == "loss_biased"` in damage mode. When in doubt, favour minimal code changes / simplest implementation.

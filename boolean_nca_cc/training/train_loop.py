@@ -474,6 +474,10 @@ def train_model(
     knockout_diversity: Optional[int] = None,  # Size of knockout pattern vocabulary for shared training/evaluation patterns
     # Damage-specific generation control (decoupled from legacy persistent_knockout)
     damage_pool_damage_prob: float = 0.0,
+    damage_eval_steps: int = 50,  # Number of message passing steps for damage evaluation
+    # Damage selection filtering parameters
+    damage_min_pool_updates: int = 0,  # Minimum pool updates before circuit can be damaged
+    damage_max_pool_updates: int = 10,  # Maximum pool updates before circuit becomes too fragile for damage
     knockout_eval: Optional[Dict] = None,
     # Learning rate scheduling
     lr_scheduler: str = "constant",  # Options: "constant", "exponential", "cosine", "linear_warmup"
@@ -522,8 +526,16 @@ def train_model(
         reset_pool_interval: Number of epochs between pool resets
         reset_strategy: Strategy for selecting graphs to reset ("uniform", "steps_biased", "loss_biased", or "combined")
         combined_weights: Tuple of weights (loss_weight, steps_weight) for combining factors in "combined" strategy
+        damage_pool_enabled: Whether to enable sample-based damage to pool entries.
+        damage_pool_interval: Number of epochs between damage applications.
+        damage_pool_fraction: Fraction of pool to damage when damage is applied.
+        damage_strategy: Strategy for selecting circuits to damage.
+        damage_combined_weights: Weights for combined damage selection strategy.
         persistent_knockout_config: Configuration for persistent knockout perturbations.
         knockout_diversity: Size of knockout pattern vocabulary for shared training/evaluation patterns
+        damage_pool_damage_prob: Damage probability per node when generating fresh patterns.
+        damage_eval_steps: Number of message passing steps for damage evaluation (baseline and recovery).
+        knockout_eval: Configuration for knockout evaluation during training.
         key: Random seed
         wiring_fixed_key: Fixed key for generating wirings when wiring_mode='fixed'
         init_model: Optional pre-trained GNN model to continue training
@@ -798,6 +810,8 @@ def train_model(
     accumulated_pattern_data = []
 
     diversity = 0.0
+    # Counter for event-driven damage evaluations (for WandB filtering)
+    damage_event_id = 0
     result = {}
     # Training loop
     try:
@@ -900,6 +914,8 @@ def train_model(
                     selection_strategy=damage_strategy,
                     combined_weights=damage_combined_weights,
                     knockout_vocabulary=knockout_vocabulary,
+                    min_pool_updates=damage_min_pool_updates,
+                    max_pool_updates=damage_max_pool_updates,
                 )
 
                 damaged_count = int(damaged_idxs.shape[0]) if hasattr(damaged_idxs, "shape") else 0
@@ -915,6 +931,119 @@ def train_model(
                             "training/epoch": epoch,
                         }
                     )
+
+                # Event-driven damage evaluation (corrected):
+                # - Baseline: same number of steps as damaged, zero KO mask, separate panel
+                # - Damaged: trajectory over periodic_eval_inner_steps, separate panel
+                if damaged_count > 0:
+                    # Build subset tensors for the damaged indices
+                    subset_wires = jax.tree.map(lambda x: x[damaged_idxs], circuit_pool.wires)
+                    subset_logits = jax.tree.map(lambda x: x[damaged_idxs], circuit_pool.logits)
+                    patterns_damaged = circuit_pool.knockout_patterns[damaged_idxs]
+                    patterns_zero = jp.zeros_like(patterns_damaged)
+
+                    # Baseline evaluation: same number of steps as damaged, zero masks, per-pattern enabled
+                    baseline_metrics = evaluate_circuits_in_chunks(
+                        eval_fn=evaluate_model_stepwise_batched,
+                        wires=subset_wires,
+                        logits=subset_logits,
+                        knockout_patterns=patterns_zero,
+                        target_chunk_size=int(patterns_zero.shape[0]),
+                        model=model,
+                        x_data=x_data,
+                        y_data=y_data,
+                        input_n=input_n,
+                        arity=arity,
+                        circuit_hidden_dim=circuit_hidden_dim,
+                        n_message_steps=damage_eval_steps,  # Same as damaged
+                        loss_type=loss_type,
+                        layer_sizes=layer_sizes,
+                        return_per_pattern=True,
+                    )
+
+                    # Extract baseline hard accuracy per step across batch
+                    baseline_hard_acc_mean_series = None
+                    if (
+                        isinstance(baseline_metrics, dict)
+                        and "per_pattern" in baseline_metrics
+                        and "pattern_hard_accuracies" in baseline_metrics["per_pattern"]
+                    ):
+                        baseline_hard_acc_series = baseline_metrics["per_pattern"][
+                            "pattern_hard_accuracies"
+                        ]  # [steps, batch]
+                        baseline_hard_acc_mean_series = jp.mean(
+                            baseline_hard_acc_series, axis=1
+                        )  # [steps]
+                    else:
+                        # Fallback to aggregated series if per-pattern absent
+                        baseline_hard_acc_mean_series = baseline_metrics["hard_accuracy"]
+
+                    # Damaged trajectory: periodic_eval_inner_steps, per-pattern enabled
+                    traj_metrics = evaluate_circuits_in_chunks(
+                        eval_fn=evaluate_model_stepwise_batched,
+                        wires=subset_wires,
+                        logits=subset_logits,
+                        knockout_patterns=patterns_damaged,
+                        target_chunk_size=int(patterns_damaged.shape[0]),
+                        model=model,
+                        x_data=x_data,
+                        y_data=y_data,
+                        input_n=input_n,
+                        arity=arity,
+                        circuit_hidden_dim=circuit_hidden_dim,
+                        n_message_steps=damage_eval_steps,
+                        loss_type=loss_type,
+                        layer_sizes=layer_sizes,
+                        return_per_pattern=True,
+                    )
+
+                    # Mean hard accuracy per step across the damaged batch
+                    damaged_hard_acc_mean_series = None
+                    if (
+                        isinstance(traj_metrics, dict)
+                        and "per_pattern" in traj_metrics
+                        and "pattern_hard_accuracies" in traj_metrics["per_pattern"]
+                    ):
+                        damaged_hard_acc_series = traj_metrics["per_pattern"][
+                            "pattern_hard_accuracies"
+                        ]  # [steps, batch]
+                        damaged_hard_acc_mean_series = jp.mean(
+                            damaged_hard_acc_series, axis=1
+                        )  # [steps]
+                    else:
+                        # Fallback to aggregated series if per-pattern absent
+                        damaged_hard_acc_mean_series = traj_metrics["hard_accuracy"]
+
+                    # Log to WandB: separate panels for baseline vs damage recovery
+                    if wandb_run:
+                        # Panel 1: Baseline performance (no damage, full trajectory)
+                        for step_idx in range(int(baseline_hard_acc_mean_series.shape[0])):
+                            wandb_run.log(
+                                {
+                                    "eval_damage_pool/baseline/step": int(step_idx),
+                                    "eval_damage_pool/baseline/hard_accuracy_mean": float(
+                                        baseline_hard_acc_mean_series[step_idx]
+                                    ),
+                                    "eval_damage_pool/damage_event_id": int(damage_event_id),
+                                    "training/epoch": epoch,
+                                }
+                            )
+                        
+                        # Panel 2: Damage recovery trajectory (only damaged performance)
+                        for step_idx in range(int(damaged_hard_acc_mean_series.shape[0])):
+                            wandb_run.log(
+                                {
+                                    "eval_damage_pool/recovery/step": int(step_idx),
+                                    "eval_damage_pool/recovery/hard_accuracy_mean": float(
+                                        damaged_hard_acc_mean_series[step_idx]
+                                    ),
+                                    "eval_damage_pool/damage_event_id": int(damage_event_id),
+                                    "training/epoch": epoch,
+                                }
+                            )
+
+                    # Increment event id for next damage interval
+                    damage_event_id += 1
 
             if jp.isnan(loss):
                 log.warning(

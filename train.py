@@ -490,6 +490,10 @@ def main(cfg: DictConfig) -> None:
         damage_strategy=cfg.pool.get("damage_strategy", "uniform"),
         damage_combined_weights=tuple(cfg.pool.get("damage_combined_weights", [0.5, 0.5])),
         damage_pool_damage_prob=cfg.pool.get("damage_prob", cfg.pool.get("persistent_knockout", {}).get("damage_prob", 0.0)),
+        damage_eval_steps=cfg.pool.get("damage_eval_steps", 50),
+        # Damage selection filtering parameters
+        damage_min_pool_updates=cfg.pool.get("damage_min_pool_updates", 0),
+        damage_max_pool_updates=cfg.pool.get("damage_max_pool_updates", 10),
         # Perturbation configurations
         persistent_knockout_config=cfg.pool.get("persistent_knockout", None),
         knockout_diversity=cfg.pool.get("damage_knockout_diversity", cfg.pool.get("persistent_knockout", {}).get("knockout_diversity", 0)),

@@ -65,13 +65,19 @@ pool:
   # Sample-based damage (applied post-step, independent of resets)
   damage_pool_enabled: true
   damage_pool_interval: 128
-  damage_pool_fraction: 0.15
-  damage_strategy: "uniform"
+  damage_pool_fraction: 0.1
+  damage_strategy: "loss_biased"
   damage_combined_weights: [0.5, 0.5]
   # Number of gates to knock out when generating fresh patterns (ignored if vocabulary is used)
   damage_prob: 20.0
   # Damage-specific vocabulary size (decoupled from legacy persistent_knockout)
   damage_knockout_diversity: 4
+  # Pool update step filtering for damage selection (prevents damage to over-optimized circuits)
+  damage_min_pool_updates: 1    # Minimum pool updates before circuit can be damaged
+  damage_max_pool_updates: 10   # Maximum pool updates before circuit becomes too fragile for damage
+  # Number of message passing steps for damage evaluation (baseline and recovery trajectories)
+  # This should typically match or be close to the training n_message_steps for realistic recovery assessment
+  damage_eval_steps: 100
 
   # # Persistent structural knockout (injected periodically)
   # persistent_knockout:
@@ -81,11 +87,11 @@ pool:
 
 eval:
   # Periodic evaluation parameters
-  periodic_eval_enabled: false
+  periodic_eval_enabled: true
   periodic_eval_inner_steps: 100
-  periodic_eval_interval: 256
+  periodic_eval_interval: 1024
   periodic_eval_test_seed: 42
-  periodic_eval_log_stepwise: false
+  periodic_eval_log_stepwise: true
   periodic_eval_batch_size: ${pool.damage_knockout_diversity}  # Batch size for knockout evaluation (should match knockout_diversity)
   
   # Knockout evaluation
@@ -96,7 +102,7 @@ eval:
   # Final BP vs SA comparison evaluation
   final_eval_enabled: true
   final_eval_inner_steps: ${eval.periodic_eval_inner_steps}
-  final_eval_seed: 999
+  # final_eval_seed: 999
 
 # Logging configuration
 logging:
