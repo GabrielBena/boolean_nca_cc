@@ -128,149 +128,149 @@ def get_loss_and_update_graph(
     return updated_graph, loss, current_logits, aux
 
 
-# def evaluate_model_stepwise_generator(
-#     model: CircuitGNN | CircuitSelfAttention,
-#     wires: List[jp.ndarray],
-#     logits: List[jp.ndarray],
-#     x_data: jp.ndarray,
-#     y_data: jp.ndarray,
-#     input_n: int,
-#     arity: int = 2,
-#     circuit_hidden_dim: int = 16,
-#     max_steps: int = None,
-#     loss_type: str = "l4",
-#     bidirectional_edges: bool = True,
-#     layer_sizes: List[Tuple[int, int]] = None,
-# ) -> Generator[StepResult, None, None]:
-#     """
-#     Generator that yields step-by-step evaluation results for GNN model optimization.
+def evaluate_model_stepwise_generator(
+    model: CircuitGNN | CircuitSelfAttention,
+    wires: List[jp.ndarray],
+    logits: List[jp.ndarray],
+    x_data: jp.ndarray,
+    y_data: jp.ndarray,
+    input_n: int,
+    arity: int = 2,
+    circuit_hidden_dim: int = 16,
+    max_steps: int = None,
+    loss_type: str = "l4",
+    bidirectional_edges: bool = True,
+    layer_sizes: List[Tuple[int, int]] = None,
+) -> Generator[StepResult, None, None]:
+    """
+    Generator that yields step-by-step evaluation results for GNN model optimization.
 
-#     This function provides EXACTLY the same computation path as the training loop,
-#     including using the same loss function, graph initialization, and step tracking.
-#     Perfect for live demos and interactive use with zero discrepancy from training.
+    This function provides EXACTLY the same computation path as the training loop,
+    including using the same loss function, graph initialization, and step tracking.
+    Perfect for live demos and interactive use with zero discrepancy from training.
 
-#     Args:
-#         model: Trained CircuitGNN or CircuitSelfAttention model
-#         wires: List of wire connection patterns
-#         logits: List of initial logit tensors for each layer
-#         x_data: Input data for evaluation
-#         y_data: Target output data
-#         input_n: Number of input nodes
-#         arity: Number of inputs per gate
-#         circuit_hidden_dim: Dimension of hidden features
-#         max_steps: Maximum number of steps to run (None for infinite)
-#         loss_type: Loss function to use
-#         bidirectional_edges: Whether to use bidirectional edges
+    Args:
+        model: Trained CircuitGNN or CircuitSelfAttention model
+        wires: List of wire connection patterns
+        logits: List of initial logit tensors for each layer
+        x_data: Input data for evaluation
+        y_data: Target output data
+        input_n: Number of input nodes
+        arity: Number of inputs per gate
+        circuit_hidden_dim: Dimension of hidden features
+        max_steps: Maximum number of steps to run (None for infinite)
+        loss_type: Loss function to use
+        bidirectional_edges: Whether to use bidirectional edges
 
-#     Yields:
-#         StepResult: Results from each step including loss, accuracy, predictions, and updated logits
-#     """
-#     # Store original shapes for reconstruction (EXACTLY like training)
-#     logits_original_shapes = [logit.shape for logit in logits]
+    Yields:
+        StepResult: Results from each step including loss, accuracy, predictions, and updated logits
+    """
+    # Store original shapes for reconstruction (EXACTLY like training)
+    logits_original_shapes = [logit.shape for logit in logits]
 
-#     # Calculate initial loss using the EXACT same function as training
-#     (
-#         initial_loss,
-#         (
-#             initial_hard_loss,
-#             initial_pred,
-#             initial_pred_hard,
-#             initial_accuracy,
-#             initial_hard_accuracy,
-#             initial_res,
-#             initial_hard_res,
-#         ),
-#     ) = get_loss_from_wires_logits(logits, wires, x_data, y_data, loss_type)
+    # Calculate initial loss using the EXACT same function as training
+    (
+        initial_loss,
+        (
+            initial_hard_loss,
+            initial_pred,
+            initial_pred_hard,
+            initial_accuracy,
+            initial_hard_accuracy,
+            initial_res,
+            initial_hard_res,
+        ),
+    ) = get_loss_from_wires_logits(logits, wires, x_data, y_data, loss_type)
 
-#     # Build initial graph using the same function as training
-#     # Initialize with update_steps = 0 (exactly like training pool initialization)
-#     graph = build_graph(
-#         logits,
-#         wires,
-#         input_n,
-#         arity,
-#         circuit_hidden_dim,
-#         loss_value=initial_loss,
-#         bidirectional_edges=bidirectional_edges,
-#     )
+    # Build initial graph using the same function as training
+    # Initialize with update_steps = 0 (exactly like training pool initialization)
+    graph = build_graph(
+        logits,
+        wires,
+        input_n,
+        arity,
+        circuit_hidden_dim,
+        loss_value=initial_loss,
+        bidirectional_edges=bidirectional_edges,
+    )
 
-#     # Initialize graph globals with [loss, update_steps] exactly like training
-#     current_update_steps = 0
-#     graph = graph._replace(
-#         globals=jp.array([initial_loss, current_update_steps], dtype=jp.float32)
-#     )
+    # Initialize graph globals with [loss, update_steps] exactly like training
+    current_update_steps = 0
+    graph = graph._replace(
+        globals=jp.array([initial_loss, current_update_steps], dtype=jp.float32)
+    )
 
-#     graph = update_output_node_loss(graph, layer_sizes, initial_res.mean(axis=0))
+    graph = update_output_node_loss(graph, layer_sizes, initial_res.mean(axis=0))
 
-#     # Yield initial state (step 0)
-#     yield StepResult(
-#         step=0,
-#         loss=float(initial_loss),
-#         hard_loss=float(initial_hard_loss),
-#         accuracy=float(initial_accuracy),
-#         hard_accuracy=float(initial_hard_accuracy),
-#         predictions=initial_pred,
-#         hard_predictions=initial_pred_hard,
-#         logits=logits,
-#         graph=graph,
-#     )
+    # Yield initial state (step 0)
+    yield StepResult(
+        step=0,
+        loss=float(initial_loss),
+        hard_loss=float(initial_hard_loss),
+        accuracy=float(initial_accuracy),
+        hard_accuracy=float(initial_hard_accuracy),
+        predictions=initial_pred,
+        hard_predictions=initial_pred_hard,
+        logits=logits,
+        graph=graph,
+    )
 
-#     # Run optimization steps (EXACTLY like the training loop)
-#     step = 0
-#     while max_steps is None or step < max_steps:
-#         step += 1
+    # Run optimization steps (EXACTLY like the training loop)
+    step = 0
+    while max_steps is None or step < max_steps:
+        step += 1
 
-#         # Extract the current update_steps count from graph globals (EXACTLY like training)
-#         current_update_steps = 0
-#         if graph.globals is not None and graph.globals.shape[-1] > 1:
-#             current_update_steps = graph.globals[..., 1]
+        # Extract the current update_steps count from graph globals (EXACTLY like training)
+        current_update_steps = 0
+        if graph.globals is not None and graph.globals.shape[-1] > 1:
+            current_update_steps = graph.globals[..., 1]
 
-#         # Apply one step of model processing (EXACTLY like training inner loop)
-#         # Note: training does multiple steps in a batch, but we do one at a time for live demo
-#         updated_graph = model(graph)
+        # Apply one step of model processing (EXACTLY like training inner loop)
+        # Note: training does multiple steps in a batch, but we do one at a time for live demo
+        updated_graph = model(graph)
 
-#         # Use the unified get_loss_and_update_graph function for consistency
-#         updated_graph, loss, current_logits, aux = get_loss_and_update_graph(
-#             updated_graph,
-#             logits_original_shapes,
-#             wires,
-#             x_data,
-#             y_data,
-#             loss_type,
-#             layer_sizes,
-#         )
+        # Use the unified get_loss_and_update_graph function for consistency
+        updated_graph, loss, current_logits, aux = get_loss_and_update_graph(
+            updated_graph,
+            logits_original_shapes,
+            wires,
+            x_data,
+            y_data,
+            loss_type,
+            layer_sizes,
+        )
 
-#         # Extract auxiliary data
-#         (
-#             hard_loss,
-#             pred,
-#             pred_hard,
-#             accuracy,
-#             hard_accuracy,
-#             res,
-#             hard_res,
-#         ) = aux
+        # Extract auxiliary data
+        (
+            hard_loss,
+            pred,
+            pred_hard,
+            accuracy,
+            hard_accuracy,
+            res,
+            hard_res,
+        ) = aux
 
-#         # Update with the computed loss and incremented update_steps (EXACTLY like training)
-#         updated_graph = updated_graph._replace(
-#             globals=jp.array([loss, current_update_steps + 1], dtype=jp.float32)
-#         )
+        # Update with the computed loss and incremented update_steps (EXACTLY like training)
+        updated_graph = updated_graph._replace(
+            globals=jp.array([loss, current_update_steps + 1], dtype=jp.float32)
+        )
 
-#         # Update the graph variable for next iteration
-#         graph = updated_graph
+        # Update the graph variable for next iteration
+        graph = updated_graph
 
-#         # Yield current state
-#         yield StepResult(
-#             step=step,
-#             loss=float(loss),
-#             hard_loss=float(hard_loss),
-#             accuracy=float(accuracy),
-#             hard_accuracy=float(hard_accuracy),
-#             predictions=pred,
-#             hard_predictions=pred_hard,
-#             logits=current_logits,
-#             graph=graph,
-#         )
+        # Yield current state
+        yield StepResult(
+            step=step,
+            loss=float(loss),
+            hard_loss=float(hard_loss),
+            accuracy=float(accuracy),
+            hard_accuracy=float(hard_accuracy),
+            predictions=pred,
+            hard_predictions=pred_hard,
+            logits=current_logits,
+            graph=graph,
+        )
 
 
 # def evaluate_model_stepwise(
