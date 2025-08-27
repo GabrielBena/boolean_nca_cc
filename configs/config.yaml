@@ -45,7 +45,7 @@ training:
   random_loss_step: false  # Use random message passing step for loss computation
   use_beta_loss_step: false  # Use beta distribution for random loss step (varies from early to late steps through training)
   # BATCH SIZE
-  meta_batch_size: 256
+  meta_batch_size: 512
   batch_chunk_size: 128  # Sequential batch processing chunk size (null means use meta_batch_size)
   # OPTIMIZATION
   learning_rate: 1e-4
