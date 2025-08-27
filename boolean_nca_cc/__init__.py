@@ -11,42 +11,38 @@ The package is organized into the following submodules:
 """
 
 from boolean_nca_cc.circuits.model import (
-    generate_layer_sizes,
     gen_circuit,
+    generate_layer_sizes,
     run_circuit,
     run_layer,
 )
-from boolean_nca_cc.circuits.train import (
-    TrainState, 
-    train_step, 
-    create_gate_mask_from_knockout_pattern,
+from boolean_nca_cc.circuits.train import TrainState, train_step
+from boolean_nca_cc.models import CircuitGNN, run_gnn_scan
+from boolean_nca_cc.training import (
+    evaluate_model_stepwise,
+    train_model,
 )
 from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
-from boolean_nca_cc.models import CircuitSelfAttention
-from boolean_nca_cc.training import (
-    train_model,
-    evaluate_model_stepwise_batched,
-)
 
 __version__ = "0.1.0"
 
 __all__ = [
-    # Circuits
-    "generate_layer_sizes",
-    "gen_circuit",
-    "run_circuit",
-    "run_layer",
-    "TrainState",
-    "train_step",
-    "create_gate_mask_from_knockout_pattern",
     # Models
-    "CircuitSelfAttention",
-    # Utils
-    "build_graph",
-    "extract_logits_from_graph",
-    # Training
-    "train_model",
-    "evaluate_model_stepwise_batched",
+    "CircuitGNN",
+    "TrainState",
     # Version
     "__version__",
+    # Utils
+    "build_graph",
+    "evaluate_model_stepwise",
+    "extract_logits_from_graph",
+    "gen_circuit",
+    # Circuits
+    "generate_layer_sizes",
+    "run_circuit",
+    "run_gnn_scan",
+    "run_layer",
+    # Training
+    "train_model",
+    "train_step",
 ]
