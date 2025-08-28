@@ -1,0 +1,10 @@
+{
+  "num_patterns": 128,
+  "mean_overall_bitwise_fraction_diff": 0.37419891357421875,
+  "mean_per_gate_mean_hamming": 0.37419891357421875,
+  "mean_final_accuracy": 0.9420394897460938,
+  "mean_final_hard_loss": 118.703125,
+  "config_path": "/Users/bary/LocalDocs/Code/CapoCaccia/boolean_nca_cc-1/configs/config.yaml",
+  "output_path": "/Users/bary/LocalDocs/Code/CapoCaccia/boolean_nca_cc-1/results/knockout_lut_distance_vocab128_damage40.0",
+  "pairwise_matrix_csv": "/Users/bary/LocalDocs/Code/CapoCaccia/boolean_nca_cc-1/results/knockout_lut_distance_vocab128_damage40.0/pairwise_matrix.csv"
+}

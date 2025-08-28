@@ -69,11 +69,11 @@ pool:
   damage_strategy: "loss_biased"
   damage_combined_weights: [0.5, 0.5]
   # Number of gates to knock out when generating fresh patterns (ignored if vocabulary is used)
-  damage_prob: 20.0
+  damage_prob: 1.0
   # Damage-specific vocabulary size (decoupled from legacy persistent_knockout)
-  damage_knockout_diversity: 4
+  damage_knockout_diversity: 512
   # Pool update step filtering for damage selection (prevents damage to over-optimized circuits)
-  damage_min_pool_updates: 1    # Minimum pool updates before circuit can be damaged
+  damage_min_pool_updates: 0    # Minimum pool updates before circuit can be damaged
   damage_max_pool_updates: 10   # Maximum pool updates before circuit becomes too fragile for damage
   # Number of message passing steps for damage evaluation (baseline and recovery trajectories)
   # This should typically match or be close to the training n_message_steps for realistic recovery assessment

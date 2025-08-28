@@ -20,6 +20,7 @@ from boolean_nca_cc.circuits.train import TrainState, train_step
 from boolean_nca_cc.models import CircuitGNN, run_gnn_scan
 from boolean_nca_cc.training import (
     evaluate_model_stepwise,
+    evaluate_model_stepwise_batched,
     train_model,
 )
 from boolean_nca_cc.utils import build_graph, extract_logits_from_graph
@@ -35,6 +36,7 @@ __all__ = [
     # Utils
     "build_graph",
     "evaluate_model_stepwise",
+    "evaluate_model_stepwise_batched",
     "extract_logits_from_graph",
     "gen_circuit",
     # Circuits
