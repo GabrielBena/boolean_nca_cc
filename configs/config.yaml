@@ -112,6 +112,24 @@ logging:
   log_interval: 16  # Log metrics every N epochs
   level: "INFO" 
 
+# Checkpoint configuration
+checkpoint:
+  enabled: true
+  interval: 1031  # prime number 
+  save_best: true  # Save best model based on metric
+  best_metric: "final_hard_accuracy"  # Metric to track for best model
+  best_metric_source: "eval"  # Source for best metric: "training", "eval", or "eval_ko"
+  save_stable_states: false  # Save last stable state before NaN loss
+
+# Early stopping configuration
+early_stop:
+  enabled: true  # Enable early stopping based on accuracy threshold
+  threshold: 0.995  # Accuracy threshold to trigger early stopping
+  metric: "final_hard_accuracy"  # Metric to monitor: "loss", "hard_loss", "accuracy", "hard_accuracy"
+  source: "training"  # Source for metric: "training", "eval", or "eval_ko_in"
+  patience: 10  # Number of epochs above threshold before stopping
+  min_epochs: 1012  # Minimum epochs before early stopping can trigger
+
 # Backpropagation baseline configuration
 backprop:
   enabled: true

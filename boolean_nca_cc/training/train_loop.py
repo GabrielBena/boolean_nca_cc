@@ -15,11 +15,12 @@ from functools import partial
 from tqdm.auto import tqdm
 import os
 import logging
+from datetime import datetime
 
 
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.models import CircuitSelfAttention
-# from boolean_nca_cc.training.utils import save_checkpoint
+from boolean_nca_cc.training.checkpointing import save_checkpoint
 
 from boolean_nca_cc.training.schedulers import (
     should_reset_pool,
@@ -91,6 +92,268 @@ def _log_to_wandb(
         wandb_run.log(metrics_dict)
     except Exception as e:
         log.warning(f"Error logging to wandb: {e}")
+
+def _setup_checkpoint_dir(checkpoint_dir: str | None, wandb_id: str | None) -> str | None:
+    """Setup checkpoint directory with unique identifier."""
+    if checkpoint_dir is None:
+        return None
+
+    # Create unique checkpoint directory using wandb ID or timestamp
+    unique_id = wandb_id if wandb_id else datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    checkpoint_path = os.path.join(checkpoint_dir, f"run_{unique_id}")
+    os.makedirs(checkpoint_path, exist_ok=True)
+    log.info(f"Checkpoints will be saved to: {checkpoint_path}")
+
+    return checkpoint_path
+
+
+def _save_periodic_checkpoint(
+    checkpoint_path: str,
+    model,
+    optimizer,
+    metrics: dict,
+    epoch: int,
+    checkpoint_interval: int,
+    wandb_run=None,
+) -> None:
+    """Save periodic checkpoint if interval allows."""
+    if checkpoint_path is None or epoch == 0 or epoch % checkpoint_interval != 0:
+        return
+
+    ckpt_filename = "latest_checkpoint.pkl"
+    # log.info(f"Saving periodic checkpoint at epoch {epoch}")
+
+    try:
+        save_checkpoint(
+            model,
+            optimizer,
+            metrics,
+            {"epoch": epoch},
+            epoch,
+            checkpoint_path,
+            filename=ckpt_filename,
+        )
+
+        # Log to wandb if enabled
+        if wandb_run:
+            wandb_run.save(os.path.join(checkpoint_path, ckpt_filename))
+
+            # Also log this as an artifact for better tracking in wandb
+            try:
+                artifact = wandb_run.Artifact("latest_checkpoint", type="model")
+                artifact.add_file(os.path.join(checkpoint_path, ckpt_filename))
+                wandb_run.log_artifact(artifact)
+            except Exception as e:
+                log.warning(f"Error logging checkpoint as artifact: {e}")
+
+    except Exception as e:
+        log.warning(f"Error saving checkpoint: {e}")
+
+
+def _save_best_checkpoint(
+    checkpoint_path: str,
+    is_best: bool,
+    save_best: bool,
+    model,
+    optimizer,
+    metrics: dict,
+    epoch: int,
+    best_metric: str,
+    current_metric_value: float,
+    wandb_run=None,
+) -> None:
+    """Save best checkpoint if enabled and is best."""
+    if not (checkpoint_path and save_best and is_best):
+        return
+
+    # Use a fixed filename for the best model to avoid creating multiple files
+    best_filename = f"best_model_{best_metric}.pkl"
+    # log.info(
+    #     f"Saving best model at epoch {epoch} with {best_metric}={current_metric_value:.4f}"
+    # )
+
+    try:
+        save_checkpoint(
+            model,
+            optimizer,
+            metrics,
+            {"epoch": epoch, f"best_{best_metric}": current_metric_value},
+            epoch,
+            checkpoint_path,
+            filename=best_filename,
+        )
+
+        # Log to wandb if enabled
+        if wandb_run:
+            wandb_run.log({f"best/{best_metric}": current_metric_value, "best/epoch": epoch})
+
+            # Save the best model to wandb (will overwrite the previous best)
+            wandb_run.save(os.path.join(checkpoint_path, best_filename))
+
+            # Also log this as an artifact for better tracking in wandb
+            try:
+                artifact = wandb_run.Artifact(f"best_model_{best_metric}", type="model")
+                artifact.add_file(os.path.join(checkpoint_path, best_filename))
+                wandb_run.log_artifact(artifact)
+            except Exception as e:
+                log.warning(f"Error logging best model as artifact: {e}")
+    except Exception as e:
+        log.warning(f"Error saving best checkpoint: {e}")
+
+
+def _save_stable_state(
+    checkpoint_path: str,
+    save_stable_states: bool,
+    last_stable_state: dict,
+    epoch: int,
+    wandb_run=None,
+) -> None:
+    """Save the last stable state before NaN loss."""
+    if not (checkpoint_path and save_stable_states):
+        return
+
+    try:
+        stable_path = os.path.join(checkpoint_path, f"stable_state_epoch_{epoch - 1}.pkl")
+        # log.info(f"Saving last stable state to {stable_path}")
+        save_checkpoint(
+            last_stable_state["model"],
+            last_stable_state["optimizer"],
+            last_stable_state["metrics"],
+            {"epoch": epoch - 1},
+            epoch - 1,
+            os.path.dirname(stable_path),
+            filename=os.path.basename(stable_path),
+        )
+
+        # Log to wandb if enabled
+        if wandb_run:
+            wandb_run.log({"training/early_stop_epoch": epoch - 1})
+            wandb_run.alert(
+                title="Training Stopped - NaN Loss",
+                text=f"Training stopped at epoch {epoch} due to NaN loss. Last stable state saved.",
+                level=wandb_run.AlertLevel.WARN,
+            )
+    except Exception as e:
+        log.warning(f"Error saving stable state: {e}")
+
+
+def _check_early_stopping(
+    stop_accuracy_enabled: bool,
+    epoch: int,
+    stop_accuracy_min_epochs: int,
+    early_stop_triggered: bool,
+    stop_accuracy_metric: str,
+    stop_accuracy_source: str,
+    training_metrics: dict,
+    current_eval_metrics: dict | None,
+    stop_accuracy_threshold: float,
+    first_threshold_epoch: int | None,
+    epochs_above_threshold: int,
+    stop_accuracy_patience: int,
+    rng: jax.random.PRNGKey,
+) -> tuple[bool, bool, int, int | None, dict | None, jax.random.PRNGKey]:
+    """
+    Check early stopping conditions and handle early stopping logic.
+
+    Returns:
+        Tuple of (should_break, early_stop_triggered, epochs_above_threshold,
+                 first_threshold_epoch, updated_current_eval_metrics, updated_rng)
+    """
+    if not stop_accuracy_enabled or early_stop_triggered:
+        return (
+            False,
+            early_stop_triggered,
+            epochs_above_threshold,
+            first_threshold_epoch,
+            current_eval_metrics,
+            rng,
+        )
+
+    # Get the accuracy value for early stopping
+    try:
+        stop_accuracy_value = _get_metric_value(
+            stop_accuracy_metric,
+            stop_accuracy_source,
+            training_metrics,
+            current_eval_metrics,
+        )
+    except (ValueError, KeyError):
+        if stop_accuracy_source == "eval" and current_eval_metrics is None:
+            # Evaluation metrics not available, skip early stopping check this epoch
+            stop_accuracy_value = None
+        else:
+            # Fallback to training metrics if eval not available
+            stop_accuracy_value = _get_metric_value(
+                stop_accuracy_metric,
+                "training",
+                training_metrics,
+                current_eval_metrics,
+            )
+
+    if stop_accuracy_value is None:
+        return (
+            False,
+            early_stop_triggered,
+            epochs_above_threshold,
+            first_threshold_epoch,
+            current_eval_metrics,
+            rng,
+        )
+
+    if stop_accuracy_value >= stop_accuracy_threshold:
+        if first_threshold_epoch is None:
+            first_threshold_epoch = epoch
+            log.info(
+                f"Reached accuracy threshold {stop_accuracy_threshold:.4f} "
+                f"({stop_accuracy_source}_{stop_accuracy_metric}={stop_accuracy_value:.4f}) "
+                f"at epoch {epoch}. Starting patience countdown."
+            )
+        epochs_above_threshold += 1
+
+        # Check if we should stop (only after minimum epochs requirement is met)
+        if epochs_above_threshold >= stop_accuracy_patience and epoch >= stop_accuracy_min_epochs:
+            early_stop_triggered = True
+            log.info(
+                f"Early stopping triggered! "
+                f"Accuracy {stop_accuracy_source}_{stop_accuracy_metric}={stop_accuracy_value:.4f} "
+                f"has been above threshold {stop_accuracy_threshold:.4f} "
+                f"for {stop_accuracy_patience} epochs. "
+                f"Stopping at epoch {epoch}."
+            )
+
+            return (
+                True,
+                early_stop_triggered,
+                epochs_above_threshold,
+                first_threshold_epoch,
+                current_eval_metrics,
+                rng,
+            )
+        elif epochs_above_threshold >= stop_accuracy_patience and epoch < stop_accuracy_min_epochs:
+            # Log that we would stop but are waiting for minimum epochs
+            # log.info(
+            #     f"Early stopping condition met "
+            #     f"(accuracy {stop_accuracy_source}_{stop_accuracy_metric}={stop_accuracy_value:.4f} "
+            #     f"above threshold {stop_accuracy_threshold:.4f} for {stop_accuracy_patience} epochs), "
+            #     f"but waiting until minimum epoch {stop_accuracy_min_epochs} (currently at epoch {epoch})."
+            # )
+            pass
+    else:
+        # Reset counter if accuracy drops below threshold
+        if epochs_above_threshold > 0:
+            log.info("Accuracy dropped below threshold. Resetting early stopping counter.")
+        epochs_above_threshold = 0
+        first_threshold_epoch = None
+
+    return (
+        False,
+        early_stop_triggered,
+        epochs_above_threshold,
+        first_threshold_epoch,
+        current_eval_metrics,
+        rng,
+    )
 
 
 def _log_final_wandb_metrics(wandb_run, results: Dict, epochs: int) -> None:
@@ -443,7 +706,6 @@ def train_model(
     # Model architecture parameters
     arity: int = 2,
     circuit_hidden_dim: int = 16,
-    message_passing: bool = True,
     # node_mlp_features: List[int] = [64, 32],
     # edge_mlp_features: List[int] = [64, 32],
     use_attention: bool = False,
@@ -494,8 +756,14 @@ def train_model(
     init_optimizer: Optional[nnx.Optimizer] = None,
     initial_metrics: Optional[Dict] = None,
     # Checkpointing parameters
+    checkpoint_enabled: bool = False,
+    checkpoint_dir: str | None = None,
+    checkpoint_interval: int = 1024,
+    save_best: bool = True,
+    best_metric: str = "final_hard_accuracy",
+    best_metric_source: str = "eval",
+    save_stable_states: bool = True,
     # Periodic evaluation parameters
-    periodic_eval_enabled: bool = False,
     periodic_eval_inner_steps: int = 100,
     periodic_eval_interval: int = 1024,
     periodic_eval_test_seed: int = 42,
@@ -509,6 +777,13 @@ def train_model(
     training_mode: str = "growth",
     preconfig_steps: int = 200,
     preconfig_lr: float = 1e-2,
+    # Early stopping parameters
+    stop_accuracy_enabled: bool = False,
+    stop_accuracy_threshold: float = 0.95,
+    stop_accuracy_metric: str = "final_hard_accuracy",
+    stop_accuracy_source: str = "eval_ko_in",
+    stop_accuracy_patience: int = 10,
+    stop_accuracy_min_epochs: int = 100,
 ):
     """
     Train a GNN to optimize boolean circuit parameters.
@@ -519,7 +794,6 @@ def train_model(
         y_data: Target output data [batch, output_bits]
         arity: Number of inputs per gate
         circuit_hidden_dim: Dimension of hidden features
-        message_passing: Whether to use message passing or only self-updates
         # node_mlp_features: Hidden layer sizes for the node MLP
         # edge_mlp_features: Hidden layer sizes for the edge MLP
         # use_attention: Whether to use attention-based message aggregation
@@ -551,15 +825,32 @@ def train_model(
         initial_metrics: Optional dictionary of metrics from previous training
         lr_scheduler: Learning rate scheduler type
         lr_scheduler_params: Dictionary of parameters for the scheduler
-        periodic_eval_enabled: Whether to enable periodic evaluation
         periodic_eval_inner_steps: Number of inner steps for periodic evaluation
         periodic_eval_interval: Interval for periodic evaluation
         periodic_eval_test_seed: Seed for periodic evaluation test circuit generation
         periodic_eval_log_stepwise: Whether to log step-by-step evaluation metrics
         periodic_eval_batch_size: Batch size for random wiring evaluation
+        use_scan: Whether to use scan for message passing
         wandb_logging: Whether to log metrics to wandb
         log_interval: Interval for logging metrics
         wandb_run_config: Configuration to pass to wandb
+        training_mode: Training mode ("growth" or "repair")
+        preconfig_steps: Number of preconfiguration steps for repair mode
+        preconfig_lr: Learning rate for preconfiguration
+        checkpoint_enabled: Whether to enable checkpointing
+        checkpoint_dir: Directory for checkpoints
+        checkpoint_interval: Interval for periodic checkpoints
+        save_best: Whether to save best model
+        best_metric: Metric to track for best model
+        best_metric_source: Source for best metric
+        save_stable_states: Whether to save stable states
+        stop_accuracy_enabled: Whether to enable early stopping
+        stop_accuracy_threshold: Accuracy threshold for early stopping
+        stop_accuracy_metric: Metric to monitor for early stopping
+        stop_accuracy_source: Source for early stopping metric
+        stop_accuracy_patience: Patience for early stopping
+        stop_accuracy_min_epochs: Minimum epochs before early stopping
+
     Returns:
         Dictionary with trained GNN model and training metrics
     """
@@ -587,24 +878,7 @@ def train_model(
 
     # Initialize or reuse GNN
     if init_model is None:
-        # # Create a new GNN
-        # rng, init_key = jax.random.split(rng)
-        # model = CircuitSelfAttention(
-        #     # node_mlp_features=node_mlp_features,
-        #     # edge_mlp_features=edge_mlp_features,
-        #     circuit_hidden_dim=circuit_hidden_dim,
-        #     arity=arity,
-        #     attention_dim=128,
-        #     num_heads=4,
-        #     num_layers=3,
-        #     mlp_dim=256,
-        #     mlp_dim_multiplier=2,
-        #     dropout_rate=0.0,
-        #     # message_passing=message_passing,
-        #     # use_attention=use_attention,
-        #     rngs=nnx.Rngs(params=init_key),
-        # )
-        pass
+        raise ValueError("init_model must be provided")
     else:
         # Use the provided GNN
         model = init_model
@@ -794,9 +1068,16 @@ def train_model(
         return loss, (aux, updated_pool, loss_steps)
 
 
+    # Setup checkpointing directory
+    checkpoint_path = _setup_checkpoint_dir(checkpoint_dir, wandb_id)
 
     # Track best model
-    # best_metric_value = float("-inf") if "accuracy" in best_metric else float("inf")
+    best_metric_value = float("-inf") if "accuracy" in best_metric else float("inf")
+
+    # Early stopping variables
+    early_stop_triggered = False
+    epochs_above_threshold = 0
+    first_threshold_epoch = None
 
     # Create progress bar for training
     pbar = tqdm(range(epochs), desc="Training GNN")
@@ -841,11 +1122,25 @@ def train_model(
         
         log.info(f"Generated knockout vocabulary with shape: {knockout_vocabulary.shape}")
 
+    # Save initial stable state if needed
+    last_stable_state = {
+        "model": model,
+        "optimizer": optimizer,
+        "pool": circuit_pool,
+        "metrics": {
+            "losses": losses,
+            "hard_losses": hard_losses,
+            "accuracies": accuracies,
+            "hard_accuracies": hard_accuracies,
+            "reset_steps": reset_steps,
+        },
+        "epoch": 0,
+    }
+
     # Initialize accumulated pattern data for persistent scatter plot
     # Each data point will be: [epoch, pattern_id, hard_accuracy, knockout_diversity]
     accumulated_pattern_data = []
 
-    diversity = 0.0
     # # Counter for event-driven damage evaluations (for WandB filtering)
     # damage_event_id = 0
     result = {}
@@ -893,17 +1188,6 @@ def train_model(
 
                 # Use consistent key generation for pool resets
                 reset_pool_key = wiring_fixed_key
-
-                # # Sample knockout patterns from vocabulary if available, otherwise use config
-                # sampled_knockout_patterns = None
-                # if knockout_vocabulary is not None:
-                #     # Sample patterns with replacement from the vocabulary
-                #     pattern_sample_key = jax.random.fold_in(reset_key, 42)  # Use different key for pattern sampling
-                #     pattern_indices = jax.random.choice(
-                #             pattern_sample_key, len(knockout_vocabulary), shape=(num_to_reset,), replace=True
-                #     )
-                #     sampled_knockout_patterns = knockout_vocabulary[pattern_indices]
-
 
                 # Create a pool of fresh circuits, applying knockout patterns
                 # In reconfig mode, reset with preconfigured base; otherwise default
@@ -976,8 +1260,14 @@ def train_model(
                     )
 
             if jp.isnan(loss):
-                log.warning(
-                    f"Loss is NaN at epoch {epoch}, returning last stable state"
+                log.warning(f"Loss is NaN at epoch {epoch}, returning last stable state")
+                # Save the last stable state if enabled
+                _save_stable_state(
+                    checkpoint_path,
+                    save_stable_states,
+                    last_stable_state,
+                    epoch,
+                    wandb_run,
                 )
                 return last_stable_state
             else:
@@ -1030,11 +1320,16 @@ def train_model(
                 }
 
                 # Add learning rate if available
-                if schedule is not None:
-                    schedule_value = schedule(epoch)
-                else:
-                    schedule_value = learning_rate
+                schedule_value = schedule(epoch) if schedule is not None else learning_rate
                 metrics_dict["scheduler/learning_rate"] = schedule_value
+
+                # Add early stopping metrics if enabled
+                if stop_accuracy_enabled:
+                    metrics_dict["early_stop/enabled"] = True
+                    metrics_dict["early_stop/epochs_above_threshold"] = epochs_above_threshold
+                    metrics_dict["early_stop/threshold"] = stop_accuracy_threshold
+                    if first_threshold_epoch is not None:
+                        metrics_dict["early_stop/first_threshold_epoch"] = first_threshold_epoch
 
                 _log_to_wandb(wandb_run, metrics_dict, epoch, log_interval)
 
@@ -1050,7 +1345,7 @@ def train_model(
 
                 pbar.set_postfix(postfix_dict)
 
-                # Step 2: Run knockout evaluation if enabled
+                # Step 2: Run knockout evaluation if enabled (BEFORE best model tracking)
                 all_eval_metrics = {}
                 if (
                     knockout_eval
@@ -1089,9 +1384,118 @@ def train_model(
                     if ko_eval_results and "final_metrics_in" in ko_eval_results:
                         all_eval_metrics.update(ko_eval_results["final_metrics_in"])
                         all_eval_metrics.update(ko_eval_results["final_metrics_out"])
+                    
+                    # Set current eval metrics to the combined dictionary if any evals ran
+                    current_eval_metrics = ko_eval_results.get("final_metrics_in", None)
+                
 
-                # Set current eval metrics to the combined dictionary if any evals ran
-                current_eval_metrics = all_eval_metrics if all_eval_metrics else None
+                # Step 3: Get current metric value for best model tracking using modular approach
+                try:
+                    current_metric_value = _get_metric_value(
+                        best_metric,
+                        best_metric_source,
+                        training_metrics,
+                        current_eval_metrics,
+                    )
+                except (ValueError, KeyError) as e:
+                    if best_metric_source == "eval" and not knockout_eval:
+                        log.warning(
+                            f"Best metric source is 'eval' but periodic evaluation is disabled. "
+                            f"Falling back to training metrics for {best_metric}."
+                        )
+                        current_metric_value = _get_metric_value(
+                            best_metric,
+                            "training",
+                            training_metrics,
+                            current_eval_metrics,
+                        )
+                    elif best_metric_source == "eval" and current_eval_metrics is None:
+                        # Evaluation is enabled but hasn't run yet this epoch, skip best model check
+                        current_metric_value = None
+                    else:
+                        raise e
+
+                # Check if this is the best model based on the specified metric
+                is_best = False
+                if current_metric_value is not None:
+                    if "accuracy" in best_metric:  # For accuracy metrics, higher is better
+                        if current_metric_value > best_metric_value:
+                            best_metric_value = current_metric_value
+                            is_best = True
+                    else:  # For loss metrics, lower is better
+                        if current_metric_value < best_metric_value:
+                            best_metric_value = current_metric_value
+                            is_best = True
+
+                # Step 4: Save checkpoints (periodic always, best if improvement detected)
+                if checkpoint_enabled:
+                    _save_periodic_checkpoint(
+                        checkpoint_path,
+                        model,
+                        optimizer,
+                        {
+                            "losses": losses,
+                            "hard_losses": hard_losses,
+                            "accuracies": accuracies,
+                            "hard_accuracies": hard_accuracies,
+                            "reset_steps": reset_steps,
+                        },
+                        epoch,
+                        checkpoint_interval,
+                        wandb_run,
+                    )
+
+                    # Save best model if enabled and is best
+                    _save_best_checkpoint(
+                        checkpoint_path,
+                        is_best,
+                        save_best,
+                        model,
+                        optimizer,
+                        {
+                            "losses": losses,
+                            "hard_losses": hard_losses,
+                            "accuracies": accuracies,
+                            "hard_accuracies": hard_accuracies,
+                            "reset_steps": reset_steps,
+                        },
+                        epoch,
+                        f"{best_metric_source}_{best_metric}",  # Include source in metric name
+                        current_metric_value
+                        if current_metric_value is not None
+                        else best_metric_value,
+                        wandb_run,
+                    )
+
+                # Step 5: Check for early stopping based on accuracy
+                (
+                    should_break,
+                    early_stop_triggered,
+                    epochs_above_threshold,
+                    first_threshold_epoch,
+                    current_eval_metrics,
+                    rng,
+                ) = _check_early_stopping(
+                    stop_accuracy_enabled=stop_accuracy_enabled,
+                    epoch=epoch,
+                    stop_accuracy_min_epochs=stop_accuracy_min_epochs,
+                    early_stop_triggered=early_stop_triggered,
+                    stop_accuracy_metric=stop_accuracy_metric,
+                    stop_accuracy_source=stop_accuracy_source,
+                    training_metrics=training_metrics,
+                    current_eval_metrics=current_eval_metrics,
+                    stop_accuracy_threshold=stop_accuracy_threshold,
+                    first_threshold_epoch=first_threshold_epoch,
+                    epochs_above_threshold=epochs_above_threshold,
+                    stop_accuracy_patience=stop_accuracy_patience,
+                    rng=rng,
+                )
+
+                if should_break:
+                    break
+
+                # # Set current eval metrics to the combined dictionary if any evals ran
+                # current_eval_metrics = all_eval_metrics if all_eval_metrics else None
 
                 # Return the trained GNN model and metrics
                 result = {
@@ -1102,8 +1506,11 @@ def train_model(
                     "accuracies": accuracies,
                     "hard_accuracies": hard_accuracies,
                     "reset_steps": reset_steps,
-                    # "best_metric_value": best_metric_value,
-                    # "best_metric": best_metric,
+                    "best_metric_value": best_metric_value,
+                    "best_metric": best_metric,
+                    "early_stopped": early_stop_triggered,
+                    "early_stop_epoch": epoch if early_stop_triggered else None,
+                    "first_threshold_epoch": first_threshold_epoch,
                 }
 
                 # Add pool to result if used

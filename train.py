@@ -503,11 +503,16 @@ def main(cfg: DictConfig) -> None:
         lr_scheduler=cfg.training.lr_scheduler,
         lr_scheduler_params=cfg.training.lr_scheduler_params,
         # Checkpoint parameters
-        # best_metric_source=cfg.checkpoint.best_metric_source,
+        checkpoint_enabled=cfg.checkpoint.get("enabled", False),
+        checkpoint_dir=cfg.checkpoint.get("dir", None),
+        checkpoint_interval=cfg.checkpoint.get("interval", 1024),
+        save_best=cfg.checkpoint.get("save_best", True),
+        best_metric=cfg.checkpoint.get("best_metric", "final_hard_accuracy"),
+        best_metric_source=cfg.checkpoint.get("best_metric_source", "eval"),
+        save_stable_states=cfg.checkpoint.get("save_stable_states", True),
         # Knockout evaluation
         knockout_eval=cfg.eval.get("knockout_eval", None),
         # Periodic evaluation parameters
-        periodic_eval_enabled=cfg.eval.get("periodic_eval_enabled", False),
         periodic_eval_inner_steps=cfg.eval.get("periodic_eval_inner_steps", 100),
         periodic_eval_interval=cfg.eval.get("periodic_eval_interval", 1024),
         periodic_eval_test_seed=cfg.eval.get("periodic_eval_test_seed", 42),
@@ -521,6 +526,13 @@ def main(cfg: DictConfig) -> None:
         training_mode=cfg.training.training_mode,
         preconfig_steps=cfg.backprop.epochs,
         preconfig_lr=cfg.backprop.learning_rate,
+        # Early stopping parameters
+        stop_accuracy_enabled=cfg.early_stop.get("enabled", False),
+        stop_accuracy_threshold=cfg.early_stop.get("threshold", 0.95),
+        stop_accuracy_metric=cfg.early_stop.get("metric", "final_hard_accuracy"),
+        stop_accuracy_source=cfg.early_stop.get("source", "eval_ko_in"),
+        stop_accuracy_patience=cfg.early_stop.get("patience", 10),
+        stop_accuracy_min_epochs=cfg.early_stop.get("min_epochs", 100),
     )
 
     # Run final BP vs SA comparison evaluation if enabled
