@@ -81,12 +81,78 @@ def create_reproducible_knockout_pattern(
     
     return knockout_pattern
 
+def create_strip_knockout_pattern(
+    key: jax.random.PRNGKey,
+    layer_sizes: List[Tuple[int, int]],
+    damage_prob: float,
+) -> jp.ndarray:
+    """
+    Create localized knockout patterns by damaging gates within a radius of centers.
+    
+    Args:
+        key: Random key for reproducible generation
+        layer_sizes: List of (total_gates, group_size) for each gate layer
+        damage_prob: Number of gates to knock out
+    """
+    total_nodes = sum(total_gates for total_gates, _ in layer_sizes)
+    knockout_pattern = jp.zeros(total_nodes, dtype=jp.bool_)
+    
+    # Calculate damage radius (if damage_prob is 0, radius will be 0 and no damage applied)
+    damage_radius = int(damage_prob / 2)
+    
+    # Convert layer_sizes to JAX arrays for JAX-compatible operations
+    layer_sizes_array = jp.array(layer_sizes)
+    
+    # Create layer boundaries
+    layer_boundaries = jp.concatenate([
+        jp.array([0]),
+        jp.cumsum(layer_sizes_array[:, 0])
+    ])
+    
+    # Create damage mask for each layer
+    def damage_layer(layer_idx, layer_start, layer_end):
+        # Skip input and output layers
+        is_input_or_output = (layer_idx == 0) | (layer_idx == len(layer_sizes) - 1)
+        
+        def apply_damage():
+            # Select random center within this layer
+            center = layer_start + jax.random.randint(
+                key, (), layer_start, layer_end
+            )
+            
+            # Damage gates within radius (simple 1D indexing)
+            start_idx = jp.maximum(layer_start, center - damage_radius)
+            end_idx = jp.minimum(layer_end, center + damage_radius + 1)
+            
+            # Create damage mask for this layer using boolean indexing
+            layer_mask = jp.zeros(total_nodes, dtype=jp.bool_)
+            # Create a boolean mask for the damage range
+            damage_indices = jp.arange(total_nodes)
+            damage_mask = (damage_indices >= start_idx) & (damage_indices < end_idx)
+            layer_mask = layer_mask | damage_mask
+            return layer_mask
+        
+        def no_damage():
+            return jp.zeros(total_nodes, dtype=jp.bool_)
+        
+        return jax.lax.cond(is_input_or_output, no_damage, apply_damage)
+    
+    # Apply damage to all layers
+    layer_indices = jp.arange(len(layer_sizes))
+    damage_masks = jax.vmap(damage_layer)(layer_indices, layer_boundaries[:-1], layer_boundaries[1:])
+    
+    # Combine all damage masks
+    knockout_pattern = jp.any(damage_masks, axis=0)
+    
+    return knockout_pattern
+
 
 def create_knockout_vocabulary(
     rng: jax.random.PRNGKey,
     vocabulary_size: int,
     layer_sizes: List[Tuple[int, int]],
     damage_prob: float,
+    damage_mode: str = "shotgun",  # Options: "shotgun" or "strip"
 ) -> jp.ndarray:
     """
     Generates a fixed vocabulary of knockout patterns.
@@ -96,15 +162,24 @@ def create_knockout_vocabulary(
         vocabulary_size: The number of unique patterns to generate.
         layer_sizes: List of (total_gates, group_size) for each layer.
         damage_prob: The probability of knocking out a connection.
+        damage_mode: Type of damage pattern ("shotgun" for random, "strip" for localized).
 
     Returns:
         An array of knockout patterns of shape (vocabulary_size, ...).
     """
-    pattern_creator_fn = partial(
-        create_reproducible_knockout_pattern,
-        layer_sizes=layer_sizes,
-        damage_prob=damage_prob,
-    )
+    # Select pattern creator based on damage mode
+    if damage_mode == "strip":
+        pattern_creator_fn = partial(
+            create_strip_knockout_pattern,
+            layer_sizes=layer_sizes,
+            damage_prob=damage_prob,
+        )
+    else:
+        pattern_creator_fn = partial(
+            create_reproducible_knockout_pattern,
+            layer_sizes=layer_sizes,
+            damage_prob=damage_prob,
+        )
 
     pattern_keys = jax.random.split(rng, vocabulary_size)
     knockout_vocabulary = jax.vmap(pattern_creator_fn)(pattern_keys)

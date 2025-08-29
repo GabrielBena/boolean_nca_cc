@@ -397,6 +397,7 @@ def main(cfg: DictConfig) -> None:
             vocabulary_size=cfg.backprop.knockout_vocabulary.size,
             layer_sizes=layer_sizes,
             damage_prob=cfg.backprop.knockout_vocabulary.damage_prob,
+            damage_mode=cfg.pool.damage_mode,
         )
         log.info(f"Generated knockout vocabulary with {len(knockout_vocabulary)} patterns")
 
@@ -489,6 +490,7 @@ def main(cfg: DictConfig) -> None:
         damage_pool_fraction=cfg.pool.get("damage_pool_fraction", 0.0),
         damage_strategy=cfg.pool.get("damage_strategy", "uniform"),
         damage_combined_weights=tuple(cfg.pool.get("damage_combined_weights", [0.5, 0.5])),
+        damage_mode=cfg.pool.get("damage_mode", "shotgun"),
         damage_pool_damage_prob=cfg.pool.get("damage_prob", cfg.pool.get("persistent_knockout", {}).get("damage_prob", 0.0)),
         damage_eval_steps=cfg.pool.get("damage_eval_steps", 50),
         # Damage selection filtering parameters
@@ -515,6 +517,10 @@ def main(cfg: DictConfig) -> None:
         wandb_logging=cfg.wandb.enabled,
         log_interval=cfg.logging.log_interval,
         wandb_run_config=OmegaConf.to_container(cfg, resolve=True),
+        # Training mode and reconfig parameters
+        training_mode=cfg.training.training_mode,
+        preconfig_steps=cfg.backprop.epochs,
+        preconfig_lr=cfg.backprop.learning_rate,
     )
 
     # Run final BP vs SA comparison evaluation if enabled

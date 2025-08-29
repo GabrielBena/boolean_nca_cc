@@ -670,6 +670,8 @@ def initialize_graph_pool(
     loss_value: float = 0.0,
     knockout_config: Optional[Dict[str, Any]] = None,
     knockout_patterns: Optional[Array] = None,  # Pre-generated knockout patterns to use directly
+    base_wires: Optional[PyTree] = None,
+    base_logits: Optional[PyTree] = None,
 ) -> GraphPool:
     """
     Initialize a pool of graphs using a provided graph creation function.
@@ -694,8 +696,14 @@ def initialize_graph_pool(
     """
     # Generate circuit wirings based on wiring mode
 
-    # Original behavior: single wiring repeated for all circuits
-    single_wires, single_logits = gen_circuit(rng, layer_sizes, arity=arity)
+    # Determine source of single circuit to replicate
+    if base_wires is not None or base_logits is not None:
+        if base_wires is None or base_logits is None:
+            raise ValueError("Both base_wires and base_logits must be provided together.")
+        single_wires, single_logits = base_wires, base_logits
+    else:
+        # Original behavior: single wiring repeated for all circuits
+        single_wires, single_logits = gen_circuit(rng, layer_sizes, arity=arity)
 
     # Replicate the same wiring for all circuits in the pool
     all_wires = jax.tree.map(
