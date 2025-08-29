@@ -1409,7 +1409,7 @@ def train_model(
                             training_metrics,
                             current_eval_metrics,
                         )
-                    elif best_metric_source == "eval" and current_eval_metrics is None:
+                    elif (best_metric_source == "eval" or best_metric_source == "eval_ko") and current_eval_metrics is None:
                         # Evaluation is enabled but hasn't run yet this epoch, skip best model check
                         current_metric_value = None
                     else:

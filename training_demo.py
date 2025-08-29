@@ -36,17 +36,15 @@ from boolean_nca_cc.circuits.model import gen_circuit, run_circuit
 from boolean_nca_cc.circuits.tasks import TASKS, get_task_data
 
 # # Import training loop functions
-# from boolean_nca_cc.training.checkpointing import (
-#     load_config_from_wandb,
-#     load_model_from_config_and_checkpoint,
-# )
+from boolean_nca_cc.training.checkpointing import (
+    load_config_from_wandb,
+    load_model_from_config_and_checkpoint,
+)
 from boolean_nca_cc.training.evaluation import (
     evaluate_model_stepwise_generator,
     get_loss_from_wires_logits,
 )
 
-# # Import genetic mutation functions
-# from boolean_nca_cc.training.pool.perturbation import mutate_wires_swap
 
 ################## circuit gate and wire use analysis ##################
 
