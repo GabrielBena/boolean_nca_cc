@@ -1,0 +1,10 @@
+{
+  "num_patterns": 8,
+  "mean_overall_bitwise_fraction_diff": 0.32577578671328666,
+  "mean_per_gate_mean_hamming": 0.32577577978372574,
+  "mean_final_accuracy": 0.969482421875,
+  "mean_final_hard_loss": 62.5,
+  "config_path": "/home/marcello/workspace/boolean_nca_cc/configs/config.yaml",
+  "output_path": "/home/marcello/workspace/boolean_nca_cc/test_output_bp",
+  "pairwise_matrix_csv": "/home/marcello/workspace/boolean_nca_cc/test_output_bp/pairwise_matrix.csv"
+}

@@ -14,11 +14,15 @@ This script:
 import os
 import argparse
 import json
+import logging
 from typing import List, Dict, Any
 
 import jax
 import jax.numpy as jp
 from omegaconf import OmegaConf
+
+# Setup logging
+log = logging.getLogger(__name__)
 
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.circuits.tasks import get_task_data
@@ -33,6 +37,18 @@ from boolean_nca_cc.circuits.model import generate_layer_sizes
 from boolean_nca_cc.training.pool.structural_perturbation import (
     create_knockout_vocabulary,
 )
+from boolean_nca_cc.training.checkpointing import (
+    load_best_model_from_wandb,
+    load_checkpoint,
+    instantiate_model_from_config,
+)
+from boolean_nca_cc.training.evaluation import (
+    get_loss_from_wires_logits,
+    get_loss_and_update_graph,
+)
+from boolean_nca_cc.utils.graph_builder import build_graph
+from boolean_nca_cc.utils.extraction import extract_logits_from_graph
+from boolean_nca_cc.training.preconfigure import preconfigure_circuit_logits
 
 
 def _hard_truth_tables_from_logits(logits_per_layer: List[jp.ndarray]) -> List[jp.ndarray]:
@@ -254,18 +270,119 @@ def _pairwise_hamming_between_knockouts(
     return matrix
 
 
+def _evaluate_gnn_single_pattern(
+    model,
+    wires,
+    baseline_logits,
+    x_data,
+    y_data,
+    input_n: int,
+    arity: int,
+    circuit_hidden_dim: int,
+    n_message_steps: int,
+    loss_type: str,
+    layer_sizes,
+    knockout_pattern,
+):
+    """
+    Run GNN evaluation for a single knockout pattern starting from the BP-optimized baseline logits.
+    Returns final logits and metrics.
+    """
+    # Initial loss and residuals for graph seeding
+    initial_loss, (
+        initial_hard_loss,
+        initial_pred,
+        initial_pred_hard,
+        initial_accuracy,
+        initial_hard_accuracy,
+        initial_res,
+        initial_hard_res,
+    ) = get_loss_from_wires_logits(baseline_logits, wires, x_data, y_data, loss_type)
+
+    # Build initial graph and set loss features
+    graph = build_graph(
+        logits=baseline_logits,
+        wires=wires,
+        input_n=input_n,
+        arity=arity,
+        circuit_hidden_dim=circuit_hidden_dim,
+        loss_value=initial_loss,
+        bidirectional_edges=True,
+    )
+
+    # Update per-output loss features
+    from boolean_nca_cc.utils import update_output_node_loss
+
+    graph = update_output_node_loss(graph, layer_sizes, initial_res.mean(axis=0))
+
+    logits_original_shapes = [l.shape for l in baseline_logits]
+
+    current_graph = graph
+    current_logits = baseline_logits
+    current_aux = (
+        initial_hard_loss,
+        initial_pred,
+        initial_pred_hard,
+        initial_accuracy,
+        initial_hard_accuracy,
+        initial_res,
+        initial_hard_res,
+    )
+
+    for _ in range(max(0, int(n_message_steps))):
+        # Apply one step with knockout pattern
+        updated_graph = model(current_graph, knockout_pattern=knockout_pattern)
+        # Recompute loss and update loss features
+        updated_graph, loss, current_logits, current_aux = get_loss_and_update_graph(
+            updated_graph,
+            logits_original_shapes,
+            wires,
+            x_data,
+            y_data,
+            loss_type,
+            layer_sizes,
+        )
+        current_graph = updated_graph
+
+    # Metrics from final aux
+    (
+        final_hard_loss,
+        _pred,
+        _pred_hard,
+        _acc,
+        final_hard_accuracy,
+        _res,
+        _hard_res,
+    ) = current_aux
+
+    return dict(
+        logits=current_logits,
+        final_accuracy=float(final_hard_accuracy),
+        final_hard_loss=float(final_hard_loss),
+    )
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/config.yaml")
     parser.add_argument("--output", type=str, default=None)
+    # Extended CLI for GNN + analysis control
+    parser.add_argument("--methods", type=str, default="gnn", help="gnn,bp,both")
+    parser.add_argument("--damage-modes", type=str, default=None, help="comma list: shotgun,strip")
+    parser.add_argument("--vocab-size", type=int, default=None)
+    parser.add_argument("--damage-prob", type=float, default=None)
+    parser.add_argument("--n-message-steps", type=int, default=100)
+    parser.add_argument("--loss-type", type=str, default=None, choices=["l4", "bce"])
+    parser.add_argument("--run-id", type=str, default=None, help="WandB run id for GNN load")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Local checkpoint path .pkl for GNN")
     args = parser.parse_args()
 
     cfg = OmegaConf.load(args.config)
 
     # Set output directory with f-string if not provided
     if args.output is None:
-        vocab_size = cfg.backprop.knockout_vocabulary.size
-        damage_prob = cfg.backprop.knockout_vocabulary.damage_prob
+        vocab_size = args.vocab_size or cfg.backprop.knockout_vocabulary.size
+        damage_prob = args.damage_prob or cfg.backprop.knockout_vocabulary.damage_prob
         args.output = f"results/knockout_lut_distance_vocab{vocab_size}_damage{damage_prob}"
 
     # Ensure layer_sizes are present
@@ -281,51 +398,193 @@ def main():
     case_n = 1 << input_n
     x, y0 = get_task_data(cfg.circuit.task, case_n, input_bits=input_n, output_bits=output_n)
 
-    # Baseline BP (no knockouts)
-    bp_baseline = _run_bp_single(cfg, x, y0, loss_type=cfg.training.loss_type)
+    # Methods selection
+    methods_str = (args.methods or "gnn").lower()
+    if methods_str == "both":
+        methods = {"bp", "gnn"}
+    else:
+        methods = set(m.strip() for m in methods_str.split(","))
 
-    # Knockout vocabulary
-    rng = jax.random.PRNGKey(cfg.seed)
-    rng, vocab_key = jax.random.split(rng)
-    vocab = create_knockout_vocabulary(
-        rng=vocab_key,
-        vocabulary_size=cfg.backprop.knockout_vocabulary.size,
-        layer_sizes=layer_sizes,
-        damage_prob=cfg.backprop.knockout_vocabulary.damage_prob,
-    )
+    # Optional GNN load (must happen before baseline circuit creation)
+    gnn_model = None
+    gnn_hidden_dim = None
+    gnn_training_config = None
+    if "gnn" in methods:
+        # Load via wandb best by run id or latest
+        if args.checkpoint is not None:
+            loaded = load_checkpoint(args.checkpoint)
+            gnn_cfg = OmegaConf.create(loaded.get("config", {}))
+            gnn_model = instantiate_model_from_config(gnn_cfg, seed=cfg.get("seed", 0))
+            from flax import nnx as _nnx
+            _nnx.update(gnn_model, loaded["model"])
+            gnn_hidden_dim = int(gnn_cfg.model.get("circuit_hidden_dim", 16))
+            gnn_training_config = gnn_cfg
+        else:
+            gnn_model, _loaded_dict, gnn_cfg = load_best_model_from_wandb(
+                run_id=args.run_id,
+                seed=cfg.get("seed", 0),
+            )
+            gnn_hidden_dim = int(gnn_cfg.model.get("circuit_hidden_dim", 16))
+            gnn_training_config = gnn_cfg
 
-    # Train per knockout
-    bp_knockouts = _run_bp_with_knockouts(cfg, x, y0, loss_type=cfg.training.loss_type, knockout_patterns=vocab, layer_sizes=layer_sizes, baseline_params=bp_baseline["params"], baseline_wires=bp_baseline["wires"])
+    # Loss type override
+    loss_type = args.loss_type or cfg.training.loss_type
+
+    # Baseline circuit creation - use preconfigured if GNN was trained in repair mode
+    if "gnn" in methods and gnn_training_config is not None:
+        # Check if GNN was trained in repair mode and use the same preconfigured circuit
+        training_mode = gnn_training_config.get("training_mode", "growth")
+        if training_mode == "repair":
+            log.info("GNN was trained in repair mode - recreating exact preconfigured baseline circuit")
+            
+            # Extract preconfiguration parameters from training config
+            preconfig_steps = gnn_training_config.get("preconfig_steps", 200)
+            preconfig_lr = gnn_training_config.get("preconfig_lr", 1e-2)
+            wiring_fixed_key = gnn_training_config.get("wiring_fixed_key", cfg.get("test_seed", 42))
+            
+            # Convert wiring_fixed_key to JAX key if it's an integer
+            if isinstance(wiring_fixed_key, int):
+                wiring_fixed_key = jax.random.PRNGKey(wiring_fixed_key)
+            
+            # Recreate the exact same preconfigured circuit used during training
+            base_wires, base_logits = preconfigure_circuit_logits(
+                wiring_key=wiring_fixed_key,
+                layer_sizes=layer_sizes,
+                arity=arity,
+                x_data=x,
+                y_data=y0,
+                loss_type=loss_type,
+                steps=preconfig_steps,
+                lr=preconfig_lr,
+            )
+            
+            # Use preconfigured circuit for BP baseline (no additional optimization needed)
+            bp_baseline = {
+                "wires": base_wires,
+                "params": base_logits,
+                "final_loss": 0.0  # Preconfigured circuits are already optimized
+            }
+            
+            log.info(f"Recreated preconfigured circuit with {preconfig_steps} steps, lr={preconfig_lr}")
+        else:
+            # GNN was trained in growth mode - use standard BP baseline
+            log.info("GNN was trained in growth mode - using standard BP baseline")
+            bp_baseline = _run_bp_single(cfg, x, y0, loss_type=loss_type)
+    else:
+        # No GNN or no training config - use standard BP baseline
+        bp_baseline = _run_bp_single(cfg, x, y0, loss_type=loss_type)
+
+    # Prepare damage modes
+    if args.damage_modes is not None:
+        damage_modes = [m.strip() for m in args.damage_modes.split(",") if m.strip()]
+    else:
+        damage_modes = [cfg.backprop.knockout_vocabulary.get("mode", "shotgun") if hasattr(cfg.backprop, "knockout_vocabulary") else "shotgun"]
+
+
 
     # Truth tables
     baseline_tables = _hard_truth_tables_from_logits(bp_baseline["params"])  # per-layer
 
-    # Compute distances per pattern (baseline vs each KO)
+    # Storage
     os.makedirs(args.output, exist_ok=True)
     summary_rows = []
-    ko_tables_list: List[List[jp.ndarray]] = []
-    ko_active_masks_list: List[List[jp.ndarray]] = []
+    last_method_ko_tables: List[List[jp.ndarray]] = []
+    last_method_active_masks: List[List[jp.ndarray]] = []
 
-    for idx, item in enumerate(bp_knockouts["per_pattern"]):
-        pattern = item["pattern"]
-        pert_tables = _hard_truth_tables_from_logits(item["params"])  # per-layer
-        active_masks = _active_gate_mask_from_knockout(layer_sizes, pattern)
-        metrics = _hamming_distance_tables(baseline_tables, pert_tables, active_masks)
+    # Loop over damage modes
+    rng = jax.random.PRNGKey(cfg.seed)
+    for damage_mode in damage_modes:
+        rng, vocab_key = jax.random.split(rng)
+        vocab = create_knockout_vocabulary(
+            rng=vocab_key,
+            vocabulary_size=args.vocab_size or cfg.backprop.knockout_vocabulary.size,
+            layer_sizes=layer_sizes,
+            damage_prob=args.damage_prob or cfg.backprop.knockout_vocabulary.damage_prob,
+            damage_mode=damage_mode,
+        )
 
-        row = {
-            "pattern_idx": idx,
-            "overall_bitwise_fraction_diff": metrics["overall_bitwise_fraction_diff"],
-            "per_gate_mean_hamming": metrics["per_gate_mean_hamming"],
-            "counted_bits_total": metrics["counted_bits_total"],
-            "counted_gates_total": metrics["counted_gates_total"],
-            "final_accuracy": item["final_accuracy"],
-            "final_hard_loss": item["final_hard_loss"],
-        }
-        # add per-layer metrics as JSON for compactness
-        row["per_layer_bitwise_fraction_diff"] = json.dumps(metrics["per_layer_bitwise_fraction_diff"])
-        summary_rows.append(row)
-        ko_tables_list.append(pert_tables)
-        ko_active_masks_list.append(active_masks)
+        # BP method
+        if "bp" in methods:
+            bp_knockouts = _run_bp_with_knockouts(
+                cfg,
+                x,
+                y0,
+                loss_type=loss_type,
+                knockout_patterns=vocab,
+                layer_sizes=layer_sizes,
+                baseline_params=bp_baseline["params"],
+                baseline_wires=bp_baseline["wires"],
+            )
+
+            method_ko_tables: List[List[jp.ndarray]] = []
+            method_active_masks: List[List[jp.ndarray]] = []
+            for idx, item in enumerate(bp_knockouts["per_pattern"]):
+                pattern = item["pattern"]
+                pert_tables = _hard_truth_tables_from_logits(item["params"])  # per-layer
+                active_masks = _active_gate_mask_from_knockout(layer_sizes, pattern)
+                metrics = _hamming_distance_tables(baseline_tables, pert_tables, active_masks)
+
+                row = {
+                    "pattern_idx": idx,
+                    "damage_mode": damage_mode,
+                    "method": "bp",
+                    "overall_bitwise_fraction_diff": metrics["overall_bitwise_fraction_diff"],
+                    "per_gate_mean_hamming": metrics["per_gate_mean_hamming"],
+                    "counted_bits_total": metrics["counted_bits_total"],
+                    "counted_gates_total": metrics["counted_gates_total"],
+                    "final_accuracy": item["final_accuracy"],
+                    "final_hard_loss": item["final_hard_loss"],
+                }
+                row["per_layer_bitwise_fraction_diff"] = json.dumps(metrics["per_layer_bitwise_fraction_diff"])
+                summary_rows.append(row)
+                method_ko_tables.append(pert_tables)
+                method_active_masks.append(active_masks)
+
+            last_method_ko_tables = method_ko_tables
+            last_method_active_masks = method_active_masks
+
+        # GNN method
+        if "gnn" in methods and gnn_model is not None:
+            method_ko_tables: List[List[jp.ndarray]] = []
+            method_active_masks: List[List[jp.ndarray]] = []
+            for idx, pattern in enumerate(vocab):
+                eval_res = _evaluate_gnn_single_pattern(
+                    model=gnn_model,
+                    wires=bp_baseline["wires"],
+                    baseline_logits=bp_baseline["params"],
+                    x_data=x,
+                    y_data=y0,
+                    input_n=input_n,
+                    arity=arity,
+                    circuit_hidden_dim=gnn_hidden_dim or 16,
+                    n_message_steps=args.n_message_steps,
+                    loss_type=loss_type,
+                    layer_sizes=layer_sizes,
+                    knockout_pattern=pattern,
+                )
+
+                pert_tables = _hard_truth_tables_from_logits(eval_res["logits"])  # per-layer
+                active_masks = _active_gate_mask_from_knockout(layer_sizes, pattern)
+                metrics = _hamming_distance_tables(baseline_tables, pert_tables, active_masks)
+
+                row = {
+                    "pattern_idx": idx,
+                    "damage_mode": damage_mode,
+                    "method": "gnn",
+                    "overall_bitwise_fraction_diff": metrics["overall_bitwise_fraction_diff"],
+                    "per_gate_mean_hamming": metrics["per_gate_mean_hamming"],
+                    "counted_bits_total": metrics["counted_bits_total"],
+                    "counted_gates_total": metrics["counted_gates_total"],
+                    "final_accuracy": eval_res["final_accuracy"],
+                    "final_hard_loss": eval_res["final_hard_loss"],
+                }
+                row["per_layer_bitwise_fraction_diff"] = json.dumps(metrics["per_layer_bitwise_fraction_diff"])
+                summary_rows.append(row)
+                method_ko_tables.append(pert_tables)
+                method_active_masks.append(active_masks)
+
+            last_method_ko_tables = method_ko_tables
+            last_method_active_masks = method_active_masks
 
     # Save CSV
     import pandas as pd
@@ -335,7 +594,9 @@ def main():
     df.to_csv(csv_path, index=False)
 
     # Pairwise all-to-all matrix among KO patterns using intersection masks
-    pairwise = _pairwise_hamming_between_knockouts(ko_tables_list, ko_active_masks_list)
+    pairwise = []
+    if last_method_ko_tables:
+        pairwise = _pairwise_hamming_between_knockouts(last_method_ko_tables, last_method_active_masks)
     import pandas as pd  # safe to re-import; ensures availability
     df_pair = pd.DataFrame(pairwise)
     df_pair.index.name = "pattern_i"

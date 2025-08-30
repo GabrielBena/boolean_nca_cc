@@ -53,7 +53,7 @@ training:
     exponent: 1
     alpha: 1e-1 # final lr = 1% of initial lr
   # NUMBER OF EPOCHS
-  epochs: 2096 # 512
+  epochs: 8192 # 512
   # USE SCAN
   use_scan: false
 
@@ -72,9 +72,9 @@ pool:
   damage_combined_weights: [0.5, 0.5]
   damage_mode: "strip"  # Options: "shotgun" (random) or "strip" (localized)
   # Number of gates to knock out when generating fresh patterns (ignored if vocabulary is used)
-  damage_prob: 16
+  damage_prob: 25
   # Damage-specific vocabulary size (decoupled from legacy persistent_knockout)
-  damage_knockout_diversity: 2
+  damage_knockout_diversity: 8
   # Pool update step filtering for damage selection (prevents damage to over-optimized circuits)
   damage_min_pool_updates: 0    # Minimum pool updates before circuit can be damaged
   damage_max_pool_updates: 100   # Maximum pool updates before circuit becomes too fragile for damage
