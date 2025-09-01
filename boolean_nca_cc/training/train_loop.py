@@ -43,6 +43,18 @@ from boolean_nca_cc.training.pool.structural_perturbation import    (
     create_strip_knockout_pattern
 )
 from functools import partial
+from boolean_nca_cc.circuits.train import create_gate_mask_from_knockout_pattern
+from experiments.hamming_distance import (
+    _hard_truth_tables_from_logits,
+    _active_gate_mask_from_knockout,
+    _hamming_distance_tables,
+    _run_bp_with_knockouts,
+)
+from experiments.visualization.circular_plot import plot_accuracy_vs_distance
+import json
+import os
+import pandas as pd
+import numpy as np
 
 # Type alias for PyTree
 PyTree = Any
@@ -51,9 +63,7 @@ PyTree = Any
 log = logging.getLogger(__name__)
 
 
-def _init_wandb(
-    wandb_logging: bool, wandb_run_config: Optional[Dict] = None
-) -> Optional[Any]:
+def _init_wandb(wandb_logging: bool, wandb_run_config: dict | None = None) -> Any | None:
     """Initialize wandb if enabled and return the run object."""
     if not wandb_logging:
         return None
@@ -61,23 +71,21 @@ def _init_wandb(
     try:
         import wandb
 
-        if wandb.run:
-            # wandb is already initialized (likely by train.py), just return it
-            log.info(f"Using existing WandB run ID: {wandb.run.id}")
-            return wandb
-        else:
-            # Initialize wandb if not already initialized
+        if not wandb.run:
+            # Only initialize wandb if not already initialized
             wandb.init(
                 config=wandb_run_config,
                 resume="allow",
             )
-            log.info(f"Initialized new WandB run ID: {wandb.run.id}")
-            return wandb
+
+        # Get the unique run ID for checkpointing
+        log.info(f"WandB run ID: {wandb.run.id}")
+        return wandb
     except ImportError:
         log.warning("wandb not installed. Running without wandb logging.")
         return None
     except Exception as e:
-        log.warning(f"Error with wandb: {e}. Running without wandb logging.")
+        log.warning(f"Error initializing wandb: {e}. Running without wandb logging.")
         return None
 
 
@@ -169,9 +177,9 @@ def _save_best_checkpoint(
 
     # Use a fixed filename for the best model to avoid creating multiple files
     best_filename = f"best_model_{best_metric}.pkl"
-    # log.info(
-    #     f"Saving best model at epoch {epoch} with {best_metric}={current_metric_value:.4f}"
-    # )
+    log.info(
+        f"Saving best model at epoch {epoch} with {best_metric}={current_metric_value:.4f}"
+    )
 
     try:
         save_checkpoint(
@@ -447,6 +455,8 @@ def run_knockout_periodic_evaluation(
     layer_sizes: Optional[List[Tuple[int, int]]] = None,
     use_scan: bool = False,
     knockout_diversity: Optional[int] = None,  # Add diversity parameter for color coding
+    hamming_analysis_dir: Optional[str] = None,  # Directory for hamming analysis plots
+    bp_hamming_summary: Optional[List[Dict]] = None,
 ) -> Tuple[Dict, List]:  # Return both results and updated accumulated data
     """
     Run periodic evaluation on circuits with persistent knockouts using vocabulary-based sampling.
@@ -630,34 +640,98 @@ def run_knockout_periodic_evaluation(
         if wandb_run:
             wandb_run.log(main_metrics)
             
-            # Add new pattern data to accumulated data for persistent scatter plot
-            if "per_pattern" in step_metrics_in:
-                final_hard_accuracies_in = step_metrics_in["per_pattern"]["pattern_hard_accuracies"][-1]
-                for pattern_idx, hard_acc in enumerate(final_hard_accuracies_in):
-                    # Include knockout_diversity in data point for color coding
-                    diversity_value = knockout_diversity if knockout_diversity is not None else 0
-                    data_point = [int(epoch), pattern_idx, float(hard_acc), diversity_value]
-                    accumulated_pattern_data.append(data_point)
+                    # Add new pattern data to accumulated data for persistent scatter plot
+        if "per_pattern" in step_metrics_in:
+            final_hard_accuracies_in = step_metrics_in["per_pattern"]["pattern_hard_accuracies"][-1]
+            for pattern_idx, hard_acc in enumerate(final_hard_accuracies_in):
+                # Include knockout_diversity in data point for color coding
+                diversity_value = knockout_diversity if knockout_diversity is not None else 0
+                data_point = [int(epoch), pattern_idx, float(hard_acc), diversity_value]
+                accumulated_pattern_data.append(data_point)
+        
+        # Log persistent scatter plot with all accumulated data
+        if accumulated_pattern_data:
             
-            # Log persistent scatter plot with all accumulated data
-            if accumulated_pattern_data:
+            pattern_table = wandb_run.Table(
+                data=accumulated_pattern_data,
+                columns=["epoch", "pattern_id", "hard_accuracy", "knockout_diversity"]
+            )
+            
+            # Create scatter plot with all accumulated points
+            # Note: Color coding by diversity will be handled by wandb's automatic grouping
+            # based on the knockout_diversity column in the table
+            scatter_plot = wandb_run.plot.scatter(
+                pattern_table, 
+                "epoch", 
+                "hard_accuracy",
+                title="In-Distribution Pattern Performance by Epoch (Colored by Knockout Diversity)"
+            )
+            
+            wandb_run.log({"pattern_performance_scatter": scatter_plot})
+        
+        # Perform hamming distance analysis and create plots if directory is provided
+        if hamming_analysis_dir and "per_pattern" in step_metrics_in:
+            try:
+                # Extract per-pattern logits and metrics for GNN
+                final_logits_per_pattern = step_metrics_in["per_pattern"]["pattern_logits"][-1]
+                final_hard_accuracies_in = step_metrics_in["per_pattern"]["pattern_hard_accuracies"][-1]
                 
-                pattern_table = wandb.Table(
-                    data=accumulated_pattern_data,
-                    columns=["epoch", "pattern_id", "hard_accuracy", "knockout_diversity"]
+                # Analyze hamming distances for GNN
+                gnn_hamming_summary = _analyze_knockout_hamming_distances(
+                    base_logits=base_logits,
+                    knockout_patterns=in_knockout_patterns,
+                    final_logits_per_pattern=final_logits_per_pattern,
+                    layer_sizes=layer_sizes,
+                    final_hard_accuracies=final_hard_accuracies_in,
                 )
+                for row in gnn_hamming_summary:
+                    row['method'] = 'gnn'
+
+                # Combine with BP results if available for joint plotting
+                if bp_hamming_summary:
+                    combined_summary_data = gnn_hamming_summary + bp_hamming_summary
+                else:
+                    combined_summary_data = gnn_hamming_summary
                 
-                # Create scatter plot with all accumulated points
-                # Note: Color coding by diversity will be handled by wandb's automatic grouping
-                # based on the knockout_diversity column in the table
-                scatter_plot = wandb.plot.scatter(
-                    pattern_table, 
-                    "epoch", 
-                    "hard_accuracy",
-                    title="In-Distribution Pattern Performance by Epoch (Colored by Knockout Diversity)"
-                )
+                # Create and save accuracy vs distance plot
+                if combined_summary_data:
+                    # Ensure hamming analysis directory exists
+                    os.makedirs(hamming_analysis_dir, exist_ok=True)
+                    
+                    df = pd.DataFrame(combined_summary_data)
+                    
+                    plot_filename = f"accuracy_vs_distance_epoch_{epoch:04d}.png"
+                    plot_path = os.path.join(hamming_analysis_dir, plot_filename)
+                    
+                    plot_accuracy_vs_distance(
+                        summary_df=df,
+                        output_path=plot_path,
+                        color_by_method=True
+                    )
                 
-                wandb_run.log({"pattern_performance_scatter": scatter_plot})
+                    log.info(f"Hamming distance analysis plot saved to: {plot_path}")
+                    
+                    # Log plot to wandb if enabled
+                    if wandb_run:
+                        try:
+                            import wandb
+                            wandb_run.log({
+                                "hamming_analysis/joint_plot": wandb.Image(plot_path),
+                                "hamming_analysis/epoch": epoch,
+                            })
+                        except Exception as e:
+                            log.warning(f"Error logging hamming analysis plot to wandb: {e}")
+                
+                # Save summary data to CSV for this epoch
+                if combined_summary_data:
+                    df = pd.DataFrame(combined_summary_data)
+                    csv_filename = f"hamming_analysis_epoch_{epoch:04d}.csv"
+                    csv_path = os.path.join(hamming_analysis_dir, csv_filename)
+                    df.to_csv(csv_path, index=False)
+                    log.info(f"Hamming distance analysis CSV saved to: {csv_path}")
+                    
+            except Exception as e:
+                log.warning(f"Error during hamming distance analysis at epoch {epoch}: {e}")
 
             if log_stepwise:
                 for step_idx in range(len(step_metrics_in["step"])):
@@ -696,7 +770,218 @@ def run_knockout_periodic_evaluation(
 
     except Exception as e:
         log.warning(f"Error during knockout periodic evaluation at epoch {epoch}: {e}")
-        return {}
+        return {}, accumulated_pattern_data
+
+
+
+
+
+def _analyze_knockout_hamming_distances(
+    base_logits: PyTree,
+    knockout_patterns: jp.ndarray,
+    final_logits_per_pattern: List[PyTree],
+    layer_sizes: List[Tuple[int, int]],
+    final_hard_accuracies: jp.ndarray,
+) -> List[Dict]:
+    """
+    Analyze hamming distances between baseline and knockout patterns.
+    
+    Args:
+        base_logits: Baseline circuit logits
+        knockout_patterns: Array of knockout patterns
+        final_logits_per_pattern: List of final logits for each pattern (batched PyTree)
+        layer_sizes: Circuit layer sizes
+        final_hard_accuracies: Final hard accuracies for each pattern
+    
+    Returns:
+        List of dictionaries with analysis results
+    """
+    # Convert baseline logits to hard truth tables
+    baseline_tables = _hard_truth_tables_from_logits(base_logits)
+    
+    # Unbatch the per-pattern logits from a batched PyTree to a list of PyTrees
+    batch_size = final_hard_accuracies.shape[0]
+    final_logits_unbatched = [
+        jax.tree.map(lambda x: x[i], final_logits_per_pattern)
+        for i in range(batch_size)
+    ]
+    
+    summary_data = []
+    
+    for idx, (pattern, final_logits, hard_acc) in enumerate(zip(
+        knockout_patterns, final_logits_unbatched, final_hard_accuracies
+    )):
+        # Convert final logits to hard truth tables
+        pert_tables = _hard_truth_tables_from_logits(final_logits)
+        
+        # Get active gate masks for this pattern
+        active_masks = _active_gate_mask_from_knockout(layer_sizes, pattern)
+        
+        # Calculate hamming distances
+        metrics = _hamming_distance_tables(baseline_tables, pert_tables, active_masks)
+        
+        # Create summary row
+        row = {
+            "pattern_idx": int(idx),
+            "overall_bitwise_fraction_diff": metrics["overall_bitwise_fraction_diff"],
+            "per_gate_mean_hamming": metrics["per_gate_mean_hamming"],
+            "counted_bits_total": metrics["counted_bits_total"],
+            "counted_gates_total": metrics["counted_gates_total"],
+            "final_hard_accuracy": float(hard_acc),  # Using consistent naming convention
+            "per_layer_bitwise_fraction_diff": json.dumps(metrics["per_layer_bitwise_fraction_diff"])
+        }
+        
+        summary_data.append(row)
+    
+    return summary_data
+
+def plot_combined_bp_sa_stepwise_performance(
+    cfg, 
+    x_data, 
+    y_data, 
+    loss_type, 
+    knockout_patterns,
+    model,
+    base_circuit,
+    n_message_steps=100,
+    layer_sizes=None,
+    input_n=None,
+    arity=2,
+    circuit_hidden_dim=16
+):
+    """
+    Create a combined plot showing backpropagation and SA stepwise performance on the same axes.
+    
+    Args:
+        cfg: Configuration object
+        x_data: Input data
+        y_data: Target data  
+        loss_type: Type of loss function ('l4' or 'bce')
+        knockout_patterns: Array of knockout patterns to evaluate
+        model: Trained SA model
+        base_circuit: Base circuit (wires, logits) for SA evaluation
+        n_message_steps: Number of message passing steps for SA
+        layer_sizes: Circuit layer sizes
+        input_n: Number of inputs
+        arity: Circuit arity
+        circuit_hidden_dim: Circuit hidden dimension
+        
+    Returns:
+        matplotlib figure with the combined performance plot
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from boolean_nca_cc.training.evaluation import evaluate_circuits_in_chunks, evaluate_model_stepwise_batched
+    # Import backpropagation training function
+    from boolean_nca_cc.training.backprop import _run_backpropagation_training_with_knockouts
+    
+    # Run backpropagation training
+    results = _run_backpropagation_training_with_knockouts(cfg, x_data, y_data, loss_type, knockout_patterns)
+    
+    # Run SA evaluation on the same patterns
+    base_wires, base_logits = base_circuit
+    
+    # Replicate base circuit for the batch
+    batch_wires = jax.tree.map(
+        lambda x: jp.repeat(x[None, ...], len(knockout_patterns), axis=0), base_wires
+    )
+    batch_logits = jax.tree.map(
+        lambda x: jp.repeat(x[None, ...], len(knockout_patterns), axis=0), base_logits
+    )
+    
+    # Run SA evaluation with stepwise metrics
+    sa_step_metrics = evaluate_circuits_in_chunks(
+        eval_fn=evaluate_model_stepwise_batched,
+        wires=batch_wires,
+        logits=batch_logits,
+        knockout_patterns=knockout_patterns,
+        target_chunk_size=len(knockout_patterns),
+        model=model,
+        x_data=x_data,
+        y_data=y_data,
+        input_n=input_n,
+        arity=arity,
+        circuit_hidden_dim=circuit_hidden_dim,
+        n_message_steps=n_message_steps,
+        loss_type=loss_type,
+        layer_sizes=layer_sizes,
+        return_per_pattern=True,
+    )
+    
+    # Create single figure
+    fig, ax = plt.subplots(1, 1, figsize=(12, 8))
+    
+    # Plot: Hard Accuracy over steps - BP vs SA comparison
+    sa_steps = sa_step_metrics["step"]
+    sa_hard_accuracies = sa_step_metrics["hard_accuracy"]
+    
+    # Ensure SA steps start from 0 to match BP
+    if sa_steps[0] == 1:
+        sa_steps = [s - 1 for s in sa_steps]
+    
+    # Get BP step count for comparison
+    bp_step_count = len(results["patterns_performance"][0]["hard_accuracies"])
+    sa_step_count = len(sa_steps)
+    
+    # Log step count information for debugging
+    log.info(f"SA steps: {sa_step_count}, BP steps: {bp_step_count}")
+    log.info(f"SA step range: {sa_steps[0]} to {sa_steps[-1]}")
+    log.info(f"BP step range: 0 to {bp_step_count - 1}")
+    
+    # Ensure we have matching step counts
+    if sa_step_count != bp_step_count:
+        log.warning(f"Step count mismatch: SA={sa_step_count}, BP={bp_step_count}")
+        # Use the shorter length to avoid dimension mismatch
+        min_steps = min(sa_step_count, bp_step_count)
+        sa_steps = sa_steps[:min_steps]
+        sa_hard_accuracies = sa_hard_accuracies[:min_steps]
+        log.info(f"Truncated both datasets to {min_steps} steps")
+    
+    # Final verification that dimensions match
+    if len(sa_steps) != len(sa_hard_accuracies):
+        raise ValueError(f"SA steps and accuracies have different lengths: {len(sa_steps)} vs {len(sa_hard_accuracies)}")
+    
+    log.info(f"Final SA data shape: steps={len(sa_steps)}, accuracies={len(sa_hard_accuracies)}")
+    
+    # Plot SA performance (averaged across patterns)
+    try:
+        ax.plot(sa_steps, sa_hard_accuracies, 
+                color='cyan',
+                linewidth=1.5, 
+                alpha=0.7,
+                label='Self-Attention')
+    except Exception as e:
+        log.error(f"Error plotting SA data: {e}")
+        log.error(f"SA steps shape: {len(sa_steps)}, SA accuracies shape: {len(sa_hard_accuracies)}")
+        raise
+    
+    # Aggregate BP performance across all patterns
+    bp_accuracies_list = [pattern_results["hard_accuracies"] for pattern_results in results["patterns_performance"]]
+    bp_accuracies_array = np.array(bp_accuracies_list)  # Shape: [n_patterns, n_steps]
+    bp_mean_accuracies = np.mean(bp_accuracies_array, axis=0)  # Average across patterns
+    bp_steps = range(len(bp_mean_accuracies))
+    
+    try:
+        ax.plot(bp_steps, bp_mean_accuracies, 
+                color='beige',
+                linewidth=1.5,
+                alpha=0.7,
+                label='Backpropagation')
+    except Exception as e:
+        log.error(f"Error plotting BP data: {e}")
+        log.error(f"BP steps shape: {len(bp_steps)}, BP accuracies shape: {len(bp_mean_accuracies)}")
+        raise
+    
+    ax.set_xlabel('Training/Message Steps')
+    ax.set_ylabel('Hard Accuracy')
+    ax.set_title('Hard Accuracy Over Steps: SA vs Backpropagation')
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    # ax.set_ylim(0, 1)
+    
+    plt.tight_layout()
+    
+    return fig
+
 
 def train_model(
     # Data parameters
@@ -773,7 +1058,7 @@ def train_model(
     wandb_logging: bool = False,
     log_interval: int = 1,
     wandb_run_config: Optional[Dict] = None,
-    # Reconfiguration preconfig params
+    # Repair mode preconfig params
     training_mode: str = "growth",
     preconfig_steps: int = 200,
     preconfig_lr: float = 1e-2,
@@ -784,6 +1069,9 @@ def train_model(
     stop_accuracy_source: str = "eval_ko_in",
     stop_accuracy_patience: int = 10,
     stop_accuracy_min_epochs: int = 100,
+    # Hamming distance analysis parameters
+    hamming_analysis_dir: Optional[str] = None,
+    backprop_config: Optional[Dict] = None,
 ):
     """
     Train a GNN to optimize boolean circuit parameters.
@@ -850,9 +1138,8 @@ def train_model(
         stop_accuracy_source: Source for early stopping metric
         stop_accuracy_patience: Patience for early stopping
         stop_accuracy_min_epochs: Minimum epochs before early stopping
-
-    Returns:
-        Dictionary with trained GNN model and training metrics
+        hamming_analysis_dir: Directory for hamming analysis plots and CSVs
+        backprop_config: Configuration for one-time backprop evaluation
     """
        # Initialize random key
     rng = jax.random.PRNGKey(key)
@@ -910,11 +1197,11 @@ def train_model(
     wandb_run = _init_wandb(wandb_logging, wandb_run_config)
     wandb_id = wandb_run.run.id if wandb_run else None
 
-    # Preconfigure if in reconfig mode
+    # Preconfigure if in repair mode
     base_wires_preconfig = None
     base_logits_preconfig = None
     if training_mode == "repair":
-        log.info("Reconfig mode: running preconfiguration of fixed wiring circuit")
+        log.info("Repair mode: running preconfiguration of fixed wiring circuit")
         base_wires_preconfig, base_logits_preconfig = preconfigure_circuit_logits(
             wiring_key=wiring_fixed_key,
             layer_sizes=layer_sizes,
@@ -1140,6 +1427,7 @@ def train_model(
     # Initialize accumulated pattern data for persistent scatter plot
     # Each data point will be: [epoch, pattern_id, hard_accuracy, knockout_diversity]
     accumulated_pattern_data = []
+    bp_hamming_summary = None
 
     # # Counter for event-driven damage evaluations (for WandB filtering)
     # damage_event_id = 0
@@ -1190,7 +1478,7 @@ def train_model(
                 reset_pool_key = wiring_fixed_key
 
                 # Create a pool of fresh circuits, applying knockout patterns
-                # In reconfig mode, reset with preconfigured base; otherwise default
+                # In repair mode, reset with preconfigured base; otherwise default
                 reset_pool = initialize_graph_pool(
                     rng=reset_pool_key,
                     layer_sizes=layer_sizes,
@@ -1355,6 +1643,45 @@ def train_model(
                 ):
                     base_wires, base_logits = knockout_eval_base_circuit
 
+                    # Run one-time backprop evaluation for comparison
+                    if bp_hamming_summary is None and backprop_config is not None:
+                        log.info("Running one-time backprop evaluation for hamming distance comparison...")
+                        from types import SimpleNamespace
+                        
+                        mock_cfg = SimpleNamespace(
+                            backprop=SimpleNamespace(**backprop_config),
+                            circuit=SimpleNamespace(layer_sizes=layer_sizes)
+                        )
+                        
+                        bp_knockout_results = _run_bp_with_knockouts(
+                            cfg=mock_cfg,
+                            x_data=x_data,
+                            y_data=y_data,
+                            loss_type=loss_type,
+                            knockout_patterns=knockout_vocabulary,
+                            layer_sizes=layer_sizes,
+                            baseline_params=base_logits,
+                            baseline_wires=base_wires
+                        )
+                        
+                        # Stack list of per-pattern PyTrees into a single batched PyTree (leading dim = num_patterns)
+                        bp_final_logits_list = [p['params'] for p in bp_knockout_results['per_pattern']]
+                        bp_final_logits = jax.tree.map(lambda *xs: jp.stack(xs, axis=0), *bp_final_logits_list)
+                        bp_final_hard_accuracies = jp.array([p['final_hard_accuracy'] for p in bp_knockout_results['per_pattern']])
+
+                        bp_summary_rows = _analyze_knockout_hamming_distances(
+                            base_logits=base_logits,
+                            knockout_patterns=knockout_vocabulary,
+                            final_logits_per_pattern=bp_final_logits,
+                            layer_sizes=layer_sizes,
+                            final_hard_accuracies=bp_final_hard_accuracies,
+                        )
+                        
+                        for row in bp_summary_rows:
+                            row['method'] = 'bp'
+                        bp_hamming_summary = bp_summary_rows
+                        log.info(f"Backprop evaluation complete. Found {len(bp_hamming_summary)} results.")
+
                     # Pass vocabulary and wandb_run for detailed checks
                     # Pass accumulated data and get updated version back
                     ko_eval_results, accumulated_pattern_data = run_knockout_periodic_evaluation(
@@ -1379,6 +1706,8 @@ def train_model(
                         layer_sizes=layer_sizes,
                         use_scan=use_scan,
                         knockout_diversity=knockout_diversity,  # Pass diversity for color coding
+                        hamming_analysis_dir=hamming_analysis_dir,  # Pass hamming analysis directory
+                        bp_hamming_summary=bp_hamming_summary,
                     )
                     # Extract final metrics for best model tracking
                     if ko_eval_results and "final_metrics_in" in ko_eval_results:

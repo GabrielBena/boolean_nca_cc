@@ -646,7 +646,7 @@ def load_best_model_from_wandb(
     project: str = "boolean-nca-cc",
     entity: str = "marcello-barylli-growai",
     download_dir: str = "saves",
-    filename: str = "best_model_hard_accuracy",
+    filename: str = "best_model_eval_ko_hard_accuracy",
     filetype: str = "pkl",
     run_from_last: int = 1,
     use_cache: bool = True,

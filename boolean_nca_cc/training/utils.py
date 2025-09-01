@@ -53,7 +53,7 @@ def cleanup_redundant_wandb_artifacts(
     run_id=None,
     filters=None,
     project="boolean-nca-cc",
-    entity="m2snn",
+    entity="marcello-barylli-growai",
     artifact_name_pattern=None,
     keep_tags=["best", "latest"],
     keep_recent_count=3,
@@ -97,10 +97,22 @@ def cleanup_redundant_wandb_artifacts(
     if run_id:
         if verbose:
             print(f"Looking for run with ID: {run_id}")
-        run = api.run(f"{entity}/{project}/{run_id}")
-        runs_to_process = [run]
-        if verbose:
-            print(f"Found run: {run.name}")
+        try:
+            run = api.run(f"{entity}/{project}/{run_id}")
+            runs_to_process = [run]
+            if verbose:
+                print(f"Found run: {run.name}")
+        except Exception as e:
+            if verbose:
+                print(f"Warning: Could not find run {run_id}: {e}")
+                print("Skipping cleanup for this run.")
+            return {
+                "total_artifacts": 0,
+                "artifacts_to_delete": 0,
+                "artifacts_kept": 0,
+                "deleted_artifacts": [],
+                "errors": [f"Run {run_id} not found: {e}"],
+            }
     else:
         if not filters:
             filters = {}

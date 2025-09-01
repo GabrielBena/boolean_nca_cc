@@ -596,6 +596,7 @@ def _evaluate_with_loop(
     # Always initialize per-pattern storage to eliminate redundancy
     per_pattern_metrics = {
         "pattern_hard_accuracies": [],  # [n_steps, batch_size]
+        "pattern_logits": [],  # [n_steps, batch_size] - store logits for each pattern
     }
     
     vmap_get_loss = jax.vmap(
@@ -648,6 +649,7 @@ def _evaluate_with_loop(
 
         # Always store individual pattern metrics first (single source of truth)
         per_pattern_metrics["pattern_hard_accuracies"].append(current_hard_accuracies)
+        per_pattern_metrics["pattern_logits"].append(current_batch_logits)
 
         # Store averaged metrics derived from individual values (eliminates redundancy)
         step_metrics["step"].append(step)
@@ -665,6 +667,7 @@ def _evaluate_with_loop(
     # Convert lists to arrays for easier analysis
     step_metrics_per_pattern = {
         "pattern_hard_accuracies": jp.array(per_pattern_metrics["pattern_hard_accuracies"]), # [n_steps, batch_size]
+        "pattern_logits": per_pattern_metrics["pattern_logits"], # [n_steps, batch_size] - list of logit PyTrees
     }
     
     if return_per_pattern:

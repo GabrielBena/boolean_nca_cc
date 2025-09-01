@@ -25,7 +25,7 @@ wandb:
 # Circuit configuration
 circuit:
   task: "binary_multiply"
-  input_bits: 8 
+  input_bits: 8
   output_bits: 8
   arity: 4
   num_layers: 3
@@ -41,7 +41,7 @@ training:
   # LOSS TYPE
   loss_type: "l4"  # Options: "l4", "l2", or "bce"
   # BATCH SIZE
-  meta_batch_size: 64
+  meta_batch_size: 128
   # OPTIMIZATION
   learning_rate: 2e-4
   weight_decay: 1e-5
@@ -67,27 +67,27 @@ pool:
   # Sample-based damage (applied post-step, independent of resets)
   damage_pool_enabled: true
   damage_pool_interval: 128
-  damage_pool_fraction: 0.1
+  damage_pool_fraction: 0.15
   damage_strategy: "loss_biased"
   damage_combined_weights: [0.5, 0.5]
   damage_mode: "strip"  # Options: "shotgun" (random) or "strip" (localized)
   # Number of gates to knock out when generating fresh patterns (ignored if vocabulary is used)
-  damage_prob: 25
+  damage_prob: 20
   # Damage-specific vocabulary size (decoupled from legacy persistent_knockout)
-  damage_knockout_diversity: 8
+  damage_knockout_diversity: 4
   # Pool update step filtering for damage selection (prevents damage to over-optimized circuits)
   damage_min_pool_updates: 0    # Minimum pool updates before circuit can be damaged
   damage_max_pool_updates: 100   # Maximum pool updates before circuit becomes too fragile for damage
   # Number of message passing steps for damage evaluation (baseline and recovery trajectories)
   # This should typically match or be close to the training n_message_steps for realistic recovery assessment
-  damage_eval_steps: 100
+  damage_eval_steps: ${eval.periodic_eval_inner_steps}
 
 
 eval:
   # Periodic evaluation parameters
   periodic_eval_enabled: true
-  periodic_eval_inner_steps: 100
-  periodic_eval_interval: 512
+  periodic_eval_inner_steps: 20
+  periodic_eval_interval: 2048
   periodic_eval_test_seed: 42
   periodic_eval_log_stepwise: true
   periodic_eval_batch_size: ${pool.damage_knockout_diversity}  # Batch size for knockout evaluation (should match knockout_diversity)
@@ -96,6 +96,9 @@ eval:
   knockout_eval:
     enabled: true
     damage_prob: ${pool.damage_prob}
+  
+  # Hamming distance analysis
+  hamming_analysis_dir: "results/hamming_analysis_mbs${training.meta_batch_size}_div${pool.damage_knockout_diversity}_dam${pool.damage_prob}"  # Directory for hamming analysis plots and CSVs
   
   # Final BP vs SA comparison evaluation
   final_eval_enabled: true
@@ -109,7 +112,7 @@ logging:
 
 # Checkpoint configuration
 checkpoint:
-  enabled: true
+  enabled: false
   interval: 1031  # prime number 
   save_best: true  # Save best model based on metric
   best_metric: "hard_accuracy"  # Metric to track for best model

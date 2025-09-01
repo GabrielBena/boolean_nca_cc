@@ -240,7 +240,7 @@ class CircuitOptimizationDemo:
         self.active_case_i = 123 % self.case_n
 
         # WandB integration
-        self.wandb_entity = "m2snn"
+        self.wandb_entity = "marcello-barylli-growai"
         self.wandb_project = "boolean-nca-cc"
         self.wandb_download_dir = "saves"
         self.run_id = None

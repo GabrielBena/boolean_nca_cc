@@ -11,28 +11,80 @@ metric:
 
 # Parameters to sweep over
 parameters:
-  # pool.persistent_knockout.knockout_diversity:
-  #   values:
-  #     - 1
-  #     - 16
-  #     - 64
-  #     - 128
-
-      # - 512
-  #     # - 1024
-
-  training.loss_type:
+  # Core training parameters
+  training.meta_batch_size:
     values:
-      - "l4"
-      - "l2"
-      - "bce"
+      - 8
+      - 32
+      - 64
+      - 128
 
-  # pool.persistent_knockout.damage_prob:
-  #   values:
-  #     - 20
-  #     - 50
-  #     - 100
-  #     - 160
+  # Damage and recovery parameters
+  pool.damage_pool_fraction:
+    values:
+      - 0.1
+      - 0.2
+
+  pool.damage_knockout_diversity:
+    values:
+      - 8
+      - 16
+      - 32
+      - 64
+
+  # Evaluation parameters
+  eval.periodic_eval_inner_steps:
+    values:
+      - 10
+      - 20
+      - 25
+
+  # Additional strategic parameters that could affect performance
+  training.learning_rate:
+    values:
+      - 1e-4
+      - 5e-4
+
+  pool.damage_prob:
+    values:
+      - 5
+      - 10
+      - 20
+
+  pool.reset_fraction:
+    values:
+      - 0.1
+      - 0.15
+      - 0.2
+
+  # Self-attention model parameters (state size scaling)
+  model.attention_dim:
+    values:
+      - 64
+      - 128
+      - 256
+      - 512
+
+  model.num_layers:
+    values:
+      - 1
+      - 2
+      - 4
+
+  model.num_heads:
+    values:
+      - 4
+      - 8
+      - 16
+
+  # Circuit hidden dimension (affects circuit representation size)
+  circuit.circuit_hidden_dim:
+    values:
+      - 16
+      - 32
+      - 64
+
+
 
 # Add this command block to format arguments correctly for Hydra
 command:

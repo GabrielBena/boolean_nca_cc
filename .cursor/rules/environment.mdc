@@ -1,0 +1,5 @@
+---
+description: conda activate metabool
+globs:
+alwaysApply: true
+---

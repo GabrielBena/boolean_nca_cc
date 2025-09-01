@@ -307,7 +307,7 @@ class Demo:
         # WandB loading parameters
         self.run_id = None  # Specific run ID if provided
         self.loaded_run_id = None  # Last successfully loaded run ID
-        self.wandb_entity = "m2snn"
+        self.wandb_entity = "marcello-barylli-growai"
         self.wandb_project = "boolean-nca-cc"
         self.wandb_download_dir = "saves"
 

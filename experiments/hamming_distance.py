@@ -1,14 +1,22 @@
 """
-Experiment: Backprop with fixed wiring under knockout patterns, and LUT truth-table distances.
+Experiment: GNN vs Backprop comparison under knockout patterns, and LUT truth-table distances.
 
-This script:
-- Loads the training config (without Hydra side-effects)
-- Builds a fixed wiring using cfg.test_seed
+This script implements a streamlined, run ID-driven analysis:
+- GNN run ID is the single source of truth for ALL configuration
+- Automatically loads GNN model, training config, and parameters from WandB
+- Uses GNN config for circuit structure, BP parameters, data generation, seeds, etc.
+- No manual config overrides - everything derived from the training run
+- Builds baseline circuit using GNN config parameters
 - Runs baseline backprop training (no knockout)
 - Runs backprop training per knockout pattern (same wiring)
+- Runs GNN evaluation per knockout pattern (same wiring)
 - Computes Hamming distances between hard LUT truth tables of baseline vs perturbed
   excluding any gates that are knocked out in the perturbed configuration
-- Writes a CSV summary and prints a concise report
+- Compares GNN vs BP recovery performance
+- Writes a CSV summary and generates unified comparison plots
+
+CLI: Only requires --run-id (defaults to "oxlper1c") and --methods selection.
+All other parameters (vocab size, damage prob, loss type, etc.) come from GNN config.
 """
 
 import os
@@ -220,13 +228,13 @@ def _run_bp_with_knockouts(cfg, x_data, y_data, loss_type: str, knockout_pattern
             state.params, wires, x_data, y_data,
             gate_mask=create_gate_mask_from_knockout_pattern(pattern, layer_sizes)
         )
-        final_accuracy = float(final_aux["hard_accuracy"])
+        final_hard_accuracy = float(final_aux["hard_accuracy"])
         final_hard_loss = float(final_aux["hard_loss"])
 
         results.append(dict(
             params=state.params, 
             pattern=pattern,
-            final_accuracy=final_accuracy,
+            final_hard_accuracy=final_hard_accuracy,
             final_hard_loss=final_hard_loss
         ))
 
@@ -357,32 +365,52 @@ def _evaluate_gnn_single_pattern(
 
     return dict(
         logits=current_logits,
-        final_accuracy=float(final_hard_accuracy),
+                    final_hard_accuracy=float(final_hard_accuracy),
         final_hard_loss=float(final_hard_loss),
     )
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="configs/config.yaml")
     parser.add_argument("--output", type=str, default=None)
-    # Extended CLI for GNN + analysis control
-    parser.add_argument("--methods", type=str, default="gnn", help="gnn,bp,both")
-    parser.add_argument("--damage-modes", type=str, default=None, help="comma list: shotgun,strip")
-    parser.add_argument("--vocab-size", type=int, default=None)
-    parser.add_argument("--damage-prob", type=float, default=None)
-    parser.add_argument("--n-message-steps", type=int, default=100)
-    parser.add_argument("--loss-type", type=str, default=None, choices=["l4", "bce"])
-    parser.add_argument("--run-id", type=str, default=None, help="WandB run id for GNN load")
+    # Core analysis control - GNN run ID determines everything else
+    parser.add_argument("--run-id", type=str, default="oxlper1c", help="WandB run id for GNN load")
     parser.add_argument("--checkpoint", type=str, default=None, help="Local checkpoint path .pkl for GNN")
+    # Analysis method selection only
+    parser.add_argument("--methods", type=str, default="both", help="gnn,bp,both")
+    # GNN evaluation parameters
+    parser.add_argument("--n-message-steps", type=int, default=100)
     args = parser.parse_args()
 
-    cfg = OmegaConf.load(args.config)
+    # Load GNN first to get the authoritative config
+    if args.checkpoint is not None:
+        loaded = load_checkpoint(args.checkpoint)
+        gnn_cfg = OmegaConf.create(loaded.get("config", {}))
+        gnn_model = instantiate_model_from_config(gnn_cfg, seed=gnn_cfg.get("seed", 0))
+        from flax import nnx as _nnx
+        _nnx.update(gnn_model, loaded["model"])
+        gnn_hidden_dim = int(gnn_cfg.model.get("circuit_hidden_dim", 16))
+        gnn_training_config = gnn_cfg
+    else:
+        # Use standard artifact filename
+        filename_to_load = "best_model_eval_ko_hard_accuracy"
+
+        gnn_model, _loaded_dict, gnn_cfg = load_best_model_from_wandb(
+            run_id=args.run_id,
+            seed=0,  # Use default seed, will be overridden by GNN config
+            filename=filename_to_load,
+        )
+        gnn_hidden_dim = int(gnn_cfg.model.get("circuit_hidden_dim", 16))
+        gnn_training_config = gnn_cfg
+
+    # Use GNN config as the authoritative source for everything
+    # This ensures BP baseline and analysis use identical parameters to GNN training
+    cfg = gnn_cfg
 
     # Set output directory with f-string if not provided
     if args.output is None:
-        vocab_size = args.vocab_size or cfg.backprop.knockout_vocabulary.size
-        damage_prob = args.damage_prob or cfg.backprop.knockout_vocabulary.damage_prob
+        vocab_size = cfg.backprop.knockout_vocabulary.size
+        damage_prob = cfg.backprop.knockout_vocabulary.damage_prob
         args.output = f"results/knockout_lut_distance_vocab{vocab_size}_damage{damage_prob}"
 
     # Ensure layer_sizes are present
@@ -405,30 +433,14 @@ def main():
     else:
         methods = set(m.strip() for m in methods_str.split(","))
 
-    # Optional GNN load (must happen before baseline circuit creation)
-    gnn_model = None
-    gnn_hidden_dim = None
-    gnn_training_config = None
-    if "gnn" in methods:
-        # Load via wandb best by run id or latest
-        if args.checkpoint is not None:
-            loaded = load_checkpoint(args.checkpoint)
-            gnn_cfg = OmegaConf.create(loaded.get("config", {}))
-            gnn_model = instantiate_model_from_config(gnn_cfg, seed=cfg.get("seed", 0))
-            from flax import nnx as _nnx
-            _nnx.update(gnn_model, loaded["model"])
-            gnn_hidden_dim = int(gnn_cfg.model.get("circuit_hidden_dim", 16))
-            gnn_training_config = gnn_cfg
-        else:
-            gnn_model, _loaded_dict, gnn_cfg = load_best_model_from_wandb(
-                run_id=args.run_id,
-                seed=cfg.get("seed", 0),
-            )
-            gnn_hidden_dim = int(gnn_cfg.model.get("circuit_hidden_dim", 16))
-            gnn_training_config = gnn_cfg
+    # GNN model is already loaded above, now check if methods include GNN
+    if "gnn" not in methods:
+        gnn_model = None
+        gnn_hidden_dim = None
+        gnn_training_config = None
 
-    # Loss type override
-    loss_type = args.loss_type or cfg.training.loss_type
+    # Loss type from GNN config
+    loss_type = cfg.training.loss_type
 
     # Baseline circuit creation - use preconfigured if GNN was trained in repair mode
     if "gnn" in methods and gnn_training_config is not None:
@@ -474,11 +486,8 @@ def main():
         # No GNN or no training config - use standard BP baseline
         bp_baseline = _run_bp_single(cfg, x, y0, loss_type=loss_type)
 
-    # Prepare damage modes
-    if args.damage_modes is not None:
-        damage_modes = [m.strip() for m in args.damage_modes.split(",") if m.strip()]
-    else:
-        damage_modes = [cfg.backprop.knockout_vocabulary.get("mode", "shotgun") if hasattr(cfg.backprop, "knockout_vocabulary") else "shotgun"]
+    # Damage modes from GNN config
+    damage_modes = [cfg.backprop.knockout_vocabulary.get("mode", "shotgun") if hasattr(cfg.backprop, "knockout_vocabulary") else "shotgun"]
 
 
 
@@ -497,9 +506,9 @@ def main():
         rng, vocab_key = jax.random.split(rng)
         vocab = create_knockout_vocabulary(
             rng=vocab_key,
-            vocabulary_size=args.vocab_size or cfg.backprop.knockout_vocabulary.size,
+            vocabulary_size=cfg.backprop.knockout_vocabulary.size,
             layer_sizes=layer_sizes,
-            damage_prob=args.damage_prob or cfg.backprop.knockout_vocabulary.damage_prob,
+            damage_prob=cfg.backprop.knockout_vocabulary.damage_prob,
             damage_mode=damage_mode,
         )
 
@@ -532,7 +541,7 @@ def main():
                     "per_gate_mean_hamming": metrics["per_gate_mean_hamming"],
                     "counted_bits_total": metrics["counted_bits_total"],
                     "counted_gates_total": metrics["counted_gates_total"],
-                    "final_accuracy": item["final_accuracy"],
+                    "final_hard_accuracy": item["final_hard_accuracy"],
                     "final_hard_loss": item["final_hard_loss"],
                 }
                 row["per_layer_bitwise_fraction_diff"] = json.dumps(metrics["per_layer_bitwise_fraction_diff"])
@@ -575,7 +584,7 @@ def main():
                     "per_gate_mean_hamming": metrics["per_gate_mean_hamming"],
                     "counted_bits_total": metrics["counted_bits_total"],
                     "counted_gates_total": metrics["counted_gates_total"],
-                    "final_accuracy": eval_res["final_accuracy"],
+                    "final_hard_accuracy": eval_res["final_hard_accuracy"],
                     "final_hard_loss": eval_res["final_hard_loss"],
                 }
                 row["per_layer_bitwise_fraction_diff"] = json.dumps(metrics["per_layer_bitwise_fraction_diff"])
@@ -609,9 +618,9 @@ def main():
         "num_patterns": len(summary_rows),
         "mean_overall_bitwise_fraction_diff": float(df["overall_bitwise_fraction_diff"].mean()) if len(df) else 0.0,
         "mean_per_gate_mean_hamming": float(df["per_gate_mean_hamming"].mean()) if len(df) else 0.0,
-        "mean_final_accuracy": float(df["final_accuracy"].mean()) if len(df) else 0.0,
+        "mean_final_hard_accuracy": float(df["final_hard_accuracy"].mean()) if len(df) else 0.0,
         "mean_final_hard_loss": float(df["final_hard_loss"].mean()) if len(df) else 0.0,
-        "config_path": os.path.abspath(args.config),
+        # "config_path": os.path.abspath(args.config),
         "output_path": os.path.abspath(args.output),
         "pairwise_matrix_csv": os.path.abspath(pairwise_csv),
     }
@@ -620,21 +629,15 @@ def main():
 
     # Generate visualizations
     try:
-        from visualization.circular_plot import plot_circular_knockout_distances, plot_accuracy_vs_distance
-        
-        # Circular distance plot
-        circular_plot_path = os.path.join(args.output, "circular_distances.png")
-        plot_circular_knockout_distances(df, circular_plot_path)
-        print(f"Circular plot saved to: {circular_plot_path}")
+        from visualization.circular_plot import plot_accuracy_vs_distance
         
         # Accuracy vs distance scatter plot
-        if 'final_accuracy' in df.columns:
+        if 'final_hard_accuracy' in df.columns:
             accuracy_plot_path = os.path.join(args.output, "accuracy_vs_distance.png")
-            plot_accuracy_vs_distance(df, accuracy_plot_path)
+            plot_accuracy_vs_distance(df, accuracy_plot_path, color_by_method=True)
             print(f"Accuracy plot saved to: {accuracy_plot_path}")
             
-            # Add plot paths to report
-            report["circular_plot_path"] = os.path.abspath(circular_plot_path)
+            # Add plot path to report
             report["accuracy_plot_path"] = os.path.abspath(accuracy_plot_path)
             
     except ImportError as e:

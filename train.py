@@ -32,6 +32,7 @@ from boolean_nca_cc.utils.graph_builder import build_graph
 from boolean_nca_cc.training.utils import (
     cleanup_redundant_wandb_artifacts,
 )
+from boolean_nca_cc.training.checkpointing import save_checkpoint
 from boolean_nca_cc.training.pool.structural_perturbation import create_knockout_vocabulary
 
 # Configure logging
@@ -401,12 +402,12 @@ def main(cfg: DictConfig) -> None:
         )
         log.info(f"Generated knockout vocabulary with {len(knockout_vocabulary)} patterns")
 
-    # Run backpropagation training for comparison if enabled
+    # # Run backpropagation training for comparison if enabled
     bp_results = None
-    if cfg.backprop.enabled:
-        bp_results = run_backpropagation_training(
-            cfg, x, y0, loss_type=cfg.training.loss_type, knockout_patterns=knockout_vocabulary
-        )
+    # if cfg.backprop.enabled:
+    #     bp_results = run_backpropagation_training(
+    #         cfg, x, y0, loss_type=cfg.training.loss_type, knockout_patterns=knockout_vocabulary
+    #     )
     # Initialize model
     rng, init_rng = jax.random.split(rng)
 
@@ -456,6 +457,13 @@ def main(cfg: DictConfig) -> None:
 
         wandb.log(wandb_metrics)
 
+    # Prepare checkpoint directory
+    if cfg.checkpoint.enabled:
+        checkpoint_dir = os.path.join(output_dir, "checkpoints")
+        os.makedirs(checkpoint_dir, exist_ok=True)
+    else:
+        checkpoint_dir = None
+
     # Train model
     log.info(f"Starting {cfg.model.type.upper()} training")
     model_results = train_model(
@@ -503,13 +511,13 @@ def main(cfg: DictConfig) -> None:
         lr_scheduler=cfg.training.lr_scheduler,
         lr_scheduler_params=cfg.training.lr_scheduler_params,
         # Checkpoint parameters
-        checkpoint_enabled=cfg.checkpoint.get("enabled", False),
-        checkpoint_dir=cfg.checkpoint.get("dir", None),
-        checkpoint_interval=cfg.checkpoint.get("interval", 1024),
-        save_best=cfg.checkpoint.get("save_best", True),
-        best_metric=cfg.checkpoint.get("best_metric", "final_hard_accuracy"),
-        best_metric_source=cfg.checkpoint.get("best_metric_source", "eval"),
-        save_stable_states=cfg.checkpoint.get("save_stable_states", True),
+        checkpoint_enabled=cfg.checkpoint.enabled,
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_interval=cfg.checkpoint.interval,
+        save_best=cfg.checkpoint.save_best,
+        best_metric=cfg.checkpoint.best_metric,
+        best_metric_source=cfg.checkpoint.best_metric_source,
+        save_stable_states=cfg.checkpoint.save_stable_states,
         # Knockout evaluation
         knockout_eval=cfg.eval.get("knockout_eval", None),
         # Periodic evaluation parameters
@@ -533,7 +541,30 @@ def main(cfg: DictConfig) -> None:
         stop_accuracy_source=cfg.early_stop.get("source", "eval_ko_in"),
         stop_accuracy_patience=cfg.early_stop.get("patience", 10),
         stop_accuracy_min_epochs=cfg.early_stop.get("min_epochs", 100),
+        # Pass backprop config for joint analysis
+        backprop_config=OmegaConf.to_container(cfg.backprop, resolve=True) if cfg.backprop.enabled else None,
+        # Hamming distance analysis parameters
+        hamming_analysis_dir=cfg.eval.get("hamming_analysis_dir", None),
     )
+
+    # Save final model if checkpointing is enabled
+    if cfg.checkpoint.enabled and not cfg.wandb.enabled:
+        # If wandb is enabled, checkpoints are already being saved during training
+        save_checkpoint(
+            model_results["model"],
+            model_results["optimizer"],
+            {
+                "losses": model_results["losses"],
+                "hard_losses": model_results["hard_losses"],
+                "accuracies": model_results["accuracies"],
+                "hard_accuracies": model_results["hard_accuracies"],
+                "reset_steps": model_results.get("reset_steps", []),
+            },
+            cfg,
+            cfg.training.epochs,
+            checkpoint_dir,
+            filename="final_model.pkl",
+        )
 
     # Run final BP vs SA comparison evaluation if enabled
     if (cfg.backprop.enabled and bp_results is not None and 
