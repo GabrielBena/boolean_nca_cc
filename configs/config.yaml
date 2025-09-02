@@ -35,7 +35,7 @@ circuit:
 # Training parameters
 training:
   # TRAINING MODE
-  training_mode: "repair"  # Options: "growth" (nops -> configured) or "repair" (configured -> damaged -> recovery)
+  training_mode: "growth"  # Options: "growth" (nops -> configured) or "repair" (configured -> damaged -> recovery)
   # INNER LOOP
   n_message_steps: 5  # Number of message passing steps per training iteration
   # LOSS TYPE
@@ -53,7 +53,7 @@ training:
     exponent: 1
     alpha: 1e-1 # final lr = 1% of initial lr
   # NUMBER OF EPOCHS
-  epochs: 8192 # 512
+  epochs: 32 # 8192 # 512
   # USE SCAN
   use_scan: false
 
@@ -74,7 +74,7 @@ pool:
   # Number of gates to knock out when generating fresh patterns (ignored if vocabulary is used)
   damage_prob: 20
   # Damage-specific vocabulary size (decoupled from legacy persistent_knockout)
-  damage_knockout_diversity: 4
+  damage_knockout_diversity: 16
   # Pool update step filtering for damage selection (prevents damage to over-optimized circuits)
   damage_min_pool_updates: 0    # Minimum pool updates before circuit can be damaged
   damage_max_pool_updates: 100   # Maximum pool updates before circuit becomes too fragile for damage
@@ -86,7 +86,7 @@ pool:
 eval:
   # Periodic evaluation parameters
   periodic_eval_enabled: true
-  periodic_eval_inner_steps: 20
+  periodic_eval_inner_steps: 30
   periodic_eval_interval: 2048
   periodic_eval_test_seed: 42
   periodic_eval_log_stepwise: true

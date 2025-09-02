@@ -6,8 +6,8 @@ method: grid
 
 # Metric to optimize
 metric:
-  goal: minimize
-  name: Relative Time (Process)
+  goal: maximize
+  name: "eval_ko_in/final_hard_accuracy"
 
 # Parameters to sweep over
 parameters:
@@ -19,43 +19,43 @@ parameters:
       - 64
       - 128
 
-  # Damage and recovery parameters
-  pool.damage_pool_fraction:
-    values:
-      - 0.1
-      - 0.2
+  # # # Damage and recovery parameters
+  # # pool.damage_pool_fraction:
+  # #   values:
+  # #     - 0.1
+  # #     - 0.2
 
-  pool.damage_knockout_diversity:
-    values:
-      - 8
-      - 16
-      - 32
-      - 64
+  # # pool.damage_knockout_diversity:
+  # #   values:
+  # #     - 8
+  # #     - 16
+  # #     - 32
+  # #     - 64
 
-  # Evaluation parameters
-  eval.periodic_eval_inner_steps:
-    values:
-      - 10
-      - 20
-      - 25
+  # # # Evaluation parameters
+  # # eval.periodic_eval_inner_steps:
+  # #   values:
+  # #     - 10
+  # #     - 20
+  # #     - 25
 
-  # Additional strategic parameters that could affect performance
-  training.learning_rate:
-    values:
-      - 1e-4
-      - 5e-4
+  # # # Additional strategic parameters that could affect performance
+  # # training.learning_rate:
+  # #   values:
+  # #     - 1e-4
+  # #     - 5e-4
 
-  pool.damage_prob:
-    values:
-      - 5
-      - 10
-      - 20
+  # # pool.damage_prob:
+  # #   values:
+  # #     - 5
+  # #     - 10
+  # #     - 20
 
-  pool.reset_fraction:
-    values:
-      - 0.1
-      - 0.15
-      - 0.2
+  # # pool.reset_fraction:
+  # #   values:
+  # #     - 0.1
+  # #     - 0.15
+  # #     - 0.2
 
   # Self-attention model parameters (state size scaling)
   model.attention_dim:
@@ -63,17 +63,17 @@ parameters:
       - 64
       - 128
       - 256
-      - 512
+      # - 512
 
   model.num_layers:
     values:
-      - 1
+      # - 1
       - 2
       - 4
 
   model.num_heads:
     values:
-      - 4
+      # - 4
       - 8
       - 16
 
