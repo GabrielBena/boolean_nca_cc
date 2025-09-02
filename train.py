@@ -44,6 +44,23 @@ from boolean_nca_cc.utils.graph_builder import build_graph
 log = logging.getLogger(__name__)
 
 
+def extract_track_metrics_config(cfg) -> list[str] | None:
+    """
+    Extract track_metrics configuration from config.
+
+    Returns:
+        List of metrics to track or None if not configured
+    """
+    if not cfg.checkpoint.get("track_best_metrics", {}).get("enabled", False):
+        return None
+
+    metrics_config = cfg.checkpoint.get("track_best_metrics", {}).get("metrics", [])
+    if not metrics_config:
+        return None
+
+    return list(metrics_config)
+
+
 def run_backpropagation_training(cfg, x_data, y_data, loss_type="l4"):
     """
     Run standard backpropagation training for comparison.
@@ -496,6 +513,9 @@ def main(cfg: DictConfig) -> None:
     else:
         checkpoint_dir = None
 
+    # Get track_metrics configuration for training
+    track_metrics = extract_track_metrics_config(cfg)
+
     # Train model
     log.info(f"Starting {cfg.model.type.upper()} training")
     model_results = train_model(
@@ -539,10 +559,6 @@ def main(cfg: DictConfig) -> None:
         checkpoint_enabled=cfg.checkpoint.enabled,
         checkpoint_dir=checkpoint_dir,
         checkpoint_interval=cfg.checkpoint.interval,
-        save_best=cfg.checkpoint.save_best,
-        best_metric=cfg.checkpoint.best_metric,
-        best_metric_source=cfg.checkpoint.best_metric_source,
-        save_stable_states=cfg.checkpoint.save_stable_states,
         # Periodic evaluation parameters
         periodic_eval_enabled=cfg.eval.periodic.enabled,
         periodic_eval_interval=cfg.eval.periodic.interval,
@@ -562,6 +578,8 @@ def main(cfg: DictConfig) -> None:
         stop_accuracy_source=cfg.stop_accuracy.source,
         stop_accuracy_patience=cfg.stop_accuracy.patience,
         stop_accuracy_min_epochs=cfg.stop_accuracy.min_epochs,
+        # Best model tracking parameters
+        track_metrics=track_metrics,
     )
 
     # Save final model if checkpointing is enabled
@@ -596,6 +614,9 @@ def main(cfg: DictConfig) -> None:
         eval_batch_size=cfg.eval.batch_size,
     )
 
+    # Get track_metrics configuration
+    track_metrics = extract_track_metrics_config(cfg)
+
     # Run comprehensive evaluation using standardized datasets
     eval_results = run_unified_periodic_evaluation(
         model=model_results["model"],
@@ -613,6 +634,8 @@ def main(cfg: DictConfig) -> None:
         log_stepwise=False,
         layer_sizes=layer_sizes,
         log_pool_scatter=False,
+        # Best model tracking parameters (final evaluation, so no saving)
+        track_metrics=track_metrics,
     )
 
     if "metrics" in model_results:

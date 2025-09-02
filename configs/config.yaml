@@ -24,8 +24,8 @@ wandb:
 
 # Circuit configuration
 circuit:
-  task: "text"
-  input_bits: 6
+  task: "binary_multiply"
+  input_bits: 8
   output_bits: 8
   arity: 4
   num_layers: 3
@@ -39,13 +39,13 @@ training:
   wiring_mode: "random"  # Options: "fixed", "genetic", or "random"
   initial_diversity: 256
   # INNER LOOP
-  n_message_steps: 5  # Number of message passing steps per training iteration
+  n_message_steps: 3  # Number of message passing steps per training iteration
   # LOSS TYPE
   loss_type: "l4"  # Options: "l4", "l2", or "bce"
   random_loss_step: false  # Use random message passing step for loss computation
   use_beta_loss_step: false  # Use beta distribution for random loss step (varies from early to late steps through training)
   # BATCH SIZE
-  meta_batch_size: 512
+  meta_batch_size: 1024
   batch_chunk_size: 128  # Sequential batch processing chunk size (null means use meta_batch_size)
   # OPTIMIZATION
   learning_rate: 1e-4
@@ -67,8 +67,8 @@ training:
 pool:
   size: 4096
   # reset_fraction: 0.125 # Good for batch size 256
-  reset_fraction: 0.05
-  reset_interval: 64
+  reset_fraction: 0.25
+  reset_interval: 32
   reset_strategy: "combined"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
   # Genetic mutation parameters
@@ -135,10 +135,18 @@ stop_accuracy:
 checkpoint:
   enabled: true
   interval: 1031  # Save checkpoints every N epochs (prime number to avoid rest pool before)
-  save_best: true  # Whether to track and save the best model
-  best_metric: "hard_accuracy"  # Metric to use for determining best model (loss, hard_loss, accuracy, hard_accuracy)
-  best_metric_source: "eval"  # Source of the metric ('training' or 'eval')
-  save_stable_states: false  # Whether to save a checkpoint before potential NaN losses
+    
+  # Multi-metric best model tracking - specify which metrics to track and save
+  track_best_metrics:
+    enabled: true  # Whether to enable multi-metric tracking (in addition to the single best_metric above)
+    metrics:
+      # Format: "source_metric" where source is 'training', 'eval_in', or 'eval_out'
+      # and metric is 'hard_accuracy', 'accuracy', 'hard_loss', or 'loss'
+      - "eval_in_hard_accuracy"    # In-distribution hard accuracy (most important)
+      - "eval_out_hard_accuracy"   # Out-of-distribution hard accuracy (generalization)
+      # - "training_hard_accuracy"   # Training hard accuracy (uncomment if needed)
+      # - "eval_in_hard_loss"        # In-distribution hard loss (uncomment if needed)
+      # - "eval_out_hard_loss"       # Out-of-distribution hard loss (uncomment if needed)
 
 # Logging configuration
 logging:
