@@ -87,8 +87,6 @@ def _init_wandb(wandb_logging: bool, wandb_run_config: dict | None = None) -> An
             # Make the run summary of this metric be its max over the run
             # so sweeps can optimize it even if it's logged periodically
             wandb.define_metric("eval_ko_in/final_hard_accuracy", summary="max")
-            # Provide a sweep-friendly alias without slashes
-            wandb.define_metric("sweep/objective", summary="max")
         except Exception as e:
             log.warning(f"Error defining wandb metrics: {e}")
 
@@ -398,23 +396,6 @@ def _log_final_wandb_metrics(wandb_run, results: Dict, epochs: int) -> None:
             }
         )
 
-        # Also ensure the sweep objective is written to summary if tracked as best
-        try:
-            if "best_metric_value" in results and results.get("best_metric") in (
-                "final_hard_accuracy",
-                "hard_accuracy",
-            ):
-                prev = wandb_run.summary.get("eval_ko_in/final_hard_accuracy", None)
-                best_val = float(results["best_metric_value"])
-                if prev is None or best_val > float(prev):
-                    wandb_run.summary["eval_ko_in/final_hard_accuracy"] = best_val
-                # Also store a duplicate alias that is sweep-friendly
-                wandb_run.summary["sweep/objective"] = best_val
-        except Exception as e:
-            log.warning(
-                f"Error updating WandB summary final eval_ko_in/final_hard_accuracy: {e}"
-            )
-
     except Exception as e:
         log.warning(f"Error logging final metrics to wandb: {e}")
 
@@ -576,11 +557,11 @@ def run_knockout_periodic_evaluation(
         )
 
         final_metrics_in = {
-            "eval_ko_in/final_loss": float(step_metrics_in["soft_loss"][-1]),
-            "eval_ko_in/final_hard_loss": float(step_metrics_in["hard_loss"][-1]),
-            "eval_ko_in/final_accuracy": float(step_metrics_in["soft_accuracy"][-1]),
-            "eval_ko_in/final_hard_accuracy": float(step_metrics_in["hard_accuracy"][-1]),
-            "eval_ko_in/epoch": int(epoch),
+            "eval_ko_in/final_loss": step_metrics_in["soft_loss"][-1],
+            "eval_ko_in/final_hard_loss": step_metrics_in["hard_loss"][-1],
+            "eval_ko_in/final_accuracy": step_metrics_in["soft_accuracy"][-1],
+            "eval_ko_in/final_hard_accuracy": step_metrics_in["hard_accuracy"][-1],
+            "eval_ko_in/epoch": epoch,
         }
 
         # 2. Generate OUT-of-distribution knockout patterns (always fresh, different seed)
@@ -658,11 +639,11 @@ def run_knockout_periodic_evaluation(
         )
 
         final_metrics_out = {
-            "eval_ko_out/final_loss": float(step_metrics_out["soft_loss"][-1]),
-            "eval_ko_out/final_hard_loss": float(step_metrics_out["hard_loss"][-1]),
-            "eval_ko_out/final_accuracy": float(step_metrics_out["soft_accuracy"][-1]),
-            "eval_ko_out/final_hard_accuracy": float(step_metrics_out["hard_accuracy"][-1]),
-            "eval_ko_out/epoch": int(epoch),
+            "eval_ko_out/final_loss": step_metrics_out["soft_loss"][-1],
+            "eval_ko_out/final_hard_loss": step_metrics_out["hard_loss"][-1],
+            "eval_ko_out/final_accuracy": step_metrics_out["soft_accuracy"][-1],
+            "eval_ko_out/final_hard_accuracy": step_metrics_out["hard_accuracy"][-1],
+            "eval_ko_out/epoch": epoch,
         }
 
         # Log main metrics normally (these will create panels)
@@ -670,27 +651,6 @@ def run_knockout_periodic_evaluation(
         
         if wandb_run:
             wandb_run.log(main_metrics)
-            # Ensure sweep objective is present in run.summary (reliable for sweeps)
-            try:
-                latest_val = float(final_metrics_in["eval_ko_in/final_hard_accuracy"])
-                # Access the active run's summary explicitly
-                run_summary = getattr(wandb_run, "run", None).summary if getattr(wandb_run, "run", None) is not None else None
-                if run_summary is not None:
-                    current = run_summary.get("eval_ko_in/final_hard_accuracy", None)
-                    if current is None or latest_val > float(current):
-                        run_summary["eval_ko_in/final_hard_accuracy"] = latest_val
-                # Also try the global alias in case agent expects it
-                try:
-                    import wandb as _wandb
-                    prev = _wandb.summary.get("eval_ko_in/final_hard_accuracy", None)
-                    if prev is None or latest_val > float(prev):
-                        _wandb.summary["eval_ko_in/final_hard_accuracy"] = latest_val
-                except Exception:
-                    pass
-            except Exception as e:
-                log.warning(
-                    f"Error updating WandB summary for eval_ko_in/final_hard_accuracy: {e}"
-                )
             
                     # Add new pattern data to accumulated data for persistent scatter plot
         if "per_pattern" in step_metrics_in:
@@ -768,15 +728,18 @@ def run_knockout_periodic_evaluation(
                         try:
                             import wandb
                             
-                            # Calculate mean hamming distance from GNN results
+                            # Calculate mean and std hamming distance from GNN results
                             if gnn_hamming_summary:
-                                gnn_mean_hamming = np.mean([row['per_gate_mean_hamming'] for row in gnn_hamming_summary])
-                                log.info(f"Mean hamming distance (epoch {epoch}): {gnn_mean_hamming:.4f}")
+                                hamming_values = [row['per_gate_mean_hamming'] for row in gnn_hamming_summary]
+                                gnn_mean_hamming = np.mean(hamming_values)
+                                gnn_std_hamming = np.std(hamming_values)
+                                log.info(f"Mean hamming distance (epoch {epoch}): {gnn_mean_hamming:.4f} ± {gnn_std_hamming:.4f}")
                                 
                                 wandb_run.log({
                                     "hamming_analysis/joint_plot": wandb.Image(plot_path),
                                     "hamming_analysis/epoch": epoch,
                                     "hamming_analysis/mean_hamming_distance": gnn_mean_hamming,
+                                    "hamming_analysis/std_hamming_distance": gnn_std_hamming,
                                 })
                             else:
                                 log.warning(f"No GNN hamming summary data available for epoch {epoch}")
@@ -979,120 +942,68 @@ def plot_combined_bp_sa_stepwise_performance(
     # Create single figure
     fig, ax = plt.subplots(1, 1, figsize=(12, 8))
     
-    # Plot: Hard Accuracy over steps - BP vs SA comparison (compute-normalized x-axis)
+    # Plot: Hard Accuracy over steps - BP vs SA comparison
     sa_steps = sa_step_metrics["step"]
     sa_hard_accuracies = sa_step_metrics["hard_accuracy"]
-
+    
+    # Ensure SA steps start from 0 to match BP
+    if sa_steps[0] == 1:
+        sa_steps = [s - 1 for s in sa_steps]
+    
+    # Get BP step count for comparison
+    bp_step_count = len(results["patterns_performance"][0]["hard_accuracies"])
+    sa_step_count = len(sa_steps)
+    
+    # Log step count information for debugging
+    log.info(f"SA steps: {sa_step_count}, BP steps: {bp_step_count}")
+    log.info(f"SA step range: {sa_steps[0]} to {sa_steps[-1]}")
+    log.info(f"BP step range: 0 to {bp_step_count - 1}")
+    
+    # Ensure we have matching step counts
+    if sa_step_count != bp_step_count:
+        log.warning(f"Step count mismatch: SA={sa_step_count}, BP={bp_step_count}")
+        # Use the shorter length to avoid dimension mismatch
+        min_steps = min(sa_step_count, bp_step_count)
+        sa_steps = sa_steps[:min_steps]
+        sa_hard_accuracies = sa_hard_accuracies[:min_steps]
+        log.info(f"Truncated both datasets to {min_steps} steps")
+    
+    # Final verification that dimensions match
+    if len(sa_steps) != len(sa_hard_accuracies):
+        raise ValueError(f"SA steps and accuracies have different lengths: {len(sa_steps)} vs {len(sa_hard_accuracies)}")
+    
+    log.info(f"Final SA data shape: steps={len(sa_steps)}, accuracies={len(sa_hard_accuracies)}")
+    
+    # Plot SA performance (averaged across patterns)
+    try:
+        ax.plot(sa_steps, sa_hard_accuracies, 
+                color='cyan',
+                linewidth=1.5, 
+                alpha=0.7,
+                label='Self-Attention')
+    except Exception as e:
+        log.error(f"Error plotting SA data: {e}")
+        log.error(f"SA steps shape: {len(sa_steps)}, SA accuracies shape: {len(sa_hard_accuracies)}")
+        raise
+    
     # Aggregate BP performance across all patterns
     bp_accuracies_list = [pattern_results["hard_accuracies"] for pattern_results in results["patterns_performance"]]
     bp_accuracies_array = np.array(bp_accuracies_list)  # Shape: [n_patterns, n_steps]
     bp_mean_accuracies = np.mean(bp_accuracies_array, axis=0)  # Average across patterns
     bp_steps = range(len(bp_mean_accuracies))
-
-    # Build EFP axis via micro-profiling
+    
     try:
-        import os
-        from boolean_nca_cc.training.profiling import time_once, profile_once
-        from boolean_nca_cc.training.evaluation import evaluate_circuits_in_chunks, evaluate_model_stepwise_batched
-        from boolean_nca_cc.circuits.train import TrainState, train_step
-
-        # SA one-step forward loss callable (same shapes as plotted curves)
-        def _sa_one_step_loss():
-            metrics = evaluate_circuits_in_chunks(
-                eval_fn=evaluate_model_stepwise_batched,
-                wires=batch_wires,
-                logits=batch_logits,
-                knockout_patterns=knockout_patterns,
-                target_chunk_size=len(knockout_patterns),
-                model=model,
-                x_data=x_data,
-                y_data=y_data,
-                input_n=input_n,
-                arity=arity,
-                circuit_hidden_dim=circuit_hidden_dim,
-                n_message_steps=1,
-                loss_type=loss_type,
-                layer_sizes=layer_sizes,
-                return_per_pattern=False,
-            )
-            return metrics["soft_loss"][-1]
-
-        # BP one-step update callable (forward + backward + optimizer) on a representative pattern
-        # Use AdamW with a standard lr; optimizer cost differences are negligible for FLOPs scaling
-        import optax as _opt
-        rep_pattern = knockout_patterns[0]
-
-        def _bp_one_update_loss():
-            # Fresh state to keep the function idempotent across warmup and timing runs
-            state = TrainState(params=base_circuit[1], opt_state=_opt.adamw(1e-3).init(base_circuit[1]))
-            _train_step_fn = partial(
-                train_step,
-                opt=_opt.adamw(1e-3),
-                wires=base_circuit[0],
-                x=x_data,
-                y0=y_data,
-                loss_type=loss_type,
-                do_train=True,
-                knockout_pattern=rep_pattern,
-                layer_sizes=layer_sizes,
-            )
-            loss, _, _ = _train_step_fn(state=state)
-            return loss
-
-        # Time and profile
-        t_sa = time_once(_sa_one_step_loss)
-        t_bp = time_once(_bp_one_update_loss)
-
-        log.info(f"Raw timing: t_sa = {t_sa:.6f}s, t_bp = {t_bp:.6f}s")
-        
-        # Skip profiling if TensorFlow profiler has issues (common in some environments)
-        try:
-            trace_root = os.path.join("profiles", "compute_match")
-            profile_once(os.path.join(trace_root, "sa_forward"), _sa_one_step_loss)
-            profile_once(os.path.join(trace_root, "bp_update"), _bp_one_update_loss)
-            log.info("Profiling traces written successfully")
-        except Exception as prof_e:
-            log.warning(f"Profiling failed (this is OK): {prof_e}")
-
-        r_time = float(t_bp / max(t_sa, 1e-12))
-        log.info(f"Compute normalization (time ratio) r_time = {r_time:.4f}")
-        
-        # Sanity check: if ratio is too extreme, fall back to theoretical value
-        if r_time < 0.1 or r_time > 10.0:
-            log.warning(f"Extreme timing ratio {r_time:.4f} detected. Using theoretical r=2.0 instead.")
-            r_time = 2.0
-    except Exception as e:
-        log.warning(f"Profiling for EFP ratio failed; falling back to r=2.0. Error: {e}")
-        r_time = 2.0
-
-    # Construct cumulative EFP axes
-    x_sa = np.arange(1, len(sa_hard_accuracies) + 1, dtype=float)
-    x_bp = r_time * np.arange(1, len(bp_mean_accuracies) + 1, dtype=float)
-
-    # Plot SA performance (averaged across patterns)
-    try:
-        ax.plot(x_sa, sa_hard_accuracies,
-                color='cyan',
-                linewidth=1.5,
-                alpha=0.7,
-                label='Self-Attention')
-    except Exception as e:
-        log.error(f"Error plotting SA data: {e}")
-        log.error(f"SA x shape: {len(x_sa)}, SA accuracies shape: {len(sa_hard_accuracies)}")
-        raise
-
-    try:
-        ax.plot(x_bp, bp_mean_accuracies,
+        ax.plot(bp_steps, bp_mean_accuracies, 
                 color='orange',
                 linewidth=1.5,
                 alpha=0.7,
                 label='Backpropagation')
     except Exception as e:
         log.error(f"Error plotting BP data: {e}")
-        log.error(f"BP x shape: {len(x_bp)}, BP accuracies shape: {len(bp_mean_accuracies)}")
+        log.error(f"BP steps shape: {len(bp_steps)}, BP accuracies shape: {len(bp_mean_accuracies)}")
         raise
-
-    ax.set_xlabel(f'Cumulative compute (EFP, r_time={r_time:.2f})')
+    
+    ax.set_xlabel('Training/Message Steps')
     ax.set_ylabel('Hard Accuracy')
     ax.set_title('Hard Accuracy Over Steps: SA vs Backpropagation')
     ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
@@ -1965,53 +1876,6 @@ def train_model(
         log.info(f"Training interrupted by user at epoch {epoch}/{epochs}")
         # Ensure progress bar is properly closed
         pbar.close()
-
-    # Final combined BP vs SA plot (single end-of-training call, reuse cached BP results)
-    try:
-        if (
-            knockout_eval
-            and knockout_eval.get("enabled")
-            and knockout_eval_base_circuit is not None
-            and knockout_vocabulary is not None
-            and bp_results is not None
-        ):
-            fig = plot_combined_bp_sa_stepwise_performance(
-                cfg=None,
-                x_data=x_data,
-                y_data=y_data,
-                loss_type=loss_type,
-                knockout_patterns=knockout_vocabulary,
-                model=model,
-                base_circuit=knockout_eval_base_circuit,
-                n_message_steps=periodic_eval_inner_steps,
-                layer_sizes=layer_sizes,
-                input_n=input_n,
-                arity=arity,
-                circuit_hidden_dim=circuit_hidden_dim,
-                bp_results=bp_results,
-            )
-
-            output_dir = hamming_analysis_dir or checkpoint_path
-            if output_dir is not None:
-                os.makedirs(output_dir, exist_ok=True)
-                combined_plot_path = os.path.join(output_dir, "combined_bp_sa_final.png")
-                try:
-                    import matplotlib.pyplot as plt
-                    fig.savefig(combined_plot_path, bbox_inches="tight")
-                finally:
-                    plt.close(fig)
-                if wandb_run:
-                    try:
-                        import wandb
-                        wandb_run.log({"combined/sa_vs_bp_final": wandb.Image(combined_plot_path)})
-                    except Exception as e:
-                        log.warning(f"Error logging combined plot to wandb: {e}")
-        else:
-            if knockout_eval and knockout_eval.get("enabled") and bp_results is None:
-                log.info("Skipping final combined plot: backprop results unavailable for reuse.")
-    except Exception as e:
-        log.warning(f"Error creating final combined BP vs SA plot: {e}")
-
     # Log final results to wandb
     _log_final_wandb_metrics(wandb_run, result, epochs)
 
