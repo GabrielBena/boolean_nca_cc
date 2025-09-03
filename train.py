@@ -39,6 +39,10 @@ from boolean_nca_cc.training.utils import (
     plot_training_curves,
 )
 from boolean_nca_cc.utils.graph_builder import build_graph
+from boolean_nca_cc.utils.pool_stats import (
+    calculate_expected_pool_updates,
+    compute_pool_parameter,
+)
 
 # Configure logging
 log = logging.getLogger(__name__)
@@ -377,6 +381,113 @@ def create_and_save_final_results(
     return final_results
 
 
+def process_pool_configuration(cfg):
+    """
+    Process pool configuration to automatically compute missing parameters based on expected updates.
+
+    Args:
+        cfg: Configuration object with pool settings
+
+    Returns:
+        Updated configuration with computed parameters
+
+    Raises:
+        ValueError: If configuration is underspecified or invalid
+    """
+    if cfg.pool.expected_updates is None:
+        # No automatic computation requested, validate current config
+        log.info("Using explicit pool configuration (no expected_updates specified)")
+        return cfg
+
+    # Check which parameters need to be computed
+    pool_params = {
+        "pool_size": cfg.pool.size,
+        "batch_size": cfg.training.meta_batch_size,
+        "n_message_steps": cfg.training.n_message_steps,
+        "reset_interval": cfg.pool.reset_interval,
+        "reset_fraction": cfg.pool.reset_fraction,
+    }
+
+    # Count None/null parameters
+    none_params = [key for key, value in pool_params.items() if value is None]
+
+    if len(none_params) == 0:
+        # All parameters specified, verify the configuration matches expected updates
+        log.info(
+            f"Verifying pool configuration matches target expected updates: {cfg.pool.expected_updates}"
+        )
+        stats = calculate_expected_pool_updates(**pool_params)
+        actual_updates = stats.expected_updates
+
+        if abs(actual_updates - cfg.pool.expected_updates) > 0.1:
+            log.warning(
+                f"Configuration mismatch: Expected {cfg.pool.expected_updates:.2f} updates, "
+                f"but configuration yields {actual_updates:.2f} updates"
+            )
+        else:
+            log.info(f"Configuration verified: {actual_updates:.2f} expected updates per circuit")
+
+        return cfg
+
+    elif len(none_params) == 1:
+        # Exactly one parameter to compute
+        param_to_solve = none_params[0]
+        log.info(
+            f"Computing {param_to_solve} for target expected updates: {cfg.pool.expected_updates}"
+        )
+
+        # Prepare arguments for computation
+        compute_kwargs = {k: v for k, v in pool_params.items() if v is not None}
+
+        try:
+            computed_value = compute_pool_parameter(
+                target_expected_updates=cfg.pool.expected_updates,
+                solve_for=param_to_solve,
+                **compute_kwargs,
+            )
+
+            # Update configuration with computed value
+            with open_dict(cfg):
+                if param_to_solve == "pool_size":
+                    cfg.pool.size = int(computed_value)
+                elif param_to_solve == "batch_size":
+                    cfg.training.meta_batch_size = int(computed_value)
+                elif param_to_solve == "n_message_steps":
+                    cfg.training.n_message_steps = int(computed_value)
+                elif param_to_solve == "reset_interval":
+                    cfg.pool.reset_interval = int(computed_value)
+                elif param_to_solve == "reset_fraction":
+                    cfg.pool.reset_fraction = float(computed_value)
+
+            log.info(f"Computed {param_to_solve} = {computed_value:.4f}")
+
+            # Verify the computation
+            updated_params = {
+                "pool_size": cfg.pool.size,
+                "batch_size": cfg.training.meta_batch_size,
+                "n_message_steps": cfg.training.n_message_steps,
+                "reset_interval": cfg.pool.reset_interval,
+                "reset_fraction": cfg.pool.reset_fraction,
+            }
+            stats = calculate_expected_pool_updates(**updated_params)
+            log.info(f"Verification: {stats.expected_updates:.2f} expected updates per circuit")
+
+        except ValueError as e:
+            raise ValueError(
+                f"Cannot compute {param_to_solve} for target {cfg.pool.expected_updates} updates: {e}"
+            )
+
+    else:
+        # Multiple parameters are None - underspecified
+        raise ValueError(
+            f"Pool configuration is underspecified. Cannot compute multiple parameters: {none_params}. "
+            f"Please specify all but one of: pool.size, training.meta_batch_size, "
+            f"training.n_message_steps, pool.reset_interval, pool.reset_fraction"
+        )
+
+    return cfg
+
+
 @hydra.main(version_base=None, config_path="configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     """
@@ -387,6 +498,29 @@ def main(cfg: DictConfig) -> None:
     """
     # Print configuration
     log.info(OmegaConf.to_yaml(cfg))
+
+    # Process pool configuration for automatic parameter computation
+    cfg = process_pool_configuration(cfg)
+
+    # Log final pool configuration and expected updates
+    pool_params = {
+        "pool_size": cfg.pool.size,
+        "batch_size": cfg.training.meta_batch_size,
+        "n_message_steps": cfg.training.n_message_steps,
+        "reset_interval": cfg.pool.reset_interval,
+        "reset_fraction": cfg.pool.reset_fraction,
+    }
+    stats = calculate_expected_pool_updates(**pool_params)
+
+    log.info("Final Pool Configuration:")
+    log.info(f"  Pool Size: {cfg.pool.size}")
+    log.info(f"  Batch Size: {cfg.training.meta_batch_size}")
+    log.info(f"  Message Steps: {cfg.training.n_message_steps}")
+    log.info(f"  Reset Interval: {cfg.pool.reset_interval}")
+    log.info(f"  Reset Fraction: {cfg.pool.reset_fraction:.4f}")
+    log.info(f"  Expected Updates per Circuit: {stats.expected_updates:.2f}")
+    log.info(f"  Selection Probability: {stats.selection_probability:.4f}")
+    log.info(f"  Expected Lifetime: {stats.expected_lifetime_epochs:.1f} epochs")
 
     # Set random seed
     rng = jax.random.PRNGKey(cfg.seed)
