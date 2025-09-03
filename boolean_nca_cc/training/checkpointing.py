@@ -885,19 +885,96 @@ def check_early_stopping(
 
 
 # WandB integration functions
+def _select_best_artifact(artifacts: list, prefer_metric: str | None = None):
+    """
+    Intelligently select the best artifact from multiple best model artifacts.
+
+    Args:
+        artifacts: List of WandB artifacts to choose from
+        prefer_metric: Optional specific metric to prefer (e.g., "eval_in_hard_accuracy")
+
+    Returns:
+        Selected artifact
+    """
+    if not artifacts:
+        raise ValueError("No artifacts provided for selection")
+
+    if len(artifacts) == 1:
+        return artifacts[0]
+
+    # Extract metric names from artifact names
+    artifact_metrics = []
+    for artifact in artifacts:
+        # Extract metric from artifact name (e.g., "best_model_eval_in_hard_accuracy" -> "eval_in_hard_accuracy")
+        name_parts = artifact.name.split("best_model_")
+        if len(name_parts) > 1:
+            metric_part = name_parts[1]
+            # Remove version suffix if present (e.g., ":v0")
+            if ":" in metric_part:
+                metric_part = metric_part.split(":")[0]
+            artifact_metrics.append((artifact, metric_part))
+        else:
+            # Fallback for artifacts that don't follow the new naming scheme
+            artifact_metrics.append((artifact, "unknown"))
+
+    # If a specific metric is preferred, try to find it
+    if prefer_metric:
+        for artifact, metric in artifact_metrics:
+            if metric == prefer_metric:
+                log.info(f"Found preferred metric '{prefer_metric}' in artifact: {artifact.name}")
+                return artifact
+        log.warning(f"Preferred metric '{prefer_metric}' not found, using intelligent selection")
+
+    # Intelligent selection priority:
+    # 1. Eval metrics over training metrics
+    # 2. Hard metrics over soft metrics
+    # 3. In-distribution over out-of-distribution
+    # 4. Accuracy over loss
+
+    def metric_priority(metric: str) -> tuple[int, int, int, int]:
+        """Calculate priority score for a metric (lower is better)."""
+        # Eval vs training (0 = eval, 1 = training)
+        eval_score = 0 if metric.startswith("eval") else 1
+
+        # Hard vs soft (0 = hard, 1 = soft)
+        hard_score = 0 if "hard" in metric else 1
+
+        # In vs out distribution (0 = in, 1 = out, 2 = neither)
+        if "eval_in" in metric:
+            dist_score = 0
+        elif "eval_out" in metric:
+            dist_score = 1
+        else:
+            dist_score = 2
+
+        # Accuracy vs loss (0 = accuracy, 1 = loss)
+        acc_score = 0 if "accuracy" in metric else 1
+
+        return (eval_score, hard_score, dist_score, acc_score)
+
+    # Sort artifacts by priority
+    artifact_metrics.sort(key=lambda x: metric_priority(x[1]))
+
+    selected_artifact, selected_metric = artifact_metrics[0]
+    log.info(f"Selected artifact with metric '{selected_metric}' using intelligent priority")
+
+    return selected_artifact
+
+
 def load_config_from_wandb(
     run_id: str | None = None,
     filters: dict[str, Any] | None = None,
     project: str = "boolean-nca-cc",
     entity: str = "m2snn",
     download_dir: str = "saves",
-    filename: str = "best_model_hard_accuracy",
+    filename: str = "best_model",
     filetype: str = "pkl",
     run_from_last: int = 1,
     use_cache: bool = True,
     force_download: bool = False,
     select_by_best_metric: bool = False,
     metric_name: str = "hard_accuracy",
+    prefer_metric: str | None = None,
 ) -> tuple[Any, str, str]:
     """
     Load config and checkpoint information from WandB artifacts.
@@ -912,13 +989,15 @@ def load_config_from_wandb(
         project: WandB project name
         entity: WandB entity/username
         download_dir: Directory to download artifacts to
-        filename: Filename of the best model
+        filename: Base filename to search for (e.g., "best_model" matches all best model artifacts)
         filetype: Filetype of the best model
         run_from_last: Index from the end of runs list to select
         use_cache: Whether to use locally cached artifacts if available
         force_download: If True, always download from wandb even if local cache exists
         select_by_best_metric: If True, select run with highest metric
         metric_name: Name of the metric to maximize when select_by_best_metric is True
+        prefer_metric: Optional specific metric to prefer when multiple best models are available
+                      (e.g., "eval_in_hard_accuracy", "eval_out_hard_accuracy")
 
     Returns:
         Tuple of (config, checkpoint_path, run_id) containing the hydra config,
@@ -1041,8 +1120,19 @@ def load_config_from_wandb(
         else:
             raise ValueError(f"No model artifacts found for run {run.id}")
 
-    latest_best = best_models[-1]
-    log.info(f"Found best model artifact: {latest_best.name}")
+    # Intelligent selection of best model artifact
+    if len(best_models) == 1:
+        selected_artifact = best_models[0]
+        log.info(f"Found single best model artifact: {selected_artifact.name}")
+    else:
+        log.info(f"Found {len(best_models)} best model artifacts:")
+        for a in best_models:
+            log.info(f"  - {a.name}")
+
+        selected_artifact = _select_best_artifact(best_models, prefer_metric)
+        log.info(f"Selected best model artifact: {selected_artifact.name}")
+
+    latest_best = selected_artifact
 
     # Create download directory if it doesn't exist
     download_path = os.path.join(download_dir, f"run_{run.id}")
@@ -1051,7 +1141,10 @@ def load_config_from_wandb(
     # Download the artifact
     log.info(f"Downloading artifact to {download_path}")
     artifact_dir = latest_best.download(root=download_path)
-    checkpoint_path = os.path.join(artifact_dir, f"{filename}.{filetype}")
+
+    # Extract the actual filename from the artifact name (remove version suffix if present)
+    actual_filename = latest_best.name.split(":")[0]  # Remove ":v0" etc.
+    checkpoint_path = os.path.join(artifact_dir, f"{actual_filename}.{filetype}")
 
     # Get config from run
     config = OmegaConf.create(run.config)
@@ -1112,19 +1205,21 @@ def load_best_model_from_wandb(
     project: str = "boolean-nca-cc",
     entity: str = "m2snn",
     download_dir: str = "saves",
-    filename: str = "best_model_hard_accuracy",
+    filename: str = "best_model",
     filetype: str = "pkl",
     run_from_last: int = 1,
     use_cache: bool = True,
     force_download: bool = False,
     select_by_best_metric: bool = False,
     metric_name: str = "hard_accuracy",
+    prefer_metric: str | None = None,
 ) -> tuple[Any, dict[str, Any], Any]:
     """
     Load the best model from WandB artifacts with full backward compatibility.
 
-    This function handles both old pickle-based artifacts and new Orbax-based
-    checkpoints seamlessly, providing a unified interface for model loading.
+    This function handles both old single-metric and new multi-metric best model artifacts,
+    providing a unified interface for model loading. It automatically detects and selects
+    the best available artifact.
 
     This is now a convenience wrapper around the split functions load_config_from_wandb
     and load_model_from_config_and_checkpoint.
@@ -1136,18 +1231,26 @@ def load_best_model_from_wandb(
         project: WandB project name
         entity: WandB entity/username
         download_dir: Directory to download artifacts to
-        filename: Filename of the best model
+        filename: Base filename to search for (e.g., "best_model" matches all best model artifacts)
         filetype: Filetype of the best model
         run_from_last: Index from the end of runs list to select
         use_cache: Whether to use locally cached artifacts if available
         force_download: If True, always download from wandb even if local cache exists
         select_by_best_metric: If True, select run with highest metric
         metric_name: Name of the metric to maximize when select_by_best_metric is True
+        prefer_metric: Optional specific metric to prefer when multiple best models are available
+                      (e.g., "eval_in_hard_accuracy", "eval_out_hard_accuracy"). If None, uses
+                      intelligent selection prioritizing eval metrics over training metrics.
 
     Returns:
         Tuple of (loaded_model, loaded_dict, config) containing the instantiated model,
         full loaded state, and the complete hydra config used during training
     """
+
+    # For backward compatibility, if filename is the old style, update it to be more generic
+    if filename == "best_model_hard_accuracy":
+        log.info("Detected old-style filename, updating to generic 'best_model' for compatibility")
+        filename = "best_model"
 
     # Load config and checkpoint information
     config, checkpoint_path, run_id = load_config_from_wandb(
@@ -1163,6 +1266,7 @@ def load_best_model_from_wandb(
         force_download=force_download,
         select_by_best_metric=select_by_best_metric,
         metric_name=metric_name,
+        prefer_metric=prefer_metric,
     )
 
     # Load model from config and checkpoint

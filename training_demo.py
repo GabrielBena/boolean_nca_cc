@@ -37,6 +37,7 @@ from boolean_nca_cc.circuits.tasks import TASKS, get_task_data
 
 # Import training loop functions
 from boolean_nca_cc.training.checkpointing import (
+    load_best_model_from_wandb,
     load_config_from_wandb,
     load_model_from_config_and_checkpoint,
 )
@@ -260,6 +261,11 @@ class CircuitOptimizationDemo:
         self.wandb_download_dir = "saves"
         self.run_id = None
         self.loaded_run_id = None
+
+        # Model loading preferences
+        self.load_modes = ["Latest Checkpoint", "Best Model"]
+        self.load_mode_idx = 1  # Default to best model
+        self.prefer_metric = None  # For best model selection
 
         # Initialize visualization
         self.setup_visualization()
@@ -645,34 +651,56 @@ class CircuitOptimizationDemo:
                 "config.circuit.task": self.available_tasks[self.task_idx],
             }
 
-            # Load frozen model
-            loaded_config, checkpoint_path, run_id = load_config_from_wandb(
-                run_id=self.run_id,
-                filters=filters if not self.run_id else None,
-                project=self.wandb_project,
-                entity=self.wandb_entity,
-                download_dir=self.wandb_download_dir,
-                filename="latest_checkpoint",
-                select_by_best_metric=False,
-                run_from_last=1,
-                use_cache=True,
-            )
+            # Load frozen model based on selected mode
+            load_mode = self.load_modes[self.load_mode_idx]
 
-            if loaded_config.circuit.num_layers != self.layer_n:
-                print(
-                    f"Layer number mismatch: {loaded_config.circuit.num_layers} != {self.layer_n}"
+            if load_mode == "Best Model":
+                # Use the new best model loading with intelligent selection
+                model, loaded_dict, loaded_config = load_best_model_from_wandb(
+                    run_id=self.run_id,
+                    filters=filters if not self.run_id else None,
+                    project=self.wandb_project,
+                    entity=self.wandb_entity,
+                    download_dir=self.wandb_download_dir,
+                    select_by_best_metric=False,
+                    run_from_last=1,
+                    use_cache=True,
+                    prefer_metric=self.prefer_metric,  # Will use intelligent selection if None
                 )
-                print(f"Using layer number: {self.layer_n}")
-                loaded_config.circuit.num_layers = self.layer_n
 
-            model, loaded_dict = load_model_from_config_and_checkpoint(
-                config=loaded_config,
-                checkpoint_path=checkpoint_path,
-                run_id=run_id,
-            )
+                # For best model loading, we already have the instantiated model
+                self.frozen_model = model
+                self.loaded_run_id = loaded_dict.get("run_id", "unknown")
 
-            self.frozen_model = model
-            self.loaded_run_id = loaded_dict.get("run_id", "unknown")
+            else:  # Latest Checkpoint
+                # Use the original checkpoint loading
+                loaded_config, checkpoint_path, run_id = load_config_from_wandb(
+                    run_id=self.run_id,
+                    filters=filters if not self.run_id else None,
+                    project=self.wandb_project,
+                    entity=self.wandb_entity,
+                    download_dir=self.wandb_download_dir,
+                    filename="latest_checkpoint",
+                    select_by_best_metric=False,
+                    run_from_last=1,
+                    use_cache=True,
+                )
+
+                if loaded_config.circuit.num_layers != self.layer_n:
+                    print(
+                        f"Layer number mismatch: {loaded_config.circuit.num_layers} != {self.layer_n}"
+                    )
+                    print(f"Using layer number: {self.layer_n}")
+                    loaded_config.circuit.num_layers = self.layer_n
+
+                model, loaded_dict = load_model_from_config_and_checkpoint(
+                    config=loaded_config,
+                    checkpoint_path=checkpoint_path,
+                    run_id=run_id,
+                )
+
+                self.frozen_model = model
+                self.loaded_run_id = loaded_dict.get("run_id", "unknown")
 
             # Extract hidden_dim from loaded config for graph compatibility
             if hasattr(loaded_config, "model") and hasattr(loaded_config.model, "hidden_dim"):
@@ -1523,6 +1551,55 @@ class CircuitOptimizationDemo:
 
                 # WandB integration
                 imgui.separator_text("Load Frozen Model")
+
+                # Loading mode selection
+                load_changed, self.load_mode_idx = imgui.combo(
+                    "Load Mode", self.load_mode_idx, self.load_modes
+                )
+                if load_changed:
+                    print(f"Changed load mode to: {self.load_modes[self.load_mode_idx]}")
+
+                # Show description of selected mode
+                if self.load_mode_idx == 0:  # Latest Checkpoint
+                    imgui.text_colored(
+                        imgui.ImVec4(0.7, 0.7, 0.7, 1.0),
+                        "Loads most recent checkpoint (may not be best performing)",
+                    )
+                else:  # Best Model
+                    imgui.text_colored(
+                        imgui.ImVec4(0.0, 1.0, 0.0, 1.0),
+                        "Loads best performing model (recommended)",
+                    )
+
+                # Optional preferred metric for best model selection
+                if self.load_mode_idx == 1:  # Best Model mode
+                    prefer_metrics = [
+                        "Auto (Intelligent Selection)",
+                        "eval_in_hard_accuracy",
+                        "eval_out_hard_accuracy",
+                        "eval_in_hard_loss",
+                        "eval_out_hard_loss",
+                        "training_hard_accuracy",
+                    ]
+                    prefer_metric_idx = (
+                        0
+                        if self.prefer_metric is None
+                        else (
+                            prefer_metrics.index(self.prefer_metric)
+                            if self.prefer_metric in prefer_metrics
+                            else 0
+                        )
+                    )
+
+                    changed, prefer_metric_idx = imgui.combo(
+                        "Prefer Metric", prefer_metric_idx, prefer_metrics
+                    )
+                    if changed:
+                        self.prefer_metric = (
+                            None if prefer_metric_idx == 0 else prefer_metrics[prefer_metric_idx]
+                        )
+                        print(f"Preferred metric: {self.prefer_metric or 'Auto'}")
+
                 run_id_buffer = self.run_id if self.run_id else ""
                 changed, run_id_buffer = imgui.input_text("Run ID", run_id_buffer, 256)
                 if changed:
@@ -1743,6 +1820,9 @@ class CircuitOptimizationDemo:
             # Status information
             imgui.separator_text("Status")
             imgui.text(f"Method: {method_name}")
+            imgui.text(f"Load Mode: {self.load_modes[self.load_mode_idx]}")
+            if self.load_mode_idx == 1 and self.prefer_metric:  # Best Model with specific metric
+                imgui.text(f"Prefer Metric: {self.prefer_metric}")
             imgui.text(f"Circuit Parameters: {sum(logit.size for logit in self.logits0)}")
             imgui.text(f"Optimization Step: {self.step_i}")
             imgui.text(f"Active Input Case: {self.active_case_i}")

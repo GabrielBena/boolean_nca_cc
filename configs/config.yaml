@@ -77,18 +77,6 @@ pool:
   # the system will automatically compute the missing parameter(s)
   expected_updates: 96  # Target expected updates per circuit (e.g., 50.0)
   
-  # Example configurations:
-  # Option 1: Set expected_updates and let system compute reset_fraction
-  # expected_updates: 50.0
-  # reset_fraction: null
-  # 
-  # Option 2: Set expected_updates and let system compute reset_interval  
-  # expected_updates: 75.0
-  # reset_interval: null
-  #
-  # Option 3: Verify existing configuration matches target
-  # expected_updates: 30.0  # Will check if current config yields ~30 updates
-  
   # Genetic mutation parameters
   mutation_rate: 1e-3 # For genetic mutation rate
   n_swaps_per_layer: null # For genetic mutation number of swaps per layer
