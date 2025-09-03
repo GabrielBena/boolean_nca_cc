@@ -67,7 +67,7 @@ training:
 pool:
   size: 1024
   # reset_fraction: 0.125 # Good for batch size 256, reset interval 64, n_steps 5 
-  reset_fraction: 0.125
+  reset_fraction: null
   reset_interval: 64
   reset_strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
@@ -75,7 +75,7 @@ pool:
   # Automatic parameter computation based on target expected updates
   # If expected_updates is specified and some parameters above are null, 
   # the system will automatically compute the missing parameter(s)
-  expected_updates: null  # Target expected updates per circuit (e.g., 50.0)
+  expected_updates: 96  # Target expected updates per circuit (e.g., 50.0)
   
   # Example configurations:
   # Option 1: Set expected_updates and let system compute reset_fraction
