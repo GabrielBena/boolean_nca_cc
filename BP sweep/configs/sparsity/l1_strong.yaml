@@ -1,0 +1,7 @@
+# @package _global_
+# Strong L1 sparsity regularization
+
+sparsity:
+  enabled: true
+  type: "l1"
+  weight: 1e-2

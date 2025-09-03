@@ -1,0 +1,7 @@
+# @package _global_
+# No sparsity regularization (baseline)
+
+sparsity:
+  enabled: false
+  type: null
+  weight: 0.0

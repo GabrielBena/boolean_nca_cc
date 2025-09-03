@@ -1,0 +1,18 @@
+# @package _global_
+# 8-bit binary multiplication task
+
+task:
+  name: "binary_multiply"
+  description: "8-bit binary multiplication"
+  
+  # Problem dimensions
+  input_n: 8
+  output_n: 8
+  
+  # Circuit architecture
+  arity: 4
+  layer_n: 3
+  width_factor: 2
+  
+  # Train/test split
+  test_ratio: 0.2

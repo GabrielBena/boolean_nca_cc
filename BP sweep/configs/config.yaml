@@ -1,0 +1,21 @@
+# Main configuration file for sparsity comparison studies
+defaults:
+  # - experiment: quick_study
+  - experiment: full_study
+  # - experiment: ablation_study
+  - task: binary_multiply_8bit
+  - optimizer: adam_default
+  - sparsity: l1_medium
+  - _self_
+
+# Global settings
+study_name: "sparsity_comparison"
+save_results: true
+results_dir: "results/${study_name}/${now:%Y-%m-%d_%H-%M-%S}"
+
+# Logging
+hydra:
+  run:
+    dir: outputs/${study_name}/${now:%Y-%m-%d_%H-%M-%S}
+  job:
+    name: ${study_name}

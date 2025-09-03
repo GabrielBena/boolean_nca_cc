@@ -1,0 +1,23 @@
+# @package _global_
+# Focused ablation study for specific sparsity investigation
+
+# Experiment configuration
+experiment:
+  name: "ablation_study"
+  description: "Focused study on specific sparsity configurations"
+  
+  # Moderate number of seeds for focused analysis
+  split_seeds: [42, 123, 456]
+  circuit_seeds: [100, 200, 300]
+  
+  # Training configuration
+  num_steps: 128
+  loss_type: "l4"
+  
+  # Focused sparsity sweep - fine-grained around promising values
+  sparsity_types: ["l1"]  # Focus on best performing type
+  sparsity_weights: [0.0, 5e-4, 1e-3, 2e-3, 5e-3, 1e-2]
+  
+  # Parallelization
+  n_jobs: 4
+  verbose: true

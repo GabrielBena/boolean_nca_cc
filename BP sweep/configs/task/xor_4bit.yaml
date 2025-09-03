@@ -1,0 +1,18 @@
+# @package _global_
+# 4-bit XOR task (simple for debugging)
+
+task:
+  name: "xor"
+  description: "4-bit XOR operation"
+  
+  # Problem dimensions
+  input_n: 4
+  output_n: 4
+  
+  # Circuit architecture
+  arity: 2
+  layer_n: 2
+  width_factor: 2
+  
+  # Train/test split
+  test_ratio: 0.25

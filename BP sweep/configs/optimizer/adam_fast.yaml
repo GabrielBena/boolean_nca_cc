@@ -1,0 +1,9 @@
+# @package _global_
+# Fast Adam optimizer for quick convergence
+
+optimizer:
+  name: "adam"
+  learning_rate: 2.0
+  b1: 0.9
+  b2: 0.999
+  weight_decay: 1e-3
