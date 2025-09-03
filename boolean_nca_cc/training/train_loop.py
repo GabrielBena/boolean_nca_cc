@@ -1296,21 +1296,6 @@ def train_model(
 
         log.info(eval_datasets.get_summary())
 
-    # Save initial stable state if needed
-    last_stable_state = {
-        "model": model,
-        "optimizer": optimizer,
-        "pool": circuit_pool,
-        "metrics": {
-            "losses": losses,
-            "hard_losses": hard_losses,
-            "accuracies": accuracies,
-            "hard_accuracies": hard_accuracies,
-            "reset_steps": reset_steps,
-        },
-        "epoch": 0,
-    }
-
     # Determine effective batch chunk size
     effective_batch_chunk_size = (
         batch_chunk_size if batch_chunk_size is not None else meta_batch_size
@@ -1433,33 +1418,6 @@ def train_model(
                 # Update last reset epoch
                 last_reset_epoch = epoch
                 diversity = circuit_pool.get_wiring_diversity(layer_sizes)
-
-            if jp.isnan(loss):
-                log.warning(f"Loss is NaN at epoch {epoch}, returning last stable state")
-                # Save the last stable state if enabled
-                save_stable_state(
-                    checkpoint_path,
-                    save_stable_states,
-                    last_stable_state,
-                    epoch,
-                    wandb_run,
-                )
-                return last_stable_state
-            else:
-                # Update last stable state
-                last_stable_state = {
-                    "model": model,
-                    "optimizer": optimizer,
-                    "pool": circuit_pool,
-                    "metrics": {
-                        "losses": losses.copy(),
-                        "hard_losses": hard_losses.copy(),
-                        "accuracies": accuracies.copy(),
-                        "hard_accuracies": hard_accuracies.copy(),
-                        "reset_steps": reset_steps.copy(),
-                    },
-                    "epoch": epoch,
-                }
 
                 # Record metrics
                 losses.append(float(loss))
