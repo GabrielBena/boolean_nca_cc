@@ -1108,29 +1108,37 @@ def load_config_from_wandb(
 
     if not best_models:
         log.info(f"No artifacts found matching '{filename}'")
-        # Try to find any model artifacts
-        model_artifacts = [a for a in artifacts if "model" in a.name.lower()]
-        if model_artifacts:
-            log.info("Found other model artifacts:")
-            for a in model_artifacts:
-                log.info(f"  - {a.name}")
-            raise ValueError(
-                f"No {filename} artifacts found for run {run.id}, but found other model artifacts. Please check the artifact names."
-            )
+        # Fallback: try latest checkpoint artifacts
+        latest_ckpts = [a for a in artifacts if "latest_checkpoint" in a.name]
+        if latest_ckpts:
+            # Pick the most recent one (artifacts are usually in chronological order)
+            selected_artifact = latest_ckpts[-1]
+            log.info(f"Falling back to latest checkpoint artifact: {selected_artifact.name}")
         else:
-            raise ValueError(f"No model artifacts found for run {run.id}")
-
-    # Intelligent selection of best model artifact
-    if len(best_models) == 1:
-        selected_artifact = best_models[0]
-        log.info(f"Found single best model artifact: {selected_artifact.name}")
+            # Try to find any model artifacts for better error reporting
+            model_artifacts = [a for a in artifacts if "model" in a.name.lower()]
+            if model_artifacts:
+                log.info("Found other model artifacts:")
+                for a in model_artifacts:
+                    log.info(f"  - {a.name}")
+                raise ValueError(
+                    f"No {filename} or latest_checkpoint artifacts found for run {run.id},"
+                    " but found other model artifacts. Please check the artifact names."
+                )
+            else:
+                raise ValueError(f"No model artifacts found for run {run.id}")
     else:
-        log.info(f"Found {len(best_models)} best model artifacts:")
-        for a in best_models:
-            log.info(f"  - {a.name}")
+        # Intelligent selection of best model artifact
+        if len(best_models) == 1:
+            selected_artifact = best_models[0]
+            log.info(f"Found single best model artifact: {selected_artifact.name}")
+        else:
+            log.info(f"Found {len(best_models)} best model artifacts:")
+            for a in best_models:
+                log.info(f"  - {a.name}")
 
-        selected_artifact = _select_best_artifact(best_models, prefer_metric)
-        log.info(f"Selected best model artifact: {selected_artifact.name}")
+            selected_artifact = _select_best_artifact(best_models, prefer_metric)
+            log.info(f"Selected best model artifact: {selected_artifact.name}")
 
     latest_best = selected_artifact
 
