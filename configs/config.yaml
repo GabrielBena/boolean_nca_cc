@@ -45,8 +45,8 @@ training:
   random_loss_step: false  # Use random message passing step for loss computation
   use_beta_loss_step: false  # Use beta distribution for random loss step (varies from early to late steps through training)
   # BATCH SIZE
-  meta_batch_size: 128
-  batch_chunk_size: 128  # Sequential batch processing chunk size (null means use meta_batch_size)
+  meta_batch_size: 256
+  batch_chunk_size: 256  # Sequential batch processing chunk size (null means use meta_batch_size)
   # OPTIMIZATION
   learning_rate: 1e-4
   weight_decay: 1e-5
@@ -68,7 +68,7 @@ pool:
   size: 1024
   # reset_fraction: 0.125 # Good for batch size 256, reset interval 64, n_steps 5 
   reset_fraction: 0.125
-  reset_interval: 32
+  reset_interval: 64
   reset_strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
   
@@ -153,7 +153,7 @@ stop_accuracy:
 checkpoint:
   enabled: true
   interval: 1031  # Save checkpoints every N epochs (prime number to avoid rest pool before)
-    
+  save_best: true
   # Multi-metric best model tracking - specify which metrics to track and save
   track_best_metrics:
     enabled: true  # Whether to enable multi-metric tracking (in addition to the single best_metric above)

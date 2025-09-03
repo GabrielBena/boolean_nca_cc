@@ -713,6 +713,7 @@ def main(cfg: DictConfig) -> None:
         stop_accuracy_patience=cfg.stop_accuracy.patience,
         stop_accuracy_min_epochs=cfg.stop_accuracy.min_epochs,
         # Best model tracking parameters
+        save_best=cfg.checkpoint.save_best,
         track_metrics=track_metrics,
     )
 
