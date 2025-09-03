@@ -1419,193 +1419,193 @@ def train_model(
                 last_reset_epoch = epoch
                 diversity = circuit_pool.get_wiring_diversity(layer_sizes)
 
-                # Record metrics
-                losses.append(float(loss))
-                hard_losses.append(float(hard_loss))
-                accuracies.append(float(accuracy))
-                hard_accuracies.append(float(hard_accuracy))
-                reset_steps.append(float(avg_steps_reset))
+            # Record metrics
+            losses.append(float(loss))
+            hard_losses.append(float(hard_loss))
+            accuracies.append(float(accuracy))
+            hard_accuracies.append(float(hard_accuracy))
+            reset_steps.append(float(avg_steps_reset))
 
-                # Prepare training metrics for best model tracking
-                training_metrics = {
-                    "loss": float(loss),
-                    "hard_loss": float(hard_loss),
-                    "accuracy": float(accuracy),
-                    "hard_accuracy": float(hard_accuracy),
-                }
+            # Prepare training metrics for best model tracking
+            training_metrics = {
+                "loss": float(loss),
+                "hard_loss": float(hard_loss),
+                "accuracy": float(accuracy),
+                "hard_accuracy": float(hard_accuracy),
+            }
 
-                # Initialize evaluation metrics as None (will be set if periodic eval runs)
-                current_eval_metrics = None
+            # Initialize evaluation metrics as None (will be set if periodic eval runs)
+            current_eval_metrics = None
 
-                avg_steps = circuit_pool.get_average_update_steps()
-                # Log to wandb if enabled
-                metrics_dict = {
-                    "training/epoch": epoch,
-                    "training/loss": float(loss),
-                    "training/hard_loss": float(hard_loss),
-                    "training/accuracy": float(accuracy),
-                    "training/hard_accuracy": float(hard_accuracy),
-                    "pool/wiring_diversity": float(diversity),
-                    "pool/reset_steps": float(avg_steps_reset),
-                    "pool/avg_update_steps": float(avg_steps),
-                    "pool/loss_steps": loss_steps,
-                }
+            avg_steps = circuit_pool.get_average_update_steps()
+            # Log to wandb if enabled
+            metrics_dict = {
+                "training/epoch": epoch,
+                "training/loss": float(loss),
+                "training/hard_loss": float(hard_loss),
+                "training/accuracy": float(accuracy),
+                "training/hard_accuracy": float(hard_accuracy),
+                "pool/wiring_diversity": float(diversity),
+                "pool/reset_steps": float(avg_steps_reset),
+                "pool/avg_update_steps": float(avg_steps),
+                "pool/loss_steps": loss_steps,
+            }
 
-                # Add sequential batching metrics if enabled
-                if use_sequential_batching:
-                    num_chunks = (
-                        meta_batch_size + effective_batch_chunk_size - 1
-                    ) // effective_batch_chunk_size
-                    metrics_dict.update(
-                        {
-                            "training/sequential_batching": True,
-                            "training/meta_batch_size": meta_batch_size,
-                            "training/chunk_size": effective_batch_chunk_size,
-                            "training/num_chunks": num_chunks,
-                        }
-                    )
-                else:
-                    metrics_dict["training/sequential_batching"] = False
+            # Add sequential batching metrics if enabled
+            if use_sequential_batching:
+                num_chunks = (
+                    meta_batch_size + effective_batch_chunk_size - 1
+                ) // effective_batch_chunk_size
+                metrics_dict.update(
+                    {
+                        "training/sequential_batching": True,
+                        "training/meta_batch_size": meta_batch_size,
+                        "training/chunk_size": effective_batch_chunk_size,
+                        "training/num_chunks": num_chunks,
+                    }
+                )
+            else:
+                metrics_dict["training/sequential_batching"] = False
 
-                # Add learning rate if available
-                schedule_value = schedule(epoch) if schedule is not None else learning_rate
-                metrics_dict["scheduler/learning_rate"] = schedule_value
+            # Add learning rate if available
+            schedule_value = schedule(epoch) if schedule is not None else learning_rate
+            metrics_dict["scheduler/learning_rate"] = schedule_value
 
-                # Add early stopping metrics if enabled
-                if stop_accuracy_enabled:
-                    metrics_dict["early_stop/enabled"] = True
-                    metrics_dict["early_stop/epochs_above_threshold"] = epochs_above_threshold
-                    metrics_dict["early_stop/threshold"] = stop_accuracy_threshold
-                    if first_threshold_epoch is not None:
-                        metrics_dict["early_stop/first_threshold_epoch"] = first_threshold_epoch
+            # Add early stopping metrics if enabled
+            if stop_accuracy_enabled:
+                metrics_dict["early_stop/enabled"] = True
+                metrics_dict["early_stop/epochs_above_threshold"] = epochs_above_threshold
+                metrics_dict["early_stop/threshold"] = stop_accuracy_threshold
+                if first_threshold_epoch is not None:
+                    metrics_dict["early_stop/first_threshold_epoch"] = first_threshold_epoch
 
-                _log_to_wandb(wandb_run, metrics_dict, epoch, log_interval)
+            _log_to_wandb(wandb_run, metrics_dict, epoch, log_interval)
 
-                # Update progress bar with current metrics
-                postfix_dict = {
-                    "Loss": f"{loss:.4f}",
-                    "Accuracy": f"{accuracy:.4f}",
-                    "Hard Acc": f"{hard_accuracy:.4f}",
-                    "Diversity": f"{diversity:.3f}",
-                    "Reset Steps": f"{avg_steps_reset:.2f}",
-                    "Loss Steps": f"{loss_steps:.2f}",
-                }
+            # Update progress bar with current metrics
+            postfix_dict = {
+                "Loss": f"{loss:.4f}",
+                "Accuracy": f"{accuracy:.4f}",
+                "Hard Acc": f"{hard_accuracy:.4f}",
+                "Diversity": f"{diversity:.3f}",
+                "Reset Steps": f"{avg_steps_reset:.2f}",
+                "Loss Steps": f"{loss_steps:.2f}",
+            }
 
-                # Add chunk info if using sequential batching
-                if use_sequential_batching:
-                    num_chunks = (
-                        meta_batch_size + effective_batch_chunk_size - 1
-                    ) // effective_batch_chunk_size
-                    postfix_dict["Chunks"] = f"{num_chunks}x{effective_batch_chunk_size}"
+            # Add chunk info if using sequential batching
+            if use_sequential_batching:
+                num_chunks = (
+                    meta_batch_size + effective_batch_chunk_size - 1
+                ) // effective_batch_chunk_size
+                postfix_dict["Chunks"] = f"{num_chunks}x{effective_batch_chunk_size}"
 
-                # Add early stopping info if active
-                if stop_accuracy_enabled and epochs_above_threshold > 0:
-                    postfix_dict["ES"] = f"{epochs_above_threshold}/{stop_accuracy_patience}"
+            # Add early stopping info if active
+            if stop_accuracy_enabled and epochs_above_threshold > 0:
+                postfix_dict["ES"] = f"{epochs_above_threshold}/{stop_accuracy_patience}"
 
-                pbar.set_postfix(postfix_dict)
+            pbar.set_postfix(postfix_dict)
 
-                # Step 2: Run periodic evaluation if enabled (includes unified best model tracking)
-                if (
-                    periodic_eval_enabled
-                    and eval_datasets is not None
-                    and epoch % periodic_eval_interval == 0
-                ):
-                    # Run enhanced evaluations: fixed seed, pool sample (if diversity > 1), and OOD
-                    rng, eval_key = jax.random.split(rng)
+            # Step 2: Run periodic evaluation if enabled (includes unified best model tracking)
+            if (
+                periodic_eval_enabled
+                and eval_datasets is not None
+                and epoch % periodic_eval_interval == 0
+            ):
+                # Run enhanced evaluations: fixed seed, pool sample (if diversity > 1), and OOD
+                rng, eval_key = jax.random.split(rng)
 
-                    # Use the same datasets created during initialization
-                    # The pool evaluation circuits are recreated with the same logic as training
-                    current_datasets = eval_datasets
+                # Use the same datasets created during initialization
+                # The pool evaluation circuits are recreated with the same logic as training
+                current_datasets = eval_datasets
 
-                    eval_results = run_unified_periodic_evaluation(
-                        model=model,
-                        datasets=current_datasets,
-                        pool=circuit_pool,
-                        x_data=x_data,
-                        y_data=y_data,
-                        input_n=input_n,
-                        arity=arity,
-                        circuit_hidden_dim=circuit_hidden_dim,
-                        n_message_steps=periodic_eval_inner_steps,  # Use fixed message steps
-                        loss_type=loss_type,
-                        epoch=epoch,
-                        wandb_run=wandb_run,
-                        log_stepwise=periodic_eval_log_stepwise,
-                        layer_sizes=layer_sizes,
-                        log_pool_scatter=periodic_eval_log_pool_scatter,
-                        # Best model tracking parameters
-                        best_model_tracker=best_model_tracker,
-                        checkpoint_path=checkpoint_path,
-                        save_best=save_best,
-                        optimizer=optimizer,
-                        training_metrics=training_metrics,
-                        track_metrics=track_metrics,
-                    )
-                    # Extract final metrics for best model tracking (use IN-distribution metrics)
-                    current_eval_metrics = eval_results.get("final_metrics_in", None)
-
-                # Step 3: Save periodic checkpoints (best models are now handled by unified system)
-                if checkpoint_enabled:
-                    save_periodic_checkpoint(
-                        checkpoint_path,
-                        model,
-                        optimizer,
-                        {
-                            "losses": losses,
-                            "hard_losses": hard_losses,
-                            "accuracies": accuracies,
-                            "hard_accuracies": hard_accuracies,
-                            "reset_steps": reset_steps,
-                        },
-                        epoch,
-                        checkpoint_interval,
-                        wandb_run,
-                    )
-
-                # Step 4: Check for early stopping based on accuracy
-                (
-                    should_break,
-                    early_stop_triggered,
-                    epochs_above_threshold,
-                    first_threshold_epoch,
-                    current_eval_metrics,
-                    rng,
-                ) = check_early_stopping(
-                    stop_accuracy_enabled=stop_accuracy_enabled,
+                eval_results = run_unified_periodic_evaluation(
+                    model=model,
+                    datasets=current_datasets,
+                    pool=circuit_pool,
+                    x_data=x_data,
+                    y_data=y_data,
+                    input_n=input_n,
+                    arity=arity,
+                    circuit_hidden_dim=circuit_hidden_dim,
+                    n_message_steps=periodic_eval_inner_steps,  # Use fixed message steps
+                    loss_type=loss_type,
                     epoch=epoch,
-                    stop_accuracy_min_epochs=stop_accuracy_min_epochs,
-                    early_stop_triggered=early_stop_triggered,
-                    stop_accuracy_metric=stop_accuracy_metric,
-                    stop_accuracy_source=stop_accuracy_source,
+                    wandb_run=wandb_run,
+                    log_stepwise=periodic_eval_log_stepwise,
+                    layer_sizes=layer_sizes,
+                    log_pool_scatter=periodic_eval_log_pool_scatter,
+                    # Best model tracking parameters
+                    best_model_tracker=best_model_tracker,
+                    checkpoint_path=checkpoint_path,
+                    save_best=save_best,
+                    optimizer=optimizer,
                     training_metrics=training_metrics,
-                    current_eval_metrics=current_eval_metrics,
-                    stop_accuracy_threshold=stop_accuracy_threshold,
-                    first_threshold_epoch=first_threshold_epoch,
-                    epochs_above_threshold=epochs_above_threshold,
-                    stop_accuracy_patience=stop_accuracy_patience,
-                    rng=rng,
+                    track_metrics=track_metrics,
+                )
+                # Extract final metrics for best model tracking (use IN-distribution metrics)
+                current_eval_metrics = eval_results.get("final_metrics_in", None)
+
+            # Step 3: Save periodic checkpoints (best models are now handled by unified system)
+            if checkpoint_enabled:
+                save_periodic_checkpoint(
+                    checkpoint_path,
+                    model,
+                    optimizer,
+                    {
+                        "losses": losses,
+                        "hard_losses": hard_losses,
+                        "accuracies": accuracies,
+                        "hard_accuracies": hard_accuracies,
+                        "reset_steps": reset_steps,
+                    },
+                    epoch,
+                    checkpoint_interval,
+                    wandb_run,
                 )
 
-                if should_break:
-                    break
+            # Step 4: Check for early stopping based on accuracy
+            (
+                should_break,
+                early_stop_triggered,
+                epochs_above_threshold,
+                first_threshold_epoch,
+                current_eval_metrics,
+                rng,
+            ) = check_early_stopping(
+                stop_accuracy_enabled=stop_accuracy_enabled,
+                epoch=epoch,
+                stop_accuracy_min_epochs=stop_accuracy_min_epochs,
+                early_stop_triggered=early_stop_triggered,
+                stop_accuracy_metric=stop_accuracy_metric,
+                stop_accuracy_source=stop_accuracy_source,
+                training_metrics=training_metrics,
+                current_eval_metrics=current_eval_metrics,
+                stop_accuracy_threshold=stop_accuracy_threshold,
+                first_threshold_epoch=first_threshold_epoch,
+                epochs_above_threshold=epochs_above_threshold,
+                stop_accuracy_patience=stop_accuracy_patience,
+                rng=rng,
+            )
 
-                # Return the trained GNN model and metrics
-                result = {
-                    "model": model,
-                    "optimizer": optimizer,
-                    "losses": losses,
-                    "hard_losses": hard_losses,
-                    "accuracies": accuracies,
-                    "hard_accuracies": hard_accuracies,
-                    "reset_steps": reset_steps,
-                    "early_stopped": early_stop_triggered,
-                    "early_stop_epoch": epoch if early_stop_triggered else None,
-                    "first_threshold_epoch": first_threshold_epoch,
-                    "best_model_tracker": best_model_tracker,  # Include unified best model tracker
-                }
+            if should_break:
+                break
 
-                # Add pool to result if used
-                result["pool"] = circuit_pool
+            # Return the trained GNN model and metrics
+            result = {
+                "model": model,
+                "optimizer": optimizer,
+                "losses": losses,
+                "hard_losses": hard_losses,
+                "accuracies": accuracies,
+                "hard_accuracies": hard_accuracies,
+                "reset_steps": reset_steps,
+                "early_stopped": early_stop_triggered,
+                "early_stop_epoch": epoch if early_stop_triggered else None,
+                "first_threshold_epoch": first_threshold_epoch,
+                "best_model_tracker": best_model_tracker,  # Include unified best model tracker
+            }
+
+            # Add pool to result if used
+            result["pool"] = circuit_pool
     except KeyboardInterrupt:
         log.info(f"Training interrupted by user at epoch {epoch}/{epochs}")
         # Ensure progress bar is properly closed
