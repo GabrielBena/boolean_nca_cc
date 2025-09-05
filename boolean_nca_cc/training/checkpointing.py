@@ -305,7 +305,11 @@ def instantiate_model_from_config(config, seed=0):
 
         if config.circuit.layer_sizes is None:
             layer_sizes = generate_layer_sizes(
-                input_n, output_n, arity, layer_n=config.circuit.num_layers
+                input_n,
+                output_n,
+                arity,
+                layer_n=config.circuit.num_layers,
+                width_factor=config.circuit.get("width_factor", 2),
             )
         else:
             layer_sizes = config.circuit.layer_sizes

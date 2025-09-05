@@ -18,9 +18,6 @@ import numpy as np
 import optax
 from flax import nnx
 
-# Configure logging to show INFO messages
-logging.basicConfig(level=logging.INFO, format="%(name)s - %(levelname)s - %(message)s")
-
 # Import model components
 from imgui_bundle import (
     hello_imgui,
@@ -51,6 +48,9 @@ from boolean_nca_cc.training.evaluation import (
 
 # Import genetic mutation functions
 from boolean_nca_cc.training.pool.perturbation import mutate_wires_swap
+
+# Configure logging to show INFO messages
+logging.basicConfig(level=logging.INFO, format="%(name)s - %(levelname)s - %(message)s")
 
 ################## circuit gate and wire use analysis ##################
 
@@ -169,6 +169,7 @@ class CircuitOptimizationDemo:
         self.output_n = 8
         self.arity = 4
         self.layer_n = 3
+        self.width_factor = 2
         self.hidden_dim = 64
 
         # Update case_n based on input_n
@@ -283,7 +284,7 @@ class CircuitOptimizationDemo:
         """Initialize circuit using shared infrastructure"""
         # Generate layer sizes using shared function
         self.layer_sizes = generate_layer_sizes(
-            self.input_n, self.output_n, self.arity, self.layer_n
+            self.input_n, self.output_n, self.arity, self.layer_n, self.width_factor
         )
 
         if self.use_training_wires and self.wiring_mode == "fixed":
@@ -656,7 +657,7 @@ class CircuitOptimizationDemo:
 
             if load_mode == "Best Model":
                 # Use the new best model loading with intelligent selection
-                model, loaded_dict, loaded_config = load_best_model_from_wandb(
+                loaded_config, checkpoint_path, run_id = load_config_from_wandb(
                     run_id=self.run_id,
                     filters=filters if not self.run_id else None,
                     project=self.wandb_project,
@@ -668,8 +669,29 @@ class CircuitOptimizationDemo:
                     prefer_metric=self.prefer_metric,  # Will use intelligent selection if None
                 )
 
+                if loaded_config.circuit.num_layers != self.layer_n:
+                    print(
+                        f"Layer number mismatch: {loaded_config.circuit.num_layers} != {self.layer_n}"
+                    )
+                    print(f"Using layer number: {self.layer_n}")
+                    loaded_config.circuit.num_layers = self.layer_n
+
+                if loaded_config.circuit.get("width_factor", 2) != self.width_factor:
+                    print(
+                        f"Width factor mismatch: {loaded_config.circuit.get('width_factor', 2)} != {self.width_factor}"
+                    )
+                    print(f"Using width factor: {self.width_factor}")
+                    loaded_config.circuit.width_factor = self.width_factor
+
+                model, loaded_dict = load_model_from_config_and_checkpoint(
+                    config=loaded_config,
+                    checkpoint_path=checkpoint_path,
+                    run_id=run_id,
+                )
+
                 # For best model loading, we already have the instantiated model
                 self.frozen_model = model
+                self.loaded_run_id = run_id
                 self.loaded_run_id = loaded_dict.get("run_id", "unknown")
 
             else:  # Latest Checkpoint
@@ -692,6 +714,13 @@ class CircuitOptimizationDemo:
                     )
                     print(f"Using layer number: {self.layer_n}")
                     loaded_config.circuit.num_layers = self.layer_n
+
+                if loaded_config.circuit.width_factor != self.width_factor:
+                    print(
+                        f"Width factor mismatch: {loaded_config.circuit.width_factor} != {self.width_factor}"
+                    )
+                    print(f"Using width factor: {self.width_factor}")
+                    loaded_config.circuit.width_factor = self.width_factor
 
                 model, loaded_dict = load_model_from_config_and_checkpoint(
                     config=loaded_config,
@@ -1624,17 +1653,20 @@ class CircuitOptimizationDemo:
             orig_output_n = self.output_n
             orig_arity = self.arity
             orig_layer_n = self.layer_n
+            orig_width_factor = self.width_factor
 
             _, self.input_n = imgui.slider_int("Input Bits", self.input_n, 2, 8)
             _, self.output_n = imgui.slider_int("Output Bits", self.output_n, 2, 8)
             _, self.arity = imgui.slider_int("Gate Arity", self.arity, 2, 4)
-            _, self.layer_n = imgui.slider_int("Hidden Layers", self.layer_n, 1, 4)
+            _, self.layer_n = imgui.slider_int("Hidden Layers", self.layer_n, 1, 5)
+            _, self.width_factor = imgui.slider_int("Width Factor", self.width_factor, 1, 4)
 
             if (
                 self.input_n != orig_input_n
                 or self.output_n != orig_output_n
                 or self.arity != orig_arity
                 or self.layer_n != orig_layer_n
+                or self.width_factor != orig_width_factor
             ):
                 try:
                     self.regenerate_circuit()
@@ -1646,6 +1678,7 @@ class CircuitOptimizationDemo:
                     self.output_n = orig_output_n
                     self.arity = orig_arity
                     self.layer_n = orig_layer_n
+                    self.width_factor = orig_width_factor
 
             if imgui.button("Regenerate Circuit"):
                 self.regenerate_circuit()
