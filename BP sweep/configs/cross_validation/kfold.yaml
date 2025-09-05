@@ -1,0 +1,6 @@
+# @package _global_
+# 3-fold cross-validation
+
+cross_validation:
+  num_splits: 16
+  base_split_seed: ${train_test_base_seed}

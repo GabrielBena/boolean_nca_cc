@@ -1,21 +1,28 @@
-# Main configuration file for sparsity comparison studies
+# Main configuration file for single experiment training
 defaults:
-  # - experiment: quick_study
-  - experiment: full_study
-  # - experiment: ablation_study
-  - task: binary_multiply_8bit
+  - task: binary_add_8bit
   - optimizer: adam_default
-  - sparsity: l1_medium
+  - sparsity: none
+  - wandb: enabled
+  - cross_validation: kfold
   - _self_
 
-# Global settings
-study_name: "sparsity_comparison"
-save_results: true
-results_dir: "results/${study_name}/${now:%Y-%m-%d_%H-%M-%S}"
+# Training configuration
+training:
+  num_steps: 128
+  loss_type: "l4"
 
-# Logging
+# Circuit generation seed
+circuit_seed: 123
+
+# Train / Test base seed
+train_test_base_seed: 42
+
+# Default WandB configuration (can be overridden by wandb configs)
+
+# Hydra logging
 hydra:
   run:
-    dir: outputs/${study_name}/${now:%Y-%m-%d_%H-%M-%S}
+    dir: outputs/bp_sweep/${now:%Y-%m-%d_%H-%M-%S}
   job:
-    name: ${study_name}
+    name: bp_sweep

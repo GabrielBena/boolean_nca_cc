@@ -6,4 +6,3 @@ optimizer:
   learning_rate: 1.0
   b1: 0.8
   b2: 0.8
-  weight_decay: 1e-4

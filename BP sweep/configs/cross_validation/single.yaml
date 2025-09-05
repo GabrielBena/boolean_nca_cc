@@ -1,0 +1,6 @@
+# @package _global_
+# Single split (no cross-validation)
+
+cross_validation:
+  num_splits: 1
+  base_split_seed: ${train_test_base_seed}

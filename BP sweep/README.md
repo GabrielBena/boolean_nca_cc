@@ -1,157 +1,113 @@
-# Boolean Circuit Sparsity Studies
+# Boolean Circuit Training with Cross-Validation
 
-This directory contains Hydra-based experiments for studying sparsity regularization in boolean circuits.
+A simplified single experiment training script with k-fold cross-validation and WandB integration for hyperparameter optimization.
 
-## Structure
-
-```
-BP sweep/
-├── configs/                    # Hydra configuration files
-│   ├── config.yaml            # Main config
-│   ├── experiment/            # Experiment types
-│   │   ├── quick_study.yaml   # Fast testing
-│   │   ├── full_study.yaml    # Comprehensive study
-│   │   └── ablation_study.yaml # Focused analysis
-│   ├── task/                  # Task configurations
-│   │   ├── binary_multiply_8bit.yaml
-│   │   ├── binary_multiply_6bit.yaml
-│   │   └── xor_4bit.yaml
-│   ├── optimizer/             # Optimizer settings
-│   │   ├── adam_default.yaml
-│   │   ├── adam_fast.yaml
-│   │   └── adamw_default.yaml
-│   └── sparsity/              # Sparsity configurations
-│       ├── none.yaml          # No sparsity (baseline)
-│       ├── l1_light.yaml      # Light L1 regularization
-│       ├── l1_medium.yaml     # Medium L1 regularization
-│       └── ...
-├── run_study_hydra.py         # Main Hydra-based runner
-├── requirements.txt           # Python dependencies
-└── README.md                  # This documentation
-```
-
-## Usage
-
-### Basic Usage
+## Quick Start
 
 ```bash
-# Default configuration (quick study)
-python run_study_hydra.py
+# Default configuration (5-fold CV, L1 sparsity, 8-bit multiplication)
+python train_single.py
 
-# Full comprehensive study
-python run_study_hydra.py experiment=full_study
-
-# Different task
-python run_study_hydra.py task=binary_multiply_6bit
-
-# Different sparsity configuration
-python run_study_hydra.py sparsity=l1_strong
-
-# Combine multiple overrides
-python run_study_hydra.py experiment=full_study task=xor_4bit optimizer=adam_fast
-```
-
-### Advanced Usage
-
-```bash
 # Override specific parameters
-python run_study_hydra.py experiment.num_steps=512 task.input_n=10
+python train_single.py optimizer.learning_rate=0.1 sparsity.weight=1e-2
 
-# Multiple runs with different configurations
-python run_study_hydra.py --multirun experiment=quick_study,full_study
+# Different tasks
+python train_single.py task=binary_multiply_6bit
+python train_single.py task=xor_4bit
 
-# Sweep over multiple sparsity weights
-python run_study_hydra.py --multirun sparsity.weight=1e-4,1e-3,1e-2
+# Different sparsity configurations
+python train_single.py sparsity=l1_strong
+python train_single.py sparsity=none
 
-# Custom results directory
-python run_study_hydra.py results_dir=custom_results/my_experiment
+# Different cross-validation configurations
+python train_single.py cross_validation=single  # No CV (1 split)
+python train_single.py cross_validation=cv3     # 3-fold CV
+python train_single.py cross_validation=cv10    # 10-fold CV
+
+# Disable WandB logging
+python train_single.py wandb=disabled
 ```
 
-### Configuration Composition
+## Configuration Structure
 
-The system uses Hydra's composition feature:
-
-```yaml
-# configs/config.yaml
-defaults:
-  - experiment: quick_study      # Choose experiment type
-  - task: binary_multiply_8bit   # Choose task
-  - optimizer: adam_default      # Choose optimizer
-  - sparsity: l1_medium         # Choose sparsity
-  - _self_                      # Apply overrides last
-```
-
-## Configuration Files
-
-### Experiment Types
-
-- **`quick_study`**: Fast experiments for testing (64 steps, 2 seeds)
-- **`full_study`**: Comprehensive study (256 steps, 5 seeds each)
-- **`ablation_study`**: Focused analysis on specific configurations
-
-### Tasks
-
-- **`binary_multiply_8bit`**: 8-bit multiplication (challenging)
-- **`binary_multiply_6bit`**: 6-bit multiplication (faster)
-- **`xor_4bit`**: Simple XOR task (debugging)
-
-### Sparsity Types
-
-- **`none`**: No sparsity (baseline)
-- **`l1_light`**: Light L1 regularization (1e-4)
-- **`l1_medium`**: Medium L1 regularization (1e-3)
-- **`l1_strong`**: Strong L1 regularization (1e-2)
-- **`binary_medium`**: Binary sparsity regularization
-- **`entropy_medium`**: Entropy-based sparsity regularization
-
-## Output
-
-Results are automatically saved to timestamped directories:
+The script uses Hydra's compositional configuration system:
 
 ```
-outputs/sparsity_comparison/YYYY-MM-DD_HH-MM-SS/
-├── detailed_results.csv       # All experimental results
-├── summary.json              # Statistical summary
-├── config.yaml               # Configuration used
-└── .hydra/                   # Hydra metadata
+configs/
+├── config.yaml              # Main configuration
+├── task/                    # Task definitions
+│   ├── binary_multiply_8bit.yaml
+│   ├── binary_multiply_6bit.yaml
+│   └── xor_4bit.yaml
+├── optimizer/               # Optimizer configurations  
+│   ├── adam_default.yaml
+│   ├── adam_fast.yaml
+│   └── adamw_default.yaml
+├── sparsity/               # Sparsity regularization
+│   ├── none.yaml
+│   ├── l1_light.yaml
+│   ├── l1_medium.yaml
+│   ├── l1_strong.yaml
+│   ├── binary_medium.yaml
+│   └── entropy_medium.yaml
+├── cross_validation/        # CV configurations
+│   ├── single.yaml         # 1 split
+│   ├── cv3.yaml           # 3-fold
+│   ├── cv5.yaml           # 5-fold
+│   └── cv10.yaml          # 10-fold
+└── wandb/                  # WandB settings
+    ├── enabled.yaml
+    └── disabled.yaml
 ```
 
-## Example Workflows
+## Cross-Validation Features
 
-### Quick Testing
+- **Robust evaluation**: Multiple train/test splits for statistical reliability
+- **Deterministic splits**: Reproducible results from base seed
+- **Comprehensive metrics**: Individual split results + aggregated statistics
+- **WandB integration**: Both per-split and summary metrics logged
+
+### Metrics Logged
+
+**Per Split:**
+- Training/test accuracy and loss curves
+- Generalization gap over time
+- Sparsity metrics (if enabled)
+- Final performance metrics
+
+**Aggregated (Cross-Validation Summary):**
+- Mean ± std for all metrics across splits
+- Min/max ranges for key metrics
+- Statistical significance indicators
+
+## WandB Integration
+
+- **Project**: `boolean_bp_sweep`
+- **Tags**: Automatic tagging by task, sparsity type, optimizer, CV folds
+- **Config tracking**: Full Hydra configuration logged
+- **Artifacts**: Optional model checkpointing (can be added)
+
+Perfect for hyperparameter optimization with WandB Sweeps!
+
+## Example Usage for Hyperparameter Optimization
+
 ```bash
-# Test new sparsity configuration
-python run_study_hydra.py experiment=quick_study sparsity=l1_strong
+# Single experiment with specific hyperparameters
+python train_single.py \
+    optimizer.learning_rate=0.5 \
+    sparsity.type=l1 \
+    sparsity.weight=1e-3 \
+    training.num_steps=512 \
+    cross_validation.num_splits=10
 
-# Test on smaller problem
-python run_study_hydra.py task=xor_4bit experiment=quick_study
+# Quick testing with minimal CV
+python train_single.py cross_validation=single training.num_steps=64
 ```
 
-### Production Studies
-```bash
-# Comprehensive 8-bit multiplication study
-python run_study_hydra.py experiment=full_study task=binary_multiply_8bit
+## Architecture
 
-# Compare all sparsity types
-python run_study_hydra.py --multirun experiment=full_study sparsity=l1_medium,binary_medium,entropy_medium
-```
-
-### Ablation Studies
-```bash
-# Fine-grained sparsity weight search
-python run_study_hydra.py experiment=ablation_study --multirun sparsity.weight=1e-4,5e-4,1e-3,2e-3,5e-3
-```
-
-## Benefits of Hydra System
-
-1. **Clean Configuration**: Separate concerns into modular config files
-2. **Easy Composition**: Mix and match different components
-3. **Reproducibility**: All configurations are logged automatically
-4. **Parameter Sweeps**: Built-in multirun support for hyperparameter search
-5. **Override System**: Easy command-line parameter overrides
-6. **Timestamped Outputs**: Automatic experiment tracking
-7. **Type Safety**: Configuration validation and type checking
-
-## Clean Hydra-Based System
-
-This directory now contains only the modern Hydra-based configuration system for clean, reproducible experiments. The legacy scripts have been removed to maintain a focused codebase.
+The script maintains the same circuit generation and training logic as the original study but:
+- Focuses on a single hyperparameter configuration per run
+- Uses cross-validation for robust evaluation within that configuration
+- Offloads sweep logic to external tools (WandB, Optuna, etc.)
+- Provides comprehensive logging for analysis

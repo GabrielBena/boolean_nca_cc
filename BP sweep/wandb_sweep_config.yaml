@@ -1,0 +1,70 @@
+program: train_single.py
+method: bayes
+metric:
+  goal: maximize
+  name: cv_summary/mean_test_acc
+
+project: boolean_bp_sweep
+entity: m2snn
+
+parameters:
+
+  # Loss parameters
+  training.loss_type:
+    values: ["l4", "l2", "bce"]
+
+  # Optimizer parameters
+  optimizer.learning_rate:
+    distribution: q_uniform
+    min: 0.001
+    max: 10.0
+    q: 0.001
+
+  optimizer.b1:
+    distribution: q_uniform
+    min: 0.1
+    max: 0.99
+    q: 0.001
+
+  optimizer.b2:
+    distribution: q_uniform
+    min: 0.1
+    max: 0.9999
+    q: 0.001
+
+  optimizer.weight_decay:
+    distribution: q_uniform
+    min: 0.0
+    max: 1.0
+    q: 0.0001
+
+  # Sparsity parameters
+  sparsity.type:
+    values: ["l1", "binary", "entropy"]
+  
+  sparsity.weight:
+    distribution: q_uniform
+    min: 0.0
+    max: 1.0
+    q: 0.0001
+  
+  # Fixed parameters for this sweep
+  task: 
+    value: "binary_multiply_8bit"
+  
+  cross_validation.num_splits:
+    value: 16
+
+  training.num_steps:
+    value: 128
+  
+  wandb:
+    value: "enabled"
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args_no_hyphens}
+
+
