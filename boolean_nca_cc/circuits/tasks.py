@@ -266,7 +266,12 @@ def get_task_data(task_name, case_n, train_test_split=False, test_ratio=0.2, see
 
     # Perform train/test split
     if seed is not None:
-        key = jax.random.PRNGKey(seed)
+        if isinstance(seed, int):
+            key = jax.random.PRNGKey(seed)
+        elif isinstance(seed, type(jax.random.PRNGKey(0))):
+            key = seed
+        else:
+            raise ValueError(f"Invalid seed type: {type(seed)}")
     else:
         key = jax.random.PRNGKey(42)  # Default seed for reproducibility
 

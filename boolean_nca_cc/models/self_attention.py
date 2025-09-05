@@ -279,6 +279,7 @@ class CircuitSelfAttention(nnx.Module):
         self,
         senders: jp.ndarray,
         receivers: jp.ndarray,
+        n_node: int,
     ) -> jp.ndarray:
         """
         Create an attention mask based on the circuit wiring.
@@ -292,14 +293,14 @@ class CircuitSelfAttention(nnx.Module):
             Boolean attention mask of shape [batch_size, 1, seq_len, seq_len]
         """
         # Create a mask where edges exist in the graph
-        mask = jp.zeros((self.n_node, self.n_node), dtype=jp.bool_)
+        mask = jp.zeros((n_node, n_node), dtype=jp.bool_)
 
         if len(senders) > 0:
             # Set mask[receiver, sender] = True for all edges
             mask = mask.at[receivers, senders].set(True)
 
         # Add self-connections (diagonal of True)
-        mask = mask | jp.eye(self.n_node, dtype=jp.bool_)
+        mask = mask | jp.eye(n_node, dtype=jp.bool_)
 
         # Add batch dimension and singleton head dimension [batch_size, 1, seq_len, seq_len]
         # This format matches the MultiHeadAttention mask format
@@ -361,7 +362,7 @@ class CircuitSelfAttention(nnx.Module):
 
         # Create attention mask if not provided
         if attention_mask is None:
-            attention_mask = self._create_attention_mask(senders, receivers)
+            attention_mask = self._create_attention_mask(senders, receivers, self.n_node)
 
         # Project features to the attention dimension
         x = self.feature_proj(features)
@@ -427,7 +428,7 @@ def run_self_attention_scan(
         all_graphs: List of graphs from each step (including initial)
     """
     # --- Compute the mask *once* before the scan ---
-    attention_mask = model._create_attention_mask(graph.senders, graph.receivers)
+    attention_mask = model._create_attention_mask(graph.senders, graph.receivers, model.n_node)
     # ---------------------------------------------
 
     def scan_body(carry_graph, _):
@@ -481,7 +482,7 @@ def run_self_attention_scan_with_loss(
     from boolean_nca_cc.training.evaluation import get_loss_and_update_graph
 
     # --- Compute the mask *once* before the scan ---
-    attention_mask = model._create_attention_mask(graph.senders, graph.receivers)
+    attention_mask = model._create_attention_mask(graph.senders, graph.receivers, model.n_node)
     # ---------------------------------------------
 
     def attention_step_with_loss(carry, _):

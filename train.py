@@ -550,7 +550,13 @@ def main(cfg: DictConfig) -> None:
     input_n, output_n = cfg.circuit.input_bits, cfg.circuit.output_bits
     arity = cfg.circuit.arity
     if cfg.circuit.layer_sizes is None:
-        layer_sizes = generate_layer_sizes(input_n, output_n, arity, layer_n=cfg.circuit.num_layers)
+        layer_sizes = generate_layer_sizes(
+            input_n,
+            output_n,
+            arity,
+            layer_n=cfg.circuit.num_layers,
+            width_factor=cfg.circuit.width_factor,
+        )
         with open_dict(cfg):
             cfg.circuit.layer_sizes = layer_sizes
     else:
