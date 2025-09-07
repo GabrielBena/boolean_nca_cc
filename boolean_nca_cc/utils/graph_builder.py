@@ -19,6 +19,7 @@ def build_graph(
     arity: int,
     circuit_hidden_dim: int,
     bidirectional_edges: bool = True,
+    neighboring_connections: bool = False,
     loss_value: jp.ndarray | int = 0,
     update_steps: int = 0,
     knockout_strategy: str = "untouched",  # "untouched", "no_receive", "detached"
@@ -37,6 +38,7 @@ def build_graph(
         arity: Fan-in for each gate
         circuit_hidden_dim: Dimension of hidden features for nodes
         bidirectional_edges: If True, create edges in both forward and backward directions
+        neighboring_connections: If True, create edges between adjacent gates within the same layer
         loss_value: Optional scalar value representing the current loss of the circuit.
         update_steps: Number of times this graph has been updated by the GNN.
         knockout_strategy: How to handle knocked-out gates in message passing:
@@ -304,6 +306,82 @@ def build_graph(
     else:
         senders = jp.array([], dtype=jp.int32)
         receivers = jp.array([], dtype=jp.int32)
+
+    # Add neighboring connections within layers if requested
+    if neighboring_connections:
+        neighboring_senders = []
+        neighboring_receivers = []
+
+        # Add neighboring connections for each gate layer
+        for layer_idx_graph in range(1, len(layer_start_indices)):
+            layer_start_idx = layer_start_indices[layer_idx_graph]
+            if layer_idx_graph < len(logits) + 1:  # Make sure we don't go beyond available layers
+                layer_logits = logits[layer_idx_graph - 1]  # Adjust index since logits is 0-based
+                group_n, group_size, _ = layer_logits.shape
+                num_gates_in_layer = group_n * group_size
+
+                if num_gates_in_layer > 1:  # Only if there are multiple gates in this layer
+                    for i in range(num_gates_in_layer - 1):
+                        # Connect gate i to gate i+1 and vice versa (bidirectional neighboring)
+                        neighboring_senders.extend([layer_start_idx + i, layer_start_idx + i + 1])
+                        neighboring_receivers.extend([layer_start_idx + i + 1, layer_start_idx + i])
+
+        # Apply knockout strategy filtering to neighboring connections if masks are provided
+        if (
+            neighboring_senders
+            and layered_knockout_masks is not None
+            and knockout_strategy != "untouched"
+        ):
+            from boolean_nca_cc.training.pool.structural_perturbation import ensure_flat_mask
+
+            # Calculate layer sizes for flat mask conversion
+            layer_sizes_for_flat = [(input_n, 1)]  # Input layer
+            for layer_logits in logits:
+                group_n, group_size, _ = layer_logits.shape
+                gate_n = group_n * group_size
+                layer_sizes_for_flat.append((gate_n, group_size))
+
+            flat_knockout_mask = ensure_flat_mask(gate_knockout_mask, layer_sizes_for_flat)
+            gate_active = flat_knockout_mask == 1.0
+
+            neighboring_senders = jp.array(neighboring_senders)
+            neighboring_receivers = jp.array(neighboring_receivers)
+
+            if knockout_strategy == "no_receive":
+                # Remove neighboring edges where receiver is knocked out
+                neighbor_edge_mask = gate_active[neighboring_receivers]
+            elif knockout_strategy == "detached":
+                # Remove neighboring edges where either sender or receiver is knocked out
+                neighbor_edge_mask = (
+                    gate_active[neighboring_senders] & gate_active[neighboring_receivers]
+                )
+            else:
+                # This shouldn't happen, but default to keeping all edges
+                neighbor_edge_mask = jp.ones(len(neighboring_senders), dtype=bool)
+
+            # Filter neighboring edges
+            neighboring_senders = neighboring_senders[neighbor_edge_mask]
+            neighboring_receivers = neighboring_receivers[neighbor_edge_mask]
+
+        # Combine neighboring edges with existing edges
+        if neighboring_senders:
+            neighboring_senders = (
+                jp.array(neighboring_senders)
+                if not isinstance(neighboring_senders, jp.ndarray)
+                else neighboring_senders
+            )
+            neighboring_receivers = (
+                jp.array(neighboring_receivers)
+                if not isinstance(neighboring_receivers, jp.ndarray)
+                else neighboring_receivers
+            )
+
+            if len(senders) > 0:
+                senders = jp.concatenate([senders, neighboring_senders])
+                receivers = jp.concatenate([receivers, neighboring_receivers])
+            else:
+                senders = neighboring_senders
+                receivers = neighboring_receivers
 
     n_node = current_global_node_idx
     n_edge = len(senders)

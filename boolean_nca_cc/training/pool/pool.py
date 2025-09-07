@@ -16,8 +16,8 @@ from jax import Array
 
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.training.pool.perturbation import mutate_wires_batch
+from boolean_nca_cc.utils.configured_graph_builder import configured_build_graph as build_graph
 from boolean_nca_cc.utils.extraction import extract_logits_from_graph
-from boolean_nca_cc.utils.graph_builder import build_graph
 
 PyTree = Any
 
@@ -697,7 +697,9 @@ class GraphPool(struct.PyTreeNode):
             apply_gate_knockout_to_pool_batch,
             batch_layered_to_flat_mask,
         )
-        from boolean_nca_cc.utils.graph_builder import build_graph
+        from boolean_nca_cc.utils.configured_graph_builder import (
+            configured_build_graph as build_graph,
+        )
 
         # Split keys for different operations
         selection_key, knockout_key = jax.random.split(key)
@@ -797,7 +799,9 @@ class GraphPool(struct.PyTreeNode):
             apply_logits_perturbation_to_pool_batch,
             batch_layered_to_flat_mask,
         )
-        from boolean_nca_cc.utils.graph_builder import build_graph
+        from boolean_nca_cc.utils.configured_graph_builder import (
+            configured_build_graph as build_graph,
+        )
 
         # Split keys for different operations
         selection_key, perturbation_key = jax.random.split(key)

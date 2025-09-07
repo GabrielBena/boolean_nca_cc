@@ -34,6 +34,11 @@ circuit:
   circuit_hidden_dim: 32
   text: "Hello NCAs!"
 
+# Graph configuration
+graph:
+  neighboring_connections: true  # Enable neighboring connections between adjacent gates in the same layer
+  bidirectional_edges: true  # Create edges in both forward and backward directions
+
 # Training parameters
 training:
   # WIRING MODE : "random" or "fixed"

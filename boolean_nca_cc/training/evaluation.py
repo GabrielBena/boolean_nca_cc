@@ -20,10 +20,11 @@ from boolean_nca_cc.circuits.train import (
 )
 from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention
 from boolean_nca_cc.utils import (
-    build_graph,
+    # build_graph,
     extract_logits_from_graph,
     update_output_node_loss,
 )
+from boolean_nca_cc.utils.configured_graph_builder import configured_build_graph as build_graph
 
 
 class StepResult(NamedTuple):

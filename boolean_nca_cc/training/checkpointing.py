@@ -11,7 +11,7 @@ from omegaconf import OmegaConf
 
 import wandb
 from boolean_nca_cc.circuits.model import gen_circuit, generate_layer_sizes
-from boolean_nca_cc.utils.graph_builder import build_graph
+from boolean_nca_cc.utils.configured_graph_builder import configured_build_graph as build_graph
 
 # Setup logging
 log = logging.getLogger(__name__)

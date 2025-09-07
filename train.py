@@ -38,7 +38,11 @@ from boolean_nca_cc.training.utils import (
     cleanup_redundant_wandb_artifacts,
     plot_training_curves,
 )
-from boolean_nca_cc.utils.graph_builder import build_graph
+from boolean_nca_cc.utils.configured_graph_builder import (
+    configure_build_graph,
+    configured_build_graph,
+    is_configured,
+)
 from boolean_nca_cc.utils.pool_stats import (
     calculate_expected_pool_updates,
     compute_pool_parameter,
@@ -502,6 +506,21 @@ def main(cfg: DictConfig) -> None:
     # Process pool configuration for automatic parameter computation
     cfg = process_pool_configuration(cfg)
 
+    # Configure global build_graph function with settings from config
+    log.info(
+        f"Configuring graph builder: neighboring_connections={cfg.graph.neighboring_connections}, bidirectional_edges={cfg.graph.bidirectional_edges}"
+    )
+    configure_build_graph(
+        neighboring_connections=cfg.graph.neighboring_connections,
+        bidirectional_edges=cfg.graph.bidirectional_edges,
+    )
+
+    # Verify configuration was applied
+    if is_configured():
+        log.info("✅ Graph builder successfully configured with explicit settings")
+    else:
+        log.warning("⚠️ Graph builder configuration failed, will use defaults")
+
     # Log final pool configuration and expected updates
     pool_params = {
         "pool_size": cfg.pool.size,
@@ -566,8 +585,8 @@ def main(cfg: DictConfig) -> None:
     test_key = jax.random.PRNGKey(cfg.test_seed)
     wires, logits = gen_circuit(test_key, cfg.circuit.layer_sizes, arity=cfg.circuit.arity)
 
-    # Generate dummy graph
-    graph = build_graph(
+    # Generate dummy graph using globally configured function
+    graph = configured_build_graph(
         wires=wires,
         logits=logits,
         input_n=input_n,
