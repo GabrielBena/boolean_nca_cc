@@ -468,6 +468,7 @@ def evaluate_model_stepwise_batched(
     step_metrics["soft_accuracy"].append(float(jp.mean(initial_accuracies)))
     step_metrics["hard_accuracy"].append(float(jp.mean(initial_hard_accuracies)))
     step_metrics["logits_mean"].append(float(jp.mean(batch_graphs.nodes["logits"])))
+    
 
     # Store original shapes for reconstruction
     logits_original_shapes = [
@@ -488,6 +489,8 @@ def evaluate_model_stepwise_batched(
         logits_original_shapes=logits_original_shapes,
         step_metrics=step_metrics,
         return_per_pattern=return_per_pattern,
+        initial_hard_accuracies=initial_hard_accuracies,
+        batch_logits=batch_logits,
     )
 
 def evaluate_circuits_in_chunks(
@@ -586,6 +589,8 @@ def _evaluate_with_loop(
     logits_original_shapes: List[Tuple],
     step_metrics: Dict,
     return_per_pattern: bool = False,  # New parameter
+    initial_hard_accuracies: Optional[jp.ndarray] = None,
+    batch_logits: Optional[List[jp.ndarray]] = None,
 ) -> Dict:
     """
     Evaluate using loop mode (original behavior).
@@ -598,6 +603,11 @@ def _evaluate_with_loop(
         "pattern_hard_accuracies": [],  # [n_steps, batch_size]
         "pattern_logits": [],  # [n_steps, batch_size] - store logits for each pattern
     }
+    
+    # Store initial step 0 data in per-pattern metrics
+    if initial_hard_accuracies is not None and batch_logits is not None:
+        per_pattern_metrics["pattern_hard_accuracies"].append(initial_hard_accuracies)
+        per_pattern_metrics["pattern_logits"].append(batch_logits)
     
     vmap_get_loss = jax.vmap(
         lambda logits, wires: get_loss_from_wires_logits(

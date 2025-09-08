@@ -11,7 +11,7 @@ import optax
 from tqdm.auto import tqdm
 from functools import partial
 import logging
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.circuits.train import TrainState, loss_f_l4, loss_f_bce, train_step
@@ -21,9 +21,105 @@ from boolean_nca_cc.circuits.train import create_gate_mask_from_knockout_pattern
 log = logging.getLogger(__name__)
 
 
-def _run_backpropagation_training_with_knockouts(cfg, x_data, y_data, loss_type, knockout_patterns):
+def _train_single_knockout_pattern(
+    initial_logits,
+    knockout_pattern,
+    opt,
+    wires,
+    x_data,
+    y_data,
+    loss_type,
+    layer_sizes,
+    epochs,
+):
+    """
+    Train a single knockout pattern. This function is designed to be vectorized with jax.vmap.
+    
+    Args:
+        initial_logits: Initial circuit parameters
+        knockout_pattern: Knockout pattern to apply
+        opt: Optimizer
+        wires: Circuit wiring
+        x_data: Input data
+        y_data: Target data
+        loss_type: Loss function type
+        layer_sizes: Circuit layer sizes
+        epochs: Number of training epochs
+        
+    Returns:
+        Dictionary with training results for this pattern
+    """
+    # Initialize state
+    state = TrainState(params=initial_logits, opt_state=opt.init(initial_logits))
+    
+    # Create train step function
+    _train_step_fn = partial(
+        train_step,
+        opt=opt,
+        wires=wires,
+        x=x_data,
+        y0=y_data,
+        loss_type=loss_type,
+        do_train=True,
+        knockout_pattern=knockout_pattern,
+        layer_sizes=layer_sizes,
+    )
+    
+    # Training loop - collect metrics as JAX arrays
+    losses = jp.zeros(epochs)
+    hard_losses = jp.zeros(epochs)
+    accuracies = jp.zeros(epochs)
+    hard_accuracies = jp.zeros(epochs)
+    
+    for i in range(epochs):
+        loss, aux_metrics, new_state = _train_step_fn(state=state)
+        state = new_state
+        
+        losses = losses.at[i].set(loss)
+        hard_losses = hard_losses.at[i].set(aux_metrics["hard_loss"])
+        accuracies = accuracies.at[i].set(aux_metrics["accuracy"])
+        hard_accuracies = hard_accuracies.at[i].set(aux_metrics["hard_accuracy"])
+    
+    # Final evaluation
+    loss_fn = loss_f_l4 if loss_type == "l4" else loss_f_bce
+    final_loss, final_aux_metrics = loss_fn(
+        state.params, wires, x_data, y_data, 
+        gate_mask=create_gate_mask_from_knockout_pattern(knockout_pattern, layer_sizes)
+    )
+    
+    return {
+        "losses": losses,
+        "hard_losses": hard_losses,
+        "accuracies": accuracies,
+        "hard_accuracies": hard_accuracies,
+        "final_loss": final_loss,
+        "final_hard_loss": final_aux_metrics["hard_loss"],
+        "final_accuracy": final_aux_metrics["accuracy"],
+        "final_hard_accuracy": final_aux_metrics["hard_accuracy"],
+        "params": state.params,
+    }
+
+
+def _run_backpropagation_training_with_knockouts(
+    cfg, 
+    x_data, 
+    y_data, 
+    loss_type, 
+    knockout_patterns,
+    parallel: bool = True,
+    batch_size: Optional[int] = None
+):
     """
     Run backpropagation training for each knockout pattern in the vocabulary.
+    
+    Args:
+        cfg: Configuration object
+        x_data: Input data
+        y_data: Target data
+        loss_type: Loss function type
+        knockout_patterns: Array of knockout patterns
+        parallel: Whether to use parallel training (default: True)
+        batch_size: Batch size for parallel training (default: all patterns at once)
     """
     # Generate circuit
     key = jax.random.PRNGKey(cfg.test_seed)
@@ -40,93 +136,153 @@ def _run_backpropagation_training_with_knockouts(cfg, x_data, y_data, loss_type,
     else:
         opt = optax.adam(cfg.backprop.learning_rate)
 
-    patterns_performance = []
+    num_patterns = len(knockout_patterns)
+    log.info(f"Training on {num_patterns} knockout patterns (parallel={parallel})")
     
-    # Train on each knockout pattern
-    for pattern_idx, knockout_pattern in enumerate(knockout_patterns):
-        log.info(f"Training on knockout pattern {pattern_idx + 1}/{len(knockout_patterns)}")
+    if parallel:
+        # Parallel training using JAX vmap
+        if batch_size is None:
+            batch_size = num_patterns
         
-        # Initialize fresh state for each pattern
-        state = TrainState(params=logits, opt_state=opt.init(logits))
-        
-        # Training loop for this pattern
-        losses = []
-        hard_losses = []
-        accuracies = []
-        hard_accuracies = []
-
-        # Partial function for train_step with knockout pattern
-        _train_step_fn = partial(
-            train_step,
-            opt=opt,
-            wires=wires,
-            x=x_data,
-            y0=y_data,
-            loss_type=loss_type,
-            do_train=True,
-            knockout_pattern=knockout_pattern,
-            layer_sizes=cfg.circuit.layer_sizes,
+        # Create vectorized training function
+        vectorized_train = jax.vmap(
+            partial(
+                _train_single_knockout_pattern,
+                opt=opt,
+                wires=wires,
+                x_data=x_data,
+                y_data=y_data,
+                loss_type=loss_type,
+                layer_sizes=cfg.circuit.layer_sizes,
+                epochs=cfg.backprop.epochs,
+            ),
+            in_axes=(None, 0)  # initial_logits is shared, knockout_patterns are batched
         )
-
-        pbar = tqdm(range(cfg.backprop.epochs), desc=f"BP pattern {pattern_idx + 1}")
-        for i in pbar:
-            loss, aux_metrics, new_state = _train_step_fn(state=state)
-            state = new_state
-
-            accuracy = float(aux_metrics["accuracy"])
-            hard_accuracy = float(aux_metrics["hard_accuracy"])
-            hard_loss = float(aux_metrics["hard_loss"])
-
-            # Log metrics
-            if i % cfg.logging.log_interval == 0:
+        
+        # Process in batches to manage memory
+        patterns_performance = []
+        for batch_start in range(0, num_patterns, batch_size):
+            batch_end = min(batch_start + batch_size, num_patterns)
+            batch_patterns = knockout_patterns[batch_start:batch_end]
+            batch_size_actual = batch_end - batch_start
+            
+            log.info(f"Processing batch {batch_start//batch_size + 1}/{(num_patterns + batch_size - 1)//batch_size} "
+                    f"(patterns {batch_start+1}-{batch_end})")
+            
+            # Train batch of patterns in parallel
+            batch_results = vectorized_train(logits, batch_patterns)
+            
+            # Convert batch results to individual pattern results
+            for i, (pattern_idx, knockout_pattern) in enumerate(zip(range(batch_start, batch_end), batch_patterns)):
+                pattern_results = {
+                    "pattern_idx": pattern_idx,
+                    "knockout_pattern": knockout_pattern,
+                    "losses": [float(x) for x in batch_results["losses"][i]],
+                    "hard_losses": [float(x) for x in batch_results["hard_losses"][i]],
+                    "accuracies": [float(x) for x in batch_results["accuracies"][i]],
+                    "hard_accuracies": [float(x) for x in batch_results["hard_accuracies"][i]],
+                    "final_loss": float(batch_results["final_loss"][i]),
+                    "final_hard_loss": float(batch_results["final_hard_loss"][i]),
+                    "final_accuracy": float(batch_results["final_accuracy"][i]),
+                    "final_hard_accuracy": float(batch_results["final_hard_accuracy"][i]),
+                    "params": jax.tree.map(lambda x: x[i], batch_results["params"]),
+                }
+                patterns_performance.append(pattern_results)
+                
                 log.info(
-                    f"BP Pattern {pattern_idx + 1} Epoch {i}: Loss={loss:.4f}, Acc={accuracy:.4f}, Hard Acc={hard_accuracy:.4f}"
+                    f"BP Pattern {pattern_idx + 1} Final: Loss={pattern_results['final_loss']:.4f}, "
+                    f"Acc={pattern_results['final_accuracy']:.4f}, Hard Acc={pattern_results['final_hard_accuracy']:.4f}"
                 )
+                
+    else:
+        # Sequential training (original implementation)
+        patterns_performance = []
+        
+        for pattern_idx, knockout_pattern in enumerate(knockout_patterns):
+            log.info(f"Training on knockout pattern {pattern_idx + 1}/{len(knockout_patterns)}")
+            
+            # Initialize fresh state for each pattern
+            state = TrainState(params=logits, opt_state=opt.init(logits))
+            
+            # Training loop for this pattern
+            losses = []
+            hard_losses = []
+            accuracies = []
+            hard_accuracies = []
 
-            # Store metrics
-            losses.append(float(loss))
-            hard_losses.append(hard_loss)
-            accuracies.append(accuracy)
-            hard_accuracies.append(hard_accuracy)
-
-            # Update tqdm postfix
-            pbar.set_postfix(
-                loss=loss,
-                acc=accuracy,
-                hard_acc=hard_accuracy,
-                hard_loss=hard_loss,
+            # Partial function for train_step with knockout pattern
+            _train_step_fn = partial(
+                train_step,
+                opt=opt,
+                wires=wires,
+                x=x_data,
+                y0=y_data,
+                loss_type=loss_type,
+                do_train=True,
+                knockout_pattern=knockout_pattern,
+                layer_sizes=cfg.circuit.layer_sizes,
             )
 
-        # Final evaluation for this pattern
-        loss_fn = loss_f_l4 if loss_type == "l4" else loss_f_bce
-        final_loss, final_aux_metrics = loss_fn(
-            state.params, wires, x_data, y_data, 
-            gate_mask=create_gate_mask_from_knockout_pattern(knockout_pattern, cfg.circuit.layer_sizes)
-        )
-        final_accuracy = float(final_aux_metrics["accuracy"])
-        final_hard_accuracy = float(final_aux_metrics["hard_accuracy"])
-        final_hard_loss = float(final_aux_metrics["hard_loss"])
+            pbar = tqdm(range(cfg.backprop.epochs), desc=f"BP pattern {pattern_idx + 1}")
+            for i in pbar:
+                loss, aux_metrics, new_state = _train_step_fn(state=state)
+                state = new_state
 
-        log.info(
-            f"BP Pattern {pattern_idx + 1} Final: Loss={final_loss:.4f}, Acc={final_accuracy:.4f}, Hard Acc={final_hard_accuracy:.4f}"
-        )
+                accuracy = float(aux_metrics["accuracy"])
+                hard_accuracy = float(aux_metrics["hard_accuracy"])
+                hard_loss = float(aux_metrics["hard_loss"])
 
-        # Store results for this pattern
-        pattern_results = {
-            "pattern_idx": pattern_idx,
-            "knockout_pattern": knockout_pattern,
-            "losses": losses,
-            "hard_losses": hard_losses,
-            "accuracies": accuracies,
-            "hard_accuracies": hard_accuracies,
-            "final_loss": float(final_loss),
-            "final_hard_loss": final_hard_loss,
-            "final_accuracy": final_accuracy,
-            "final_hard_accuracy": final_hard_accuracy,
-            "params": state.params,
-        }
-        
-        patterns_performance.append(pattern_results)
+                # Log metrics
+                if i % cfg.logging.log_interval == 0:
+                    log.info(
+                        f"BP Pattern {pattern_idx + 1} Epoch {i}: Loss={loss:.4f}, Acc={accuracy:.4f}, Hard Acc={hard_accuracy:.4f}"
+                    )
+
+                # Store metrics
+                losses.append(float(loss))
+                hard_losses.append(hard_loss)
+                accuracies.append(accuracy)
+                hard_accuracies.append(hard_accuracy)
+
+                # Update tqdm postfix
+                pbar.set_postfix(
+                    loss=loss,
+                    acc=accuracy,
+                    hard_acc=hard_accuracy,
+                    hard_loss=hard_loss,
+                )
+
+            # Final evaluation for this pattern
+            loss_fn = loss_f_l4 if loss_type == "l4" else loss_f_bce
+            final_loss, final_aux_metrics = loss_fn(
+                state.params, wires, x_data, y_data, 
+                gate_mask=create_gate_mask_from_knockout_pattern(knockout_pattern, cfg.circuit.layer_sizes)
+            )
+            final_accuracy = float(final_aux_metrics["accuracy"])
+            final_hard_accuracy = float(final_aux_metrics["hard_accuracy"])
+            final_hard_loss = float(final_aux_metrics["hard_loss"])
+
+            log.info(
+                f"BP Pattern {pattern_idx + 1} Final: Loss={final_loss:.4f}, Acc={final_accuracy:.4f}, Hard Acc={final_hard_accuracy:.4f}"
+            )
+            
+
+            # Store results for this pattern
+            pattern_results = {
+                "pattern_idx": pattern_idx,
+                "knockout_pattern": knockout_pattern,
+                "losses": losses,
+                "hard_losses": hard_losses,
+                "accuracies": accuracies,
+                "hard_accuracies": hard_accuracies,
+                "final_loss": float(final_loss),
+                "final_hard_loss": final_hard_loss,
+                "final_accuracy": final_accuracy,
+                "final_hard_accuracy": final_hard_accuracy,
+                "params": state.params,
+            }
+            
+            patterns_performance.append(pattern_results)
 
     # Calculate aggregate metrics
     final_losses = [p["final_loss"] for p in patterns_performance]
@@ -148,6 +304,7 @@ def _run_backpropagation_training_with_knockouts(cfg, x_data, y_data, loss_type,
         "best_final_loss": final_losses[best_pattern_idx],
         "worst_final_loss": final_losses[worst_pattern_idx],
     }
+    
 
     log.info(f"Knockout training complete. Mean final loss: {aggregate_metrics['mean_final_loss']:.4f}")
     log.info(f"Best pattern: {best_pattern_idx}, Worst pattern: {worst_pattern_idx}")

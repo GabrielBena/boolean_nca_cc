@@ -20,18 +20,33 @@ def preconfigure_circuit_logits(
     y_data: jp.ndarray,
     loss_type: str,
     steps: int = 200,
-    lr: float = 1e-2,
+    lr: float = 1,
+    optimizer: str = "adam",
+    weight_decay: float = 0.0,
+    beta1: float = 0.9,
+    beta2: float = 0.999,
 ) -> Tuple[List[jp.ndarray], List[jp.ndarray]]:
     """
     Optimize circuit logits only on a fixed wiring to obtain a configured base circuit.
+    
+    Uses the same backprop configuration as the main training for consistency.
 
     Returns base wires and logits suitable for initializing pools and resets in reconfig mode.
     """
     # Generate fixed wiring with NOP logits as starting point
     base_wires, base_logits = gen_circuit(wiring_key, layer_sizes, arity=arity)
 
-    # Optimizer over logits only
-    opt = optax.adam(lr)
+    # Setup optimizer using same configuration as main training
+    if optimizer == "adamw":
+        opt = optax.adamw(
+            lr,
+            b1=beta1,
+            b2=beta2,
+            weight_decay=weight_decay,
+        )
+    else:
+        opt = optax.adam(lr, b1=beta1, b2=beta2)
+    
     state = TrainState(params=base_logits, opt_state=opt.init(base_logits))
 
     # Partially apply fixed args to training step

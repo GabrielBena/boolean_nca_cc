@@ -13,6 +13,13 @@ from typing import List, Tuple, Optional
 from functools import partial
 
 
+# Default ordered indices for greedy knockout pattern selection
+DEFAULT_GREEDY_ORDERED_INDICES = [
+    48, 17, 52, 146, 154, 30, 35, 33, 68, 145,
+    12, 99, 139, 46, 111, 144, 57, 153, 10, 64,
+]
+
+
 def create_reproducible_knockout_pattern(
     key: jax.random.PRNGKey,
     layer_sizes: List[Tuple[int, int]],  # (total_gates, group_size) for each layer
@@ -147,12 +154,42 @@ def create_strip_knockout_pattern(
     return knockout_pattern
 
 
+def create_greedy_knockout_pattern(
+    ordered_indices: List[int],
+    layer_sizes: List[Tuple[int, int]],
+    max_gates: int,
+) -> jp.ndarray:
+    """
+    Create a knockout pattern using a predefined ordered list of gate indices.
+    
+    Args:
+        ordered_indices: List of gate indices in order of selection (e.g., from greedy selection)
+        layer_sizes: List of (total_gates, group_size) for each layer
+        max_gates: Maximum number of gates to knock out
+        
+    Returns:
+        Boolean array where True indicates knocked out gates
+    """
+    total_nodes = sum(total_gates for total_gates, _ in layer_sizes)
+    knockout_pattern = jp.zeros(total_nodes, dtype=jp.bool_)
+    
+    # Take up to max_gates indices from the ordered list
+    num_knockouts = min(max_gates, len(ordered_indices))
+    selected_indices = ordered_indices[:num_knockouts]
+    
+    # Set the selected indices to True (knocked out)
+    knockout_pattern = knockout_pattern.at[jp.array(selected_indices)].set(True)
+    
+    return knockout_pattern
+
+
 def create_knockout_vocabulary(
     rng: jax.random.PRNGKey,
     vocabulary_size: int,
     layer_sizes: List[Tuple[int, int]],
     damage_prob: float,
-    damage_mode: str = "shotgun",  # Options: "shotgun" or "strip"
+    damage_mode: str = "shotgun",  # Options: "shotgun", "strip", or "greedy"
+    ordered_indices: Optional[List[int]] = None,  # Used when damage_mode == "greedy"
 ) -> jp.ndarray:
     """
     Generates a fixed vocabulary of knockout patterns.
@@ -162,11 +199,22 @@ def create_knockout_vocabulary(
         vocabulary_size: The number of unique patterns to generate.
         layer_sizes: List of (total_gates, group_size) for each layer.
         damage_prob: The probability of knocking out a connection.
-        damage_mode: Type of damage pattern ("shotgun" for random, "strip" for localized).
+        damage_mode: Type of damage pattern ("shotgun" for random, "strip" for localized, "greedy" for ordered selection).
+        ordered_indices: List of gate indices in order of selection for greedy mode.
 
     Returns:
         An array of knockout patterns of shape (vocabulary_size, ...).
     """
+    # Greedy mode: deterministic pattern built from ordered indices; replicate across vocabulary
+    if damage_mode == "greedy":
+        indices = ordered_indices if ordered_indices is not None else DEFAULT_GREEDY_ORDERED_INDICES
+        pattern = create_greedy_knockout_pattern(
+            ordered_indices=indices,
+            layer_sizes=layer_sizes,
+            max_gates=int(damage_prob),
+        )
+        return jp.repeat(pattern[None, ...], vocabulary_size, axis=0)
+
     # Select pattern creator based on damage mode
     if damage_mode == "strip":
         pattern_creator_fn = partial(

@@ -1,0 +1,9 @@
+method,variable,n_samples,consensus,normal_tests,total_tests
+bp,overall_bitwise_fraction_diff,50,Likely not normal,2,4
+bp,per_gate_mean_hamming,50,Likely not normal,0,4
+bp,final_hard_accuracy,50,Likely normal,4,4
+bp,final_hard_loss,50,Likely not normal,0,4
+gnn,overall_bitwise_fraction_diff,50,Likely normal,3,4
+gnn,per_gate_mean_hamming,50,Likely normal,4,4
+gnn,final_hard_accuracy,50,Likely not normal,0,4
+gnn,final_hard_loss,50,Likely not normal,0,4

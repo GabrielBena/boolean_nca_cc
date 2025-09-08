@@ -16,7 +16,7 @@ from typing import Optional
 def plot_accuracy_vs_distance(
     summary_df: pd.DataFrame,
     output_path: str,
-    figsize: tuple = (8, 6),
+    figsize: tuple = (8, 3),
     dpi: int = 300,
     color_by_method: bool = True
 ) -> str:
@@ -57,27 +57,29 @@ def plot_accuracy_vs_distance(
                       c='blue', marker='s', s=100, alpha=0.7, 
                       edgecolors='black', linewidth=0.5, label='BP')
         
-        # Add legend
-        ax.legend(fontsize=10)
+        # Add legend with font size matching Figure 3
+        ax.legend(loc='lower right', fontsize=16)
     else:
         # Fallback to single color if no method column or color_by_method is False
         ax.scatter(summary_df['overall_bitwise_fraction_diff'], 
                   summary_df['final_hard_accuracy'], 
                   alpha=0.7, s=100, edgecolors='black', linewidth=0.5)
     
-    # Customize plot
-    ax.set_xlabel('Hamming Distance from Baseline')
-    ax.set_ylabel('Final Hard Accuracy')
-    ax.set_title('Circuit Performance vs Structural Change')
+    # Customize plot with font sizes matching Figure 3
+    ax.set_xlabel('Hamming Distance from Baseline (Fraction)', fontsize=18)
+    ax.set_ylabel('Final Hard Accuracy', fontsize=18)
+    ax.set_title('Circuit Performance vs Perturbation Response', fontsize=20)
+    ax.tick_params(axis='both', which='major', labelsize=16)
     ax.grid(True, alpha=0.3)
+    ax.set_ylim(0.6, 1.02)
     
     # Add baseline point at (0, 1) if available
-    if 'final_hard_accuracy' in summary_df.columns:
-        baseline_acc = 1.0  # Assuming baseline achieves perfect accuracy
-        ax.scatter([0], [baseline_acc], c='green', s=200, marker='*', 
-                  edgecolors='black', linewidth=2, zorder=5)
-        ax.annotate('Baseline', (0, baseline_acc), xytext=(10, 10), 
-                   textcoords='offset points', fontsize=10, fontweight='bold', color='green')
+    # if 'final_hard_accuracy' in summary_df.columns:
+    #     baseline_acc = 1.0  # Assuming baseline achieves perfect accuracy
+    #     ax.scatter([0], [baseline_acc], c='green', s=200, marker='*', 
+    #               edgecolors='black', linewidth=2, zorder=5)
+    #     ax.annotate('Baseline', (0, baseline_acc), xytext=(10, 10), 
+    #                textcoords='offset points', fontsize=10, fontweight='bold', color='green')
     
     plt.tight_layout()
     plt.savefig(output_path, dpi=dpi, bbox_inches='tight')

@@ -12,12 +12,12 @@ metric:
 # Parameters to sweep over
 parameters:
   # Core training parameters
-  training.meta_batch_size:
-    values:
-      - 8
-      - 32
-      - 64
-      - 128
+  # training.meta_batch_size:
+  #   values:
+  #     - 8
+  #     - 32
+  #     - 64
+  #     - 128
 
   # # Damage and recovery parameters
   # pool.damage_pool_fraction:
@@ -25,12 +25,16 @@ parameters:
   #     - 0.1
   #     - 0.2
 
-  # pool.damage_knockout_diversity:
-  #   values:
-  #     - 8
-  #     - 16
-  #     - 32
-  #     - 64
+  pool.damage_knockout_diversity:
+    values:
+      # - 10
+      # - 32
+      - 512
+      - 128
+      - 256
+      - 32
+      # - 256
+      # - 512
 
   # # Evaluation parameters
   # eval.periodic_eval_inner_steps:
@@ -45,11 +49,22 @@ parameters:
   #     - 1e-4
   #     - 5e-4
 
-  # pool.damage_prob:
-  #   values:
-  #     - 5
-  #     - 10
-  #     - 20
+  pool.damage_prob:
+    values:
+      # - 1
+      # # - 2
+      # - 3
+      # - 4
+      - 15
+      - 5
+      # - 6
+      - 10
+
+  pool.damage_mode:
+    values:
+      - shotgun
+      # - strip
+      # - greedy
 
   # pool.reset_fraction:
   #   values:
@@ -58,31 +73,31 @@ parameters:
   #     - 0.2
 
   # Self-attention model parameters (state size scaling)
-  model.attention_dim:
-    values:
-      - 64
-      - 128
-      - 256
-      # - 512
+  # model.attention_dim:
+  #   values:
+  #     - 64
+  #     - 128
+  #     - 256
+  #     # - 512
 
-  model.num_layers:
-    values:
-      # - 1
-      - 2
-      - 4
+  # model.num_layers:
+  #   values:
+  #     # - 1
+  #     - 2
+  #     - 4
 
-  model.num_heads:
-    values:
-      # - 4
-      - 8
-      - 16
+  # model.num_heads:
+  #   values:
+  #     # - 4
+  #     - 8
+  #     - 16
 
   # Circuit hidden dimension (affects circuit representation size)
-  circuit.circuit_hidden_dim:
-    values:
-      - 16
-      - 32
-      - 64
+  # circuit.circuit_hidden_dim:
+  #   values:
+  #     - 16
+  #     - 32
+  #     - 64
 
 
 

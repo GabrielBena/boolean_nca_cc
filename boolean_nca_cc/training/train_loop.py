@@ -44,12 +44,12 @@ from boolean_nca_cc.training.pool.structural_perturbation import    (
 )
 from functools import partial
 from boolean_nca_cc.circuits.train import create_gate_mask_from_knockout_pattern
-from experiments.hamming_distance import (
+from boolean_nca_cc.analysis.hamming_distance import (
     _hard_truth_tables_from_logits,
     _active_gate_mask_from_knockout,
     _hamming_distance_tables,
 )
-from experiments.visualization.circular_plot import plot_accuracy_vs_distance
+from boolean_nca_cc.analysis.visualization import plot_accuracy_vs_distance
 import json
 import os
 import pandas as pd
@@ -411,7 +411,7 @@ def _get_metric_value(
 
     Args:
         metric_name: Name of the metric ('loss', 'hard_loss', 'accuracy', 'hard_accuracy')
-        metric_source: Source of the metric ('training', 'eval', or 'eval_ko')
+        metric_source: Source of the metric ('training', 'eval', or 'eval_ko_in')
         training_metrics: Dictionary with training metrics
         eval_metrics: Dictionary with evaluation metrics (optional)
 
@@ -431,9 +431,9 @@ def _get_metric_value(
             "hard_accuracy": "eval_in/final_hard_accuracy",
         }
         return eval_metrics[eval_key_map[metric_name]]
-    elif metric_source == "eval_ko":
+    elif metric_source == "eval_ko_in":
         if eval_metrics is None:
-            raise ValueError("Knockout evaluation metrics not available for eval_ko source")
+            raise ValueError("Knockout evaluation metrics not available for eval_ko_in source")
         # Map to knockout evaluation metric keys
         eval_key_map = {
             "loss": "eval_ko_in/final_loss",
@@ -463,6 +463,7 @@ def run_knockout_periodic_evaluation(
     wandb_run,
     eval_batch_size: int,
     accumulated_pattern_data: List,  # Add this parameter
+    training_mode: str = "growth",  # Add training mode parameter
     log_stepwise=False,
     layer_sizes: Optional[List[Tuple[int, int]]] = None,
     use_scan: bool = False,
@@ -491,10 +492,13 @@ def run_knockout_periodic_evaluation(
         wandb_run: WandB run object for logging
         eval_batch_size: Batch size for evaluation
         accumulated_pattern_data: List to accumulate pattern performance data
+        training_mode: Training mode ("growth" or "repair") for mode-aware visualization
         log_stepwise: Whether to log step-by-step metrics
         layer_sizes: Layer sizes for the circuit
         use_scan: Whether to use scan for message passing
         knockout_diversity: Diversity parameter for color coding scatter plots
+        hamming_analysis_dir: Directory for hamming analysis plots
+        bp_hamming_summary: Backpropagation hamming summary for comparison
         
     Returns:
         Tuple of (evaluation results, updated accumulated pattern data)
@@ -563,6 +567,12 @@ def run_knockout_periodic_evaluation(
             "eval_ko_in/final_hard_accuracy": step_metrics_in["hard_accuracy"][-1],
             "eval_ko_in/epoch": epoch,
         }
+        
+        # Calculate and add standard deviation for eval_ko_in/hard_accuracy
+        if "per_pattern" in step_metrics_in:
+            final_hard_accuracies_in = step_metrics_in["per_pattern"]["pattern_hard_accuracies"][-1]
+            hard_acc_std = float(jp.std(final_hard_accuracies_in))
+            final_metrics_in["eval_ko_in/final_hard_accuracy_std"] = hard_acc_std
 
         # 2. Generate OUT-of-distribution knockout patterns (always fresh, different seed)
         log.info(f"Running OUT-of-distribution Knockout evaluation with fresh patterns ({eval_batch_size} patterns)...")
@@ -578,38 +588,6 @@ def run_knockout_periodic_evaluation(
         out_pattern_keys = jax.random.split(ood_rng, eval_batch_size)
         out_knockout_patterns = jax.vmap(pattern_creator_fn)(out_pattern_keys)
         
-        # --- BEGIN DEBUG CHECKS ---
-
-        # Check how many ID patterns are in the vocabulary (should be all of them)
-        if knockout_vocabulary is not None and in_knockout_patterns.size > 0:
-            id_in_vocab_count = 0
-            for i in range(len(in_knockout_patterns)):
-                id_pattern = in_knockout_patterns[i]
-                is_in_vocab = jp.any(jp.all(id_pattern == knockout_vocabulary, axis=1))
-                if is_in_vocab:
-                    id_in_vocab_count += 1
-            log.info(f"DEBUG: Number of ID patterns found in vocabulary: {id_in_vocab_count}/{len(in_knockout_patterns)}")
-            if wandb_run:
-                wandb_run.log({"debug/id_patterns_in_vocab_count": id_in_vocab_count})
-                wandb_run.log({"debug/id_patterns_total": len(in_knockout_patterns)})
-
-        # Check how many OOD patterns are in the vocabulary (should be 0)
-        if knockout_vocabulary is not None and out_knockout_patterns.size > 0:
-            # Check each OOD pattern against the vocabulary
-            ood_in_vocab_count = 0
-            for i in range(len(out_knockout_patterns)):
-                ood_pattern = out_knockout_patterns[i]
-                is_in_vocab = jp.any(jp.all(ood_pattern == knockout_vocabulary, axis=1))
-                if is_in_vocab:
-                    ood_in_vocab_count += 1
-            
-            log.info(f"DEBUG: Number of OOD patterns found in vocabulary: {ood_in_vocab_count}/{len(out_knockout_patterns)}")
-            if wandb_run:
-                wandb_run.log({"debug/ood_patterns_in_vocab_count": ood_in_vocab_count})
-                wandb_run.log({"debug/ood_patterns_total": len(out_knockout_patterns)})
-
-
-        # --- END DEBUG CHECKS ---
         
         # Replicate base circuit for the batch
         out_wires = jax.tree.map(
@@ -785,7 +763,7 @@ def run_knockout_periodic_evaluation(
             f"Knockout Eval (epoch {epoch}):\n"
             f"  IN-distribution KO: Loss={final_metrics_in['eval_ko_in/final_loss']:.4f}, "
             f"Acc={final_metrics_in['eval_ko_in/final_accuracy']:.4f}, "
-            f"Hard Acc={final_metrics_in['eval_ko_in/final_hard_accuracy']:.4f}\n"
+            f"Hard Acc={final_metrics_in['eval_ko_in/final_hard_accuracy']:.4f}"
             f"  OUT-of-distribution KO: Loss={final_metrics_out['eval_ko_out/final_loss']:.4f}, "
             f"Acc={final_metrics_out['eval_ko_out/final_accuracy']:.4f}, "
             f"Hard Acc={final_metrics_out['eval_ko_out/final_hard_accuracy']:.4f}"
@@ -877,6 +855,10 @@ def plot_combined_bp_sa_stepwise_performance(
     arity=2,
     circuit_hidden_dim=16,
     bp_results=None,
+    show_bp_trajectory=True,
+    periodic_eval_test_seed=42,
+    knockout_config=None,
+    show_ood_trajectory=True,
 ):
     """
     Create a combined plot showing backpropagation and SA stepwise performance on the same axes.
@@ -886,7 +868,7 @@ def plot_combined_bp_sa_stepwise_performance(
         x_data: Input data
         y_data: Target data  
         loss_type: Type of loss function ('l4' or 'bce')
-        knockout_patterns: Array of knockout patterns to evaluate
+        knockout_patterns: Array of IN-distribution knockout patterns to evaluate
         model: Trained SA model
         base_circuit: Base circuit (wires, logits) for SA evaluation
         n_message_steps: Number of message passing steps for SA
@@ -894,6 +876,11 @@ def plot_combined_bp_sa_stepwise_performance(
         input_n: Number of inputs
         arity: Circuit arity
         circuit_hidden_dim: Circuit hidden dimension
+        bp_results: Pre-computed backpropagation results (optional)
+        show_bp_trajectory: If True, show full BP trajectory; if False, show only final BP accuracy as reference line
+        periodic_eval_test_seed: Seed for generating OOD patterns (should match training evaluation)
+        knockout_config: Configuration for knockout evaluation (needed for OOD pattern generation)
+        show_ood_trajectory: If True, show OOD SA trajectory; if False, show only IN-distribution
         
     Returns:
         matplotlib figure with the combined performance plot
@@ -905,7 +892,11 @@ def plot_combined_bp_sa_stepwise_performance(
     if bp_results is None:
         from boolean_nca_cc.training.backprop import _run_backpropagation_training_with_knockouts
         # Run backpropagation training
-        results = _run_backpropagation_training_with_knockouts(cfg, x_data, y_data, loss_type, knockout_patterns)
+        results = _run_backpropagation_training_with_knockouts(
+            cfg, x_data, y_data, loss_type, knockout_patterns, 
+            parallel=cfg.backprop.get("parallel", True),
+            batch_size=cfg.backprop.get("batch_size", None)
+        )
     else:
         results = bp_results
     
@@ -920,8 +911,8 @@ def plot_combined_bp_sa_stepwise_performance(
         lambda x: jp.repeat(x[None, ...], len(knockout_patterns), axis=0), base_logits
     )
     
-    # Run SA evaluation with stepwise metrics
-    sa_step_metrics = evaluate_circuits_in_chunks(
+    # Run SA evaluation with stepwise metrics on IN-distribution patterns
+    sa_step_metrics_in = evaluate_circuits_in_chunks(
         eval_fn=evaluate_model_stepwise_batched,
         wires=batch_wires,
         logits=batch_logits,
@@ -939,6 +930,57 @@ def plot_combined_bp_sa_stepwise_performance(
         return_per_pattern=True,
     )
     
+    # Generate OUT-of-distribution knockout patterns if requested and config provided
+    sa_step_metrics_out = None
+    if show_ood_trajectory and knockout_config is not None:
+        log.info(f"Generating OOD knockout patterns for SA evaluation ({len(knockout_patterns)} patterns)...")
+        
+        # Use the same logic as in run_knockout_periodic_evaluation
+        from boolean_nca_cc.training.pool.structural_perturbation import create_reproducible_knockout_pattern
+        from functools import partial
+        
+        pattern_creator_fn = partial(
+            create_reproducible_knockout_pattern,
+            layer_sizes=layer_sizes,
+            damage_prob=knockout_config["damage_prob"],
+        )
+        
+        # Use different seed for OOD patterns (same as training evaluation)
+        ood_rng = jax.random.PRNGKey(periodic_eval_test_seed + 1)
+        out_pattern_keys = jax.random.split(ood_rng, len(knockout_patterns))
+        out_knockout_patterns = jax.vmap(pattern_creator_fn)(out_pattern_keys)
+        
+        # Replicate base circuit for the OOD batch
+        out_batch_wires = jax.tree.map(
+            lambda x: jp.repeat(x[None, ...], len(out_knockout_patterns), axis=0), base_wires
+        )
+        out_batch_logits = jax.tree.map(
+            lambda x: jp.repeat(x[None, ...], len(out_knockout_patterns), axis=0), base_logits
+        )
+        
+        # Run SA evaluation on OOD patterns
+        sa_step_metrics_out = evaluate_circuits_in_chunks(
+            eval_fn=evaluate_model_stepwise_batched,
+            wires=out_batch_wires,
+            logits=out_batch_logits,
+            knockout_patterns=out_knockout_patterns,
+            target_chunk_size=len(out_knockout_patterns),
+            model=model,
+            x_data=x_data,
+            y_data=y_data,
+            input_n=input_n,
+            arity=arity,
+            circuit_hidden_dim=circuit_hidden_dim,
+            n_message_steps=n_message_steps,
+            loss_type=loss_type,
+            layer_sizes=layer_sizes,
+            return_per_pattern=True,
+        )
+        log.info("OOD SA evaluation completed")
+    
+    # Use IN-distribution metrics as the primary SA metrics for backward compatibility
+    sa_step_metrics = sa_step_metrics_in
+    
     # Create single figure
     fig, ax = plt.subplots(1, 1, figsize=(12, 8))
     
@@ -946,9 +988,30 @@ def plot_combined_bp_sa_stepwise_performance(
     sa_steps = sa_step_metrics["step"]
     sa_hard_accuracies = sa_step_metrics["hard_accuracy"]
     
-    # Ensure SA steps start from 0 to match BP
-    if sa_steps[0] == 1:
-        sa_steps = [s - 1 for s in sa_steps]
+    # Evaluate the base circuit (preconfigured) without knockout patterns to get true pre-damage performance
+    from boolean_nca_cc.training.evaluation import get_loss_from_wires_logits
+    base_wires, base_logits = base_circuit
+    _, base_aux = get_loss_from_wires_logits(base_logits, base_wires, x_data, y_data, loss_type)
+    pre_damage_accuracy = float(base_aux[4])
+    
+    # Normalize all accuracy values so that pre-damage performance = 1.0
+    normalization_factor = pre_damage_accuracy
+    
+    # Create new step array with pre-damage performance at steps 0, 1, then damage/recovery trajectory
+    # Convert to list first to handle both numpy arrays and lists
+    sa_steps_list = sa_steps.tolist() if hasattr(sa_steps, 'tolist') else list(sa_steps)
+    sa_hard_accuracies_list = sa_hard_accuracies.tolist() if hasattr(sa_hard_accuracies, 'tolist') else list(sa_hard_accuracies)
+    
+    # Shift original steps by +2 and add pre-damage steps at 0, 1
+    shifted_sa_steps = [s + 2 for s in sa_steps_list]
+    new_sa_steps = [0, 1] + shifted_sa_steps
+    # Normalize SA accuracies: pre-damage = 1.0, others normalized by pre-damage accuracy
+    normalized_sa_accuracies = [acc / normalization_factor for acc in sa_hard_accuracies_list]
+    new_sa_hard_accuracies = [1.0, 1.0] + normalized_sa_accuracies
+    
+    # Update the arrays
+    sa_steps = np.array(new_sa_steps)
+    sa_hard_accuracies = np.array(new_sa_hard_accuracies)
     
     # Get BP step count for comparison
     bp_step_count = len(results["patterns_performance"][0]["hard_accuracies"])
@@ -957,7 +1020,7 @@ def plot_combined_bp_sa_stepwise_performance(
     # Log step count information for debugging
     log.info(f"SA steps: {sa_step_count}, BP steps: {bp_step_count}")
     log.info(f"SA step range: {sa_steps[0]} to {sa_steps[-1]}")
-    log.info(f"BP step range: 0 to {bp_step_count - 1}")
+    log.info(f"BP step range: 2 to {bp_step_count + 1}")
     
     # Ensure we have matching step counts
     if sa_step_count != bp_step_count:
@@ -974,40 +1037,217 @@ def plot_combined_bp_sa_stepwise_performance(
     
     log.info(f"Final SA data shape: steps={len(sa_steps)}, accuracies={len(sa_hard_accuracies)}")
     
-    # Plot SA performance (averaged across patterns)
+    # Plot SA performance with error bands
     try:
-        ax.plot(sa_steps, sa_hard_accuracies, 
-                color='cyan',
-                linewidth=1.5, 
-                alpha=0.7,
-                label='Self-Attention')
+        # Check if we have per-pattern data for error bands
+        if 'per_pattern' in sa_step_metrics and 'pattern_hard_accuracies' in sa_step_metrics['per_pattern']:
+            # Extract per-pattern hard accuracies
+            per_pattern_accuracies = sa_step_metrics['per_pattern']['pattern_hard_accuracies']
+            # Convert to numpy array for easier manipulation
+            per_pattern_accuracies = np.array(per_pattern_accuracies)  # Shape: [n_steps, n_patterns]
+            
+            # Add 2 pre-damage values using normalized pre-damage performance for all patterns
+            n_patterns = per_pattern_accuracies.shape[1]
+            pre_damage_per_pattern = np.full((2, n_patterns), 1.0)  # Shape: [2, n_patterns] - normalized to 1.0
+            # Normalize per-pattern accuracies
+            normalized_per_pattern_accuracies = per_pattern_accuracies / normalization_factor
+            extended_per_pattern = np.concatenate([
+                pre_damage_per_pattern,  # Steps 0, 1 with normalized pre-damage performance (1.0)
+                normalized_per_pattern_accuracies   # Steps 2, 3, 4, ..., N+2 (normalized damage/recovery trajectory)
+            ], axis=0)  # Shape: [n_steps + 2, n_patterns]
+            
+            # Calculate mean and std across patterns at each step
+            sa_mean_accuracies = np.mean(extended_per_pattern, axis=1)
+            sa_std_accuracies = np.std(extended_per_pattern, axis=1)
+            
+            # Ensure we have matching step array for per-pattern data
+            # The per-pattern data should have the same number of steps as the modified array
+            n_steps_per_pattern = len(sa_mean_accuracies)
+            if n_steps_per_pattern == len(sa_steps):
+                # Use modified steps array (includes steps 0, 1, 2, 3, ..., N+2)
+                sa_steps_for_plot = sa_steps
+            else:
+                # Create new steps array to match per-pattern data
+                sa_steps_for_plot = list(range(0, n_steps_per_pattern))
+                log.warning(f"Step count mismatch: modified={len(sa_steps)}, per_pattern={n_steps_per_pattern}. Using per_pattern steps.")
+            
+            # Plot mean line
+            ax.plot(sa_steps_for_plot, sa_mean_accuracies, 
+                    color='black',
+                    linewidth=1.5, 
+                    alpha=0.9,
+                    label='Trajectory (Seen)')
+            
+            # Plot error bands
+            ax.fill_between(sa_steps_for_plot, 
+                           sa_mean_accuracies - sa_std_accuracies,
+                           sa_mean_accuracies + sa_std_accuracies,
+                           color='black',
+                           alpha=0.2)
+                        #    label='Trajectory (±1σ)')
+        else:
+            # Fallback to averaged data without error bands
+            ax.plot(sa_steps, sa_hard_accuracies, 
+                    color='black',
+                    linewidth=1.5, 
+                    alpha=0.7,
+                    label='Trajectory (Seen)')
     except Exception as e:
         log.error(f"Error plotting SA data: {e}")
         log.error(f"SA steps shape: {len(sa_steps)}, SA accuracies shape: {len(sa_hard_accuracies)}")
+        if 'per_pattern' in sa_step_metrics and 'pattern_hard_accuracies' in sa_step_metrics['per_pattern']:
+            per_pattern_accuracies = np.array(sa_step_metrics['per_pattern']['pattern_hard_accuracies'])
+            log.error(f"Per-pattern accuracies shape: {per_pattern_accuracies.shape}")
         raise
+    
+    # Plot OOD SA trajectory if available
+    if sa_step_metrics_out is not None:
+        try:
+            # Process OOD data similar to IN-distribution data
+            ood_sa_steps = sa_step_metrics_out["step"]
+            ood_sa_hard_accuracies = sa_step_metrics_out["hard_accuracy"]
+            
+            # Create new step array with pre-damage performance at steps 0, 1, then damage/recovery trajectory
+            ood_sa_steps_list = ood_sa_steps.tolist() if hasattr(ood_sa_steps, 'tolist') else list(ood_sa_steps)
+            ood_sa_hard_accuracies_list = ood_sa_hard_accuracies.tolist() if hasattr(ood_sa_hard_accuracies, 'tolist') else list(ood_sa_hard_accuracies)
+            
+            # Shift original steps by +2 and add pre-damage steps at 0, 1
+            shifted_ood_sa_steps = [s + 2 for s in ood_sa_steps_list]
+            new_ood_sa_steps = [0, 1] + shifted_ood_sa_steps
+            # Normalize OOD SA accuracies: pre-damage = 1.0, others normalized by pre-damage accuracy
+            normalized_ood_sa_accuracies = [acc / normalization_factor for acc in ood_sa_hard_accuracies_list]
+            new_ood_sa_hard_accuracies = [1.0, 1.0] + normalized_ood_sa_accuracies
+            
+            # Update the arrays
+            ood_sa_steps = np.array(new_ood_sa_steps)
+            ood_sa_hard_accuracies = np.array(new_ood_sa_hard_accuracies)
+            
+            # Check if we have per-pattern data for error bands
+            if 'per_pattern' in sa_step_metrics_out and 'pattern_hard_accuracies' in sa_step_metrics_out['per_pattern']:
+                # Extract per-pattern hard accuracies
+                ood_per_pattern_accuracies = sa_step_metrics_out['per_pattern']['pattern_hard_accuracies']
+                # Convert to numpy array for easier manipulation
+                ood_per_pattern_accuracies = np.array(ood_per_pattern_accuracies)  # Shape: [n_steps, n_patterns]
+                
+                # Add 2 pre-damage values using normalized pre-damage performance for all patterns
+                ood_n_patterns = ood_per_pattern_accuracies.shape[1]
+                ood_pre_damage_per_pattern = np.full((2, ood_n_patterns), 1.0)  # Shape: [2, n_patterns] - normalized to 1.0
+                # Normalize OOD per-pattern accuracies
+                normalized_ood_per_pattern_accuracies = ood_per_pattern_accuracies / normalization_factor
+                ood_extended_per_pattern = np.concatenate([
+                    ood_pre_damage_per_pattern,  # Steps 0, 1 with normalized pre-damage performance (1.0)
+                    normalized_ood_per_pattern_accuracies   # Steps 2, 3, 4, ..., N+2 (normalized damage/recovery trajectory)
+                ], axis=0)  # Shape: [n_steps + 2, n_patterns]
+                
+                # Calculate mean and std across patterns at each step
+                ood_sa_mean_accuracies = np.mean(ood_extended_per_pattern, axis=1)
+                ood_sa_std_accuracies = np.std(ood_extended_per_pattern, axis=1)
+                
+                # Ensure we have matching step array for per-pattern data
+                ood_n_steps_per_pattern = len(ood_sa_mean_accuracies)
+                if ood_n_steps_per_pattern == len(ood_sa_steps):
+                    # Use modified steps array (includes steps 0, 1, 2, 3, ..., N+2)
+                    ood_sa_steps_for_plot = ood_sa_steps
+                else:
+                    # Create new steps array to match per-pattern data
+                    ood_sa_steps_for_plot = list(range(0, ood_n_steps_per_pattern))
+                    log.warning(f"OOD step count mismatch: modified={len(ood_sa_steps)}, per_pattern={ood_n_steps_per_pattern}. Using per_pattern steps.")
+                
+                # Plot OOD mean line
+                ax.plot(ood_sa_steps_for_plot, ood_sa_mean_accuracies, 
+                        color='purple',
+                        linewidth=1.5, 
+                        alpha=0.9,
+                        label='Trajectory (Unseen)')
+                
+                # Plot OOD error bands
+                ax.fill_between(ood_sa_steps_for_plot, 
+                               ood_sa_mean_accuracies - ood_sa_std_accuracies,
+                               ood_sa_mean_accuracies + ood_sa_std_accuracies,
+                               color='purple',
+                               alpha=0.2)
+            else:
+                # Fallback to averaged data without error bands
+                ax.plot(ood_sa_steps, ood_sa_hard_accuracies, 
+                        color='purple',
+                        linewidth=1.5, 
+                        alpha=0.7,
+                        label='Trajectory (Unseen)')
+                        
+        except Exception as e:
+            log.warning(f"Error plotting OOD SA data: {e}")
+            log.warning(f"OOD SA steps shape: {len(ood_sa_steps) if 'ood_sa_steps' in locals() else 'N/A'}, OOD SA accuracies shape: {len(ood_sa_hard_accuracies) if 'ood_sa_hard_accuracies' in locals() else 'N/A'}")
     
     # Aggregate BP performance across all patterns
     bp_accuracies_list = [pattern_results["hard_accuracies"] for pattern_results in results["patterns_performance"]]
     bp_accuracies_array = np.array(bp_accuracies_list)  # Shape: [n_patterns, n_steps]
-    bp_mean_accuracies = np.mean(bp_accuracies_array, axis=0)  # Average across patterns
-    bp_steps = range(len(bp_mean_accuracies))
+    # Normalize BP accuracies by pre-damage performance
+    bp_accuracies_array_normalized = bp_accuracies_array / normalization_factor
+    bp_mean_accuracies = np.mean(bp_accuracies_array_normalized, axis=0)  # Average across patterns
+    bp_std_accuracies = np.std(bp_accuracies_array_normalized, axis=0)  # Standard deviation across patterns
+    # Shift BP steps by +2 to match SA data alignment (BP starts at step 2, same as SA damage starts)
+    bp_steps = range(2, len(bp_mean_accuracies) + 2)
     
     try:
-        ax.plot(bp_steps, bp_mean_accuracies, 
-                color='orange',
-                linewidth=1.5,
-                alpha=0.7,
-                label='Backpropagation')
+        if show_bp_trajectory:
+            # Plot full BP trajectory with error bands
+            ax.plot(bp_steps, bp_mean_accuracies, 
+                    color='blue',
+                    linewidth=1.5,
+                    alpha=0.7,
+                    label='Backpropagation')
+            
+            # Add error bands for BP trajectory
+            ax.fill_between(bp_steps, 
+                           bp_mean_accuracies - bp_std_accuracies,
+                           bp_mean_accuracies + bp_std_accuracies,
+                           color='blue',
+                           alpha=0.2)
+        else:
+            # Plot pre-damage circuit accuracy as horizontal reference line (normalized to 1.0)
+            ax.axhline(y=1.0, 
+                      color='#377eb8',
+                      linestyle='--',
+                      linewidth=2.0,
+                      alpha=1.0,
+                      label=f'Pre-damage Performance')
     except Exception as e:
         log.error(f"Error plotting BP data: {e}")
         log.error(f"BP steps shape: {len(bp_steps)}, BP accuracies shape: {len(bp_mean_accuracies)}")
         raise
     
-    ax.set_xlabel('Training/Message Steps')
-    ax.set_ylabel('Hard Accuracy')
-    ax.set_title('Hard Accuracy Over Steps: SA vs Backpropagation')
-    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    # ax.set_ylim(0, 1)
+    # Set font sizes - much larger increase for Figure 3
+    ax.set_xlabel('Message Steps', fontsize=22)
+    ax.set_ylabel('Normalized Hard Accuracy', fontsize=22)
+    
+    # Update title based on mode
+    if show_bp_trajectory:
+        ax.set_title('Hard Accuracy Over Steps: SA vs Backpropagation', fontsize=26)
+    else:
+        ax.set_title('Reconfiguration Trajectory', fontsize=26)
+    
+    ax.tick_params(axis='both', which='major', labelsize=18)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0.6, 1.05)  # Adjusted for normalized values, with pre-damage at 1.0
+    
+    # Set xlim based on whether BP trajectory is shown
+    if show_bp_trajectory:
+        ax.set_xlim(0, 60)  # Extended range for full BP trajectory
+    else:
+        ax.set_xlim(0, 17)  # Standard range for SA-only plot
+    
+    # Add color-coded regions and damage indicator using pastel colors
+    ax.axvspan(0, 2, alpha=0.1, color='#377eb8')  # Pastel blue for pre-damage region
+    ax.axvspan(2, 3, alpha=0.1, color='#ff7f00')  # Pastel orange for damage region
+    ax.axvspan(3, 17, alpha=0.1, color='#4daf4a')  # Pastel green for recovery region
+    ax.axvline(x=2, color='#ff7f00', linestyle='--', linewidth=2)  # Vertical line at damage point
+    
+    # Get existing legend handles and labels (only trajectories and pre-damage line)
+    existing_handles, existing_labels = ax.get_legend_handles_labels()
+    
+    # Update legend with solid background (only trajectories and pre-damage line)
+    legend = ax.legend(handles=existing_handles, labels=existing_labels, loc='lower right', fontsize=16)
+    legend.get_frame().set_alpha(1.0)  # Make legend box solid
     
     plt.tight_layout()
     
@@ -1055,10 +1295,12 @@ def train_model(
     knockout_diversity: Optional[int] = None,  # Size of knockout pattern vocabulary for shared training/evaluation patterns
     # Damage-specific generation control (decoupled from legacy persistent_knockout)
     damage_pool_damage_prob: float = 0.0,
+    greedy_ordered_indices: Optional[List[int]] = None,
     damage_eval_steps: int = 50,  # Number of message passing steps for damage evaluation
     # Damage selection filtering parameters
     damage_min_pool_updates: int = 0,  # Minimum pool updates before circuit can be damaged
     damage_max_pool_updates: int = 10,  # Maximum pool updates before circuit becomes too fragile for damage
+    damage_seed: int = 481,  # Independent seed for damage pattern generation
     knockout_eval: Optional[Dict] = None,
     # Learning rate scheduling
     lr_scheduler: str = "constant",  # Options: "constant", "exponential", "cosine", "linear_warmup"
@@ -1233,6 +1475,11 @@ def train_model(
     base_logits_preconfig = None
     if training_mode == "repair":
         log.info("Repair mode: running preconfiguration of fixed wiring circuit")
+        # Pull optimizer hyperparameters from backprop_config if provided to match test_preconfigure
+        pre_opt = backprop_config.get("optimizer", "adam") if backprop_config else "adam"
+        pre_wd = backprop_config.get("weight_decay", 0.0) if backprop_config else 0.0
+        pre_b1 = backprop_config.get("beta1", 0.9) if backprop_config else 0.9
+        pre_b2 = backprop_config.get("beta2", 0.999) if backprop_config else 0.999
         base_wires_preconfig, base_logits_preconfig = preconfigure_circuit_logits(
             wiring_key=wiring_fixed_key,
             layer_sizes=layer_sizes,
@@ -1242,6 +1489,10 @@ def train_model(
             loss_type=loss_type,
             steps=preconfig_steps,
             lr=preconfig_lr,
+            optimizer=pre_opt,
+            weight_decay=pre_wd,
+            beta1=pre_b1,
+            beta2=pre_b2,
         )
         if wandb_logging and wandb_run:
             wandb_run.log({
@@ -1422,8 +1673,8 @@ def train_model(
     if knockout_diversity is not None and knockout_diversity > 0:
         log.info(f"Creating knockout pattern vocabulary with {knockout_diversity} patterns")
         
-        # Use the same seed as evaluation to ensure pattern space is identical
-        vocab_rng = jax.random.PRNGKey(periodic_eval_test_seed)
+        # Use dedicated damage seed for knockout pattern generation
+        vocab_rng = jax.random.PRNGKey(damage_seed)
         
         # Use the layer_sizes parameter directly - it's already in the correct format
         # from generate_layer_sizes: (total_gates, group_size)
@@ -1436,6 +1687,7 @@ def train_model(
             layer_sizes=true_layer_sizes,
             damage_prob=damage_pool_damage_prob,
             damage_mode=damage_mode,
+            ordered_indices=greedy_ordered_indices,
         )
         
         log.info(f"Generated knockout vocabulary with shape: {knockout_vocabulary.shape}")
@@ -1689,7 +1941,9 @@ def train_model(
                         )
 
                         bp_results = _run_backpropagation_training_with_knockouts(
-                            mock_cfg, x_data, y_data, loss_type, knockout_vocabulary
+                            mock_cfg, x_data, y_data, loss_type, knockout_vocabulary,
+                            parallel=backprop_config.get("parallel", True),
+                            batch_size=backprop_config.get("batch_size", None)
                         )
 
                         # Derive hamming summary from backprop results for comparison
@@ -1730,6 +1984,7 @@ def train_model(
                         wandb_run=wandb_run,
                         eval_batch_size=periodic_eval_batch_size,
                         accumulated_pattern_data=accumulated_pattern_data,  # Pass accumulated data
+                        training_mode=training_mode,  # Pass training mode
                         log_stepwise=periodic_eval_log_stepwise,
                         layer_sizes=layer_sizes,
                         use_scan=use_scan,
@@ -1766,7 +2021,7 @@ def train_model(
                             training_metrics,
                             current_eval_metrics,
                         )
-                    elif (best_metric_source == "eval" or best_metric_source == "eval_ko") and current_eval_metrics is None:
+                    elif (best_metric_source == "eval" or best_metric_source == "eval_ko_in") and current_eval_metrics is None:
                         # Evaluation is enabled but hasn't run yet this epoch, skip best model check
                         current_metric_value = None
                     else:
@@ -1878,5 +2133,163 @@ def train_model(
         pbar.close()
     # Log final results to wandb
     _log_final_wandb_metrics(wandb_run, result, epochs)
+    
+    # Create final Figure 1: Training progress tracking (complete dataset)
+    if accumulated_pattern_data:
+        try:
+            from boolean_nca_cc.analysis.visualization import create_eval_plot_prog
+            
+            # Compute backpropagation results for reference line (reuse across figures)
+            bp_results = None
+            if knockout_vocabulary is not None:
+                try:
+                    from types import SimpleNamespace
+                    from boolean_nca_cc.training.backprop import _run_backpropagation_training_with_knockouts
+                    
+                    # Create config object for backprop evaluation
+                    if backprop_config is not None:
+                        mock_cfg = SimpleNamespace(
+                            test_seed=periodic_eval_test_seed,
+                            circuit=SimpleNamespace(
+                                layer_sizes=layer_sizes,
+                                arity=arity
+                            ),
+                            backprop=SimpleNamespace(**backprop_config),
+                            logging=SimpleNamespace(log_interval=log_interval),
+                        )
+                    else:
+                        # Create default backprop config
+                        mock_cfg = SimpleNamespace(
+                            test_seed=periodic_eval_test_seed,
+                            circuit=SimpleNamespace(
+                                layer_sizes=layer_sizes,
+                                arity=arity
+                            ),
+                            backprop=SimpleNamespace(
+                                epochs=50,  # Reduced for faster evaluation
+                                learning_rate=1e-2,
+                                weight_decay=1e-4,
+                                optimizer="adam",
+                                beta1=0.9,
+                                beta2=0.999,
+                            ),
+                            logging=SimpleNamespace(log_interval=log_interval),
+                        )
+                    
+                    # Run backpropagation training once for reuse
+                    log.info("Computing backpropagation results for Figure 1 reference line...")
+                    bp_results = _run_backpropagation_training_with_knockouts(
+                        mock_cfg, x_data, y_data, loss_type, knockout_vocabulary,
+                        parallel=backprop_config.get("parallel", True),
+                        batch_size=backprop_config.get("batch_size", None)
+                    )
+                    log.info(f"Backpropagation results computed. Mean final accuracy: {bp_results['aggregate_metrics']['mean_final_hard_accuracy']:.3f}")
+                    
+                except Exception as e:
+                    log.warning(f"Error computing backpropagation results for Figure 1: {e}")
+                    bp_results = None
+            
+            # Create the final plot with all accumulated data and BP reference
+            final_plot_path = create_eval_plot_prog(
+                pattern_data=accumulated_pattern_data,
+                training_mode=training_mode,
+                wandb_run=wandb_run,
+                output_dir="reports/figures",
+                filename=f"training_progress_final_{training_mode}.png",
+                bp_results=bp_results,
+                show_bp_reference=True
+            )
+            
+            # Log the final plot to wandb if enabled
+            if wandb_run:
+                wandb_run.log({"training_progress_final": wandb.Image(final_plot_path)})
+                log.info(f"Final Figure 1 (training progress) saved and logged to wandb: {final_plot_path}")
+            else:
+                log.info(f"Final Figure 1 (training progress) saved to: {final_plot_path}")
+            
+        except Exception as e:
+            log.warning(f"Error creating final training progress plot: {e}")
+
+    # Create Figure 3: Damage recovery and growth trajectories (stepwise)
+    if (knockout_vocabulary is not None and 
+        knockout_eval_base_circuit is not None and 
+        result.get("model") is not None):
+        try:
+            import os
+            import wandb
+            import matplotlib.pyplot as plt
+            
+            # Create reports/figures directory if it doesn't exist
+            os.makedirs("reports/figures", exist_ok=True)
+            
+            # Create a proper config object for backprop evaluation (needed for SA evaluation)
+            from types import SimpleNamespace
+            
+            # Use backprop_config if available, otherwise create default config
+            if backprop_config is not None:
+                mock_cfg = SimpleNamespace(
+                    test_seed=periodic_eval_test_seed,
+                    circuit=SimpleNamespace(
+                        layer_sizes=layer_sizes,
+                        arity=arity
+                    ),
+                    backprop=SimpleNamespace(**backprop_config),
+                    logging=SimpleNamespace(log_interval=log_interval),
+                )
+            else:
+                # Create default backprop config
+                mock_cfg = SimpleNamespace(
+                    test_seed=periodic_eval_test_seed,
+                    circuit=SimpleNamespace(
+                        layer_sizes=layer_sizes,
+                        arity=arity
+                    ),
+                    backprop=SimpleNamespace(
+                        epochs=50,  # Reduced for faster evaluation
+                        learning_rate=1e-2,
+                        weight_decay=1e-4,
+                        optimizer="adam",
+                        beta1=0.9,
+                        beta2=0.999,
+                    ),
+                    logging=SimpleNamespace(log_interval=log_interval),
+                )
+            
+            # Create Figure 3 with BP reference line (show_bp_trajectory=False)
+            # Reuse bp_results from Figure 1 if available, otherwise compute new ones
+            fig3 = plot_combined_bp_sa_stepwise_performance(
+                cfg=mock_cfg,
+                x_data=x_data,
+                y_data=y_data,
+                loss_type=loss_type,
+                knockout_patterns=knockout_vocabulary,
+                model=result["model"],
+                base_circuit=knockout_eval_base_circuit,
+                n_message_steps=periodic_eval_inner_steps,
+                layer_sizes=layer_sizes,
+                input_n=input_n,
+                arity=arity,
+                circuit_hidden_dim=circuit_hidden_dim,
+                bp_results=bp_results,  # Reuse BP results from Figure 1
+                show_bp_trajectory=False,  # Figure 3 mode: BP as reference line
+                periodic_eval_test_seed=periodic_eval_test_seed,
+                knockout_config=knockout_eval,
+                show_ood_trajectory=True,  # Enable OOD trajectory plotting
+            )
+            
+            # Save Figure 3 locally
+            fig3_path = f"reports/figures/damage_recovery_trajectories_{training_mode}.png"
+            fig3.savefig(fig3_path, dpi=300, bbox_inches='tight')
+            plt.close(fig3)
+            
+            # Log Figure 3 to wandb if enabled
+            if wandb_run:
+                wandb_run.log({"figure3_damage_recovery_trajectories": wandb.Image(fig3_path)})
+                log.info(f"Figure 3 (damage recovery trajectories) saved and logged to wandb: {fig3_path}")
+            else:
+                log.info(f"Figure 3 (damage recovery trajectories) saved to: {fig3_path}")
+            
+        except Exception as e:
+            log.warning(f"Error creating Figure 3 (damage recovery trajectories): {e}")
 
     return result

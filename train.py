@@ -24,6 +24,7 @@ from boolean_nca_cc.circuits.tasks import get_task_data
 from boolean_nca_cc import generate_layer_sizes
 from boolean_nca_cc.circuits.train import TrainState, loss_f_l4, loss_f_bce, train_step
 from boolean_nca_cc.circuits.train import create_gate_mask_from_knockout_pattern
+from boolean_nca_cc.training.backprop import _run_backpropagation_training_with_knockouts
 
 from boolean_nca_cc.training.train_loop import (
     train_model,
@@ -39,7 +40,7 @@ from boolean_nca_cc.training.pool.structural_perturbation import create_knockout
 log = logging.getLogger(__name__)
 
 
-def run_backpropagation_training(cfg, x_data, y_data, loss_type="l4", knockout_patterns=None):
+def run_backpropagation_training(cfg, x_data, y_data, loss_type="l4", knockout_patterns=None, parallel=True, batch_size=None):
     """
     Run standard backpropagation training for comparison.
 
@@ -50,6 +51,8 @@ def run_backpropagation_training(cfg, x_data, y_data, loss_type="l4", knockout_p
         loss_type: Loss function type ('l4' or 'bce')
         knockout_patterns: Optional array of knockout patterns to test. If provided,
                           training will be run for each pattern in the vocabulary.
+        parallel: Whether to use parallel training for knockout patterns (default: True)
+        batch_size: Batch size for parallel training (default: all patterns at once)
 
     Returns:
         Dictionary of training results. If knockout_patterns is provided, returns
@@ -58,7 +61,7 @@ def run_backpropagation_training(cfg, x_data, y_data, loss_type="l4", knockout_p
     if knockout_patterns is not None:
         log.info(f"Running backpropagation training with {len(knockout_patterns)} knockout patterns")
         return _run_backpropagation_training_with_knockouts(
-            cfg, x_data, y_data, loss_type, knockout_patterns
+            cfg, x_data, y_data, loss_type, knockout_patterns, parallel=parallel, batch_size=batch_size
         )
     else:
         log.info("Running baseline backpropagation training")
@@ -171,145 +174,6 @@ def _run_backpropagation_training_single(cfg, x_data, y_data, loss_type="l4"):
     return results
 
 
-def _run_backpropagation_training_with_knockouts(cfg, x_data, y_data, loss_type, knockout_patterns):
-    """
-    Run backpropagation training for each knockout pattern in the vocabulary.
-    """
-    # Generate circuit
-    key = jax.random.PRNGKey(cfg.test_seed)
-    wires, logits = gen_circuit(key, cfg.circuit.layer_sizes, arity=cfg.circuit.arity)
-
-    # Setup optimizer
-    if cfg.backprop.optimizer == "adamw":
-        opt = optax.adamw(
-            cfg.backprop.learning_rate,
-            b1=cfg.backprop.beta1,
-            b2=cfg.backprop.beta2,
-            weight_decay=cfg.backprop.weight_decay,
-        )
-    else:
-        opt = optax.adam(cfg.backprop.learning_rate)
-
-    patterns_performance = []
-    
-    # Train on each knockout pattern
-    for pattern_idx, knockout_pattern in enumerate(knockout_patterns):
-        log.info(f"Training on knockout pattern {pattern_idx + 1}/{len(knockout_patterns)}")
-        
-        # Initialize fresh state for each pattern
-        state = TrainState(params=logits, opt_state=opt.init(logits))
-        
-        # Training loop for this pattern
-        losses = []
-        hard_losses = []
-        accuracies = []
-        hard_accuracies = []
-
-        # Partial function for train_step with knockout pattern
-        _train_step_fn = partial(
-            train_step,
-            opt=opt,
-            wires=wires,
-            x=x_data,
-            y0=y_data,
-            loss_type=loss_type,
-            do_train=True,
-            knockout_pattern=knockout_pattern,
-            layer_sizes=cfg.circuit.layer_sizes,
-        )
-
-        pbar = tqdm(range(cfg.backprop.epochs), desc=f"BP pattern {pattern_idx + 1}")
-        for i in pbar:
-            loss, aux_metrics, new_state = _train_step_fn(state=state)
-            state = new_state
-
-            accuracy = float(aux_metrics["accuracy"])
-            hard_accuracy = float(aux_metrics["hard_accuracy"])
-            hard_loss = float(aux_metrics["hard_loss"])
-
-            # Log metrics
-            if i % cfg.logging.log_interval == 0:
-                log.info(
-                    f"BP Pattern {pattern_idx + 1} Epoch {i}: Loss={loss:.4f}, Acc={accuracy:.4f}, Hard Acc={hard_accuracy:.4f}"
-                )
-
-            # Store metrics
-            losses.append(float(loss))
-            hard_losses.append(hard_loss)
-            accuracies.append(accuracy)
-            hard_accuracies.append(hard_accuracy)
-
-            # Update tqdm postfix
-            pbar.set_postfix(
-                loss=loss,
-                acc=accuracy,
-                hard_acc=hard_accuracy,
-                hard_loss=hard_loss,
-            )
-
-        # Final evaluation for this pattern
-        loss_fn = loss_f_l4 if loss_type == "l4" else loss_f_bce
-        final_loss, final_aux_metrics = loss_fn(
-            state.params, wires, x_data, y_data, 
-            gate_mask=create_gate_mask_from_knockout_pattern(knockout_pattern, cfg.circuit.layer_sizes)
-        )
-        final_accuracy = float(final_aux_metrics["accuracy"])
-        final_hard_accuracy = float(final_aux_metrics["hard_accuracy"])
-        final_hard_loss = float(final_aux_metrics["hard_loss"])
-
-        log.info(
-            f"BP Pattern {pattern_idx + 1} Final: Loss={final_loss:.4f}, Acc={final_accuracy:.4f}, Hard Acc={final_hard_accuracy:.4f}"
-        )
-
-        # Store results for this pattern
-        pattern_results = {
-            "pattern_idx": pattern_idx,
-            "knockout_pattern": knockout_pattern,
-            "losses": losses,
-            "hard_losses": hard_losses,
-            "accuracies": accuracies,
-            "hard_accuracies": hard_accuracies,
-            "final_loss": float(final_loss),
-            "final_hard_loss": final_hard_loss,
-            "final_accuracy": final_accuracy,
-            "final_hard_accuracy": final_hard_accuracy,
-            "params": state.params,
-        }
-        
-        patterns_performance.append(pattern_results)
-
-    # Calculate aggregate metrics
-    final_losses = [p["final_loss"] for p in patterns_performance]
-    final_accuracies = [p["final_accuracy"] for p in patterns_performance]
-    final_hard_accuracies = [p["final_hard_accuracy"] for p in patterns_performance]
-    
-    best_pattern_idx = min(range(len(final_losses)), key=lambda i: final_losses[i])
-    worst_pattern_idx = max(range(len(final_losses)), key=lambda i: final_losses[i])
-    
-    aggregate_metrics = {
-        "mean_final_loss": float(jax.numpy.mean(jax.numpy.array(final_losses))),
-        "std_final_loss": float(jax.numpy.std(jax.numpy.array(final_losses))),
-        "mean_final_accuracy": float(jax.numpy.mean(jax.numpy.array(final_accuracies))),
-        "std_final_accuracy": float(jax.numpy.std(jax.numpy.array(final_accuracies))),
-        "mean_final_hard_accuracy": float(jax.numpy.mean(jax.numpy.array(final_hard_accuracies))),
-        "std_final_hard_accuracy": float(jax.numpy.std(jax.numpy.array(final_hard_accuracies))),
-        "best_pattern_idx": best_pattern_idx,
-        "worst_pattern_idx": worst_pattern_idx,
-        "best_final_loss": final_losses[best_pattern_idx],
-        "worst_final_loss": final_losses[worst_pattern_idx],
-    }
-
-    log.info(f"Knockout training complete. Mean final loss: {aggregate_metrics['mean_final_loss']:.4f}")
-    log.info(f"Best pattern: {best_pattern_idx}, Worst pattern: {worst_pattern_idx}")
-
-    results = {
-        "patterns_performance": patterns_performance,
-        "vocabulary_patterns": knockout_patterns,
-        "aggregate_metrics": aggregate_metrics,
-        "wires": wires,  # Same wires for all patterns
-    }
-
-    return results
 
 
 
@@ -392,22 +256,28 @@ def main(cfg: DictConfig) -> None:
     knockout_vocabulary = None
     if cfg.backprop.enabled and hasattr(cfg.backprop, 'knockout_vocabulary') and cfg.backprop.knockout_vocabulary.enabled:
         log.info("Generating knockout vocabulary for backprop training")
-        rng, vocab_key = jax.random.split(rng)
+        # Use dedicated damage seed for knockout pattern generation
+        damage_rng = jax.random.PRNGKey(cfg.damage_seed)
         knockout_vocabulary = create_knockout_vocabulary(
-            rng=vocab_key,
+            rng=damage_rng,
             vocabulary_size=cfg.backprop.knockout_vocabulary.size,
             layer_sizes=layer_sizes,
             damage_prob=cfg.backprop.knockout_vocabulary.damage_prob,
             damage_mode=cfg.pool.damage_mode,
+            ordered_indices=cfg.pool.get("greedy_ordered_indices", None),
         )
         log.info(f"Generated knockout vocabulary with {len(knockout_vocabulary)} patterns")
 
-    # # Run backpropagation training for comparison if enabled
+    # Run backpropagation training for comparison if enabled
     bp_results = None
-    # if cfg.backprop.enabled:
-    #     bp_results = run_backpropagation_training(
-    #         cfg, x, y0, loss_type=cfg.training.loss_type, knockout_patterns=knockout_vocabulary
-    #     )
+    if cfg.backprop.enabled:
+        bp_results = run_backpropagation_training(
+            cfg, x, y0, 
+            loss_type=cfg.training.loss_type, 
+            knockout_patterns=knockout_vocabulary,
+            parallel=cfg.backprop.get("parallel", True),
+            batch_size=cfg.backprop.get("batch_size", None)
+        )
     # Initialize model
     rng, init_rng = jax.random.split(rng)
 
@@ -500,10 +370,12 @@ def main(cfg: DictConfig) -> None:
         damage_combined_weights=tuple(cfg.pool.get("damage_combined_weights", [0.5, 0.5])),
         damage_mode=cfg.pool.get("damage_mode", "shotgun"),
         damage_pool_damage_prob=cfg.pool.get("damage_prob", cfg.pool.get("persistent_knockout", {}).get("damage_prob", 0.0)),
+        greedy_ordered_indices=cfg.pool.get("greedy_ordered_indices", None),
         damage_eval_steps=cfg.pool.get("damage_eval_steps", 50),
         # Damage selection filtering parameters
         damage_min_pool_updates=cfg.pool.get("damage_min_pool_updates", 0),
         damage_max_pool_updates=cfg.pool.get("damage_max_pool_updates", 10),
+        damage_seed=cfg.damage_seed,
         # Perturbation configurations
         persistent_knockout_config=cfg.pool.get("persistent_knockout", None),
         knockout_diversity=cfg.pool.get("damage_knockout_diversity", cfg.pool.get("persistent_knockout", {}).get("knockout_diversity", 0)),

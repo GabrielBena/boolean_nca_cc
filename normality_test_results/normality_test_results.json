@@ -1,0 +1,330 @@
+[
+  {
+    "method": "bp",
+    "variable": "overall_bitwise_fraction_diff",
+    "n_samples": 50,
+    "mean": 0.25971460951271386,
+    "std": 0.14493704217205106,
+    "skewness": 0.725073679500141,
+    "kurtosis": -0.16075972716323594,
+    "tests": {
+      "shapiro_wilk": {
+        "statistic": 0.94128088389066,
+        "p_value": 0.01514453517735432,
+        "is_normal": "False",
+        "interpretation": "Not normal"
+      },
+      "dagostino_pearson": {
+        "statistic": 4.708693246702028,
+        "p_value": 0.09495552799541393,
+        "is_normal": "True",
+        "interpretation": "Normal"
+      },
+      "jarque_bera": {
+        "statistic": 4.434939693110607,
+        "p_value": 0.10888425446934409,
+        "is_normal": "True",
+        "interpretation": "Normal"
+      },
+      "anderson_darling": {
+        "statistic": 0.8997450005289309,
+        "critical_5pct": 0.736,
+        "is_normal": "False",
+        "interpretation": "Not normal"
+      }
+    },
+    "overall_assessment": {
+      "normal_count": "2",
+      "total_tests": 4,
+      "majority_normal": "False",
+      "consensus": "Likely not normal"
+    }
+  },
+  {
+    "method": "bp",
+    "variable": "per_gate_mean_hamming",
+    "n_samples": 50,
+    "mean": 0.3239203050898324,
+    "std": 0.10028284000242099,
+    "skewness": 0.8860736357335591,
+    "kurtosis": 2.124140641272068,
+    "tests": {
+      "shapiro_wilk": {
+        "statistic": 0.9300091949294048,
+        "p_value": 0.005530331014179127,
+        "is_normal": "False",
+        "interpretation": "Not normal"
+      },
+      "dagostino_pearson": {
+        "statistic": 12.72714172162652,
+        "p_value": 0.0017232023965401543,
+        "is_normal": "False",
+        "interpretation": "Not normal"
+      },
+      "jarque_bera": {
+        "statistic": 15.942665449316832,
+        "p_value": 0.00034521859783910754,
+        "is_normal": "False",
+        "interpretation": "Not normal"
+      },
+      "anderson_darling": {
+        "statistic": 0.8197069028775985,
+        "critical_5pct": 0.736,
+        "is_normal": "False",
+        "interpretation": "Not normal"
+      }
+    },
+    "overall_assessment": {
+      "normal_count": "0",
+      "total_tests": 4,
+      "majority_normal": "False",
+      "consensus": "Likely not normal"
+    }
+  },
+  {
+    "method": "bp",
+    "variable": "final_hard_accuracy",
+    "n_samples": 50,
+    "mean": 0.8086490809573941,
+    "std": 0.1087418888852898,
+    "skewness": -0.6613727627633339,
+    "kurtosis": 0.1493103241297833,
+    "tests": {
+      "shapiro_wilk": {
+        "statistic": 0.9591471748557131,
+        "p_value": 0.08187134958735708,
+        "is_normal": "True",
+        "interpretation": "Normal"
+      },
+      "dagostino_pearson": {
+        "statistic": 4.418116719104294,
+        "p_value": 0.10980399573363332,
+        "is_normal": "True",
+        "interpretation": "Normal"
+      },
+      "jarque_bera": {
+        "statistic": 3.691561037901134,
+        "p_value": 0.1579020272547925,
+        "is_normal": "True",
+        "interpretation": "Normal"
+      },
+      "anderson_darling": {
+        "statistic": 0.46520813299636643,
+        "critical_5pct": 0.736,
+        "is_normal": "True",
+        "interpretation": "Normal"
+      }
+    },
+    "overall_assessment": {
+      "normal_count": "4",
+      "total_tests": 4,
+      "majority_normal": "True",
+      "consensus": "Likely normal"
+    }
+  },
+  {
+    "method": "bp",
+    "variable": "final_hard_loss",
+    "n_samples": 50,
+    "mean": 0.702482677580184,
+    "std": 0.7602121911187898,
+    "skewness": 2.332034700666333,
+    "kurtosis": 6.69176201806671,
+    "tests": {
+      "shapiro_wilk": {
+        "statistic": 0.7613564378712063,
+        "p_value": 1.256854058221865e-07,
+        "is_normal": "False",
+        "interpretation": "Not normal"
+      },
+      "dagostino_pearson": {
+        "statistic": 42.38720893976962,
+        "p_value": 6.247906577592558e-10,
+        "is_normal": "False",
+        "interpretation": "Not normal"
+      },
+      "jarque_bera": {
+        "statistic": 138.61087976434982,
+        "p_value": 7.962141534266653e-31,
+        "is_normal": "False",
+        "interpretation": "Not normal"
+      },
+      "anderson_darling": {
+        "statistic": 3.0755879931494476,
+        "critical_5pct": 0.736,
+        "is_normal": "False",
+        "interpretation": "Not normal"
+      }
+    },
+    "overall_assessment": {
+      "normal_count": "0",
+      "total_tests": 4,
+      "majority_normal": "False",
+      "consensus": "Likely not normal"
+    }
+  },
+  {
+    "method": "gnn",
+    "variable": "overall_bitwise_fraction_diff",
+    "n_samples": 50,
+    "mean": 0.4266791047965032,
+    "std": 0.176280109126702,
+    "skewness": 0.4163074446217928,
+    "kurtosis": -0.7015963435368047,
+    "tests": {
+      "shapiro_wilk": {
+        "statistic": 0.9574571736538681,
+        "p_value": 0.06956475316494153,
+        "is_normal": "True",
+        "interpretation": "Normal"
+      },
+      "dagostino_pearson": {
+        "statistic": 3.0466573862112316,
+        "p_value": 0.2179850725441592,
+        "is_normal": "True",
+        "interpretation": "Normal"
+      },
+      "jarque_bera": {
+        "statistic": 2.469760381363176,
+        "p_value": 0.2908696091699456,
+        "is_normal": "True",
+        "interpretation": "Normal"
+      },
+      "anderson_darling": {
+        "statistic": 0.754839496013858,
+        "critical_5pct": 0.736,
+        "is_normal": "False",
+        "interpretation": "Not normal"
+      }
+    },
+    "overall_assessment": {
+      "normal_count": "3",
+      "total_tests": 4,
+      "majority_normal": "True",
+      "consensus": "Likely normal"
+    }
+  },
+  {
+    "method": "gnn",
+    "variable": "per_gate_mean_hamming",
+    "n_samples": 50,
+    "mean": 0.24901323936152828,
+    "std": 0.0891505776957857,
+    "skewness": 0.13188774144090262,
+    "kurtosis": -0.1242754349360986,
+    "tests": {
+      "shapiro_wilk": {
+        "statistic": 0.9878173496074474,
+        "p_value": 0.8825461228401035,
+        "is_normal": "True",
+        "interpretation": "Normal"
+      },
+      "dagostino_pearson": {
+        "statistic": 0.22191382780112193,
+        "p_value": 0.8949773091796587,
+        "is_normal": "True",
+        "interpretation": "Normal"
+      },
+      "jarque_bera": {
+        "statistic": 0.17712893562101273,
+        "p_value": 0.9152441050505028,
+        "is_normal": "True",
+        "interpretation": "Normal"
+      },
+      "anderson_darling": {
+        "statistic": 0.17536970170210253,
+        "critical_5pct": 0.736,
+        "is_normal": "True",
+        "interpretation": "Normal"
+      }
+    },
+    "overall_assessment": {
+      "normal_count": "4",
+      "total_tests": 4,
+      "majority_normal": "True",
+      "consensus": "Likely normal"
+    }
+  },
+  {
+    "method": "gnn",
+    "variable": "final_hard_accuracy",
+    "n_samples": 50,
+    "mean": 0.9016987322101984,
+    "std": 0.09377386455841413,
+    "skewness": -0.9613018312785647,
+    "kurtosis": -0.15299186481952587,
+    "tests": {
+      "shapiro_wilk": {
+        "statistic": 0.8657338726156598,
+        "p_value": 4.2455230444458504e-05,
+        "is_normal": "False",
+        "interpretation": "Not normal"
+      },
+      "dagostino_pearson": {
+        "statistic": 7.56446416810736,
+        "p_value": 0.02277180607082163,
+        "is_normal": "False",
+        "interpretation": "Not normal"
+      },
+      "jarque_bera": {
+        "statistic": 7.749606987456374,
+        "p_value": 0.020758416631996908,
+        "is_normal": "False",
+        "interpretation": "Not normal"
+      },
+      "anderson_darling": {
+        "statistic": 2.3527545999020134,
+        "critical_5pct": 0.736,
+        "is_normal": "False",
+        "interpretation": "Not normal"
+      }
+    },
+    "overall_assessment": {
+      "normal_count": "0",
+      "total_tests": 4,
+      "majority_normal": "False",
+      "consensus": "Likely not normal"
+    }
+  },
+  {
+    "method": "gnn",
+    "variable": "final_hard_loss",
+    "n_samples": 50,
+    "mean": 0.35857811224917313,
+    "std": 0.3107988985641941,
+    "skewness": 0.9220582647710145,
+    "kurtosis": 0.32280559060341485,
+    "tests": {
+      "shapiro_wilk": {
+        "statistic": 0.9073535797546702,
+        "p_value": 0.0008481406297058808,
+        "is_normal": "False",
+        "interpretation": "Not normal"
+      },
+      "dagostino_pearson": {
+        "statistic": 7.853579091063143,
+        "p_value": 0.019706839011654438,
+        "is_normal": "False",
+        "interpretation": "Not normal"
+      },
+      "jarque_bera": {
+        "statistic": 7.302019216364494,
+        "p_value": 0.025964901164509287,
+        "is_normal": "False",
+        "interpretation": "Not normal"
+      },
+      "anderson_darling": {
+        "statistic": 1.3036674153693042,
+        "critical_5pct": 0.736,
+        "is_normal": "False",
+        "interpretation": "Not normal"
+      }
+    },
+    "overall_assessment": {
+      "normal_count": "0",
+      "total_tests": 4,
+      "majority_normal": "False",
+      "consensus": "Likely not normal"
+    }
+  }
+]
