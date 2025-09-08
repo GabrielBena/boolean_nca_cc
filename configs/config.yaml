@@ -24,7 +24,7 @@ wandb:
 
 # Circuit configuration
 circuit:
-  task: "binary_multiply"
+  task: "reverse"
   input_bits: 8
   output_bits: 8
   arity: 4
@@ -36,7 +36,7 @@ circuit:
 
 # Graph configuration
 graph:
-  neighboring_connections: true  # Enable neighboring connections between adjacent gates in the same layer
+  neighboring_connections: false  # Enable neighboring connections between adjacent gates in the same layer
   bidirectional_edges: true  # Create edges in both forward and backward directions
 
 # Training parameters
@@ -45,13 +45,13 @@ training:
   wiring_mode: "random"  # Options: "fixed", "genetic", or "random"
   initial_diversity: 256
   # INNER LOOP
-  n_message_steps: 2  # Number of message passing steps per training iteration
+  n_message_steps: 5  # Number of message passing steps per training iteration
   # LOSS TYPE
-  loss_type: "bce"  # Options: "l4", "l2", or "bce"
+  loss_type: "l4"  # Options: "l4", "l2", or "bce"
   random_loss_step: false  # Use random message passing step for loss computation
   use_beta_loss_step: false  # Use beta distribution for random loss step (varies from early to late steps through training)
   # BATCH SIZE
-  meta_batch_size: 128
+  meta_batch_size: 256
   batch_chunk_size: null  # Sequential batch processing chunk size (null means use meta_batch_size)
   # OPTIMIZATION
   learning_rate: 1e-4
@@ -72,7 +72,6 @@ training:
 # Pool configuration for meta-learning
 pool:
   size: 4096
-  # reset_fraction: 0.125 # Good for batch size 256, reset interval 64, n_steps 5 
   reset_fraction: null
   reset_interval: 128
   reset_strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
