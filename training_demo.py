@@ -34,7 +34,6 @@ from boolean_nca_cc.circuits.tasks import TASKS, get_task_data
 
 # Import training loop functions
 from boolean_nca_cc.training.checkpointing import (
-    load_best_model_from_wandb,
     load_config_from_wandb,
     load_model_from_config_and_checkpoint,
 )
@@ -266,7 +265,7 @@ class CircuitOptimizationDemo:
         # Model loading preferences
         self.load_modes = ["Latest Checkpoint", "Best Model"]
         self.load_mode_idx = 1  # Default to best model
-        self.prefer_metric = None  # For best model selection
+        self.prefer_metric = "eval_out_hard_accuracy"  # For best model selection
 
         # Initialize visualization
         self.setup_visualization()
@@ -663,10 +662,11 @@ class CircuitOptimizationDemo:
                     project=self.wandb_project,
                     entity=self.wandb_entity,
                     download_dir=self.wandb_download_dir,
-                    select_by_best_metric=False,
+                    select_by_best_metric=True,
                     run_from_last=1,
                     use_cache=True,
                     prefer_metric=self.prefer_metric,  # Will use intelligent selection if None
+                    metric_name="best/eval_out_hard_accuracy",
                 )
 
                 if loaded_config.circuit.num_layers != self.layer_n:

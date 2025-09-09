@@ -977,7 +977,7 @@ def load_config_from_wandb(
     use_cache: bool = True,
     force_download: bool = False,
     select_by_best_metric: bool = False,
-    metric_name: str = "hard_accuracy",
+    metric_name: str = "eval_out_hard_accuracy",
     prefer_metric: str | None = None,
 ) -> tuple[Any, str, str]:
     """
@@ -1223,7 +1223,7 @@ def load_best_model_from_wandb(
     use_cache: bool = True,
     force_download: bool = False,
     select_by_best_metric: bool = False,
-    metric_name: str = "hard_accuracy",
+    metric_name: str = "eval_out_hard_accuracy",
     prefer_metric: str | None = None,
 ) -> tuple[Any, dict[str, Any], Any]:
     """
