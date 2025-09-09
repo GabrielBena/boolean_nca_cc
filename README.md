@@ -196,26 +196,33 @@ wandb:
 
 ```
 boolean_nca_cc/
-├── circuits/           # Circuit generation and tasks
-│   ├── model.py       # Circuit creation and execution
-│   ├── tasks.py       # Boolean task definitions
-│   └── train.py       # Circuit training utilities
-├── models/            # Neural network models
-│   ├── gnn.py         # Graph Neural Network
-│   ├── self_attention.py  # Self-Attention model
-│   ├── node_update.py # Node update modules
-│   ├── edge_update.py # Edge update modules
-│   └── aggregation.py # Message aggregation
-├── training/          # Training infrastructure
-│   ├── train_loop.py  # Main training loop
-│   ├── train_step.py  # Single training step
-│   ├── evaluation.py  # Model evaluation
-│   ├── pool.py        # Pool-based meta-learning
-│   └── utils.py       # Training utilities
-└── utils/             # Utility functions
-    ├── graph_builder.py    # Graph construction
-    ├── extraction.py       # Parameter extraction
-    └── positional_encoding.py  # Positional encodings
+├── circuits/                      # Circuit generation and tasks
+│   ├── model.py                  # Circuit creation and execution
+│   ├── tasks.py                  # Boolean task definitions
+│   ├── train.py                  # Circuit training utilities
+│   └── viz.py                    # Circuit visualization helpers
+├── models/                        # Neural network models
+│   ├── gnn.py                    # Graph Neural Network
+│   ├── self_attention.py         # Self-Attention model
+│   ├── node_update.py            # Node update modules
+│   ├── edge_update.py            # Edge update modules
+│   └── aggregation.py            # Message aggregation
+├── training/                      # Training infrastructure
+│   ├── train_loop.py             # Main training loop
+│   ├── evaluation.py             # Model evaluation
+│   ├── eval_datasets.py          # Evaluation datasets helpers
+│   ├── checkpointing.py          # Checkpointing utilities
+│   ├── schedulers.py             # LR schedulers and schedules
+│   └── pool/                     # Pool-based meta-learning
+│       ├── pool.py
+│       ├── perturbation.py
+│       └── structural_perturbation.py
+└── utils/                         # Utility functions
+    ├── graph_builder.py          # Graph construction
+    ├── configured_graph_builder.py
+    ├── extraction.py             # Parameter extraction
+    ├── positional_encoding.py    # Positional encodings
+    └── trees.py
 ```
 
 ## Key Features
