@@ -2,6 +2,11 @@
 
 This package provides a framework for optimizing boolean circuits using Graph Neural Networks (GNNs) and Self-Attention mechanisms. By representing circuits as graphs and applying message passing neural networks, we can optimize circuit parameters without requiring gradient access to the underlying circuits.
 
+![Circuit Visualisation](assets/reverse_wire_shuffle.gif)
+
+This GIF shows the adaptive reconfiguration capacity of our Graph Transformer (GT), as it updates the circuit Lookup Tables (green cells) to perform a target computation using message passing through the graph's functional edges. This can be seen by the alignment of 'Current Output' to 'Expected Output' in the output bit visualisation. Precise wiring of the circuit is shuffled multiple times, and we can see that the GT is able adapt to the new wiring, recovering overall functionality of the boolean circuit.
+
+
 ## Overview
 
 The `boolean_nca_cc` package provides:

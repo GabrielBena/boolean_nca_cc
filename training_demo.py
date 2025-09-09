@@ -211,6 +211,8 @@ class CircuitOptimizationDemo:
         self.is_optimizing = True
         self.loss_log = np.zeros(max_trainstep_n, np.float32)
         self.hard_log = np.zeros(max_trainstep_n, np.float32)
+        self.accuracy_log = np.zeros(max_trainstep_n, np.float32)
+        self.hard_accuracy_log = np.zeros(max_trainstep_n, np.float32)
 
         # Mutation settings
         self.mutation_rate = 0.05
@@ -239,7 +241,9 @@ class CircuitOptimizationDemo:
         self.min_loss_value = 1e-6
         self.auto_scale_plot = True
 
-        # Loss plot display options
+        # Plot display options
+        self.plot_types = ["Loss", "Accuracy"]
+        self.plot_type_idx = 1  # Default to Loss
         self.loss_display_modes = ["Both", "Soft Only", "Hard Only"]
         self.loss_display_mode_idx = 0  # Default to showing both
 
@@ -394,6 +398,8 @@ class CircuitOptimizationDemo:
         self.step_i = 0
         self.loss_log = np.zeros(max_trainstep_n, np.float32)
         self.hard_log = np.zeros(max_trainstep_n, np.float32)
+        self.accuracy_log = np.zeros(max_trainstep_n, np.float32)
+        self.hard_accuracy_log = np.zeros(max_trainstep_n, np.float32)
 
         # Reset the model generator when wires change
         self.model_generator = None
@@ -434,6 +440,8 @@ class CircuitOptimizationDemo:
                 self.step_i = 0
                 self.loss_log = np.zeros(max_trainstep_n, np.float32)
                 self.hard_log = np.zeros(max_trainstep_n, np.float32)
+                self.accuracy_log = np.zeros(max_trainstep_n, np.float32)
+                self.hard_accuracy_log = np.zeros(max_trainstep_n, np.float32)
 
                 # Reset the model generator when distribution changes
                 self.model_generator = None
@@ -448,7 +456,7 @@ class CircuitOptimizationDemo:
                 # Refresh activations
                 self.initialize_activations()
 
-    def update_task(self):
+    def update_task(self, reset_logs=True):
         """Update current task using shared task infrastructure"""
         task_name = self.available_tasks[self.task_idx]
 
@@ -479,9 +487,12 @@ class CircuitOptimizationDemo:
             self.y0 = jp.float32(unpack(clipped_output, bit_n=self.output_n))
 
         # Reset optimization progress
-        self.step_i = 0
-        self.loss_log = np.zeros(max_trainstep_n, np.float32)
-        self.hard_log = np.zeros(max_trainstep_n, np.float32)
+        if reset_logs:
+            self.step_i = 0
+            self.loss_log = np.zeros(max_trainstep_n, np.float32)
+            self.hard_log = np.zeros(max_trainstep_n, np.float32)
+            self.accuracy_log = np.zeros(max_trainstep_n, np.float32)
+            self.hard_accuracy_log = np.zeros(max_trainstep_n, np.float32)
 
         # Reset the model generator when task changes
         self.model_generator = None
@@ -773,14 +784,16 @@ class CircuitOptimizationDemo:
             method_name = self.optimization_methods[self.optimization_method_idx]
 
             if method_name == "Backprop":
-                loss, hard_loss = self.optimize_backprop()
+                loss, hard_loss, accuracy, hard_accuracy = self.optimize_backprop()
             else:
-                loss, hard_loss = self.optimize_with_unified_model()
+                loss, hard_loss, accuracy, hard_accuracy = self.optimize_with_unified_model()
 
             # Update loss logs
             i = self.step_i % len(self.loss_log)
             self.loss_log[i] = max(min(float(loss), self.max_loss_value), self.min_loss_value)
             self.hard_log[i] = max(min(float(hard_loss), self.max_loss_value), self.min_loss_value)
+            self.accuracy_log[i] = max(min(float(accuracy), 1.0), 0.0)
+            self.hard_accuracy_log[i] = max(min(float(hard_accuracy), 1.0), 0.0)
 
             # Debug output every 100 steps
             if self.is_optimizing and self.step_i % 100 == 0:
@@ -862,7 +875,7 @@ class CircuitOptimizationDemo:
             self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
             self.err_mask = np.zeros((self.case_n, self.output_n), bool)
 
-        return loss, hard_loss
+        return loss, hard_loss, accuracy, hard_accuracy
 
     def optimize_with_unified_model(self):
         """Use the unified generator from training code to optimize with frozen GNN/Self-Attention model"""
@@ -926,7 +939,12 @@ class CircuitOptimizationDemo:
                     self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
                     self.err_mask = np.zeros((self.case_n, self.output_n), bool)
 
-                return self.last_step_result.loss, self.last_step_result.hard_loss
+                return (
+                    self.last_step_result.loss,
+                    self.last_step_result.hard_loss,
+                    self.last_step_result.accuracy,
+                    self.last_step_result.hard_accuracy,
+                )
             else:
                 # No result yet, return current state
                 (
@@ -945,7 +963,7 @@ class CircuitOptimizationDemo:
                 )
                 self.current_pred = pred
                 self.current_pred_hard = pred_hard
-                return loss, hard_loss
+                return loss, hard_loss, accuracy, hard_accuracy
 
         except Exception as e:
             import traceback
@@ -977,7 +995,7 @@ class CircuitOptimizationDemo:
         oimg = zoom(oimg, zoom_factor)
         self.outputs_img = np.uint8(oimg.clip(0, 1) * 255)
 
-    def regenerate_circuit(self):
+    def regenerate_circuit(self, reset_logs=True):
         """Regenerate circuit completely"""
         print(f"Regenerating circuit: input_n={self.input_n}, output_n={self.output_n}")
 
@@ -995,19 +1013,22 @@ class CircuitOptimizationDemo:
             delattr(self, "current_pred_hard")
 
         # Update task and visualization
-        self.update_task()
+        self.update_task(reset_logs=reset_logs)
 
         # Reinitialize optimization method
         # self.initialize_optimization_method()
 
         # Reset optimization progress
-        self.step_i = 0
-        self.loss_log = np.zeros(max_trainstep_n, np.float32)
-        self.hard_log = np.zeros(max_trainstep_n, np.float32)
+        if reset_logs:
+            self.step_i = 0
+            self.loss_log = np.zeros(max_trainstep_n, np.float32)
+            self.hard_log = np.zeros(max_trainstep_n, np.float32)
+            self.accuracy_log = np.zeros(max_trainstep_n, np.float32)
+            self.hard_accuracy_log = np.zeros(max_trainstep_n, np.float32)
 
         print("Circuit regenerated successfully")
 
-    def mutate_wires_random(self, mutation_rate=None):
+    def mutate_wires_random(self, mutation_rate=None, reset_logs=True):
         """Mutate current circuit wires using genetic mutation with specified rate"""
         if mutation_rate is None:
             mutation_rate = self.mutation_rate
@@ -1026,9 +1047,12 @@ class CircuitOptimizationDemo:
             self.wires = mutated_wires
 
             # Reset optimization state but keep the same task
-            self.step_i = 0
-            self.loss_log = np.zeros(max_trainstep_n, np.float32)
-            self.hard_log = np.zeros(max_trainstep_n, np.float32)
+            if reset_logs:
+                self.step_i = 0
+                self.loss_log = np.zeros(max_trainstep_n, np.float32)
+                self.hard_log = np.zeros(max_trainstep_n, np.float32)
+                self.accuracy_log = np.zeros(max_trainstep_n, np.float32)
+                self.hard_accuracy_log = np.zeros(max_trainstep_n, np.float32)
 
             # Reset logits to initial state for fair comparison
             self.logits = self.logits0
@@ -1054,7 +1078,7 @@ class CircuitOptimizationDemo:
 
             print(f"Traceback: {traceback.format_exc()}")
 
-    def mutate_one_wire(self):
+    def mutate_one_wire(self, reset_logs=True):
         """Mutate exactly one wire in one randomly selected layer"""
         try:
             # Generate a random key for mutation
@@ -1092,9 +1116,12 @@ class CircuitOptimizationDemo:
             self.wires = mutated_wires
 
             # Reset optimization state but keep the same task
-            self.step_i = 0
-            self.loss_log = np.zeros(max_trainstep_n, np.float32)
-            self.hard_log = np.zeros(max_trainstep_n, np.float32)
+            if reset_logs:
+                self.step_i = 0
+                self.loss_log = np.zeros(max_trainstep_n, np.float32)
+                self.hard_log = np.zeros(max_trainstep_n, np.float32)
+                self.accuracy_log = np.zeros(max_trainstep_n, np.float32)
+                self.hard_accuracy_log = np.zeros(max_trainstep_n, np.float32)
 
             # Reset logits to initial state for fair comparison
             self.logits = self.logits0
@@ -1126,6 +1153,8 @@ class CircuitOptimizationDemo:
         self.step_i = 0
         self.loss_log = np.zeros(max_trainstep_n, np.float32)
         self.hard_log = np.zeros(max_trainstep_n, np.float32)
+        self.accuracy_log = np.zeros(max_trainstep_n, np.float32)
+        self.hard_accuracy_log = np.zeros(max_trainstep_n, np.float32)
 
         # Reset the model generator when circuit is reset
         self.model_generator = None
@@ -1458,41 +1487,77 @@ class CircuitOptimizationDemo:
             imgui.begin_child("main", (-300, 0))
 
             # Optimization progress plot
-            if implot.begin_plot("Circuit Optimization Progress", (-1, 200)):
-                implot.setup_legend(implot.Location_.north_east.value)
-                implot.setup_axis_scale(implot.ImAxis_.y1.value, implot.Scale_.log10.value)
-                implot.setup_axes(
-                    "Step",
-                    "Loss",
-                    implot.AxisFlags_.auto_fit.value,
-                    implot.AxisFlags_.auto_fit.value,
-                )
-                implot.setup_axis_limits(
-                    implot.ImAxis_.y1.value, self.min_loss_value, self.max_loss_value
-                )
+            plot_type = self.plot_types[self.plot_type_idx]
+            plot_title = f"Circuit Optimization Progress - {plot_type}"
 
-                # Plot lines based on display mode
-                display_mode = self.loss_display_modes[self.loss_display_mode_idx]
-                if display_mode in ["Both", "Soft Only"]:
-                    implot.plot_line("soft_loss", self.loss_log)
-                if display_mode in ["Both", "Hard Only"]:
-                    implot.plot_line("hard_loss", self.hard_log)
+            if implot.begin_plot(plot_title, (-1, 200)):
+                implot.setup_legend(implot.Location_.north_east.value)
+
+                # Setup axes based on plot type
+                if plot_type == "Loss":
+                    implot.setup_axis_scale(implot.ImAxis_.y1.value, implot.Scale_.log10.value)
+                    implot.setup_axes(
+                        "Step",
+                        "Loss",
+                        implot.AxisFlags_.auto_fit.value,
+                        implot.AxisFlags_.auto_fit.value,
+                    )
+                    implot.setup_axis_limits(
+                        implot.ImAxis_.y1.value, self.min_loss_value, self.max_loss_value
+                    )
+
+                    # Plot loss lines based on display mode
+                    display_mode = self.loss_display_modes[self.loss_display_mode_idx]
+                    if display_mode in ["Both", "Soft Only"]:
+                        implot.plot_line("soft_loss", self.loss_log)
+                    if display_mode in ["Both", "Hard Only"]:
+                        implot.plot_line("hard_loss", self.hard_log)
+
+                else:  # Accuracy
+                    implot.setup_axis_scale(implot.ImAxis_.y1.value, implot.Scale_.linear.value)
+                    implot.setup_axes(
+                        "Step",
+                        "Accuracy",
+                        implot.AxisFlags_.auto_fit.value,
+                        implot.AxisFlags_.none.value,  # Remove auto_fit for y-axis to respect manual limits
+                    )
+                    implot.setup_axis_limits(implot.ImAxis_.y1.value, 0.0, 1.15)
+
+                    # Plot accuracy lines based on display mode
+                    display_mode = self.loss_display_modes[self.loss_display_mode_idx]
+                    if display_mode in ["Both", "Soft Only"]:
+                        implot.plot_line("soft_accuracy", self.accuracy_log)
+                    if display_mode in ["Both", "Hard Only"]:
+                        implot.plot_line("hard_accuracy", self.hard_accuracy_log)
 
                 implot.drag_line_x(1, self.step_i % len(self.loss_log), (0.8, 0, 0, 0.5))
 
-                # Right-click context menu for loss display options
+                # Right-click context menu for plot options
                 if implot.is_plot_hovered() and imgui.is_mouse_clicked(1):  # Right click
-                    imgui.open_popup("loss_display_menu")
+                    imgui.open_popup("plot_options_menu")
 
-                if imgui.begin_popup("loss_display_menu"):
-                    imgui.text("Loss Display Options")
+                if imgui.begin_popup("plot_options_menu"):
+                    imgui.text("Plot Options")
                     imgui.separator()
 
+                    # Plot type selection
+                    imgui.text("Plot Type:")
+                    for i, ptype in enumerate(self.plot_types):
+                        selected = i == self.plot_type_idx
+                        if imgui.selectable(ptype, selected)[0]:
+                            self.plot_type_idx = i
+                            print(f"Plot type changed to: {ptype}")
+
+                    imgui.separator()
+
+                    # Display mode selection
+                    mode_label = "Loss Display" if plot_type == "Loss" else "Accuracy Display"
+                    imgui.text(f"{mode_label} Options:")
                     for i, mode in enumerate(self.loss_display_modes):
                         selected = i == self.loss_display_mode_idx
                         if imgui.selectable(mode, selected)[0]:
                             self.loss_display_mode_idx = i
-                            print(f"Loss display mode changed to: {mode}")
+                            print(f"Display mode changed to: {mode}")
 
                     imgui.end_popup()
 
@@ -1711,7 +1776,7 @@ class CircuitOptimizationDemo:
 
                 self.wiring_seed = random.randint(0, 99999)
                 self.wiring_key = jax.random.PRNGKey(self.wiring_seed)
-                self.regenerate_circuit()  # This will invalidate cache
+                self.regenerate_circuit(reset_logs=False)  # This will invalidate cache
 
             # Training-consistent wiring controls
             imgui.separator_text("Training-Consistent Wiring")
@@ -1830,6 +1895,14 @@ class CircuitOptimizationDemo:
 
             # Visualization controls
             imgui.separator_text("Visualization")
+
+            # Plot type selection
+            plot_changed, self.plot_type_idx = imgui.combo(
+                "Plot Type", self.plot_type_idx, self.plot_types
+            )
+            if plot_changed:
+                print(f"Plot type changed to: {self.plot_types[self.plot_type_idx]}")
+
             _, self.use_simple_viz = imgui.checkbox("Simple visualization", self.use_simple_viz)
             _, self.use_message_viz = imgui.checkbox("Message visualization", self.use_message_viz)
             _, self.use_full_resolution = imgui.checkbox(
@@ -1861,7 +1934,8 @@ class CircuitOptimizationDemo:
             imgui.text(f"Active Input Case: {self.active_case_i}")
             imgui.text(f"Wiring Seed: {self.wiring_seed}")
             imgui.text(f"Wiring Mode: {self.wiring_mode}")
-            imgui.text(f"Loss Display: {self.loss_display_modes[self.loss_display_mode_idx]}")
+            imgui.text(f"Plot Type: {self.plot_types[self.plot_type_idx]}")
+            imgui.text(f"Display Mode: {self.loss_display_modes[self.loss_display_mode_idx]}")
 
             # Training wire status
             if self.use_training_wires:
