@@ -2,6 +2,8 @@
 
 This package provides a framework for optimizing boolean circuits using Graph Neural Networks (GNNs). By representing circuits as graphs and applying message passing neural networks, we can optimize circuit parameters without requiring gradient access to the underlying circuits.
 
+![Circuit Visualisation](assets/Circuit.gif)
+
 ## Overview
 
 The `boolean_nca_cc` package provides:
