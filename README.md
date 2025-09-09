@@ -4,6 +4,8 @@ This package provides a framework for optimizing boolean circuits using Graph Ne
 
 ![Circuit Visualisation](assets/Circuit.gif)
 
+This GIF shows the adaptive reconfiguration capacity of our Graph Transformer (GT), as it updates the circuit Lookup Tables (green cells) to perform a target computation. This can be seen by the alignment of 'Current Output' to 'Expected Output' in the output bit visualisation.
+
 ## Overview
 
 The `boolean_nca_cc` package provides:
