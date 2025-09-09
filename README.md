@@ -262,7 +262,7 @@ If you use this code in your research, please cite:
 ```bibtex
 @software{boolean_nca,
   title={Self-Organising Digital Circuits,
-  author={Gabriel Béna, Marcello Barilly},
+  author={Gabriel Béna, Marcello Barilly, Alexander Mordvintsev},
   year={2025},
   url={https://github.com/GabrielBena/boolean_nca_cc}
 }
