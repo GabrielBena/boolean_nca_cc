@@ -75,7 +75,7 @@ pool:
   # Number of gates to knock out when generating fresh patterns (ignored if vocabulary is used)
   damage_prob: 15
   # Damage-specific vocabulary size (decoupled from legacy persistent_knockout)
-  damage_knockout_diversity: 512
+  damage_knockout_diversity: 256
   # Pool update step filtering for damage selection (prevents damage to over-optimized circuits)
   damage_min_pool_updates: 0    # Minimum pool updates before circuit can be damaged
   damage_max_pool_updates: 100   # Maximum pool updates before circuit becomes too fragile for damage

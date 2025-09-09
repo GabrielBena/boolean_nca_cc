@@ -1218,7 +1218,7 @@ def plot_combined_bp_sa_stepwise_performance(
     
     # Set font sizes - much larger increase for Figure 3
     ax.set_xlabel('Message Steps', fontsize=22)
-    ax.set_ylabel('Normalized Hard Accuracy', fontsize=22)
+    ax.set_ylabel('Hard Accuracy', fontsize=22)
     
     # Update title based on mode
     if show_bp_trajectory:
@@ -1229,6 +1229,11 @@ def plot_combined_bp_sa_stepwise_performance(
     ax.tick_params(axis='both', which='major', labelsize=18)
     ax.grid(True, alpha=0.3)
     ax.set_ylim(0.6, 1.05)  # Adjusted for normalized values, with pre-damage at 1.0
+    
+    # Set y-axis ticks to show 0.05 steps
+    import numpy as np
+    y_ticks = np.arange(0.6, 1.03, 0.05)
+    ax.set_yticks(y_ticks)
     
     # Set xlim based on whether BP trajectory is shown
     if show_bp_trajectory:
