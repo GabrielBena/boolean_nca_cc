@@ -149,6 +149,7 @@ The package includes several predefined boolean circuit tasks:
 - **copy**: Identity function
 - **gray**: Gray code conversion
 - **popcount**: Count number of 1 bits
+- **text**: Arbitrary text-like pattern
 
 ## Configuration System
 
@@ -248,9 +249,9 @@ If you use this code in your research, please cite:
 
 ```bibtex
 @software{boolean_nca,
-  title={Graph Neural Cellular Automata for Boolean Circuit Optimization},
+  title={Self-Organising Digital Circuits,
   author={Gabriel Béna, Marcello Barilly},
-  year={2024},
+  year={2025},
   url={https://github.com/GabrielBena/boolean_nca_cc}
 }
 ```
