@@ -470,6 +470,7 @@ def run_knockout_periodic_evaluation(
     knockout_diversity: Optional[int] = None,  # Add diversity parameter for color coding
     hamming_analysis_dir: Optional[str] = None,  # Directory for hamming analysis plots
     bp_hamming_summary: Optional[List[Dict]] = None,
+    layer_neighbors: bool = False,
 ) -> Tuple[Dict, List]:  # Return both results and updated accumulated data
     """
     Run periodic evaluation on circuits with persistent knockouts using vocabulary-based sampling.
@@ -557,6 +558,7 @@ def run_knockout_periodic_evaluation(
             loss_type=loss_type,
             layer_sizes=layer_sizes,
             return_per_pattern=True,  # Enable per-pattern analysis
+            layer_neighbors=layer_neighbors,
             # use_scan=use_scan,
         )
 
@@ -613,6 +615,7 @@ def run_knockout_periodic_evaluation(
             loss_type=loss_type,
             layer_sizes=layer_sizes,
             return_per_pattern=True,  # Enable per-pattern analysis
+            layer_neighbors=layer_neighbors,
             # use_scan=use_scan,
         )
 
@@ -859,6 +862,7 @@ def plot_combined_bp_sa_stepwise_performance(
     periodic_eval_test_seed=42,
     knockout_config=None,
     show_ood_trajectory=True,
+    layer_neighbors=False,
 ):
     """
     Create a combined plot showing backpropagation and SA stepwise performance on the same axes.
@@ -928,6 +932,7 @@ def plot_combined_bp_sa_stepwise_performance(
         loss_type=loss_type,
         layer_sizes=layer_sizes,
         return_per_pattern=True,
+        layer_neighbors=layer_neighbors,
     )
     
     # Generate OUT-of-distribution knockout patterns if requested and config provided
@@ -975,6 +980,7 @@ def plot_combined_bp_sa_stepwise_performance(
             loss_type=loss_type,
             layer_sizes=layer_sizes,
             return_per_pattern=True,
+            layer_neighbors=layer_neighbors,
         )
         log.info("OOD SA evaluation completed")
     
@@ -1275,6 +1281,7 @@ def train_model(
     weight_decay: float = 1e-4,
     epochs: int = 100,
     n_message_steps: int = 1,
+    layer_neighbors: bool = False,
     use_scan: bool = False,
     # Loss parameters
     loss_type: str = "l4",  # Options: 'l4' or 'bce'
@@ -1576,7 +1583,12 @@ def train_model(
             all_results = []
 
             for i in range(n_message_steps):
-                graph = model(graph, knockout_pattern=knockout_pattern)
+                graph = model(
+                    graph,
+                    knockout_pattern=knockout_pattern,
+                    layer_neighbors=layer_neighbors,
+                    layer_sizes=layer_sizes,
+                )
 
                 graph, loss, logits, aux = get_loss_and_update_graph(
                     graph=graph,
@@ -1996,6 +2008,7 @@ def train_model(
                         knockout_diversity=knockout_diversity,  # Pass diversity for color coding
                         hamming_analysis_dir=hamming_analysis_dir,  # Pass hamming analysis directory
                         bp_hamming_summary=bp_hamming_summary,
+                        layer_neighbors=layer_neighbors,
                     )
                     # Extract final metrics for best model tracking
                     if ko_eval_results and "final_metrics_in" in ko_eval_results:

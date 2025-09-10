@@ -351,6 +351,7 @@ def main(cfg: DictConfig) -> None:
         weight_decay=cfg.training.weight_decay,
         epochs=cfg.training.epochs,
         n_message_steps=cfg.training.n_message_steps,
+        layer_neighbors=cfg.training.get("layer_neighbors", False),
         use_scan=cfg.training.use_scan,
         # Loss parameters
         loss_type=cfg.training.loss_type,

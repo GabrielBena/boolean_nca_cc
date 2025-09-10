@@ -287,6 +287,8 @@ class CircuitSelfAttention(nnx.Module):
         receivers: jp.ndarray,
         knockout_pattern: Optional[jp.ndarray] = None,
         bidirectional: bool = True,
+        layer_neighbors: bool = False,
+        layer_sizes: Optional[List[Tuple[int, int]]] = None,
     ) -> jp.ndarray:
         """
         Create an attention mask based on the circuit wiring and knockout pattern.
@@ -296,6 +298,8 @@ class CircuitSelfAttention(nnx.Module):
             receivers: Array of receiver node indices
             knockout_pattern: Optional boolean array where True indicates a knocked-out node.
             bidirectional: If True, create a symmetric mask
+            layer_neighbors: If True, allow attention between adjacent nodes within layers
+            layer_sizes: List of (nodes, group_size) tuples for each layer
 
         Returns:
             Boolean attention mask of shape [batch_size, 1, seq_len, seq_len]
@@ -314,6 +318,11 @@ class CircuitSelfAttention(nnx.Module):
         # Add self-connections (diagonal of True) so nodes can attend to themselves
         mask = mask | jp.eye(self.n_node, dtype=jp.bool_)
 
+        # Add layer neighbor connections if enabled
+        if layer_neighbors and layer_sizes is not None:
+            layer_neighbor_mask = self._create_layer_neighbor_mask(layer_sizes)
+            mask = mask | layer_neighbor_mask
+
         # If a knockout pattern is provided, apply it to the mask
         if knockout_pattern is not None:
             # Create a mask for active (non-knocked-out) nodes
@@ -330,6 +339,30 @@ class CircuitSelfAttention(nnx.Module):
         # Add batch dimension and singleton head dimension [batch_size, 1, seq_len, seq_len]
         # This format matches the MultiHeadAttention mask format
         return mask[None, None, ...]
+
+    def _create_layer_neighbor_mask(self, layer_sizes: List[Tuple[int, int]]) -> jp.ndarray:
+        """
+        Create mask for adjacent nodes within each layer.
+        
+        Args:
+            layer_sizes: List of (nodes, group_size) tuples for each layer
+            
+        Returns:
+            Boolean mask of shape [n_node, n_node] for layer neighbor connections
+        """
+        mask = jp.zeros((self.n_node, self.n_node), dtype=jp.bool_)
+        
+        current_idx = 0
+        for layer_nodes, _ in layer_sizes:
+            # Add connections between adjacent nodes in the same layer
+            for i in range(layer_nodes - 1):
+                node_i = current_idx + i
+                node_j = current_idx + i + 1
+                mask = mask.at[node_i, node_j].set(True)
+                mask = mask.at[node_j, node_i].set(True)  # Bidirectional
+            current_idx += layer_nodes
+        
+        return mask
 
     def _extract_features(self, nodes: Dict[str, jp.ndarray]) -> jp.ndarray:
         """
@@ -364,6 +397,8 @@ class CircuitSelfAttention(nnx.Module):
         graph: jraph.GraphsTuple,
         attention_mask: Optional[jp.ndarray] = None,
         knockout_pattern: Optional[jp.ndarray] = None,
+        layer_neighbors: bool = False,
+        layer_sizes: Optional[List[Tuple[int, int]]] = None,
     ) -> jraph.GraphsTuple:
         """
         Apply self-attention to update circuit parameters.
@@ -373,6 +408,8 @@ class CircuitSelfAttention(nnx.Module):
             attention_mask: Optional pre-computed attention mask.
                           If None, it will be computed from the graph.
             knockout_pattern: Optional knockout pattern to apply to the attention mask.
+            layer_neighbors: If True, allow attention between adjacent nodes within layers
+            layer_sizes: List of (nodes, group_size) tuples for each layer
 
         Returns:
             Updated graph after self-attention
@@ -390,7 +427,8 @@ class CircuitSelfAttention(nnx.Module):
         # Create attention mask if not provided
         if attention_mask is None:
             attention_mask = self._create_attention_mask(
-                senders, receivers, knockout_pattern=knockout_pattern, bidirectional=True
+                senders, receivers, knockout_pattern=knockout_pattern, bidirectional=True,
+                layer_neighbors=layer_neighbors, layer_sizes=layer_sizes
             )
 
         # Project features to the attention dimension
@@ -450,6 +488,8 @@ def run_self_attention_scan(
     graph: jraph.GraphsTuple,
     num_steps: int,
     knockout_pattern: Optional[jp.ndarray] = None,
+    layer_neighbors: bool = False,
+    layer_sizes: Optional[List[Tuple[int, int]]] = None,
 ) -> Tuple[jraph.GraphsTuple, List[jraph.GraphsTuple]]:
     """
     Apply the self-attention model iteratively for multiple steps using jax.lax.scan.
@@ -459,6 +499,8 @@ def run_self_attention_scan(
         graph: The initial graph
         num_steps: Number of steps to perform
         knockout_pattern: Optional knockout pattern to apply to the attention mask.
+        layer_neighbors: If True, allow attention between adjacent nodes within layers
+        layer_sizes: List of (nodes, group_size) tuples for each layer
 
     Returns:
         final_graph: The graph after all steps
@@ -466,13 +508,15 @@ def run_self_attention_scan(
     """
     # --- Compute the mask *once* before the scan ---
     attention_mask = model._create_attention_mask(
-        graph.senders, graph.receivers, knockout_pattern=knockout_pattern, bidirectional=True
+        graph.senders, graph.receivers, knockout_pattern=knockout_pattern, bidirectional=True,
+        layer_neighbors=layer_neighbors, layer_sizes=layer_sizes
     )
     # ---------------------------------------------
 
     def scan_body(carry_graph, _):
         # Apply one step of self-attention with precomputed mask
-        updated_graph = model(carry_graph, attention_mask=attention_mask, knockout_pattern=knockout_pattern)
+        updated_graph = model(carry_graph, attention_mask=attention_mask, knockout_pattern=knockout_pattern,
+                            layer_neighbors=layer_neighbors, layer_sizes=layer_sizes)
         return updated_graph, updated_graph
 
     # Run the scan
@@ -497,6 +541,7 @@ def run_self_attention_scan_with_loss(
     loss_type: str,
     layer_sizes: Tuple[Tuple[int, int], ...],
     knockout_pattern: Optional[jp.ndarray] = None,
+    layer_neighbors: bool = False,
 ) -> Tuple[jraph.GraphsTuple, List[jraph.GraphsTuple], jp.ndarray, List]:
     """
     Run the self-attention model for multiple steps with loss computation and graph updating at each step.
@@ -515,6 +560,7 @@ def run_self_attention_scan_with_loss(
         loss_type: Type of loss function to use
         layer_sizes: List of (nodes, group_size) tuples for each layer
         knockout_pattern: Optional knockout pattern to apply to the attention mask.
+        layer_neighbors: If True, allow attention between adjacent nodes within layers
 
     Returns:
         final_graph: The graph after all steps
@@ -526,7 +572,8 @@ def run_self_attention_scan_with_loss(
 
     # --- Compute the mask *once* before the scan ---
     attention_mask = model._create_attention_mask(
-        graph.senders, graph.receivers, knockout_pattern=knockout_pattern, bidirectional=True
+        graph.senders, graph.receivers, knockout_pattern=knockout_pattern, bidirectional=True,
+        layer_neighbors=layer_neighbors, layer_sizes=layer_sizes
     )
     # ---------------------------------------------
 
@@ -534,7 +581,8 @@ def run_self_attention_scan_with_loss(
         current_graph = carry
 
         # Apply self-attention with precomputed mask
-        model_updated_graph = model(current_graph, attention_mask=attention_mask, knockout_pattern=knockout_pattern)
+        model_updated_graph = model(current_graph, attention_mask=attention_mask, knockout_pattern=knockout_pattern,
+                                  layer_neighbors=layer_neighbors, layer_sizes=layer_sizes)
 
         # Compute loss and update graph
         updated_graph, loss, current_logits, aux = get_loss_and_update_graph(

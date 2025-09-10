@@ -18,6 +18,10 @@ parameters:
   #     - 32
   #     - 64
   #     - 128
+  training.layer_neighbors:
+    values:
+      - true
+      - false
 
   # # Damage and recovery parameters
   # pool.damage_pool_fraction:
@@ -25,14 +29,14 @@ parameters:
   #     - 0.1
   #     - 0.2
 
-  pool.damage_knockout_diversity:
-    values:
+  # pool.damage_knockout_diversity:
+  #   values:
       # - 10
       # - 32
-      - 512
-      - 128
-      - 256
-      - 32
+      # - 512
+      # - 128
+      # - 256
+      # - 32
       # - 256
       # - 512
 
@@ -49,20 +53,20 @@ parameters:
   #     - 1e-4
   #     - 5e-4
 
-  pool.damage_prob:
-    values:
+  # pool.damage_prob:
+  #   values:
       # - 1
       # # - 2
       # - 3
       # - 4
-      - 15
-      - 5
-      # - 6
-      - 10
+      # - 15
+      # - 5
+      # # - 6
+      # - 10
 
-  pool.damage_mode:
-    values:
-      - shotgun
+  # pool.damage_mode:
+  #   values:
+  #     - shotgun
       # - strip
       # - greedy
 

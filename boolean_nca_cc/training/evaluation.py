@@ -380,6 +380,7 @@ def evaluate_model_stepwise_batched(
     layer_sizes: List[Tuple[int, int]] = None,
     knockout_patterns: Optional[jp.ndarray] = None,
     return_per_pattern: bool = False,  # New parameter
+    layer_neighbors: bool = False,
 ) -> Dict:
     """
     Evaluate GNN performance on a batch of circuits by running message passing steps
@@ -491,6 +492,7 @@ def evaluate_model_stepwise_batched(
         return_per_pattern=return_per_pattern,
         initial_hard_accuracies=initial_hard_accuracies,
         batch_logits=batch_logits,
+        layer_neighbors=layer_neighbors,
     )
 
 def evaluate_circuits_in_chunks(
@@ -591,6 +593,7 @@ def _evaluate_with_loop(
     return_per_pattern: bool = False,  # New parameter
     initial_hard_accuracies: Optional[jp.ndarray] = None,
     batch_logits: Optional[List[jp.ndarray]] = None,
+    layer_neighbors: bool = False,
 ) -> Dict:
     """
     Evaluate using loop mode (original behavior).
@@ -627,10 +630,23 @@ def _evaluate_with_loop(
         # Apply model to all graphs in batch
         if knockout_patterns is not None:
             # Use a lambda to correctly map over the knockout_pattern keyword argument
-            vmap_model = jax.vmap(lambda g, k: model(g, knockout_pattern=k))
+            vmap_model = jax.vmap(
+                lambda g, k: model(
+                    g,
+                    knockout_pattern=k,
+                    layer_neighbors=layer_neighbors,
+                    layer_sizes=layer_sizes,
+                )
+            )
             updated_graphs = vmap_model(current_graphs, knockout_patterns)
         else:
-            vmap_model = jax.vmap(model)
+            vmap_model = jax.vmap(
+                lambda g: model(
+                    g,
+                    layer_neighbors=layer_neighbors,
+                    layer_sizes=layer_sizes,
+                )
+            )
             updated_graphs = vmap_model(current_graphs)
 
         # Extract logits from updated graphs
