@@ -18,10 +18,33 @@ parameters:
   #     - 32
   #     - 64
   #     - 128
-  training.layer_neighbors:
+  # training.layer_neighbors:
+  #   values:
+  #     - true
+  #     - false
+
+  training.damage_emission:
     values:
       - true
       - false
+
+  # # Training mode toggle
+  # training.training_mode:
+  #   values:
+  #     - "growth"
+  #     - "repair"
+
+  # Damage mode toggle
+  pool.damage_mode:
+    values:
+      - "shotgun"
+      - "strip"
+
+  # # Damage probability values
+  # pool.damage_prob:
+  #   values:
+  #     - 10
+  #     - 15
 
   # # Damage and recovery parameters
   # pool.damage_pool_fraction:

@@ -10,13 +10,13 @@ Perform Hamming-based analysis and plotting after training. Use `experiments/ham
 - **Method comparison**: Compare GNN evaluation to Backpropagation (BP) on the same KO patterns.
 - **Damage modes**: Support both `shotgun` and `strip` via existing utilities.
 - **Unified plots**: Reuse existing visualization to show accuracy vs distance and circular plots.
-- **Zero duplication**: Reuse existing functions in `structural_perturbation.py`, `circular_plot.py`, `model.py`, and `checkpointing.py`. No new classes.
+- **Zero duplication**: Reuse existing functions in `perturbation.py`, `circular_plot.py`, `model.py`, and `checkpointing.py`. No new classes.
 
 ### Principles
 
 - Keep training core free of analysis/plotting dependencies.
 - Use existing helpers already present in `experiments/hamming_distance.py` for truth-table conversion, masks, and distance metrics.
-- Reuse knockout vocabulary generation from `training/pool/structural_perturbation.py` (already implemented for hamming distance analysis of backprop mode).
+- Reuse knockout vocabulary generation from `training/pool/perturbation.py` (already implemented for hamming distance analysis of backprop mode).
 - Reuse plotting from `experiments/visualization/circular_plot.py`.
 - Reuse circuit utilities from `boolean_nca_cc/circuits/model.py`.
 - Leverage existing checkpoint loading from `boolean_nca_cc/training/checkpointing.py` for GNNs.
@@ -50,7 +50,7 @@ Do not introduce new classes. Extend the existing script with minimal additions:
 
 - **Knockout vocabulary (reuse, no redefinition)**:
 
-  - `create_knockout_vocabulary(...)` from `training/pool/structural_perturbation.py` for both `shotgun` and `strip`.
+  - `create_knockout_vocabulary(...)` from `training/pool/perturbation.py` for both `shotgun` and `strip`.
   - Use identical seeds across methods to ensure pattern parity.
 
 - **GNN per-pattern evaluation**:
@@ -66,7 +66,7 @@ Do not introduce new classes. Extend the existing script with minimal additions:
 ### Reused Functionality (no duplication)
 
 - **Checkpoint loading**: `load_best_model_from_wandb` from `boolean_nca_cc/training/checkpointing.py` for seamless one-step model restoration from WandB.
-- **Damage pattern generation**: `create_knockout_vocabulary` (and underlying `create_reproducible_knockout_pattern` / `create_strip_knockout_pattern`) from `training/pool/structural_perturbation.py`.
+- **Damage pattern generation**: `create_knockout_vocabulary` (and underlying `create_reproducible_knockout_pattern` / `create_strip_knockout_pattern`) from `training/pool/perturbation.py`.
 - **Circuit utilities**: `generate_layer_sizes`, `gen_circuit` from `boolean_nca_cc/circuits/model.py`.
 - **Visualization**: `plot_circular_knockout_distances`, `plot_accuracy_vs_distance` from `experiments/visualization/circular_plot.py`.
 - **Truth tables, masks, and distance math**: use the already-implemented helpers in `experiments/hamming_distance.py`.
@@ -114,7 +114,7 @@ Each row in `summary.csv` contains:
 
 - No train-loop integration for this analysis.
 - No analyzer classes.
-- No redefinition of functionality from `structural_perturbation.py`, `circular_plot.py`, `model.py`, or `checkpointing.py`.
+- No redefinition of functionality from `perturbation.py`, `circular_plot.py`, `model.py`, or `checkpointing.py`.
 
 ### Rationale
 
@@ -122,5 +122,5 @@ This approach keeps core training fast, stable, and free of heavy plotting/dataf
 
 ### Future Extensions (optional)
 
-- Add additional damage modes (targeted, progressive) by extending KO generation in `structural_perturbation.py` only if needed.
+- Add additional damage modes (targeted, progressive) by extending KO generation in `perturbation.py` only if needed.
 - Add method markers/colors in plots by lightly extending `plot_accuracy_vs_distance` without changing defaults.

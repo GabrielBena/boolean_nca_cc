@@ -125,7 +125,7 @@ def recreate_knockout_vocabulary(loaded_config: Dict[str, Any]) -> jp.ndarray:
     """
     Recreate the knockout vocabulary using the exact same parameters and functions as training.
     """
-    from boolean_nca_cc.training.pool.structural_perturbation import create_knockout_vocabulary
+    from boolean_nca_cc.training.pool.perturbation import create_knockout_vocabulary
     from boolean_nca_cc.circuits.model import generate_layer_sizes
     
     # Extract knockout parameters from the actual training config

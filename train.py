@@ -34,7 +34,7 @@ from boolean_nca_cc.training.utils import (
     cleanup_redundant_wandb_artifacts,
 )
 from boolean_nca_cc.training.checkpointing import save_checkpoint
-from boolean_nca_cc.training.pool.structural_perturbation import create_knockout_vocabulary
+from boolean_nca_cc.training.pool.perturbation import create_knockout_vocabulary
 
 # Configure logging
 log = logging.getLogger(__name__)
@@ -352,6 +352,7 @@ def main(cfg: DictConfig) -> None:
         epochs=cfg.training.epochs,
         n_message_steps=cfg.training.n_message_steps,
         layer_neighbors=cfg.training.get("layer_neighbors", False),
+        damage_emission=cfg.training.get("damage_emission", False),
         use_scan=cfg.training.use_scan,
         # Loss parameters
         loss_type=cfg.training.loss_type,

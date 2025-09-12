@@ -233,3 +233,170 @@ def create_knockout_vocabulary(
     knockout_vocabulary = jax.vmap(pattern_creator_fn)(pattern_keys)
 
     return knockout_vocabulary
+
+
+# =========================
+# SEU (logit) perturbations
+# =========================
+
+def compute_layer_offsets(
+    layer_sizes: List[Tuple[int, int]],
+) -> Tuple[jp.ndarray, jp.ndarray]:
+    """
+    Compute per-layer gate counts and start offsets for gate layers (excluding inputs).
+
+    Args:
+        layer_sizes: List of (total_gates, group_size) per gate layer.
+
+    Returns:
+        Tuple of (layer_start_indices, gates_per_layer) as int32 arrays.
+    """
+    gates_per_layer = jp.array([int(total) for total, _ in layer_sizes], dtype=jp.int32)
+    if gates_per_layer.size == 0:
+        return jp.array([], dtype=jp.int32), gates_per_layer
+    cumsum = jp.cumsum(gates_per_layer)
+    starts = jp.concatenate([jp.array([0], dtype=jp.int32), cumsum[:-1]])
+    return starts, gates_per_layer
+
+
+def flip_logits_with_masks(
+    logits_per_layer: List[jp.ndarray],
+    flip_masks_per_layer: List[jp.ndarray],
+    mode: str = "invert",
+) -> List[jp.ndarray]:
+    """
+    Apply SEU flips to logits using dense boolean masks aligned to per-layer shapes.
+
+    Args:
+        logits_per_layer: List of arrays with shape (group_n, group_size, 2^arity).
+        flip_masks_per_layer: List of boolean arrays of identical shapes.
+        mode: Only "invert" is supported (negate selected logits).
+
+    Returns:
+        List of mutated logits, same shapes as inputs.
+    """
+    if mode != "invert":
+        raise ValueError("Only invert mode is supported for SEU flips.")
+
+    if len(logits_per_layer) != len(flip_masks_per_layer):
+        raise ValueError("logits_per_layer and flip_masks_per_layer must have equal lengths.")
+
+    mutated: List[jp.ndarray] = []
+    for lgt, msk in zip(logits_per_layer, flip_masks_per_layer):
+        if lgt.shape != msk.shape:
+            raise ValueError("Flip mask shape must match logits shape per layer.")
+        factors = jp.where(msk, -1.0, 1.0)
+        mutated.append(lgt * factors)
+    return mutated
+
+
+def sample_seu_gates(
+    key: jax.random.PRNGKey,
+    layer_sizes: List[Tuple[int, int]],
+    num_gates: int,
+    strategy: str = "random",
+    ordered_indices: Optional[List[int]] = None,
+) -> jp.ndarray:
+    """
+    Sample global gate indices (excluding inputs) for SEU application.
+
+    Args:
+        key: JAX PRNGKey.
+        layer_sizes: List of (total_gates, group_size) per gate layer.
+        num_gates: Number of gates to sample.
+        strategy: "random" or "greedy".
+        ordered_indices: Greedy order to use; defaults to DEFAULT_GREEDY_ORDERED_INDICES.
+
+    Returns:
+        1D int32 array of selected global gate indices in [0, total_gates_all_layers).
+    """
+    _, gates_per_layer = compute_layer_offsets(layer_sizes)
+    total_gates = int(jp.sum(gates_per_layer))
+    if total_gates == 0 or num_gates <= 0:
+        return jp.array([], dtype=jp.int32)
+
+    k = min(int(num_gates), total_gates)
+
+    if strategy == "random":
+        return jax.random.choice(key, total_gates, shape=(k,), replace=False).astype(jp.int32)
+
+    if strategy == "greedy":
+        ordered = ordered_indices if ordered_indices is not None else DEFAULT_GREEDY_ORDERED_INDICES
+        ordered = [idx for idx in ordered if 0 <= idx < total_gates]
+        if not ordered:
+            return jp.array([], dtype=jp.int32)
+        return jp.array(ordered[:k], dtype=jp.int32)
+
+    raise ValueError("strategy must be 'random' or 'greedy'.")
+
+
+def build_flip_masks_from_indices(
+    layer_sizes: List[Tuple[int, int]],
+    selected_gate_indices: jp.ndarray,
+    flips_per_gate: int,
+    arity: int,
+    key: jax.random.PRNGKey,
+) -> List[jp.ndarray]:
+    """
+    Build dense per-layer flip masks given selected global gate indices.
+
+    Args:
+        layer_sizes: List of (total_gates, group_size) per gate layer.
+        selected_gate_indices: 1D array of global gate indices among gate layers.
+        flips_per_gate: Number of LUT entries to flip per selected gate.
+        arity: LUT arity; table size is 2**arity.
+        key: JAX PRNGKey for LUT-entry sampling.
+
+    Returns:
+        List of boolean masks shaped like logits per layer: (group_n, group_size, 2^arity).
+    """
+    starts, gates_per_layer = compute_layer_offsets(layer_sizes)
+    if gates_per_layer.size == 0:
+        return []
+
+    table_size = int(2 ** int(arity))
+    flips = max(0, min(int(flips_per_gate), table_size))
+
+    masks: List[jp.ndarray] = []
+    for (layer_total, group_size), start in zip(layer_sizes, list(starts)):
+        num_gates_layer = int(layer_total)
+        if num_gates_layer == 0:
+            masks.append(jp.zeros((0, 0, table_size), dtype=jp.bool_))
+            continue
+        group_n = num_gates_layer // int(group_size)
+        layer_mask = jp.zeros((group_n, int(group_size), table_size), dtype=jp.bool_)
+
+        if selected_gate_indices.size == 0 or flips == 0:
+            masks.append(layer_mask)
+            continue
+
+        layer_start = int(start)
+        layer_end = layer_start + num_gates_layer
+        in_layer_mask = (selected_gate_indices >= layer_start) & (selected_gate_indices < layer_end)
+        in_layer_indices = selected_gate_indices[in_layer_mask] - layer_start
+
+        if in_layer_indices.size == 0:
+            masks.append(layer_mask)
+            continue
+
+        gate_keys = jax.random.split(key, int(in_layer_indices.size))
+        for gate_offset, gate_key in zip(list(in_layer_indices), list(gate_keys)):
+            gate_offset = int(gate_offset)
+            g_idx = gate_offset // int(group_size)
+            in_group_idx = gate_offset % int(group_size)
+
+            if flips == table_size:
+                entries_mask = jp.ones((table_size,), dtype=jp.bool_)
+            else:
+                entries = jax.random.choice(
+                    gate_key, table_size, shape=(flips,), replace=False
+                )
+                entries_mask = jp.zeros((table_size,), dtype=jp.bool_).at[entries].set(True)
+
+            gate_mask = layer_mask[g_idx, in_group_idx]
+            gate_mask = jp.logical_or(gate_mask, entries_mask)
+            layer_mask = layer_mask.at[g_idx, in_group_idx].set(gate_mask)
+
+        masks.append(layer_mask)
+
+    return masks

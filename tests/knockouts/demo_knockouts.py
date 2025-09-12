@@ -13,7 +13,7 @@ import optax
 
 from boolean_nca_cc.circuits.model import gen_circuit, generate_layer_sizes, run_circuit
 from boolean_nca_cc.circuits.train import TrainState, train_step
-from boolean_nca_cc.training.pool.structural_perturbation import (
+from boolean_nca_cc.training.pool.perturbation import (
     apply_gate_knockout_to_pool_element,
     create_reproducible_knockout_pattern,
 )

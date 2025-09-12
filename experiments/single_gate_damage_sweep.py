@@ -34,7 +34,7 @@ from boolean_nca_cc.circuits.model import generate_layer_sizes, gen_circuit
 from boolean_nca_cc.circuits.tasks import get_task_data
 from boolean_nca_cc.training.evaluation import get_loss_from_wires_logits
 from boolean_nca_cc.training.preconfigure import preconfigure_circuit_logits
-from boolean_nca_cc.training.pool.structural_perturbation import (
+from boolean_nca_cc.training.pool.perturbation import (
     create_reproducible_knockout_pattern,
 )
 

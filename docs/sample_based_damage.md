@@ -10,7 +10,7 @@ Status: core functionality implemented; evaluation upgrades pending.
 ### Scope
 
 - Touchpoints: `boolean_nca_cc/training/pool/pool.py`, `boolean_nca_cc/training/train_loop.py`.
-- Reuse: `boolean_nca_cc/training/pool/structural_perturbation.py` and existing selection logic.
+- Reuse: `boolean_nca_cc/training/pool/perturbation.py` and existing selection logic.
 
 ### Insertion Points
 
@@ -92,7 +92,7 @@ if (
 
 ### Reused Components [implemented]
 
-- `structural_perturbation.py`:
+- `perturbation.py`:
   - `create_reproducible_knockout_pattern(...)` for fresh KO masks.
   - `create_knockout_vocabulary(...)` when a shared vocabulary is configured.
 - `pool.py`:

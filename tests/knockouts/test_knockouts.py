@@ -15,7 +15,7 @@ import pytest
 from flax import nnx
 
 from boolean_nca_cc.circuits.model import gen_circuit, generate_layer_sizes, run_circuit
-from boolean_nca_cc.training.pool.structural_perturbation import (
+from boolean_nca_cc.training.pool.perturbation import (
     create_reproducible_knockout_pattern,
 )
 

@@ -178,6 +178,9 @@ class CircuitSelfAttention(nnx.Module):
         type: str = "self_attention",
         zero_init: bool = True,
         re_zero_update: bool = False,
+        damage_emission: bool = False,
+        layer_neighbors: bool = False,
+        layer_sizes: Optional[List[Tuple[int, int]]] = None,
     ):
         """
         Initialize the circuit self-attention model.
@@ -206,6 +209,9 @@ class CircuitSelfAttention(nnx.Module):
         self.dropout_rate = dropout_rate
         self.num_heads = num_heads
         self.deterministic = True
+        self.damage_emission = damage_emission
+        self.layer_neighbors = layer_neighbors
+        self.layer_sizes = layer_sizes
 
         if (
             mlp_dim is None
@@ -287,7 +293,7 @@ class CircuitSelfAttention(nnx.Module):
         receivers: jp.ndarray,
         knockout_pattern: Optional[jp.ndarray] = None,
         bidirectional: bool = True,
-        layer_neighbors: bool = False,
+        layer_neighbors: Optional[bool] = None,
         layer_sizes: Optional[List[Tuple[int, int]]] = None,
     ) -> jp.ndarray:
         """
@@ -319,8 +325,10 @@ class CircuitSelfAttention(nnx.Module):
         mask = mask | jp.eye(self.n_node, dtype=jp.bool_)
 
         # Add layer neighbor connections if enabled
-        if layer_neighbors and layer_sizes is not None:
-            layer_neighbor_mask = self._create_layer_neighbor_mask(layer_sizes)
+        ln_enabled = self.layer_neighbors if layer_neighbors is None else layer_neighbors
+        effective_layer_sizes = self.layer_sizes if layer_sizes is None else layer_sizes
+        if ln_enabled and effective_layer_sizes is not None:
+            layer_neighbor_mask = self._create_layer_neighbor_mask(effective_layer_sizes)
             mask = mask | layer_neighbor_mask
 
         # If a knockout pattern is provided, apply it to the mask
@@ -328,13 +336,13 @@ class CircuitSelfAttention(nnx.Module):
             # Create a mask for active (non-knocked-out) nodes
             active_nodes_mask = ~knockout_pattern
 
-            # A node can't send attention if it's knocked out.
-            # A node can't receive attention if it's knocked out.
-            # This is equivalent to ANDing the active mask with both rows and columns.
-            knockout_mask = jp.outer(active_nodes_mask, active_nodes_mask)
-            
-            # Combine the wiring mask with the knockout mask
-            mask = mask & knockout_mask
+            if self.damage_emission:
+                # Disable receiving for damaged nodes (row mask), but keep them as valid senders (columns remain)
+                mask = mask & active_nodes_mask[:, None]
+            else:
+                # Disable both sending and receiving for damaged nodes (symmetric mask)
+                knockout_mask = jp.outer(active_nodes_mask, active_nodes_mask)
+                mask = mask & knockout_mask
 
         # Add batch dimension and singleton head dimension [batch_size, 1, seq_len, seq_len]
         # This format matches the MultiHeadAttention mask format
@@ -397,7 +405,7 @@ class CircuitSelfAttention(nnx.Module):
         graph: jraph.GraphsTuple,
         attention_mask: Optional[jp.ndarray] = None,
         knockout_pattern: Optional[jp.ndarray] = None,
-        layer_neighbors: bool = False,
+        layer_neighbors: Optional[bool] = None,
         layer_sizes: Optional[List[Tuple[int, int]]] = None,
     ) -> jraph.GraphsTuple:
         """
@@ -453,15 +461,19 @@ class CircuitSelfAttention(nnx.Module):
         if knockout_pattern is not None:
             active_mask = ~knockout_pattern
     
-            # SET TO LARGE NEGATIVE VALUES for knocked-out nodes (NEW)
-            # Use -10.0 which gives sigmoid(-10) ≈ 4.5e-5 ≈ 0.0
-            large_negative_value = -10.0
+            # SET TO LARGE NEGATIVE VALUES for knocked-out nodes
+            # Use -1000.0 which gives sigmoid(-1000) ≈ 0.0 for complete deactivation
+            large_negative_value = -1000.0
             current_logits = jp.where(
                 active_mask[:, None], 
                 nodes["logits"], 
                 large_negative_value
             )
-            current_hidden = nodes["hidden"] * active_mask[:, None]
+            current_hidden = jp.where(
+                active_mask[:, None], 
+                nodes["hidden"], 
+                large_negative_value
+            )
     
             # Zero out updates for knocked-out nodes
             logit_updates = logit_updates * active_mask[:, None]
@@ -476,6 +488,8 @@ class CircuitSelfAttention(nnx.Module):
             updated_hidden = nodes["hidden"] + self.hidden_scale * hidden_updates
 
         # Create updated nodes dictionary
+        # Preserve all channels: layer, group, gate_id, layer_pe, intra_layer_pe, loss
+        # Only update logits and hidden channels
         updated_nodes = {**nodes, "logits": updated_logits, "hidden": updated_hidden}
 
         # Return updated graph

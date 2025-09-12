@@ -16,6 +16,7 @@ from tqdm.auto import tqdm
 import os
 import logging
 from datetime import datetime
+from omegaconf import OmegaConf
 
 
 from boolean_nca_cc.circuits.model import gen_circuit
@@ -37,7 +38,7 @@ from boolean_nca_cc.training.preconfigure import preconfigure_circuit_logits
 import wandb
 
 from boolean_nca_cc.utils.graph_builder import build_graph
-from boolean_nca_cc.training.pool.structural_perturbation import    (
+from boolean_nca_cc.training.pool.perturbation import    (
     create_reproducible_knockout_pattern, 
     create_knockout_vocabulary,
     create_strip_knockout_pattern
@@ -558,7 +559,6 @@ def run_knockout_periodic_evaluation(
             loss_type=loss_type,
             layer_sizes=layer_sizes,
             return_per_pattern=True,  # Enable per-pattern analysis
-            layer_neighbors=layer_neighbors,
             # use_scan=use_scan,
         )
 
@@ -615,7 +615,6 @@ def run_knockout_periodic_evaluation(
             loss_type=loss_type,
             layer_sizes=layer_sizes,
             return_per_pattern=True,  # Enable per-pattern analysis
-            layer_neighbors=layer_neighbors,
             # use_scan=use_scan,
         )
 
@@ -941,7 +940,7 @@ def plot_combined_bp_sa_stepwise_performance(
         log.info(f"Generating OOD knockout patterns for SA evaluation ({len(knockout_patterns)} patterns)...")
         
         # Use the same logic as in run_knockout_periodic_evaluation
-        from boolean_nca_cc.training.pool.structural_perturbation import create_reproducible_knockout_pattern
+        from boolean_nca_cc.training.pool.perturbation import create_reproducible_knockout_pattern
         from functools import partial
         
         pattern_creator_fn = partial(
@@ -1347,6 +1346,8 @@ def train_model(
     training_mode: str = "growth",
     preconfig_steps: int = 200,
     preconfig_lr: float = 1e-2,
+    # Attention masking policy
+    damage_emission: bool = False,
     # Early stopping parameters
     stop_accuracy_enabled: bool = False,
     stop_accuracy_threshold: float = 0.95,
@@ -1454,6 +1455,21 @@ def train_model(
     else:
         # Use the provided GNN
         model = init_model
+        # Set attention masking policy once per run
+        try:
+            model.damage_emission = damage_emission
+        except Exception:
+            pass
+        # Set layer neighbors policy once per run
+        try:
+            model.layer_neighbors = layer_neighbors
+        except Exception:
+            pass
+        # Set layer sizes on the model for mask neighbor logic
+        try:
+            model.layer_sizes = layer_sizes
+        except Exception:
+            pass
 
     # Create optimizer or reuse existing optimizer
     if init_optimizer is None:
@@ -1586,8 +1602,6 @@ def train_model(
                 graph = model(
                     graph,
                     knockout_pattern=knockout_pattern,
-                    layer_neighbors=layer_neighbors,
-                    layer_sizes=layer_sizes,
                 )
 
                 graph, loss, logits, aux = get_loss_and_update_graph(
@@ -1844,6 +1858,68 @@ def train_model(
                         {
                             "pool/damaged_count": damaged_count,
                             "pool/damaged_fraction": damaged_frac,
+                            "training/epoch": epoch,
+                        }
+                    )
+
+            # Apply SEU flips to a fraction of the pool (analogous schedule to KO damage)
+            try:
+                seu_cfg = OmegaConf.load("configs/config.yaml")
+                seu_enabled = bool(seu_cfg.eval.seu.enabled)
+                seu_fraction = float(seu_cfg.eval.seu.fraction)
+                flips_per_gate = int(seu_cfg.eval.seu.flips_per_gate)
+            except Exception:
+                seu_enabled = False
+                seu_fraction = damage_pool_fraction
+                flips_per_gate = 1
+
+            if (
+                seu_enabled
+                and damage_pool_interval > 0
+                and seu_fraction > 0.0
+                and (epoch % damage_pool_interval == 0)
+            ):
+                rng, seu_key = jax.random.split(rng)
+
+                # Map damage_mode to SEU gate selection
+                if damage_mode == "shotgun":
+                    gate_selection = "random"
+                elif damage_mode == "greedy":
+                    gate_selection = "greedy"
+                else:
+                    gate_selection = "random"  # strip unsupported for SEU
+
+                # Use damage_prob as gates_per_circuit (count of gates to flip per circuit)
+                gates_per_circuit = int(damage_pool_damage_prob)
+
+                circuit_pool, seu_idxs = circuit_pool.seu_fraction(
+                    key=seu_key,
+                    fraction=seu_fraction,
+                    layer_sizes=tuple(layer_sizes),
+                    gates_per_circuit=gates_per_circuit,
+                    flips_per_gate=flips_per_gate,
+                    selection_strategy=damage_strategy,
+                    gate_selection=gate_selection,
+                    input_n=input_n,
+                    arity=arity,
+                    circuit_hidden_dim=circuit_hidden_dim,
+                    greedy_ordered_indices=greedy_ordered_indices,
+                )
+
+                seu_count = int(seu_idxs.shape[0]) if hasattr(seu_idxs, "shape") else 0
+                seu_frac = seu_count / float(pool_size) if pool_size > 0 else 0.0
+                log.info(
+                    f"SEU applied at epoch {epoch}: count={seu_count}, fraction={seu_frac:.4f}, "
+                    f"gates_per_circuit={gates_per_circuit}, flips_per_gate={flips_per_gate}, mode={gate_selection}"
+                )
+                if wandb_run:
+                    wandb_run.log(
+                        {
+                            "pool/seu_count": seu_count,
+                            "pool/seu_fraction": seu_frac,
+                            "seu/gates_per_circuit": gates_per_circuit,
+                            "seu/flips_per_gate": flips_per_gate,
+                            "seu/gate_selection": gate_selection,
                             "training/epoch": epoch,
                         }
                     )

@@ -76,7 +76,7 @@ Always check configs/config.yaml to see which parameter settings are ctually use
 
 **3.1 Pattern Generation**
 
-- **`training/pool/structural_perturbation.py`** isolation:
+- **`training/pool/perturbation.py`** isolation:
   - Test `create_reproducible_knockout_pattern` with fixed seeds
   - Test `create_knockout_vocabulary` produces diverse patterns
   - Verify reproducibility across calls with same seed

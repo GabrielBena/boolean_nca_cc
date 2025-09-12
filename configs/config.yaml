@@ -41,6 +41,8 @@ training:
   n_message_steps: 5  # Number of message passing steps per training iteration
   # MESSAGE PASSING GRAPH AUGMENTATION
   layer_neighbors: false  # Allow attention between adjacent gates within a layer
+  # ATTENTION MASKING POLICY
+  damage_emission: false  # If true, knocked-out nodes cannot receive but can still send
   # LOSS TYPE
   loss_type: "l4"  # Options: "l4", "l2", or "bce"
   # BATCH SIZE
@@ -97,6 +99,11 @@ eval:
   periodic_eval_test_seed: ${test_seed}
   periodic_eval_log_stepwise: true
   periodic_eval_batch_size: ${pool.damage_knockout_diversity}  # Batch size for knockout evaluation (should match knockout_diversity)
+  # SEU evaluation configuration
+  seu:
+    enabled: false
+    fraction: ${pool.damage_pool_fraction}
+    flips_per_gate: 1
   
   # Knockout evaluation
   knockout_eval:

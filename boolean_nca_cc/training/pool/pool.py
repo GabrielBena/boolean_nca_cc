@@ -20,8 +20,11 @@ log = logging.getLogger(__name__)
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.utils.graph_builder import build_graph
 from boolean_nca_cc.utils.extraction import extract_logits_from_graph
-from boolean_nca_cc.training.pool.structural_perturbation import (
-    create_reproducible_knockout_pattern)
+from boolean_nca_cc.training.pool.perturbation import (
+    create_reproducible_knockout_pattern,
+    sample_seu_gates,
+    build_flip_masks_from_indices,
+)
 
 PyTree = Any
 
@@ -368,6 +371,74 @@ class GraphPool(struct.PyTreeNode):
 
         return reset_pool, avg_steps_reset
 
+    def apply_seu(
+        self,
+        idxs: Array,
+        flip_masks_per_circuit: List[jp.ndarray],  # list per layer: (k, group_n, group_size, 2^arity)
+        layer_sizes: List[Tuple[int, int]],
+        input_n: int,
+        arity: int,
+        circuit_hidden_dim: int,
+    ) -> "GraphPool":
+        """
+        Apply SEU flips via dense masks to selected circuits, rebuild graphs preserving globals,
+        and persist mutated logits and graphs into the pool.
+
+        Args:
+            idxs: 1D indices of circuits to update.
+            flip_masks_per_circuit: List of per-layer boolean masks stacked over batch idxs.
+            layer_sizes: Circuit layer sizes (unused here; kept for signature parity and checks).
+            input_n: Number of input nodes.
+            arity: Gate arity.
+            circuit_hidden_dim: Node feature dim for graph builder.
+
+        Returns:
+            Updated GraphPool instance.
+        """
+        # Slice current logits and wires for the selected circuits
+        batch_logits = jax.tree.map(lambda leaf: leaf[idxs], self.logits)
+        batch_wires = jax.tree.map(lambda leaf: leaf[idxs], self.wires)
+
+        # Validate mask structure matches logits structure
+        if len(batch_logits) != len(flip_masks_per_circuit):
+            raise ValueError("flip_masks_per_circuit length must equal number of layers in logits.")
+
+        mutated_logits = []
+        for layer_logits, layer_mask in zip(batch_logits, flip_masks_per_circuit):
+            if layer_logits.shape != layer_mask.shape:
+                raise ValueError("Flip mask batch shape must match logits batch shape for each layer.")
+            factors = jp.where(layer_mask, -1.0, 1.0)
+            mutated_logits.append(layer_logits * factors)
+
+        # Preserve globals for each selected circuit
+        old_globals = self.graphs.globals[idxs]
+        loss_values = old_globals[:, 0]
+        update_steps = old_globals[:, 1]
+
+        # Build graphs per circuit with preserved globals
+        vmap_build_graph = jax.vmap(
+            lambda lgt, wr, lv, us: build_graph(
+                logits=lgt,
+                wires=wr,
+                input_n=input_n,
+                arity=arity,
+                circuit_hidden_dim=circuit_hidden_dim,
+                loss_value=lv,
+                update_steps=us,
+            ),
+            in_axes=(0, 0, 0, 0),
+        )
+        new_graphs = vmap_build_graph(mutated_logits, batch_wires, loss_values, update_steps)
+
+        # Commit updates to pool (graphs and logits only)
+        updated_pool = self.update(
+            idxs=idxs,
+            batch_of_graphs=new_graphs,
+            batch_of_logits=mutated_logits,
+        )
+
+        return updated_pool
+
     @jax.jit
     def apply_knockouts(
         self,
@@ -658,6 +729,64 @@ class GraphPool(struct.PyTreeNode):
         avg_steps_reset = self.get_average_update_steps_for_indices(reset_idxs)
 
         return reset_idxs, avg_steps_reset
+
+    def seu_fraction(
+        self,
+        key: Array,
+        fraction: float,
+        layer_sizes: List[Tuple[int, int]],
+        gates_per_circuit: int,
+        flips_per_gate: int,
+        selection_strategy: str,
+        gate_selection: str,
+        input_n: int,
+        arity: int,
+        circuit_hidden_dim: int,
+        greedy_ordered_indices: Optional[List[int]] = None,
+    ) -> Tuple["GraphPool", Array]:
+        """
+        Apply SEU to a fraction of circuits by sampling gates and building flip masks.
+
+        Returns updated pool and indices of modified circuits.
+        """
+        # Select circuits to modify using existing pool selection semantics
+        sel_key, op_key = jax.random.split(key)
+        idxs, _avg_steps_unused = self.get_reset_indices(
+            sel_key, fraction, reset_strategy=selection_strategy
+        )
+
+        num_selected = idxs.shape[0]
+        if num_selected == 0:
+            return self, idxs
+
+        # For each selected circuit, sample gates and build masks
+        gate_keys = jax.random.split(op_key, num_selected)
+
+        def build_masks_for_one(k):
+            # sample gates
+            g_sel = sample_seu_gates(
+                k, layer_sizes[1:], gates_per_circuit, strategy=gate_selection, ordered_indices=greedy_ordered_indices
+            )
+            # construct masks per layer matching logits shapes
+            masks = build_flip_masks_from_indices(layer_sizes[1:], g_sel, flips_per_gate=flips_per_gate, arity=arity, key=k)
+            return masks
+
+        # masks_per_circuit is list-per-layer shaped (batch, ...layer_shape...)
+        masks_list = [
+            jax.tree.map(lambda *xs: jp.stack(xs), *[build_masks_for_one(k) for k in gate_keys])
+        ][0]
+
+        # Apply SEU using mask stacks
+        updated_pool = self.apply_seu(
+            idxs=idxs,
+            flip_masks_per_circuit=masks_list,
+            layer_sizes=layer_sizes[1:],
+            input_n=input_n,
+            arity=arity,
+            circuit_hidden_dim=circuit_hidden_dim,
+        )
+
+        return updated_pool, idxs
 
 
 def initialize_graph_pool(

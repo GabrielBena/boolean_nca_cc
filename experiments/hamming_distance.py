@@ -42,7 +42,7 @@ from boolean_nca_cc.circuits.train import (
     create_gate_mask_from_knockout_pattern,
 )
 from boolean_nca_cc.circuits.model import generate_layer_sizes
-from boolean_nca_cc.training.pool.structural_perturbation import (
+from boolean_nca_cc.training.pool.perturbation import (
     create_knockout_vocabulary,
 )
 from boolean_nca_cc.training.checkpointing import (
