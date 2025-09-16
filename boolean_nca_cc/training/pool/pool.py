@@ -404,11 +404,27 @@ class GraphPool(struct.PyTreeNode):
             raise ValueError("flip_masks_per_circuit length must equal number of layers in logits.")
 
         mutated_logits = []
-        for layer_logits, layer_mask in zip(batch_logits, flip_masks_per_circuit):
+        total_flips = 0
+        for i, (layer_logits, layer_mask) in enumerate(zip(batch_logits, flip_masks_per_circuit)):
             if layer_logits.shape != layer_mask.shape:
                 raise ValueError("Flip mask batch shape must match logits batch shape for each layer.")
             factors = jp.where(layer_mask, -1.0, 1.0)
-            mutated_logits.append(layer_logits * factors)
+            mutated_layer = layer_logits * factors
+            mutated_logits.append(mutated_layer)
+            
+            # DEBUG: Count flips and show sample changes
+            layer_flips = jp.sum(layer_mask).astype(int)
+            total_flips += layer_flips
+            log.info(f"DEBUG APPLY_SEU: Layer {i} flips: {layer_flips}")
+            
+            # Show sample logit changes for first circuit
+            if i == 0 and layer_logits.shape[0] > 0:
+                orig_sample = layer_logits[0, 0, 0, :5]  # First 5 LUT entries
+                new_sample = mutated_layer[0, 0, 0, :5]
+                log.info(f"DEBUG APPLY_SEU: Layer {i} sample LUT before: {orig_sample}")
+                log.info(f"DEBUG APPLY_SEU: Layer {i} sample LUT after:  {new_sample}")
+        
+        log.info(f"DEBUG APPLY_SEU: Total flips applied: {total_flips}")
 
         # Preserve globals for each selected circuit
         old_globals = self.graphs.globals[idxs]
@@ -749,6 +765,13 @@ class GraphPool(struct.PyTreeNode):
 
         Returns updated pool and indices of modified circuits.
         """
+        # DEBUG: Log SEU application details
+        log.info(f"DEBUG SEU_FRACTION: Applying SEU to circuits")
+        log.info(f"  fraction={fraction}, gates_per_circuit={gates_per_circuit}, flips_per_gate={flips_per_gate}")
+        log.info(f"  selection_strategy={selection_strategy}, gate_selection={gate_selection}")
+        log.info(f"  greedy_ordered_indices={greedy_ordered_indices}")
+        log.info(f"  layer_sizes={layer_sizes}")
+        
         # Select circuits to modify using existing pool selection semantics
         sel_key, op_key = jax.random.split(key)
         idxs, _avg_steps_unused = self.get_reset_indices(
@@ -756,7 +779,10 @@ class GraphPool(struct.PyTreeNode):
         )
 
         num_selected = idxs.shape[0]
+        log.info(f"DEBUG SEU_FRACTION: Selected {num_selected} circuits for SEU")
+        
         if num_selected == 0:
+            log.warning("DEBUG SEU_FRACTION: No circuits selected for SEU!")
             return self, idxs
 
         # For each selected circuit, sample gates and build masks
@@ -776,6 +802,18 @@ class GraphPool(struct.PyTreeNode):
             jax.tree.map(lambda *xs: jp.stack(xs), *[build_masks_for_one(k) for k in gate_keys])
         ][0]
 
+        # DEBUG: Check if masks were created and show sample gate selections
+        if num_selected > 0:
+            sample_gates = sample_seu_gates(
+                gate_keys[0], layer_sizes[1:], gates_per_circuit, strategy=gate_selection, ordered_indices=greedy_ordered_indices
+            )
+            log.info(f"DEBUG SEU_FRACTION: Sample gate selection: {sample_gates}")
+            
+            # Check mask shapes
+            for i, mask in enumerate(masks_list):
+                log.info(f"DEBUG SEU_FRACTION: Layer {i} mask shape: {mask.shape}")
+                log.info(f"DEBUG SEU_FRACTION: Layer {i} mask sum (flips): {jp.sum(mask)}")
+        
         # Apply SEU using mask stacks
         updated_pool = self.apply_seu(
             idxs=idxs,
@@ -786,6 +824,7 @@ class GraphPool(struct.PyTreeNode):
             circuit_hidden_dim=circuit_hidden_dim,
         )
 
+        log.info(f"DEBUG SEU_FRACTION: SEU application completed for {num_selected} circuits")
         return updated_pool, idxs
 
 

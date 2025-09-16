@@ -70,16 +70,16 @@ pool:
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
 
   # Sample-based damage (applied post-step, independent of resets)
-  damage_pool_enabled: true
+  damage_pool_enabled: false
   damage_pool_interval: 128
   damage_pool_fraction: 0.15
   damage_strategy: "loss_biased"
   damage_combined_weights: [0.5, 0.5]
-  damage_mode: "shotgun"  # Options: "shotgun" (random), "strip" (localized), or "greedy" (ordered selection)
+  damage_mode: "greedy"  # Options: "shotgun" (random), "strip" (localized), or "greedy" (ordered selection)
   # Number of gates to knock out when generating fresh patterns (ignored if vocabulary is used)
-  damage_prob: 15
+  damage_prob: 20
   # Damage-specific vocabulary size (decoupled from legacy persistent_knockout)
-  damage_knockout_diversity: 256
+  damage_knockout_diversity: 1 
   # Pool update step filtering for damage selection (prevents damage to over-optimized circuits)
   damage_min_pool_updates: 0    # Minimum pool updates before circuit can be damaged
   damage_max_pool_updates: 100   # Maximum pool updates before circuit becomes too fragile for damage
@@ -94,20 +94,28 @@ pool:
 eval:
   # Periodic evaluation parameters
   periodic_eval_enabled: true
-  periodic_eval_inner_steps: 60
-  periodic_eval_interval: 1024 # 16
+  periodic_eval_inner_steps: 20
+  periodic_eval_interval: 256 # 16
   periodic_eval_test_seed: ${test_seed}
   periodic_eval_log_stepwise: true
   periodic_eval_batch_size: ${pool.damage_knockout_diversity}  # Batch size for knockout evaluation (should match knockout_diversity)
   # SEU evaluation configuration
   seu:
-    enabled: false
+    enabled: true
     fraction: ${pool.damage_pool_fraction}
-    flips_per_gate: 1
+    flips_per_gate: 16  # 2**arity = 2**4 = 16
+    # SEU-specific selection controls (decoupled from knockout eval)
+    gates_per_circuit: ${pool.damage_prob}
+    selection_strategy: ${pool.damage_strategy}  # uniform|steps_biased|loss_biased|combined
+    gate_selection: "greedy"  # random|greedy
+    min_pool_updates: ${pool.damage_min_pool_updates}
+    max_pool_updates: ${pool.damage_max_pool_updates}
+    greedy_ordered_indices: ${pool.greedy_ordered_indices}
+    log_stepwise: ${eval.periodic_eval_log_stepwise}
   
   # Knockout evaluation
   knockout_eval:
-    enabled: true
+    enabled: false
     damage_prob: ${pool.damage_prob}
   
   # Hamming distance analysis
@@ -137,9 +145,9 @@ early_stop:
   enabled: true  # Enable early stopping based on accuracy threshold
   threshold: 0.995  # Accuracy threshold to trigger early stopping
   metric: "hard_accuracy"  # Metric to monitor: "loss", "hard_loss", "accuracy", "hard_accuracy"
-  source: "eval_ko_in"
+  source: "eval_seu_steps"  # Source for early stopping: "training", "eval", "eval_ko_in", or "eval_seu_steps"
   patience: 10  # Number of epochs above threshold before stopping
-  min_epochs: 1012  # Minimum epochs before early stopping can trigger
+  min_epochs: 1042  # Minimum epochs before early stopping can trigger
 
 # Backpropagation baseline configuration
 backprop:

@@ -9,7 +9,7 @@ to/from knocked out gates.
 import jax
 import jax.numpy as jp
 import jraph
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 from functools import partial
 
 
@@ -400,3 +400,57 @@ def build_flip_masks_from_indices(
         masks.append(layer_mask)
 
     return masks
+
+
+def create_seu_vocabulary(
+    rng: jax.random.PRNGKey,
+    vocabulary_size: int,
+    layer_sizes: List[Tuple[int, int]],
+    seu_config: Dict,
+    ordered_indices: Optional[List[int]] = None,
+) -> List[List[jp.ndarray]]:
+    """
+    Generate vocabulary of SEU flip mask patterns per circuit.
+    
+    For greedy mode, always returns the same pattern (vocabulary_size copies).
+    For future random mode, would generate unique patterns.
+    
+    Args:
+        rng: JAX random key (unused for greedy mode)
+        vocabulary_size: Number of patterns to generate
+        layer_sizes: List of (total_gates, group_size) per gate layer
+        seu_config: Dict containing num_gates, flips_per_gate, arity, strategy
+        ordered_indices: Greedy order to use; defaults to DEFAULT_GREEDY_ORDERED_INDICES
+        
+    Returns:
+        List of length vocabulary_size, each containing per-layer flip masks
+    """
+    strategy = seu_config.get("strategy", "greedy")
+    num_gates = seu_config.get("num_gates", 1)
+    flips_per_gate = seu_config.get("flips_per_gate", 1)
+    arity = seu_config.get("arity", 2)
+    
+    if strategy == "greedy":
+        # Greedy mode: deterministic pattern, replicate across vocabulary
+        selected_gates = sample_seu_gates(
+            key=rng,  # Unused for greedy
+            layer_sizes=layer_sizes,
+            num_gates=num_gates,
+            strategy="greedy",
+            ordered_indices=ordered_indices,
+        )
+        
+        flip_masks = build_flip_masks_from_indices(
+            layer_sizes=layer_sizes,
+            selected_gate_indices=selected_gates,
+            flips_per_gate=flips_per_gate,
+            arity=arity,
+            key=rng,  # Unused for greedy
+        )
+        
+        # Replicate the same pattern across vocabulary
+        return [flip_masks for _ in range(vocabulary_size)]
+    
+    else:
+        # Future: random mode would generate unique patterns
+        raise NotImplementedError("Random SEU vocabulary generation not yet implemented")

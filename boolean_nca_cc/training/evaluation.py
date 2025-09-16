@@ -10,6 +10,7 @@ import jax.numpy as jp
 import jraph
 from tqdm.auto import tqdm
 from typing import List, Dict, Tuple, Generator, NamedTuple, Optional
+import logging
 
 from boolean_nca_cc.models import CircuitSelfAttention, CircuitGNN
 from boolean_nca_cc.utils import (
@@ -24,6 +25,13 @@ from boolean_nca_cc.circuits.train import (
     compute_accuracy,
 )
 from boolean_nca_cc.training.pool.pool import GraphPool
+from boolean_nca_cc.training.pool.perturbation import (
+    sample_seu_gates,
+    build_flip_masks_from_indices,
+)
+
+# Setup logging
+log = logging.getLogger(__name__)
 
 
 class StepResult(NamedTuple):
@@ -365,196 +373,6 @@ def evaluate_model_stepwise(
 
     return step_metrics
 
-
-def evaluate_seu_pipeline_batched(
-    model: CircuitSelfAttention,
-    pool: GraphPool,
-    key: jax.random.PRNGKey,
-    fraction: float,
-    layer_sizes: List[Tuple[int, int]],
-    gates_per_circuit: int,
-    flips_per_gate: int,
-    selection_strategy: str,
-    gate_selection: str,
-    x_data: jp.ndarray,
-    y_data: jp.ndarray,
-    input_n: int,
-    arity: int,
-    circuit_hidden_dim: int,
-    n_message_steps: int,
-    loss_type: str,
-    greedy_ordered_indices: Optional[List[int]] = None,
-    combined_weights: Optional[Tuple[float, float]] = None,
-    min_pool_updates: Optional[int] = None,
-    max_pool_updates: Optional[int] = None,
-    bidirectional_edges: bool = True,
-    layer_neighbors: bool = False,
-) -> Tuple[Dict, GraphPool, jp.ndarray]:
-    """
-    Run SEU pipeline on a fraction of the pool and evaluate recovery trajectory.
-
-    Returns (metrics, updated_pool, modified_indices).
-    """
-    # Snapshot baseline metrics for selected circuits (step 0)
-    sel_key, seu_key = jax.random.split(key)
-    idxs, _ = pool.get_reset_indices(
-        sel_key,
-        fraction=fraction,
-        reset_strategy=selection_strategy,
-        combined_weights=combined_weights if combined_weights is not None else (0.5, 0.5),
-        min_pool_updates_for_damage=min_pool_updates,
-        max_pool_updates_for_damage=max_pool_updates,
-    )
-
-    # Slice batch wires/logits for baseline
-    batch_wires = jax.tree.map(lambda leaf: leaf[idxs], pool.wires)
-    batch_logits = jax.tree.map(lambda leaf: leaf[idxs], pool.logits)
-
-    # Evaluate baseline stepwise (step 0 recorded inside)
-    baseline = evaluate_model_stepwise_batched(
-        model=model,
-        batch_wires=batch_wires,
-        batch_logits=batch_logits,
-        x_data=x_data,
-        y_data=y_data,
-        input_n=input_n,
-        arity=arity,
-        circuit_hidden_dim=circuit_hidden_dim,
-        n_message_steps=0,
-        loss_type=loss_type,
-        bidirectional_edges=bidirectional_edges,
-        layer_sizes=layer_sizes,
-        knockout_patterns=None,
-        layer_neighbors=layer_neighbors,
-    )
-
-    # Apply SEU to the same circuits
-    updated_pool, out_idxs = pool.seu_fraction(
-        key=seu_key,
-        fraction=fraction,
-        layer_sizes=layer_sizes,
-        gates_per_circuit=gates_per_circuit,
-        flips_per_gate=flips_per_gate,
-        selection_strategy=selection_strategy,
-        gate_selection=gate_selection,
-        input_n=input_n,
-        arity=arity,
-        circuit_hidden_dim=circuit_hidden_dim,
-        greedy_ordered_indices=greedy_ordered_indices,
-    )
-
-    # Immediate post-SEU evaluation (0 GT steps)
-    post_wires = jax.tree.map(lambda leaf: leaf[out_idxs], updated_pool.wires)
-    post_logits = jax.tree.map(lambda leaf: leaf[out_idxs], updated_pool.logits)
-
-    immediate = evaluate_model_stepwise_batched(
-        model=model,
-        batch_wires=post_wires,
-        batch_logits=post_logits,
-        x_data=x_data,
-        y_data=y_data,
-        input_n=input_n,
-        arity=arity,
-        circuit_hidden_dim=circuit_hidden_dim,
-        n_message_steps=0,
-        loss_type=loss_type,
-        bidirectional_edges=bidirectional_edges,
-        layer_sizes=layer_sizes,
-        knockout_patterns=None,
-        layer_neighbors=layer_neighbors,
-    )
-
-    # Recovery evaluation for K steps
-    recovery = evaluate_model_stepwise_batched(
-        model=model,
-        batch_wires=post_wires,
-        batch_logits=post_logits,
-        x_data=x_data,
-        y_data=y_data,
-        input_n=input_n,
-        arity=arity,
-        circuit_hidden_dim=circuit_hidden_dim,
-        n_message_steps=n_message_steps,
-        loss_type=loss_type,
-        bidirectional_edges=bidirectional_edges,
-        layer_sizes=layer_sizes,
-        knockout_patterns=None,
-        layer_neighbors=layer_neighbors,
-    )
-
-    # Package results
-    metrics = {
-        "baseline": baseline,
-        "immediate": immediate,
-        "recovery": recovery,
-        "modified_indices": out_idxs,
-    }
-
-    return metrics, updated_pool, out_idxs
-
-
-def evaluate_seu_pipeline_from_config(
-    model: CircuitSelfAttention,
-    pool: GraphPool,
-    cfg,
-    x_data: jp.ndarray,
-    y_data: jp.ndarray,
-    layer_sizes: List[Tuple[int, int]],
-) -> Tuple[Dict, GraphPool, jp.ndarray]:
-    """
-    Convenience wrapper to run SEU evaluation using config values.
-    """
-    input_n = int(cfg.circuit.input_bits)
-    arity = int(cfg.circuit.arity)
-    circuit_hidden_dim = int(cfg.circuit.circuit_hidden_dim)
-
-    fraction = float(cfg.eval.seu.fraction)
-    gates_per_circuit = int(cfg.pool.damage_prob)
-    flips_per_gate = int(cfg.eval.seu.flips_per_gate)
-
-    selection_strategy = str(cfg.pool.damage_strategy)
-    combined_weights = tuple(cfg.pool.damage_combined_weights)
-    min_pool_updates = int(cfg.pool.damage_min_pool_updates)
-    max_pool_updates = int(cfg.pool.damage_max_pool_updates)
-
-    damage_mode = str(cfg.pool.damage_mode)
-    if damage_mode == "shotgun":
-        gate_selection = "random"
-    elif damage_mode == "greedy":
-        gate_selection = "greedy"
-    else:
-        # strip unsupported for SEU → fallback to random
-        gate_selection = "random"
-
-    greedy_ordered_indices = list(cfg.pool.greedy_ordered_indices)
-
-    n_message_steps = int(cfg.eval.periodic_eval_inner_steps)
-    key = jax.random.PRNGKey(int(cfg.damage_seed))
-
-    return evaluate_seu_pipeline_batched(
-        model=model,
-        pool=pool,
-        key=key,
-        fraction=fraction,
-        layer_sizes=layer_sizes,
-        gates_per_circuit=gates_per_circuit,
-        flips_per_gate=flips_per_gate,
-        selection_strategy=selection_strategy,
-        gate_selection=gate_selection,
-        combined_weights=combined_weights,
-        min_pool_updates=min_pool_updates,
-        max_pool_updates=max_pool_updates,
-        x_data=x_data,
-        y_data=y_data,
-        input_n=input_n,
-        arity=arity,
-        circuit_hidden_dim=circuit_hidden_dim,
-        n_message_steps=n_message_steps,
-        loss_type=str(cfg.training.loss_type),
-        greedy_ordered_indices=greedy_ordered_indices,
-        bidirectional_edges=True,
-        layer_neighbors=bool(cfg.training.layer_neighbors),
-    )
 
 
 def evaluate_model_stepwise_batched(

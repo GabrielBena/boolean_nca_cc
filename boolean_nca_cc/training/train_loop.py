@@ -412,7 +412,7 @@ def _get_metric_value(
 
     Args:
         metric_name: Name of the metric ('loss', 'hard_loss', 'accuracy', 'hard_accuracy')
-        metric_source: Source of the metric ('training', 'eval', or 'eval_ko_in')
+        metric_source: Source of the metric ('training', 'eval', 'eval_ko_in', or 'eval_seu_steps')
         training_metrics: Dictionary with training metrics
         eval_metrics: Dictionary with evaluation metrics (optional)
 
@@ -443,8 +443,247 @@ def _get_metric_value(
             "hard_accuracy": "eval_ko_in/final_hard_accuracy",
         }
         return eval_metrics[eval_key_map[metric_name]]
+    elif metric_source == "eval_seu_steps":
+        if eval_metrics is None:
+            raise ValueError("SEU stepwise evaluation metrics not available for eval_seu_steps source")
+        # Map to SEU stepwise evaluation metric keys
+        eval_key_map = {
+            "loss": "eval_seu_steps/loss",
+            "hard_loss": "eval_seu_steps/hard_loss", 
+            "accuracy": "eval_seu_steps/accuracy",
+            "hard_accuracy": "eval_seu_steps/hard_accuracy",
+        }
+        return eval_metrics[eval_key_map[metric_name]]
     else:
         raise ValueError(f"Unknown metric source: {metric_source}")
+
+def run_seu_periodic_evaluation(
+    model,
+    seu_vocabulary: Optional[List[List[jp.ndarray]]],
+    base_wires: PyTree,
+    base_logits: PyTree,
+    seu_config: Dict,
+    periodic_eval_test_seed: int,
+    x_data,
+    y_data,
+    input_n,
+    arity,
+    circuit_hidden_dim,
+    n_message_steps,
+    loss_type,
+    epoch,
+    wandb_run,
+    eval_batch_size: int,
+    layer_sizes: Optional[List[Tuple[int, int]]] = None,
+    layer_neighbors: bool = False,
+    greedy_ordered_indices: Optional[List[int]] = None,
+) -> Dict:
+    """
+    Run periodic SEU evaluation using vocabulary-based sampling, mirroring knockout evaluation pattern.
+    
+    Args:
+        model: The trained model to evaluate
+        seu_vocabulary: Optional vocabulary of SEU flip mask patterns
+        base_wires: Base circuit wires
+        base_logits: Base circuit logits
+        seu_config: Configuration for SEU evaluation
+        periodic_eval_test_seed: Seed for evaluation
+        x_data: Input data
+        y_data: Target data
+        input_n: Number of inputs
+        arity: Circuit arity
+        circuit_hidden_dim: Hidden dimension for circuit
+        n_message_steps: Number of message passing steps
+        loss_type: Type of loss function
+        epoch: Current training epoch
+        wandb_run: WandB run object for logging
+        eval_batch_size: Batch size for evaluation
+        layer_sizes: Layer sizes for the circuit
+        layer_neighbors: Whether to use layer neighbors
+        greedy_ordered_indices: Ordered indices for greedy gate selection
+        
+    Returns:
+        Dictionary with SEU evaluation results
+    """
+    try:
+        from boolean_nca_cc.training.evaluation import evaluate_circuits_in_chunks, evaluate_model_stepwise_batched
+        from boolean_nca_cc.training.pool.perturbation import create_seu_vocabulary, flip_logits_with_masks
+        
+        # Use the layer_sizes parameter that's already passed to the function
+        true_layer_sizes = layer_sizes if layer_sizes is not None else [(64, 8), (64, 8), (64, 8), (64, 8)]
+        
+        # 1. Generate IN-distribution SEU patterns (from vocabulary or fresh)
+        log.info(f"Running IN-distribution SEU evaluation with vocabulary patterns ({eval_batch_size} patterns)...")
+        
+        if seu_vocabulary is not None:
+            # Use provided vocabulary
+            vocab_size = len(seu_vocabulary)
+            seu_rng = jax.random.PRNGKey(periodic_eval_test_seed)
+            vocab_indices = jax.random.choice(
+                seu_rng, vocab_size, shape=(eval_batch_size,), replace=True
+            )
+            in_seu_patterns = [seu_vocabulary[idx] for idx in list(vocab_indices)]
+        else:
+            # Generate fresh SEU patterns
+            seu_rng = jax.random.PRNGKey(periodic_eval_test_seed)
+            in_seu_patterns = create_seu_vocabulary(
+                rng=seu_rng,
+                vocabulary_size=eval_batch_size,
+                layer_sizes=true_layer_sizes,
+                seu_config=seu_config,
+                ordered_indices=greedy_ordered_indices,
+            )
+        
+        # Replicate base circuit for the batch
+        in_wires = jax.tree.map(
+            lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_wires
+        )
+        in_logits = jax.tree.map(
+            lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_logits
+        )
+        
+        # Apply SEU patterns to logits (upstream of GNN processing)
+        def apply_seu_to_logits(logits_list, seu_patterns):
+            """Apply SEU patterns to logits using flip_logits_with_masks"""
+            modified_logits = []
+            for i, logits_per_layer in enumerate(logits_list):
+                # Apply SEU flips to this layer
+                modified_layer = flip_logits_with_masks(
+                    logits_per_layer=[logits_per_layer],
+                    flip_masks_per_layer=[seu_patterns[i]],
+                    mode="invert"
+                )[0]
+                modified_logits.append(modified_layer)
+            return modified_logits
+        
+        # Apply SEU patterns to each circuit in the batch
+        in_modified_logits = []
+        for i in range(eval_batch_size):
+            circuit_logits = [layer[i] for layer in in_logits]
+            circuit_pattern = in_seu_patterns[i]
+            modified_circuit = apply_seu_to_logits(circuit_logits, circuit_pattern)
+            in_modified_logits.append(modified_circuit)
+        
+        # Stack modified logits back into batch format
+        in_modified_logits = jax.tree.map(
+            lambda *xs: jp.stack(xs, axis=0), *in_modified_logits
+        )
+        
+        step_metrics_in = evaluate_circuits_in_chunks(
+            eval_fn=evaluate_model_stepwise_batched,
+            wires=in_wires,
+            logits=in_modified_logits,
+            target_chunk_size=eval_batch_size,
+            model=model,
+            x_data=x_data,
+            y_data=y_data,
+            input_n=input_n,
+            arity=arity,
+            circuit_hidden_dim=circuit_hidden_dim,
+            n_message_steps=n_message_steps,
+            loss_type=loss_type,
+            layer_sizes=layer_sizes,
+            return_per_pattern=True,  # Enable per-pattern analysis
+        )
+
+        final_metrics_in = {
+            "eval_seu_in/final_loss": step_metrics_in["soft_loss"][-1],
+            "eval_seu_in/final_hard_loss": step_metrics_in["hard_loss"][-1],
+            "eval_seu_in/final_accuracy": step_metrics_in["soft_accuracy"][-1],
+            "eval_seu_in/final_hard_accuracy": step_metrics_in["hard_accuracy"][-1],
+            "eval_seu_in/epoch": epoch,
+        }
+        
+        # Calculate and add standard deviation for eval_seu_in/hard_accuracy
+        if "per_pattern" in step_metrics_in:
+            final_hard_accuracies_in = step_metrics_in["per_pattern"]["pattern_hard_accuracies"][-1]
+            hard_acc_std = float(jp.std(final_hard_accuracies_in))
+            final_metrics_in["eval_seu_in/final_hard_accuracy_std"] = hard_acc_std
+
+        # 2. Generate OUT-of-distribution SEU patterns (always fresh, different seed)
+        log.info(f"Running OUT-of-distribution SEU evaluation with fresh patterns ({eval_batch_size} patterns)...")
+        
+        # Use different seed for OOD patterns
+        ood_rng = jax.random.PRNGKey(periodic_eval_test_seed + 1)
+        out_seu_patterns = create_seu_vocabulary(
+            rng=ood_rng,
+            vocabulary_size=eval_batch_size,
+            layer_sizes=true_layer_sizes,
+            seu_config=seu_config,
+            ordered_indices=greedy_ordered_indices,
+        )
+        
+        # Replicate base circuit for the batch
+        out_wires = jax.tree.map(
+            lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_wires
+        )
+        out_logits = jax.tree.map(
+            lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_logits
+        )
+        
+        # Apply OOD SEU patterns to logits
+        out_modified_logits = []
+        for i in range(eval_batch_size):
+            circuit_logits = [layer[i] for layer in out_logits]
+            circuit_pattern = out_seu_patterns[i]
+            modified_circuit = apply_seu_to_logits(circuit_logits, circuit_pattern)
+            out_modified_logits.append(modified_circuit)
+        
+        # Stack modified logits back into batch format
+        out_modified_logits = jax.tree.map(
+            lambda *xs: jp.stack(xs, axis=0), *out_modified_logits
+        )
+        
+        step_metrics_out = evaluate_circuits_in_chunks(
+            eval_fn=evaluate_model_stepwise_batched,
+            wires=out_wires,
+            logits=out_modified_logits,
+            target_chunk_size=eval_batch_size,
+            model=model,
+            x_data=x_data,
+            y_data=y_data,
+            input_n=input_n,
+            arity=arity,
+            circuit_hidden_dim=circuit_hidden_dim,
+            n_message_steps=n_message_steps,
+            loss_type=loss_type,
+            layer_sizes=layer_sizes,
+            return_per_pattern=True,  # Enable per-pattern analysis
+        )
+
+        final_metrics_out = {
+            "eval_seu_out/final_loss": step_metrics_out["soft_loss"][-1],
+            "eval_seu_out/final_hard_loss": step_metrics_out["hard_loss"][-1],
+            "eval_seu_out/final_accuracy": step_metrics_out["soft_accuracy"][-1],
+            "eval_seu_out/final_hard_accuracy": step_metrics_out["hard_accuracy"][-1],
+            "eval_seu_out/epoch": epoch,
+        }
+
+        # Log main metrics normally (these will create panels)
+        main_metrics = {**final_metrics_in, **final_metrics_out}
+        
+        if wandb_run:
+            wandb_run.log(main_metrics)
+
+        log.info(
+            f"SEU Eval (epoch {epoch}):\n"
+            f"  IN-distribution SEU: Loss={final_metrics_in['eval_seu_in/final_loss']:.4f}, "
+            f"Acc={final_metrics_in['eval_seu_in/final_accuracy']:.4f}, "
+            f"Hard Acc={final_metrics_in['eval_seu_in/final_hard_accuracy']:.4f}\n"
+            f"  OUT-of-distribution SEU: Loss={final_metrics_out['eval_seu_out/final_loss']:.4f}, "
+            f"Acc={final_metrics_out['eval_seu_out/final_accuracy']:.4f}, "
+            f"Hard Acc={final_metrics_out['eval_seu_out/final_hard_accuracy']:.4f}"
+        )
+
+        return {
+            "final_metrics_in": final_metrics_in,
+            "final_metrics_out": final_metrics_out,
+        }
+        
+    except Exception as e:
+        log.warning(f"Error during SEU periodic evaluation at epoch {epoch}: {e}")
+        return {}
+
 
 def run_knockout_periodic_evaluation(
     model,
@@ -1868,7 +2107,8 @@ def train_model(
                 seu_enabled = bool(seu_cfg.eval.seu.enabled)
                 seu_fraction = float(seu_cfg.eval.seu.fraction)
                 flips_per_gate = int(seu_cfg.eval.seu.flips_per_gate)
-            except Exception:
+                
+            except Exception as e:
                 seu_enabled = False
                 seu_fraction = damage_pool_fraction
                 flips_per_gate = 1
@@ -1912,17 +2152,8 @@ def train_model(
                     f"SEU applied at epoch {epoch}: count={seu_count}, fraction={seu_frac:.4f}, "
                     f"gates_per_circuit={gates_per_circuit}, flips_per_gate={flips_per_gate}, mode={gate_selection}"
                 )
-                if wandb_run:
-                    wandb_run.log(
-                        {
-                            "pool/seu_count": seu_count,
-                            "pool/seu_fraction": seu_frac,
-                            "seu/gates_per_circuit": gates_per_circuit,
-                            "seu/flips_per_gate": flips_per_gate,
-                            "seu/gate_selection": gate_selection,
-                            "training/epoch": epoch,
-                        }
-                    )
+                
+
 
             if jp.isnan(loss):
                 log.warning(f"Loss is NaN at epoch {epoch}, returning last stable state")
@@ -2012,13 +2243,18 @@ def train_model(
 
                 # Step 2: Run knockout evaluation if enabled (BEFORE best model tracking)
                 all_eval_metrics = {}
+                
+                # Define base_wires and base_logits for both knockout and SEU evaluation
+                base_wires, base_logits = None, None
+                if knockout_eval_base_circuit is not None:
+                    base_wires, base_logits = knockout_eval_base_circuit
+                
                 if (
                     knockout_eval
                     and knockout_eval.get("enabled")
                     and knockout_eval_base_circuit is not None
                     and epoch % periodic_eval_interval == 0
                 ):
-                    base_wires, base_logits = knockout_eval_base_circuit
 
                     # Run one-time backprop evaluation for comparison
                     if bp_results is None and backprop_config is not None:
@@ -2094,6 +2330,68 @@ def train_model(
                     # Set current eval metrics to the combined dictionary if any evals ran
                     current_eval_metrics = ko_eval_results.get("final_metrics_in", None)
                 
+                # Step 2.5: Run SEU evaluation independently of knockout evaluation
+                if (
+                    epoch % periodic_eval_interval == 0
+                    and hasattr(circuit_pool, 'sample')  # Ensure pool is available
+                    and base_wires is not None
+                    and base_logits is not None
+                ):
+                    log.info(f"DEBUG: SEU evaluation condition met at epoch {epoch}")
+                    log.info(f"  periodic_eval_interval={periodic_eval_interval}")
+                    log.info(f"  base_wires is not None: {base_wires is not None}")
+                    log.info(f"  base_logits is not None: {base_logits is not None}")
+                    try:
+                        # Load SEU configuration
+                        seu_cfg = OmegaConf.load("configs/config.yaml")
+                        periodic_eval_enabled_cfg = bool(seu_cfg.eval.periodic_eval_enabled)
+                        seu_enabled = bool(seu_cfg.eval.seu.enabled)
+                        log.info(f"DEBUG: SEU config loaded - periodic_eval_enabled={periodic_eval_enabled_cfg}, seu_enabled={seu_enabled}")
+                        
+                        if periodic_eval_enabled_cfg and seu_enabled:
+                            # Prepare SEU configuration dictionary for evaluation
+                            seu_eval_config = {
+                                "fraction": float(seu_cfg.eval.seu.fraction),
+                                "flips_per_gate": int(seu_cfg.eval.seu.flips_per_gate),
+                                "gates_per_circuit": int(seu_cfg.eval.seu.gates_per_circuit),
+                                "selection_strategy": str(seu_cfg.eval.seu.selection_strategy),
+                                "gate_selection": str(seu_cfg.eval.seu.gate_selection),
+                                "min_pool_updates": int(seu_cfg.eval.seu.min_pool_updates),
+                                "max_pool_updates": int(seu_cfg.eval.seu.max_pool_updates),
+                                "log_stepwise": bool(seu_cfg.eval.seu.log_stepwise),
+                            }
+                            greedy_indices_cfg = getattr(seu_cfg.eval.seu, "greedy_ordered_indices", None)
+                            
+                            # Run SEU periodic evaluation (mirror knockout evaluation pattern)
+                            seu_eval_results = run_seu_periodic_evaluation(
+                                model=model,
+                                seu_vocabulary=None,  # Generate fresh patterns for now
+                                base_wires=base_wires,
+                                base_logits=base_logits,
+                                seu_config=seu_eval_config,
+                                periodic_eval_test_seed=periodic_eval_test_seed,
+                                x_data=x_data,
+                                y_data=y_data,
+                                input_n=input_n,
+                                arity=arity,
+                                circuit_hidden_dim=circuit_hidden_dim,
+                                n_message_steps=periodic_eval_inner_steps,
+                                loss_type=loss_type,
+                                epoch=epoch,
+                                wandb_run=wandb_run,
+                                eval_batch_size=periodic_eval_batch_size,
+                                layer_sizes=layer_sizes,
+                                layer_neighbors=layer_neighbors,
+                                greedy_ordered_indices=greedy_indices_cfg if greedy_indices_cfg is not None else greedy_ordered_indices,
+                            )
+                            
+                            # Add SEU evaluation results to all_eval_metrics (mirror knockout pattern)
+                            if seu_eval_results and "final_metrics_in" in seu_eval_results:
+                                all_eval_metrics.update(seu_eval_results["final_metrics_in"])
+                                all_eval_metrics.update(seu_eval_results["final_metrics_out"])
+                                
+                    except Exception as e:
+                        log.warning(f"Error during SEU periodic evaluation at epoch {epoch}: {e}")
 
                 # Step 3: Get current metric value for best model tracking using modular approach
                 try:

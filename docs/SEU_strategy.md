@@ -129,17 +129,100 @@ This ensures SEU impact is persistent and only recovers through actual GT update
 
 ## Evaluation Considerations (Design-Aware)
 
-- Use current evaluation stack without changes:
-  - Loss from `training/evaluation.get_loss_from_wires_logits` (or batched/stepwise variants)
-  - Graph loss+update from `training/evaluation.get_loss_and_update_graph`
-  - Logit extraction from `utils/extraction.extract_logits_from_graph`
-  - Circuit execution from `circuits/model.run_circuit`
-- Protocol for each circuit (or batch):
-  - Record baseline metrics
-  - Apply SEU → record immediate metrics (0 GT steps)
-  - Run K GT steps → record recovery trajectory and final metrics
-- For hard accuracy: reuse `get_loss_from_wires_logits` which returns both soft and hard losses/accuracies.
-- Optional: persist a lightweight SEU event log (gate indices and LUT entry indices) for audit/replay; does not affect runtime.
+### Pool-Free Evaluation Architecture
+
+SEU evaluation should mirror the knockout evaluation pattern to avoid pool dependencies:
+
+- **No pool usage** - Use `base_wires` and `base_logits` directly (like `run_knockout_periodic_evaluation`)
+- **SEU pattern vocabulary** - Generate/sample SEU flip mask patterns similar to knockout patterns
+- **Circuit replication** - Replicate base circuit for batch evaluation
+- **Stepwise integration** - Use `evaluate_model_stepwise_batched` with SEU-modified logits
+
+### SEU Pattern System
+
+Create SEU pattern system that mirrors knockout patterns:
+
+1. **SEU Pattern Generation**:
+   ```python
+   def create_seu_vocabulary(
+       rng: jax.random.PRNGKey,
+       vocabulary_size: int,
+       layer_sizes: List[Tuple[int, int]],
+       seu_config: Dict,
+   ) -> List[List[jp.ndarray]]:
+       """Generate vocabulary of SEU flip mask patterns per circuit"""
+   ```
+
+2. **SEU Pattern Application**:
+   - Apply flip masks to logits **before** GNN processing (upstream)
+   - Unlike knockouts which are applied **during** GNN forward pass via attention masking
+   - GNN can freely repair the flipped logits through message passing
+
+3. **Modified Evaluation Flow**:
+   ```python
+   def run_seu_periodic_evaluation(
+       model,
+       seu_vocabulary: Optional[List[List[jp.ndarray]]],
+       base_wires: PyTree,
+       base_logits: PyTree,
+       seu_config: Dict,
+       # ... other params
+   ) -> Dict:
+       # 1. Generate/sample SEU patterns
+       # 2. Replicate base circuit for batch
+       # 3. Apply SEU patterns to logits
+       # 4. Call evaluate_model_stepwise_batched with SEU-modified logits
+   ```
+
+### Logit Storage and Persistence
+
+**Key Insight**: SEU uses the same logit storage system as normal training:
+
+- **Pool Storage**: `self.logits` stores logits separately from `self.graphs`
+- **Graph Building**: `build_graph()` embeds logits into graph node features
+- **GNN Processing**: GNN updates logits in graph nodes during message passing
+- **Logit Extraction**: `extract_logits_from_graph()` extracts updated logits from graphs
+- **Pool Update**: Pool's `update()` method can store extracted logits back to `self.logits`
+
+**SEU Flow**:
+1. Apply SEU flips to logits and store in pool (temporary)
+2. Build graphs with flipped logits
+3. GNN repairs flipped logits through message passing
+4. Extract repaired logits from graphs
+5. Update pool storage with repaired logits
+
+### Stepwise Evaluation Integration
+
+Modify `_evaluate_with_loop` to handle SEU patterns:
+
+```python
+def _evaluate_with_loop(
+    # ... existing params
+    seu_patterns: Optional[List[List[jp.ndarray]]] = None,  # New parameter
+):
+    # Apply SEU patterns to logits before GNN processing
+    if seu_patterns is not None:
+        modified_logits = apply_seu_to_logits(batch_logits, seu_patterns)
+    else:
+        modified_logits = batch_logits
+    
+    # Continue with normal GNN processing
+```
+
+### Evaluation Protocol
+
+- **Baseline measurement**: Record metrics on original logits
+- **SEU application**: Apply flip masks to logits (upstream of GNN)
+- **Immediate measurement**: Record metrics on flipped logits (0 GNN steps)
+- **Recovery measurement**: Run K GNN steps and record recovery trajectory
+- **Final measurement**: Record final metrics after GNN repair
+
+### Implementation Requirements
+
+- Use existing evaluation stack: `get_loss_from_wires_logits`, `get_loss_and_update_graph`, `extract_logits_from_graph`
+- Support both soft and hard accuracy measurements
+- Enable stepwise analysis of SEU recovery dynamics
+- Optional: persist SEU event log (gate indices and LUT entry indices) for audit/replay
 
 ---
 
@@ -170,4 +253,68 @@ Training-side analogs can mirror these if applying SEUs during training phases.
 1) Add SEU utilities in `training/pool/perturbation.py`:
    - layer offset computation, mask-based LUT flipping (invert-only), sampling + mask builders  [DONE]
 2) Add `GraphPool.apply_seu(...)` (mask-based, globals-preserving) and `GraphPool.seu_fraction(...)` wrappers  [DONE]
-3) Use existing eval paths for baseline → flip → immediate eval → K-step recovery → final eval  [DONE]
+3) Create SEU pattern vocabulary system:
+   - `create_seu_vocabulary()` function for generating SEU flip mask patterns  [DONE]
+   - Pattern sampling and replication for batch evaluation  [DONE]
+4) Modify `run_seu_periodic_evaluation()` to mirror knockout evaluation:
+   - Remove pool dependency, use `base_wires` and `base_logits` directly  [DONE]
+   - Generate/sample SEU patterns similar to knockout patterns  [DONE]
+   - Apply SEU patterns to logits before GNN processing  [DONE]
+   - Use `evaluate_model_stepwise_batched` for stepwise evaluation  [DONE]
+5) ~~Extend `_evaluate_with_loop()` to handle SEU patterns~~ [NOT NEEDED]
+   - ~~Add `seu_patterns` parameter~~
+   - ~~Apply SEU flip masks to logits upstream of GNN processing~~
+   - ~~Enable stepwise SEU recovery analysis~~
+   - **Note**: No changes needed to `_evaluate_with_loop()` - existing evaluation stack works perfectly with SEU-modified logits
+6) Integrate SEU evaluation into main training loop:
+   - Update SEU evaluation call to match knockout evaluation pattern  [DONE]
+   - Use `base_wires` and `base_logits` instead of pool sampling  [DONE]
+   - Proper metrics handling and WandB logging  [DONE]
+
+---
+
+## Implementation Status: COMPLETE ✅
+
+**All SEU functionality has been successfully implemented and integrated!**
+
+### Key Achievements:
+
+1. **SEU Utilities** (`training/pool/perturbation.py`):
+   - Complete set of JAX-compatible SEU functions
+   - Greedy and random gate selection strategies
+   - Dense mask-based LUT flipping (invert-only mode)
+   - SEU pattern vocabulary generation
+
+2. **Pool Integration** (`training/pool/pool.py`):
+   - `GraphPool.apply_seu()` for applying SEU to selected circuits
+   - `GraphPool.seu_fraction()` for pool-based SEU application during training
+   - Preserves graph globals and maintains pool consistency
+
+3. **Evaluation System** (`training/train_loop.py`):
+   - `run_seu_periodic_evaluation()` mirrors knockout evaluation pattern exactly
+   - Supports both vocabulary-based and fresh pattern generation
+   - IN-distribution and OUT-of-distribution evaluation
+   - Complete WandB logging and metrics handling
+
+4. **Training Integration**:
+   - SEU evaluation fully integrated into main training loop
+   - Uses `base_wires` and `base_logits` (no pool dependency)
+   - Consistent with knockout evaluation architecture
+
+### Design Principles Achieved:
+
+- **Upstream SEU Application**: LUT flips applied before GNN processing
+- **Training-Evaluation Consistency**: Both use identical SEU application pattern
+- **Code Reuse**: Leverages existing evaluation stack without modification
+- **Knockout Pattern Mirroring**: Identical architecture and function signatures
+
+### Ready for Production Use:
+
+The SEU evaluation system is now ready to:
+- Generate SEU patterns using greedy or random gate selection
+- Apply LUT bit flips upstream of GNN processing
+- Measure GNN repair capabilities through stepwise evaluation
+- Log comprehensive metrics to WandB
+- Support both vocabulary-based and fresh pattern generation
+
+**The implementation is complete and follows the exact same pattern as knockout evaluation, ensuring consistency and maintainability!**

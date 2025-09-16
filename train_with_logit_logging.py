@@ -27,30 +27,31 @@ from boolean_nca_cc.training.utils import cleanup_redundant_wandb_artifacts
 log = logging.getLogger(__name__)
 
 
-def create_logit_monitoring_wrapper(original_model, log_interval=10):
+class LogitMonitoringWrapper:
     """
-    Create a wrapper around the model that logs logit information.
-    
-    Args:
-        original_model: The original CircuitSelfAttention model
-        log_interval: How often to log (every N calls)
-    
-    Returns:
-        Wrapped model with logging
+    A wrapper around the model that logs logit information.
     """
-    call_count = 0
     
-    def wrapped_call(graph, **kwargs):
-        nonlocal call_count
-        call_count += 1
+    def __init__(self, original_model, log_interval=10):
+        self.original_model = original_model
+        self.log_interval = log_interval
+        self.call_count = 0
+        
+        # Copy all attributes from original model
+        for attr in dir(original_model):
+            if not attr.startswith('_') and not callable(getattr(original_model, attr)):
+                setattr(self, attr, getattr(original_model, attr))
+    
+    def __call__(self, graph, **kwargs):
+        self.call_count += 1
         
         # Call original model
-        result = original_model(graph, **kwargs)
+        result = self.original_model(graph, **kwargs)
         
         # Log every log_interval calls
-        if call_count % log_interval == 0:
+        if self.call_count % self.log_interval == 0:
             logits = result.nodes["logits"]
-            log.info(f"Model call #{call_count} - Logits shape: {logits.shape}")
+            log.info(f"Model call #{self.call_count} - Logits shape: {logits.shape}")
             log.info(f"Logits range: [{jp.min(logits):.3f}, {jp.max(logits):.3f}]")
             log.info(f"Logits mean: {jp.mean(logits):.3f}")
             
@@ -62,13 +63,20 @@ def create_logit_monitoring_wrapper(original_model, log_interval=10):
                 log.info(f"Damaged nodes sigmoid: {jax.nn.sigmoid(damaged_logits)}")
         
         return result
+
+
+def create_logit_monitoring_wrapper(original_model, log_interval=10):
+    """
+    Create a wrapper around the model that logs logit information.
     
-    # Copy attributes from original model
-    for attr in dir(original_model):
-        if not attr.startswith('_') and not callable(getattr(original_model, attr)):
-            setattr(wrapped_call, attr, getattr(original_model, attr))
+    Args:
+        original_model: The original CircuitSelfAttention model
+        log_interval: How often to log (every N calls)
     
-    return wrapped_call
+    Returns:
+        Wrapped model with logging
+    """
+    return LogitMonitoringWrapper(original_model, log_interval)
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="config")
@@ -163,9 +171,6 @@ def main(cfg: DictConfig) -> None:
     params = nnx.state(model, nnx.Param)
     total_params = jax.tree.reduce(lambda x, y: x + y.size, params, 0)
     log.info(f"Total number of params: {total_params:,}")
-    
-    # Wrap model with logit monitoring (after parameter counting)
-    model = create_logit_monitoring_wrapper(model, log_interval=5)
 
     # Train model with logging
     log.info(f"Starting {cfg.model.type.upper()} training with logit logging")
@@ -222,6 +227,13 @@ def main(cfg: DictConfig) -> None:
         training_mode=cfg.training.training_mode,
         preconfig_steps=cfg.backprop.epochs,
         preconfig_lr=cfg.backprop.learning_rate,
+        # Early stopping parameters
+        stop_accuracy_enabled=cfg.early_stop.enabled,
+        stop_accuracy_threshold=cfg.early_stop.threshold,
+        stop_accuracy_metric=cfg.early_stop.metric,
+        stop_accuracy_source=cfg.early_stop.source,
+        stop_accuracy_patience=cfg.early_stop.patience,
+        stop_accuracy_min_epochs=cfg.early_stop.min_epochs,
     )
 
     # Close wandb if enabled

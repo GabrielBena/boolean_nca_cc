@@ -20,7 +20,7 @@ def build_graph(
     circuit_hidden_dim: int,
     bidirectional_edges: bool = True,
     loss_value: jp.ndarray | int = 0,
-    update_steps: int = 0,
+    update_steps: jp.ndarray | int = 0,
 ) -> jraph.GraphsTuple:
     """
     Construct a jraph.GraphsTuple representation of a boolean circuit, including input nodes.
@@ -173,7 +173,7 @@ def build_graph(
     n_edge = len(senders)
 
     # Combine loss_value and update_steps into a single globals array
-    globals_val = jp.array([float(loss_value), float(update_steps)], dtype=jp.float32)
+    globals_val = jp.array([loss_value, update_steps], dtype=jp.float32)
 
     # Create and return the GraphsTuple
     graph = jraph.GraphsTuple(
