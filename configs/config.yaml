@@ -127,7 +127,7 @@ eval:
   inner_steps: 100  # Number of message passing steps for inner loop evaluation
   # Periodic evaluation during training
   log_stepwise: false  # Whether to log detailed step-by-step metrics to wandb
-  batch_size: 256  # Batch size for random wiring evaluation
+  batch_size: 128  # Batch size for random wiring evaluation
   log_pool_scatter: true
   periodic:
     enabled: true  # Whether to run periodic evaluation during training

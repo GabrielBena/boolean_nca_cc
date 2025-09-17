@@ -4,11 +4,12 @@ defaults:
 
 sweep:
   grid:  # parameters to combine in all possible ways
-    seed: [1, 2, 3]
-    model: [self_attention]
-    training.initial_diversity: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
-    model.mlp_dim_multiplier: [1, 2, 4]
-    model.attention_dim: [16, 32, 64, 128, 256]
-    # model.mlp_dim_multiplier: [4]
-    # model.attention_dim: [128, 256]
-    # training.initial_diversity: [1024, 2048]
+    training.loss_type: [l4, bce]
+    training.n_message_steps: [2, 5]
+    training.learning_rate: [0.0001, 0.001, 0.00001]
+  paired:
+    - group1:
+        circuit.task : [reverse, add, binary_multiply, text]
+        circuit.input_bits: [8, 8, 8, 6]
+    
+
