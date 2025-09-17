@@ -9,6 +9,8 @@ This GIF shows the adaptive reconfiguration capacity of our Graph Transformer (G
 
 ## Overview
 
+See 'Manuscript.pdf' for model details.
+
 The `boolean_nca_cc` package provides:
 
 1. **Graph Representation** - Convert boolean circuits to graph structures
