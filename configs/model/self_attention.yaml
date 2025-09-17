@@ -5,11 +5,11 @@ defaults:
   - _base
 
 type: "self_attention"
-attention_dim: 256 # 64 # 128
+attention_dim: 128 # 256 # 64 # 128
 mlp_dim: null # If null, will be set to attention_dim * mlp_dim_multiplier
 mlp_dim_multiplier: 2
-num_heads: 16 # 4 # 8
-num_layers: 4 # 1 # 1
+num_heads: 8 # 16 # 4 # 8
+num_layers: 2 # 4 # 1 # 1
 dropout_rate: 0.0
 zero_init: false
 re_zero_update: true 

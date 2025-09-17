@@ -422,6 +422,22 @@ def run_final_bp_sa_comparison(
     )
     
     log.info(f"Generated fresh circuit for final evaluation")
+    
+    # Generate knockout vocabulary if not provided
+    if knockout_vocabulary is None:
+        log.info("No knockout vocabulary provided, generating fresh patterns for evaluation")
+        from boolean_nca_cc.training.pool.perturbation import create_knockout_vocabulary
+        damage_rng = jax.random.PRNGKey(cfg.get("damage_seed", 42))
+        knockout_vocabulary = create_knockout_vocabulary(
+            rng=damage_rng,
+            vocabulary_size=cfg.pool.get("damage_knockout_diversity", 16),
+            layer_sizes=layer_sizes,
+            damage_prob=cfg.pool.get("damage_prob", 1),
+            damage_mode=cfg.pool.get("damage_mode", "knockout"),
+            ordered_indices=cfg.pool.get("greedy_ordered_indices", None),
+        )
+        log.info(f"Generated knockout vocabulary with {len(knockout_vocabulary)} patterns")
+    
     log.info(f"Evaluating SA model on {len(knockout_vocabulary)} vocabulary patterns")
     
     # Use entire vocabulary instead of sampling

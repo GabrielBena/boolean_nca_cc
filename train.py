@@ -419,6 +419,8 @@ def main(cfg: DictConfig) -> None:
         backprop_config=OmegaConf.to_container(cfg.backprop, resolve=True) if cfg.backprop.enabled else None,
         # Hamming distance analysis parameters
         hamming_analysis_dir=cfg.eval.get("hamming_analysis_dir", None),
+        # SEU evaluation parameters
+        seu_eval_config=cfg.eval.get("seu", None),
     )
 
     # Save final model if checkpointing is enabled

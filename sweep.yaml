@@ -15,18 +15,18 @@ parameters:
   # training.meta_batch_size:
   #   values:
   #     - 8
-  #     - 32
-  #     - 64
-  #     - 128
+      - 32
+      - 64
+      - 128
   # training.layer_neighbors:
   #   values:
   #     - true
   #     - false
 
-  training.damage_emission:
-    values:
-      - true
-      - false
+  # training.damage_emission:
+  #   values:
+  #     - true
+  #     - false
 
   # # Training mode toggle
   # training.training_mode:
@@ -34,11 +34,11 @@ parameters:
   #     - "growth"
   #     - "repair"
 
-  # Damage mode toggle
-  pool.damage_mode:
-    values:
-      - "shotgun"
-      - "strip"
+  # # Damage mode toggle
+  # pool.damage_mode:
+  #   values:
+  #     - "shotgun"
+  #     - "strip"
 
   # # Damage probability values
   # pool.damage_prob:
@@ -103,28 +103,28 @@ parameters:
   # model.attention_dim:
   #   values:
   #     - 64
-  #     - 128
-  #     - 256
+      - 128
+      - 256
   #     # - 512
 
   # model.num_layers:
   #   values:
   #     # - 1
-  #     - 2
-  #     - 4
+      - 2
+      - 4
 
   # model.num_heads:
   #   values:
   #     # - 4
-  #     - 8
-  #     - 16
+      - 8
+      - 16
 
   # Circuit hidden dimension (affects circuit representation size)
   # circuit.circuit_hidden_dim:
   #   values:
   #     - 16
-  #     - 32
-  #     - 64
+      - 32
+      - 64
 
 
 

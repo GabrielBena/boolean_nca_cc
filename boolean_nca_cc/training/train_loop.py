@@ -41,7 +41,8 @@ from boolean_nca_cc.utils.graph_builder import build_graph
 from boolean_nca_cc.training.pool.perturbation import    (
     create_reproducible_knockout_pattern, 
     create_knockout_vocabulary,
-    create_strip_knockout_pattern
+    create_strip_knockout_pattern,
+    build_flip_masks_from_indices
 )
 from functools import partial
 from boolean_nca_cc.circuits.train import create_gate_mask_from_knockout_pattern
@@ -303,6 +304,9 @@ def _check_early_stopping(
         if stop_accuracy_source == "eval" and current_eval_metrics is None:
             # Evaluation metrics not available, skip early stopping check this epoch
             stop_accuracy_value = None
+        elif stop_accuracy_source in ["eval_seu_in", "eval_seu_in_steps", "eval_seu_steps"]:
+            # SEU evaluation metrics not available, skip early stopping check this epoch
+            stop_accuracy_value = None
         else:
             # Fallback to training metrics if eval not available
             stop_accuracy_value = _get_metric_value(
@@ -339,7 +343,7 @@ def _check_early_stopping(
                 f"Early stopping triggered! "
                 f"Accuracy {stop_accuracy_source}_{stop_accuracy_metric}={stop_accuracy_value:.4f} "
                 f"has been above threshold {stop_accuracy_threshold:.4f} "
-                f"for {stop_accuracy_patience} epochs. "
+                f"for {stop_accuracy_patience} consecutive evaluations. "
                 f"Stopping at epoch {epoch}."
             )
 
@@ -412,7 +416,7 @@ def _get_metric_value(
 
     Args:
         metric_name: Name of the metric ('loss', 'hard_loss', 'accuracy', 'hard_accuracy')
-        metric_source: Source of the metric ('training', 'eval', 'eval_ko_in', or 'eval_seu_steps')
+        metric_source: Source of the metric ('training', 'eval', 'eval_ko_in', 'eval_seu_in', 'eval_seu_in_steps', or 'eval_seu_steps')
         training_metrics: Dictionary with training metrics
         eval_metrics: Dictionary with evaluation metrics (optional)
 
@@ -441,6 +445,28 @@ def _get_metric_value(
             "hard_loss": "eval_ko_in/final_hard_loss",
             "accuracy": "eval_ko_in/final_accuracy",
             "hard_accuracy": "eval_ko_in/final_hard_accuracy",
+        }
+        return eval_metrics[eval_key_map[metric_name]]
+    elif metric_source == "eval_seu_in":
+        if eval_metrics is None:
+            raise ValueError("SEU IN-distribution evaluation metrics not available for eval_seu_in source")
+        # Map to SEU IN-distribution evaluation metric keys (final step)
+        eval_key_map = {
+            "loss": "eval_seu_in/final_loss",
+            "hard_loss": "eval_seu_in/final_hard_loss", 
+            "accuracy": "eval_seu_in/final_accuracy",
+            "hard_accuracy": "eval_seu_in/final_hard_accuracy",
+        }
+        return eval_metrics[eval_key_map[metric_name]]
+    elif metric_source == "eval_seu_in_steps":
+        if eval_metrics is None:
+            raise ValueError("SEU IN-distribution stepwise evaluation metrics not available for eval_seu_in_steps source")
+        # Map to SEU IN-distribution stepwise evaluation metric keys (final step)
+        eval_key_map = {
+            "loss": "eval_seu_in_steps/final_loss",
+            "hard_loss": "eval_seu_in_steps/final_hard_loss", 
+            "accuracy": "eval_seu_in_steps/final_accuracy",
+            "hard_accuracy": "eval_seu_in_steps/final_hard_accuracy",
         }
         return eval_metrics[eval_key_map[metric_name]]
     elif metric_source == "eval_seu_steps":
@@ -477,6 +503,7 @@ def run_seu_periodic_evaluation(
     layer_sizes: Optional[List[Tuple[int, int]]] = None,
     layer_neighbors: bool = False,
     greedy_ordered_indices: Optional[List[int]] = None,
+    log_stepwise: bool = False,
 ) -> Dict:
     """
     Run periodic SEU evaluation using vocabulary-based sampling, mirroring knockout evaluation pattern.
@@ -501,6 +528,7 @@ def run_seu_periodic_evaluation(
         layer_sizes: Layer sizes for the circuit
         layer_neighbors: Whether to use layer neighbors
         greedy_ordered_indices: Ordered indices for greedy gate selection
+        log_stepwise: Whether to log step-by-step metrics
         
     Returns:
         Dictionary with SEU evaluation results
@@ -511,7 +539,99 @@ def run_seu_periodic_evaluation(
         
         # Use the layer_sizes parameter that's already passed to the function
         true_layer_sizes = layer_sizes if layer_sizes is not None else [(64, 8), (64, 8), (64, 8), (64, 8)]
-        
+
+        # Optional sequential SEU mode: build schedule and inject in-loop, no upfront flips
+        # Triggered via seu_config.get("sequential", False)
+        if bool(seu_config.get("sequential", False)):
+            log.info("Running SEU evaluation in sequential mode (in-loop schedule injection)...")
+
+            # Build schedule from greedy ordered indices and recovery window R
+            ordered_indices_local = greedy_ordered_indices if greedy_ordered_indices is not None else seu_config.get("greedy_ordered_indices", [])
+            if not ordered_indices_local:
+                raise ValueError("Sequential SEU mode requires non-empty greedy_ordered_indices")
+
+            flips_per_gate = int(seu_config.get("flips_per_gate", 1))
+            arity_local = int(seu_config.get("arity", arity))
+            recovery_steps = int(seu_config.get("recovery_steps", 5))
+
+            schedule = build_sequential_seu_schedule(
+                ordered_indices=ordered_indices_local,
+                layer_sizes=true_layer_sizes,
+                flips_per_gate=flips_per_gate,
+                arity=arity_local,
+                recovery_steps=recovery_steps,
+            )
+
+            # Replicate base circuit for the batch; keep logits unmodified
+            in_wires = jax.tree.map(
+                lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_wires
+            )
+            in_logits = jax.tree.map(
+                lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_logits
+            )
+
+            # Evaluate with schedule injected in-loop
+            step_metrics_seq = evaluate_circuits_in_chunks(
+                eval_fn=evaluate_model_stepwise_batched,
+                wires=in_wires,
+                logits=in_logits,
+                target_chunk_size=eval_batch_size,
+                model=model,
+                x_data=x_data,
+                y_data=y_data,
+                input_n=input_n,
+                arity=arity,
+                circuit_hidden_dim=circuit_hidden_dim,
+                n_message_steps=n_message_steps,
+                loss_type=loss_type,
+                layer_sizes=layer_sizes,
+                return_per_pattern=True,
+                seu_schedule=schedule,
+                layer_neighbors=layer_neighbors,
+            )
+
+            final_metrics_seq = {
+                "eval_seu_in/final_loss": step_metrics_seq["soft_loss"][-1],
+                "eval_seu_in/final_hard_loss": step_metrics_seq["hard_loss"][-1],
+                "eval_seu_in/final_accuracy": step_metrics_seq["soft_accuracy"][-1],
+                "eval_seu_in/final_hard_accuracy": step_metrics_seq["hard_accuracy"][-1],
+                "eval_seu_in/epoch": epoch,
+            }
+
+            # For API compatibility, mirror IN metrics as OUT in sequential mode
+            final_metrics_out_seq = {
+                "eval_seu_out/final_loss": final_metrics_seq["eval_seu_in/final_loss"],
+                "eval_seu_out/final_hard_loss": final_metrics_seq["eval_seu_in/final_hard_loss"],
+                "eval_seu_out/final_accuracy": final_metrics_seq["eval_seu_in/final_accuracy"],
+                "eval_seu_out/final_hard_accuracy": final_metrics_seq["eval_seu_in/final_hard_accuracy"],
+                "eval_seu_out/epoch": epoch,
+            }
+
+            if wandb_run:
+                wandb_run.log({**final_metrics_seq, **final_metrics_out_seq})
+
+            if bool(seu_config.get("log_stepwise", False)) and wandb_run:
+                for step_idx in range(len(step_metrics_seq["step"])):
+                    wandb_run.log({
+                        "eval_seu_in_steps/step": step_metrics_seq["step"][step_idx],
+                        "eval_seu_in_steps/loss": step_metrics_seq["soft_loss"][step_idx],
+                        "eval_seu_in_steps/hard_loss": step_metrics_seq["hard_loss"][step_idx],
+                        "eval_seu_in_steps/accuracy": step_metrics_seq["soft_accuracy"][step_idx],
+                        "eval_seu_in_steps/hard_accuracy": step_metrics_seq["hard_accuracy"][step_idx],
+                        "eval_seu_in_steps/epoch": epoch,
+                    })
+
+            return {
+                "final_metrics_in": final_metrics_seq,
+                "final_metrics_out": final_metrics_out_seq,
+                "final_step_metrics_in": {
+                    "eval_seu_in_steps/final_loss": step_metrics_seq["soft_loss"][-1],
+                    "eval_seu_in_steps/final_hard_loss": step_metrics_seq["hard_loss"][-1],
+                    "eval_seu_in_steps/final_accuracy": step_metrics_seq["soft_accuracy"][-1],
+                    "eval_seu_in_steps/final_hard_accuracy": step_metrics_seq["hard_accuracy"][-1],
+                },
+            }
+
         # 1. Generate IN-distribution SEU patterns (from vocabulary or fresh)
         log.info(f"Running IN-distribution SEU evaluation with vocabulary patterns ({eval_batch_size} patterns)...")
         
@@ -543,14 +663,14 @@ def run_seu_periodic_evaluation(
         )
         
         # Apply SEU patterns to logits (upstream of GNN processing)
-        def apply_seu_to_logits(logits_list, seu_patterns):
+        def apply_seu_to_logits(logits_list, seu_pattern):
             """Apply SEU patterns to logits using flip_logits_with_masks"""
             modified_logits = []
             for i, logits_per_layer in enumerate(logits_list):
                 # Apply SEU flips to this layer
                 modified_layer = flip_logits_with_masks(
                     logits_per_layer=[logits_per_layer],
-                    flip_masks_per_layer=[seu_patterns[i]],
+                    flip_masks_per_layer=[seu_pattern[i]],
                     mode="invert"
                 )[0]
                 modified_logits.append(modified_layer)
@@ -664,6 +784,27 @@ def run_seu_periodic_evaluation(
         
         if wandb_run:
             wandb_run.log(main_metrics)
+            
+        # Log stepwise metrics if requested
+        if log_stepwise and wandb_run:
+            for step_idx in range(len(step_metrics_in["step"])):
+                wandb_run.log({
+                    "eval_seu_in_steps/step": step_metrics_in["step"][step_idx],
+                    "eval_seu_in_steps/loss": step_metrics_in["soft_loss"][step_idx],
+                    "eval_seu_in_steps/hard_loss": step_metrics_in["hard_loss"][step_idx],
+                    "eval_seu_in_steps/accuracy": step_metrics_in["soft_accuracy"][step_idx],
+                    "eval_seu_in_steps/hard_accuracy": step_metrics_in["hard_accuracy"][step_idx],
+                    "eval_seu_in_steps/epoch": epoch,
+                })
+            for step_idx in range(len(step_metrics_out["step"])):
+                wandb_run.log({
+                    "eval_seu_out_steps/step": step_metrics_out["step"][step_idx],
+                    "eval_seu_out_steps/loss": step_metrics_out["soft_loss"][step_idx],
+                    "eval_seu_out_steps/hard_loss": step_metrics_out["hard_loss"][step_idx],
+                    "eval_seu_out_steps/accuracy": step_metrics_out["soft_accuracy"][step_idx],
+                    "eval_seu_out_steps/hard_accuracy": step_metrics_out["hard_accuracy"][step_idx],
+                    "eval_seu_out_steps/epoch": epoch,
+                })
 
         log.info(
             f"SEU Eval (epoch {epoch}):\n"
@@ -675,9 +816,21 @@ def run_seu_periodic_evaluation(
             f"Hard Acc={final_metrics_out['eval_seu_out/final_hard_accuracy']:.4f}"
         )
 
+        # Prepare final step metrics for early stopping (if stepwise logging is enabled)
+        final_step_metrics_in = {}
+        if log_stepwise and "step" in step_metrics_in and len(step_metrics_in["step"]) > 0:
+            final_step_idx = len(step_metrics_in["step"]) - 1
+            final_step_metrics_in = {
+                "eval_seu_in_steps/final_loss": step_metrics_in["soft_loss"][final_step_idx],
+                "eval_seu_in_steps/final_hard_loss": step_metrics_in["hard_loss"][final_step_idx],
+                "eval_seu_in_steps/final_accuracy": step_metrics_in["soft_accuracy"][final_step_idx],
+                "eval_seu_in_steps/final_hard_accuracy": step_metrics_in["hard_accuracy"][final_step_idx],
+            }
+
         return {
             "final_metrics_in": final_metrics_in,
             "final_metrics_out": final_metrics_out,
+            "final_step_metrics_in": final_step_metrics_in,
         }
         
     except Exception as e:
@@ -1503,6 +1656,63 @@ def plot_combined_bp_sa_stepwise_performance(
     return fig
 
 
+def build_sequential_seu_schedule(
+    ordered_indices: List[int], 
+    layer_sizes: List[Tuple[int, int]], 
+    flips_per_gate: int, 
+    arity: int, 
+    recovery_steps: int
+) -> Dict:
+    """
+    Build a sequential SEU schedule from a greedy list of gate indices.
+    
+    This function translates a greedy list of gate indices and recovery window R 
+    into a schedule that can be used with the sequential SEU evaluation system.
+    
+    Args:
+        ordered_indices: List of global gate indices in greedy order
+        layer_sizes: List of (total_gates, group_size) for each layer
+        flips_per_gate: Number of LUT entries to flip per selected gate
+        arity: LUT arity; table size is 2**arity
+        recovery_steps: Number of recovery steps between damages (R)
+        
+    Returns:
+        Dictionary with 'events' key containing list of event dictionaries.
+        Each event has 'step' and 'masks' keys.
+        
+    Example:
+        >>> ordered_indices = [48, 17, 52, 146, 154]
+        >>> layer_sizes = [(64, 8), (64, 8), (64, 8), (64, 8)]
+        >>> schedule = build_sequential_seu_schedule(
+        ...     ordered_indices, layer_sizes, flips_per_gate=1, arity=2, recovery_steps=5
+        ... )
+        >>> # Events at steps: 1, 6, 11, 16, 21
+        >>> print(schedule['events'][0]['step'])  # 1
+        >>> print(schedule['events'][1]['step'])  # 6
+    """
+    # Steps: 1, 1+R, 1+2R, ...
+    events = []
+    
+    # Use logits-bearing layers (skip input layer)
+    gate_layer_sizes = layer_sizes[1:]
+    
+    for j, gate_idx in enumerate(ordered_indices):
+        # Generate masks for this single gate
+        masks = build_flip_masks_from_indices(
+            layer_sizes=gate_layer_sizes,
+            selected_gate_indices=jp.array([gate_idx], dtype=jp.int32),
+            flips_per_gate=flips_per_gate,
+            arity=arity,
+            key=jax.random.PRNGKey(0),  # deterministic in greedy case
+        )
+        
+        # Calculate step: 1 + j * recovery_steps
+        step = 1 + j * recovery_steps
+        events.append({"step": step, "masks": masks})
+    
+    return {"events": events}
+
+
 def train_model(
     # Data parameters
     x_data: jp.ndarray,
@@ -1597,6 +1807,8 @@ def train_model(
     # Hamming distance analysis parameters
     hamming_analysis_dir: Optional[str] = None,
     backprop_config: Optional[Dict] = None,
+    # SEU evaluation parameters
+    seu_eval_config: Optional[Dict] = None,
 ):
     """
     Train a GNN to optimize boolean circuit parameters.
@@ -1737,9 +1949,8 @@ def train_model(
     wandb_run = _init_wandb(wandb_logging, wandb_run_config)
     wandb_id = wandb_run.run.id if wandb_run else None
 
-    # Preconfigure if in repair mode
-    base_wires_preconfig = None
-    base_logits_preconfig = None
+    # Create base circuit for pool initialization and evaluation
+    base_circuit = None
     if training_mode == "repair":
         log.info("Repair mode: running preconfiguration of fixed wiring circuit")
         # Pull optimizer hyperparameters from backprop_config if provided to match test_preconfigure
@@ -1747,7 +1958,7 @@ def train_model(
         pre_wd = backprop_config.get("weight_decay", 0.0) if backprop_config else 0.0
         pre_b1 = backprop_config.get("beta1", 0.9) if backprop_config else 0.9
         pre_b2 = backprop_config.get("beta2", 0.999) if backprop_config else 0.999
-        base_wires_preconfig, base_logits_preconfig = preconfigure_circuit_logits(
+        base_wires, base_logits = preconfigure_circuit_logits(
             wiring_key=wiring_fixed_key,
             layer_sizes=layer_sizes,
             arity=arity,
@@ -1761,10 +1972,16 @@ def train_model(
             beta1=pre_b1,
             beta2=pre_b2,
         )
+        base_circuit = (base_wires, base_logits)
         if wandb_logging and wandb_run:
             wandb_run.log({
                 "preconfig/steps": preconfig_steps,
             })
+    else:
+        # Growth mode: generate a base circuit for evaluation purposes
+        log.info("Growth mode: generating base circuit for evaluation")
+        base_wires, base_logits = gen_circuit(wiring_fixed_key, layer_sizes, arity=arity)
+        base_circuit = (base_wires, base_logits)
 
     circuit_pool = initialize_graph_pool(
         rng=training_pool_key,
@@ -1774,8 +1991,8 @@ def train_model(
         arity=arity,
         circuit_hidden_dim=circuit_hidden_dim,
         loss_value=0.0,  # Initial loss will be calculated properly in first step
-        base_wires=base_wires_preconfig,
-        base_logits=base_logits_preconfig,
+        base_wires=base_circuit[0] if base_circuit else None,
+        base_logits=base_circuit[1] if base_circuit else None,
     )
 
     # Define pool-based training step
@@ -1930,16 +2147,11 @@ def train_model(
     if knockout_eval and knockout_eval.get("enabled"):
         # Store base circuit for on-demand evaluation (no pre-created datasets)
         log.info("Knockout evaluation enabled - will use vocabulary-based evaluation")
-        if training_mode == "repair" and base_wires_preconfig is not None:
-            knockout_eval_base_circuit = (base_wires_preconfig, base_logits_preconfig)
-        else:
-            knockout_eval_base_circuit = gen_circuit(wiring_fixed_key, layer_sizes, arity=arity)
-        log.info("Base circuit created for knockout evaluation")
+        knockout_eval_base_circuit = base_circuit
+        log.info("Base circuit assigned for knockout evaluation")
 
     # Initialize knockout vocabulary if knockout_diversity is configured
     knockout_vocabulary = None
-    log.info(f"DEBUG: train_loop received knockout_diversity = {knockout_diversity}")
-    log.info(f"DEBUG: train_loop received damage_pool_damage_prob = {damage_pool_damage_prob}")
     if knockout_diversity is not None and knockout_diversity > 0:
         log.info(f"Creating knockout pattern vocabulary with {knockout_diversity} patterns")
         
@@ -2042,8 +2254,8 @@ def train_model(
                     circuit_hidden_dim=circuit_hidden_dim,
                     knockout_config=None, # resets no longer introduce damage
                     knockout_patterns=None,
-                    base_wires=base_wires_preconfig if training_mode == "repair" else None,
-                    base_logits=base_logits_preconfig if training_mode == "repair" else None,
+                    base_wires=base_wires if training_mode == "repair" else None,
+                    base_logits=base_logits if training_mode == "repair" else None,
                 )
 
                 # Reset a fraction of the pool and get avg steps of reset graphs
@@ -2246,13 +2458,13 @@ def train_model(
                 
                 # Define base_wires and base_logits for both knockout and SEU evaluation
                 base_wires, base_logits = None, None
-                if knockout_eval_base_circuit is not None:
-                    base_wires, base_logits = knockout_eval_base_circuit
+                if base_circuit is not None:
+                    base_wires, base_logits = base_circuit
                 
                 if (
                     knockout_eval
                     and knockout_eval.get("enabled")
-                    and knockout_eval_base_circuit is not None
+                    and base_circuit is not None
                     and epoch % periodic_eval_interval == 0
                 ):
 
@@ -2327,26 +2539,20 @@ def train_model(
                         all_eval_metrics.update(ko_eval_results["final_metrics_in"])
                         all_eval_metrics.update(ko_eval_results["final_metrics_out"])
                     
-                    # Set current eval metrics to the combined dictionary if any evals ran
+                    # Set current eval metrics to knockout results initially
                     current_eval_metrics = ko_eval_results.get("final_metrics_in", None)
                 
                 # Step 2.5: Run SEU evaluation independently of knockout evaluation
                 if (
                     epoch % periodic_eval_interval == 0
-                    and hasattr(circuit_pool, 'sample')  # Ensure pool is available
                     and base_wires is not None
                     and base_logits is not None
                 ):
-                    log.info(f"DEBUG: SEU evaluation condition met at epoch {epoch}")
-                    log.info(f"  periodic_eval_interval={periodic_eval_interval}")
-                    log.info(f"  base_wires is not None: {base_wires is not None}")
-                    log.info(f"  base_logits is not None: {base_logits is not None}")
                     try:
                         # Load SEU configuration
                         seu_cfg = OmegaConf.load("configs/config.yaml")
                         periodic_eval_enabled_cfg = bool(seu_cfg.eval.periodic_eval_enabled)
                         seu_enabled = bool(seu_cfg.eval.seu.enabled)
-                        log.info(f"DEBUG: SEU config loaded - periodic_eval_enabled={periodic_eval_enabled_cfg}, seu_enabled={seu_enabled}")
                         
                         if periodic_eval_enabled_cfg and seu_enabled:
                             # Prepare SEU configuration dictionary for evaluation
@@ -2354,13 +2560,20 @@ def train_model(
                                 "fraction": float(seu_cfg.eval.seu.fraction),
                                 "flips_per_gate": int(seu_cfg.eval.seu.flips_per_gate),
                                 "gates_per_circuit": int(seu_cfg.eval.seu.gates_per_circuit),
+                                "num_gates": int(seu_cfg.eval.seu.gates_per_circuit),  # Map gates_per_circuit to num_gates
+                                "arity": int(seu_cfg.circuit.arity),  # Get arity from circuit config
+                                "strategy": str(seu_cfg.eval.seu.gate_selection),  # Map gate_selection to strategy
                                 "selection_strategy": str(seu_cfg.eval.seu.selection_strategy),
                                 "gate_selection": str(seu_cfg.eval.seu.gate_selection),
                                 "min_pool_updates": int(seu_cfg.eval.seu.min_pool_updates),
                                 "max_pool_updates": int(seu_cfg.eval.seu.max_pool_updates),
                                 "log_stepwise": bool(seu_cfg.eval.seu.log_stepwise),
+                                # Sequential SEU evaluation parameters
+                                "sequential": bool(seu_cfg.eval.seu.get("sequential", False)),
+                                "recovery_steps": int(seu_cfg.eval.seu.get("recovery_steps", 5)),
                             }
                             greedy_indices_cfg = getattr(seu_cfg.eval.seu, "greedy_ordered_indices", None)
+                            
                             
                             # Run SEU periodic evaluation (mirror knockout evaluation pattern)
                             seu_eval_results = run_seu_periodic_evaluation(
@@ -2383,12 +2596,29 @@ def train_model(
                                 layer_sizes=layer_sizes,
                                 layer_neighbors=layer_neighbors,
                                 greedy_ordered_indices=greedy_indices_cfg if greedy_indices_cfg is not None else greedy_ordered_indices,
+                                log_stepwise=periodic_eval_log_stepwise,
                             )
                             
                             # Add SEU evaluation results to all_eval_metrics (mirror knockout pattern)
                             if seu_eval_results and "final_metrics_in" in seu_eval_results:
                                 all_eval_metrics.update(seu_eval_results["final_metrics_in"])
                                 all_eval_metrics.update(seu_eval_results["final_metrics_out"])
+                                
+                                # Update current_eval_metrics to include SEU results for early stopping
+                                # This ensures that SEU metrics are available for early stopping decisions
+                                if current_eval_metrics is None:
+                                    current_eval_metrics = seu_eval_results["final_metrics_in"]
+                                else:
+                                    # Merge knockout and SEU metrics
+                                    current_eval_metrics.update(seu_eval_results["final_metrics_in"])
+                                
+                                # Also add stepwise metrics for eval_seu_in_steps early stopping
+                                if "stepwise_metrics_in" in seu_eval_results:
+                                    current_eval_metrics.update(seu_eval_results["stepwise_metrics_in"])
+                                
+                                # Also include final step metrics if available (for stepwise early stopping)
+                                if "final_step_metrics_in" in seu_eval_results and seu_eval_results["final_step_metrics_in"]:
+                                    current_eval_metrics.update(seu_eval_results["final_step_metrics_in"])
                                 
                     except Exception as e:
                         log.warning(f"Error during SEU periodic evaluation at epoch {epoch}: {e}")
@@ -2415,6 +2645,9 @@ def train_model(
                         )
                     elif (best_metric_source == "eval" or best_metric_source == "eval_ko_in") and current_eval_metrics is None:
                         # Evaluation is enabled but hasn't run yet this epoch, skip best model check
+                        current_metric_value = None
+                    elif best_metric_source in ["eval_seu_in", "eval_seu_in_steps", "eval_seu_steps"]:
+                        # SEU evaluation metrics not available, skip early stopping check this epoch
                         current_metric_value = None
                     else:
                         raise e

@@ -70,6 +70,49 @@ def extract_logits_from_graph(
     return extracted_logits_list
 
 
+def inject_logits_into_graph(
+    graph: jraph.GraphsTuple, logits_per_layer: list[jp.ndarray]
+) -> jraph.GraphsTuple:
+    """
+    Write back per-layer logits into a graph's flattened node feature storage.
+
+    The packing mirrors boolean_nca_cc.utils.graph_builder.build_graph:
+    - Inputs (layer==0) occupy the first input_n nodes and keep zero logits
+    - Gate layers (layer>=1) are stored sequentially with logits reshaped to (num_gates, logit_dim)
+
+    Args:
+        graph: GraphsTuple to update
+        logits_per_layer: List of logits per gate layer; each of shape (group_n, group_size, logit_dim)
+
+    Returns:
+        New GraphsTuple with `nodes['logits']` updated
+    """
+    # Determine index where gate nodes start by counting input nodes (layer==0)
+    layer_info = graph.nodes["layer"]
+    input_n = jp.sum(layer_info == 0)
+
+    # Build a new flattened logits array matching graph.nodes['logits'] shape
+    existing_flat = graph.nodes["logits"]
+
+    # Start from existing to preserve input node logits (zeros) and shape/dtype
+    updated_flat = existing_flat
+
+    current_node_idx = input_n
+    for layer_logits in logits_per_layer:
+        group_n, group_size, logit_dim = layer_logits.shape
+        num_gates = group_n * group_size
+
+        # Flatten this layer to (num_gates, logit_dim)
+        layer_flat = layer_logits.reshape(num_gates, logit_dim)
+
+        # Dynamic update using lax (vmappable, JIT-friendly)
+        start_indices = (current_node_idx, 0)
+        updated_flat = jax.lax.dynamic_update_slice(updated_flat, layer_flat, start_indices)
+        current_node_idx += num_gates
+
+    updated_nodes = {**graph.nodes, "logits": updated_flat}
+    return graph._replace(nodes=updated_nodes)
+
 def update_output_node_loss(
     graph: jraph.GraphsTuple,
     layer_sizes: list[tuple[int, int]],

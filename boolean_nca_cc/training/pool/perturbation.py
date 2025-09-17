@@ -243,13 +243,14 @@ def compute_layer_offsets(
     layer_sizes: List[Tuple[int, int]],
 ) -> Tuple[jp.ndarray, jp.ndarray]:
     """
-    Compute per-layer gate counts and start offsets for gate layers (excluding inputs).
+    Compute per-layer gate counts and start offsets for the provided layers.
 
     Args:
         layer_sizes: List of (total_gates, group_size) per gate layer.
 
     Returns:
-        Tuple of (layer_start_indices, gates_per_layer) as int32 arrays.
+        Tuple of (layer_start_indices, gates_per_layer) as int32 arrays
+        for the layers provided in `layer_sizes`.
     """
     gates_per_layer = jp.array([int(total) for total, _ in layer_sizes], dtype=jp.int32)
     if gates_per_layer.size == 0:
@@ -358,6 +359,7 @@ def build_flip_masks_from_indices(
     flips = max(0, min(int(flips_per_gate), table_size))
 
     masks: List[jp.ndarray] = []
+    # Iterate over layers provided (caller decides which layers are included)
     for (layer_total, group_size), start in zip(layer_sizes, list(starts)):
         num_gates_layer = int(layer_total)
         if num_gates_layer == 0:
@@ -365,6 +367,7 @@ def build_flip_masks_from_indices(
             continue
         group_n = num_gates_layer // int(group_size)
         layer_mask = jp.zeros((group_n, int(group_size), table_size), dtype=jp.bool_)
+        
 
         if selected_gate_indices.size == 0 or flips == 0:
             masks.append(layer_mask)
@@ -429,19 +432,25 @@ def create_seu_vocabulary(
     num_gates = seu_config.get("num_gates", 1)
     flips_per_gate = seu_config.get("flips_per_gate", 1)
     arity = seu_config.get("arity", 2)
+
+    # Align SEU target layers with logits-bearing layers by excluding the input layer.
+    # gen_circuit produces one logits tensor per non-input layer (including output),
+    # so we must build masks for layer_sizes[1:] only.
+    gate_layer_sizes = layer_sizes[1:] if len(layer_sizes) >= 2 else layer_sizes
+    
     
     if strategy == "greedy":
         # Greedy mode: deterministic pattern, replicate across vocabulary
         selected_gates = sample_seu_gates(
             key=rng,  # Unused for greedy
-            layer_sizes=layer_sizes,
+            layer_sizes=gate_layer_sizes,
             num_gates=num_gates,
             strategy="greedy",
             ordered_indices=ordered_indices,
         )
         
         flip_masks = build_flip_masks_from_indices(
-            layer_sizes=layer_sizes,
+            layer_sizes=gate_layer_sizes,
             selected_gate_indices=selected_gates,
             flips_per_gate=flips_per_gate,
             arity=arity,

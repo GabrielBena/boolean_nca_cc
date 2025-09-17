@@ -31,7 +31,7 @@ circuit:
   arity: 4
   num_layers: 3
   layer_sizes: null  # Auto-generate if null 
-  circuit_hidden_dim: 64
+  circuit_hidden_dim: 32
 
 # Training parameters
 training:
@@ -94,8 +94,8 @@ pool:
 eval:
   # Periodic evaluation parameters
   periodic_eval_enabled: true
-  periodic_eval_inner_steps: 20
-  periodic_eval_interval: 256 # 16
+  periodic_eval_inner_steps: 60
+  periodic_eval_interval: 1024 # 16
   periodic_eval_test_seed: ${test_seed}
   periodic_eval_log_stepwise: true
   periodic_eval_batch_size: ${pool.damage_knockout_diversity}  # Batch size for knockout evaluation (should match knockout_diversity)
@@ -103,7 +103,7 @@ eval:
   seu:
     enabled: true
     fraction: ${pool.damage_pool_fraction}
-    flips_per_gate: 16  # 2**arity = 2**4 = 16
+    flips_per_gate: 8
     # SEU-specific selection controls (decoupled from knockout eval)
     gates_per_circuit: ${pool.damage_prob}
     selection_strategy: ${pool.damage_strategy}  # uniform|steps_biased|loss_biased|combined
@@ -112,6 +112,9 @@ eval:
     max_pool_updates: ${pool.damage_max_pool_updates}
     greedy_ordered_indices: ${pool.greedy_ordered_indices}
     log_stepwise: ${eval.periodic_eval_log_stepwise}
+    # Sequential SEU evaluation mode (in-loop damage injection)
+    sequential: false  # Enable sequential SEU mode with in-loop damage injection
+    recovery_steps: 10  # Number of recovery steps between sequential damages
   
   # Knockout evaluation
   knockout_eval:
@@ -122,7 +125,7 @@ eval:
   hamming_analysis_dir: "results/hamming_analysis_mbs${training.meta_batch_size}_div${pool.damage_knockout_diversity}_dam${pool.damage_prob}"  # Directory for hamming analysis plots and CSVs
   
   # Final BP vs SA comparison evaluation
-  final_eval_enabled: true
+  final_eval_enabled: false
   final_eval_inner_steps: ${eval.periodic_eval_inner_steps}
   # final_eval_seed: 999
 
@@ -137,16 +140,16 @@ checkpoint:
   interval: 1031  # prime number 
   save_best: true  # Save best model based on metric
   best_metric: "hard_accuracy"  # Metric to track for best model
-  best_metric_source: "eval_ko_in"  # Source for best metric: "training", "eval", or "eval_ko_in"
+  best_metric_source: ${early_stop.source}  # Source for best metric: "training", "eval", "eval_ko_in", "eval_seu_in", "eval_seu_in_steps", or "eval_seu_steps"
   save_stable_states: false  # Save last stable state before NaN loss
 
 # Early stopping configuration
 early_stop:
   enabled: true  # Enable early stopping based on accuracy threshold
-  threshold: 0.995  # Accuracy threshold to trigger early stopping
+  threshold: 1  # Accuracy threshold to trigger early stopping
   metric: "hard_accuracy"  # Metric to monitor: "loss", "hard_loss", "accuracy", "hard_accuracy"
-  source: "eval_seu_steps"  # Source for early stopping: "training", "eval", "eval_ko_in", or "eval_seu_steps"
-  patience: 10  # Number of epochs above threshold before stopping
+  source: "eval_seu_in"  # Source for early stopping: "training", "eval", "eval_ko_in", "eval_seu_in", "eval_seu_in_steps", or "eval_seu_steps"
+  patience: 2  # Number of evals above threshold before stopping
   min_epochs: 1042  # Minimum epochs before early stopping can trigger
 
 # Backpropagation baseline configuration

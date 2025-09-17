@@ -16,6 +16,7 @@ from boolean_nca_cc.models import CircuitSelfAttention, CircuitGNN
 from boolean_nca_cc.utils import (
     build_graph,
     extract_logits_from_graph,
+    inject_logits_into_graph,
     update_output_node_loss,
 )
 from boolean_nca_cc.circuits.model import run_circuit
@@ -28,6 +29,7 @@ from boolean_nca_cc.training.pool.pool import GraphPool
 from boolean_nca_cc.training.pool.perturbation import (
     sample_seu_gates,
     build_flip_masks_from_indices,
+    flip_logits_with_masks,
 )
 
 # Setup logging
@@ -391,6 +393,7 @@ def evaluate_model_stepwise_batched(
     knockout_patterns: Optional[jp.ndarray] = None,
     return_per_pattern: bool = False,  # New parameter
     layer_neighbors: bool = False,
+    seu_schedule: Optional[Dict] = None,
 ) -> Dict:
     """
     Evaluate GNN performance on a batch of circuits by running message passing steps
@@ -503,6 +506,7 @@ def evaluate_model_stepwise_batched(
         initial_hard_accuracies=initial_hard_accuracies,
         batch_logits=batch_logits,
         layer_neighbors=layer_neighbors,
+        seu_schedule=seu_schedule,
     )
 
 def evaluate_circuits_in_chunks(
@@ -604,6 +608,7 @@ def _evaluate_with_loop(
     initial_hard_accuracies: Optional[jp.ndarray] = None,
     batch_logits: Optional[List[jp.ndarray]] = None,
     layer_neighbors: bool = False,
+    seu_schedule: Optional[Dict] = None,
 ) -> Dict:
     """
     Evaluate using loop mode (original behavior).
@@ -636,7 +641,38 @@ def _evaluate_with_loop(
         lambda graph: extract_logits_from_graph(graph, logits_original_shapes)
     )
 
+    # Minimal sequential SEU support: global schedule only
+    schedule_events = []
+    if seu_schedule is not None and isinstance(seu_schedule, dict):
+        schedule_events = list(seu_schedule.get("events", []))
+
     for step in range(1, n_message_steps + 1):
+        # Pre-model SEU injection at scheduled steps (global masks applied to all graphs)
+        if schedule_events:
+            step_events = [e for e in schedule_events if int(e.get("step", -1)) == step]
+            if step_events:
+                merged_masks = None
+                for ev in step_events:
+                    masks = ev.get("masks")
+                    if masks is None:
+                        continue
+                    if merged_masks is None:
+                        merged_masks = [jp.array(m) for m in masks]
+                    else:
+                        merged_masks = [jp.logical_or(a, b) for a, b in zip(merged_masks, masks)]
+
+                if merged_masks is not None:
+                    pre_model_batch_logits = vmap_extract_logits(current_graphs)
+                    # Reuse existing flip function; vmap across batch to apply same masks per graph
+                    vmap_apply_masks = jax.vmap(
+                        lambda per_graph_logits: flip_logits_with_masks(per_graph_logits, merged_masks),
+                        in_axes=0,
+                        out_axes=0,
+                    )
+                    mutated_batch_logits = vmap_apply_masks(pre_model_batch_logits)
+                    vmap_inject = jax.vmap(lambda g, l: inject_logits_into_graph(g, l))
+                    current_graphs = vmap_inject(current_graphs, mutated_batch_logits)
+
         # Apply model to all graphs in batch
         if knockout_patterns is not None:
             # Use a lambda to correctly map over the knockout_pattern keyword argument
