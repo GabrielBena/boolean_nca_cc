@@ -31,7 +31,7 @@ circuit:
   arity: 4
   num_layers: 3
   layer_sizes: null  # Auto-generate if null 
-  circuit_hidden_dim: 32
+  circuit_hidden_dim: 64
 
 # Training parameters
 training:
@@ -66,7 +66,7 @@ pool:
   size: 1024
   reset_fraction: 0.15
   reset_interval: 128
-  reset_strategy: "combined"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
+  reset_strategy: "loss_biased"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
 
   # Sample-based damage (applied post-step, independent of resets)
@@ -77,7 +77,7 @@ pool:
   damage_combined_weights: [0.5, 0.5]
   damage_mode: "greedy"  # Options: "shotgun" (random), "strip" (localized), or "greedy" (ordered selection)
   # Number of gates to knock out when generating fresh patterns (ignored if vocabulary is used)
-  damage_prob: 20
+  damage_prob: 1
   # Damage-specific vocabulary size (decoupled from legacy persistent_knockout)
   damage_knockout_diversity: 1 
   # Pool update step filtering for damage selection (prevents damage to over-optimized circuits)
@@ -94,7 +94,7 @@ pool:
 eval:
   # Periodic evaluation parameters
   periodic_eval_enabled: true
-  periodic_eval_inner_steps: 60
+  periodic_eval_inner_steps: 100
   periodic_eval_interval: 1024 # 16
   periodic_eval_test_seed: ${test_seed}
   periodic_eval_log_stepwise: true
@@ -103,7 +103,7 @@ eval:
   seu:
     enabled: true
     fraction: ${pool.damage_pool_fraction}
-    flips_per_gate: 8
+    flips_per_gate: 16
     # SEU-specific selection controls (decoupled from knockout eval)
     gates_per_circuit: ${pool.damage_prob}
     selection_strategy: ${pool.damage_strategy}  # uniform|steps_biased|loss_biased|combined
