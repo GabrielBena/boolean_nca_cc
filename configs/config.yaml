@@ -44,7 +44,7 @@ training:
   # ATTENTION MASKING POLICY
   damage_emission: false  # If true, knocked-out nodes cannot receive but can still send
   # DAMAGE PERSISTENCE POLICY
-  damage_persistence_mode: "permanent"  # "permanent" (mask+clamp every step) | "reversible" (one-time feature clamp)
+  damage_persistence_mode: "reversible"  # "permanent" (mask+clamp every step) | "reversible" (one-time feature clamp)
   # LOSS TYPE
   loss_type: "l4"  # Options: "l4", "l2", or "bce"
   # BATCH SIZE
@@ -79,7 +79,7 @@ pool:
   damage_combined_weights: [0.5, 0.5]
   damage_mode: "greedy"  # Options: "shotgun" (random), "strip" (localized), or "greedy" (ordered selection)
   # Number of gates to knock out when generating fresh patterns (ignored if vocabulary is used)
-  damage_prob: 10
+  damage_prob: 40
   # Damage-specific vocabulary size (decoupled from legacy persistent_knockout)
   damage_knockout_diversity: 1 
   # Pool update step filtering for damage selection (prevents damage to over-optimized circuits)
