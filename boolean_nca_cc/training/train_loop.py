@@ -1797,6 +1797,7 @@ def train_model(
     preconfig_lr: float = 1e-2,
     # Attention masking policy
     damage_emission: bool = False,
+    damage_persistence_mode: str = "permanent",
     # Early stopping parameters
     stop_accuracy_enabled: bool = False,
     stop_accuracy_threshold: float = 0.95,
@@ -1909,6 +1910,11 @@ def train_model(
         # Set attention masking policy once per run
         try:
             model.damage_emission = damage_emission
+        except Exception:
+            pass
+        # Set damage persistence policy on the model
+        try:
+            model.damage_mode = damage_persistence_mode
         except Exception:
             pass
         # Set layer neighbors policy once per run
@@ -2054,10 +2060,30 @@ def train_model(
 
             all_results = []
 
+            # Apply one-time reversible perturbation to node features, and avoid structural masking
+            used_knockout = knockout_pattern
+            try:
+                if knockout_pattern is not None and getattr(model, "damage_mode", "permanent") == "reversible":
+                    active_mask = ~knockout_pattern
+                    nodes0 = graph.nodes
+                    perturbed_nodes0 = {
+                        **nodes0,
+                        "logits": jp.where(active_mask[:, None], nodes0["logits"], getattr(model, "large_negative_value", -1000.0)),
+                        "hidden": jp.where(active_mask[:, None], nodes0["hidden"], getattr(model, "large_negative_value", -1000.0)),
+                    }
+                    graph = graph._replace(nodes=perturbed_nodes0)
+                    used_knockout = None  # no mask/clamp during steps in reversible mode
+                elif knockout_pattern is not None and getattr(model, "damage_mode", "permanent") == "permanent":
+                    used_knockout = knockout_pattern
+                else:
+                    used_knockout = None
+            except Exception:
+                used_knockout = knockout_pattern
+
             for i in range(n_message_steps):
                 graph = model(
                     graph,
-                    knockout_pattern=knockout_pattern,
+                    knockout_pattern=used_knockout,
                 )
 
                 graph, loss, logits, aux = get_loss_and_update_graph(

@@ -353,6 +353,7 @@ def main(cfg: DictConfig) -> None:
         n_message_steps=cfg.training.n_message_steps,
         layer_neighbors=cfg.training.get("layer_neighbors", False),
         damage_emission=cfg.training.get("damage_emission", False),
+        damage_persistence_mode=cfg.training.get("damage_persistence_mode", "permanent"),
         use_scan=cfg.training.use_scan,
         # Loss parameters
         loss_type=cfg.training.loss_type,

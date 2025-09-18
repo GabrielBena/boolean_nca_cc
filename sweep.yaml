@@ -120,17 +120,17 @@ parameters:
   #     - 32
   #     - 64
 
-  # SEU evaluation flips per gate
-  eval.seu.flips_per_gate:
-    values:
-      - 8
-      - 16
+  # # SEU evaluation flips per gate
+  # eval.seu.flips_per_gate:
+  #   values:
+  #     - 8
+  #     - 16
 
-  # Pool reset strategy
-  pool.reset_strategy:
-    values:
-      - "loss_biased"
-      - "combined"
+  # # Pool reset strategy
+  # pool.reset_strategy:
+  #   values:
+  #     - "loss_biased"
+  #     - "combined"
 
 
 

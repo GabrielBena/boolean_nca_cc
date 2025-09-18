@@ -181,6 +181,7 @@ class CircuitSelfAttention(nnx.Module):
         damage_emission: bool = False,
         layer_neighbors: bool = False,
         layer_sizes: Optional[List[Tuple[int, int]]] = None,
+        damage_mode: str = "permanent",  # "permanent" or "reversible"
     ):
         """
         Initialize the circuit self-attention model.
@@ -212,6 +213,8 @@ class CircuitSelfAttention(nnx.Module):
         self.damage_emission = damage_emission
         self.layer_neighbors = layer_neighbors
         self.layer_sizes = layer_sizes
+        self.damage_mode = damage_mode
+        self.large_negative_value = -1000.0
 
         if (
             mlp_dim is None
@@ -331,8 +334,8 @@ class CircuitSelfAttention(nnx.Module):
             layer_neighbor_mask = self._create_layer_neighbor_mask(effective_layer_sizes)
             mask = mask | layer_neighbor_mask
 
-        # If a knockout pattern is provided, apply it to the mask
-        if knockout_pattern is not None:
+        # If a knockout pattern is provided and damage is permanent, apply it to the mask
+        if knockout_pattern is not None and self.damage_mode == "permanent":
             # Create a mask for active (non-knocked-out) nodes
             active_nodes_mask = ~knockout_pattern
 
@@ -458,12 +461,12 @@ class CircuitSelfAttention(nnx.Module):
         hidden_updates = hidden_updates[0]
 
         # Apply knockout pattern for complete gate removal
-        if knockout_pattern is not None:
+        if knockout_pattern is not None and self.damage_mode == "permanent":
             active_mask = ~knockout_pattern
-    
+            
             # SET TO LARGE NEGATIVE VALUES for knocked-out nodes
-            # Use -1000.0 which gives sigmoid(-1000) ≈ 0.0 for complete deactivation
-            large_negative_value = -1000.0
+            # Use stored large negative value for complete deactivation
+            large_negative_value = self.large_negative_value
             current_logits = jp.where(
                 active_mask[:, None], 
                 nodes["logits"], 
@@ -474,11 +477,11 @@ class CircuitSelfAttention(nnx.Module):
                 nodes["hidden"], 
                 large_negative_value
             )
-    
+            
             # Zero out updates for knocked-out nodes
             logit_updates = logit_updates * active_mask[:, None]
             hidden_updates = hidden_updates * active_mask[:, None]
-    
+            
             # Apply updates to modified features for complete isolation
             updated_logits = current_logits + self.logit_scale * logit_updates
             updated_hidden = current_hidden + self.hidden_scale * hidden_updates
@@ -520,16 +523,28 @@ def run_self_attention_scan(
         final_graph: The graph after all steps
         all_graphs: List of graphs from each step (including initial)
     """
+    # Optionally apply one-time reversible perturbation to features
+    used_knockout = knockout_pattern if model.damage_mode == "permanent" else None
+    if knockout_pattern is not None and model.damage_mode == "reversible":
+        active_mask = ~knockout_pattern
+        nodes = graph.nodes
+        perturbed_nodes = {
+            **nodes,
+            "logits": jp.where(active_mask[:, None], nodes["logits"], model.large_negative_value),
+            "hidden": jp.where(active_mask[:, None], nodes["hidden"], model.large_negative_value),
+        }
+        graph = graph._replace(nodes=perturbed_nodes)
+
     # --- Compute the mask *once* before the scan ---
     attention_mask = model._create_attention_mask(
-        graph.senders, graph.receivers, knockout_pattern=knockout_pattern, bidirectional=True,
+        graph.senders, graph.receivers, knockout_pattern=used_knockout, bidirectional=True,
         layer_neighbors=layer_neighbors, layer_sizes=layer_sizes
     )
     # ---------------------------------------------
 
     def scan_body(carry_graph, _):
         # Apply one step of self-attention with precomputed mask
-        updated_graph = model(carry_graph, attention_mask=attention_mask, knockout_pattern=knockout_pattern,
+        updated_graph = model(carry_graph, attention_mask=attention_mask, knockout_pattern=used_knockout,
                             layer_neighbors=layer_neighbors, layer_sizes=layer_sizes)
         return updated_graph, updated_graph
 
@@ -584,9 +599,21 @@ def run_self_attention_scan_with_loss(
     """
     from boolean_nca_cc.training.evaluation import get_loss_and_update_graph
 
+    # Optionally apply one-time reversible perturbation to features (no structural masking)
+    used_knockout = knockout_pattern if model.damage_mode == "permanent" else None
+    if knockout_pattern is not None and model.damage_mode == "reversible":
+        active_mask = ~knockout_pattern
+        nodes0 = graph.nodes
+        perturbed_nodes0 = {
+            **nodes0,
+            "logits": jp.where(active_mask[:, None], nodes0["logits"], model.large_negative_value),
+            "hidden": jp.where(active_mask[:, None], nodes0["hidden"], model.large_negative_value),
+        }
+        graph = graph._replace(nodes=perturbed_nodes0)
+
     # --- Compute the mask *once* before the scan ---
     attention_mask = model._create_attention_mask(
-        graph.senders, graph.receivers, knockout_pattern=knockout_pattern, bidirectional=True,
+        graph.senders, graph.receivers, knockout_pattern=used_knockout, bidirectional=True,
         layer_neighbors=layer_neighbors, layer_sizes=layer_sizes
     )
     # ---------------------------------------------
@@ -595,7 +622,7 @@ def run_self_attention_scan_with_loss(
         current_graph = carry
 
         # Apply self-attention with precomputed mask
-        model_updated_graph = model(current_graph, attention_mask=attention_mask, knockout_pattern=knockout_pattern,
+        model_updated_graph = model(current_graph, attention_mask=attention_mask, knockout_pattern=used_knockout,
                                   layer_neighbors=layer_neighbors, layer_sizes=layer_sizes)
 
         # Compute loss and update graph

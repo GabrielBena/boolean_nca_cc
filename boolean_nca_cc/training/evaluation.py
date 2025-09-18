@@ -645,8 +645,57 @@ def _evaluate_with_loop(
     schedule_events = []
     if seu_schedule is not None and isinstance(seu_schedule, dict):
         schedule_events = list(seu_schedule.get("events", []))
+    # Insert post-damage, pre-recovery readout (Step 1) when knockout patterns are provided.
+    # Unify handling here: always perform a one-time feature clamp to measure post-damage state,
+    # then let the model enforce per-step permanence via masking when applicable.
+    start_step = 1
+    used_knockouts = None
+    if knockout_patterns is not None:
+        large_neg = getattr(model, "large_negative_value", -1000.0)
 
-    for step in range(1, n_message_steps + 1):
+        def clamp_graph_nodes(graph, active_mask):
+            nodes = graph.nodes
+            logits_nodes = jp.where(active_mask[:, None], nodes["logits"], large_neg)
+            hidden_nodes = jp.where(active_mask[:, None], nodes["hidden"], large_neg)
+            new_nodes = {**nodes, "logits": logits_nodes, "hidden": hidden_nodes}
+            return graph._replace(nodes=new_nodes)
+
+        # Clamp features once without structural masking
+        active_masks = ~knockout_patterns
+        vmap_clamp_nodes = jax.vmap(clamp_graph_nodes)
+        current_graphs = vmap_clamp_nodes(current_graphs, active_masks)
+
+        # Compute post-damage metrics (pre-recovery)
+        current_batch_logits = vmap_extract_logits(current_graphs)
+        post_losses, post_aux = vmap_get_loss(current_batch_logits, batch_wires)
+        (
+            post_hard_losses,
+            _,
+            _,
+            post_accuracies,
+            post_hard_accuracies,
+            post_res,
+            _,
+        ) = [aux_elem for aux_elem in post_aux]
+        current_graphs = vmap_update_loss(current_graphs, post_res)
+
+        # Record Step 1
+        step_metrics["step"].append(1)
+        step_metrics["soft_loss"].append(float(jp.mean(post_losses)))
+        step_metrics["hard_loss"].append(float(jp.mean(post_hard_losses)))
+        step_metrics["soft_accuracy"].append(float(jp.mean(post_accuracies)))
+        step_metrics["hard_accuracy"].append(float(jp.mean(post_hard_accuracies)))
+        step_metrics["logits_mean"].append(float(jp.mean(current_graphs.nodes["logits"])))
+
+        # Per-pattern storage for step 1
+        per_pattern_metrics["pattern_hard_accuracies"].append(post_hard_accuracies)
+        per_pattern_metrics["pattern_logits"].append(current_batch_logits)
+
+        # Continue trajectory from step 2; only permanent mode keeps structural mask
+        start_step = 2
+        used_knockouts = knockout_patterns if getattr(model, "damage_mode", "permanent") == "permanent" else None
+
+    for step in range(start_step, n_message_steps + 1):
         # Pre-model SEU injection at scheduled steps (global masks applied to all graphs)
         if schedule_events:
             step_events = [e for e in schedule_events if int(e.get("step", -1)) == step]
@@ -674,7 +723,7 @@ def _evaluate_with_loop(
                     current_graphs = vmap_inject(current_graphs, mutated_batch_logits)
 
         # Apply model to all graphs in batch
-        if knockout_patterns is not None:
+        if used_knockouts is not None:
             # Use a lambda to correctly map over the knockout_pattern keyword argument
             vmap_model = jax.vmap(
                 lambda g, k: model(
@@ -684,7 +733,7 @@ def _evaluate_with_loop(
                     layer_sizes=layer_sizes,
                 )
             )
-            updated_graphs = vmap_model(current_graphs, knockout_patterns)
+            updated_graphs = vmap_model(current_graphs, used_knockouts)
         else:
             vmap_model = jax.vmap(
                 lambda g: model(
