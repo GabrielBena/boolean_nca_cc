@@ -146,7 +146,7 @@ def main(cfg: DictConfig) -> None:
     total_nodes = sum(total_gates for total_gates, _ in layer_sizes)
 
     # Greedy settings
-    max_gates_default = 20
+    max_gates_default = 160
     # Allow override via cfg.greedy.max_gates if present
     max_gates = int(getattr(getattr(cfg, "greedy", {}), "max_gates", max_gates_default))
     max_gates = max(0, min(max_gates, len(eligible)))

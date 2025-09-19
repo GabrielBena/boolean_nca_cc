@@ -48,41 +48,40 @@ Goal: For greedy damage, cycle through a fixed, ordered list of gate indices suc
   - `create_knockout_vocabulary(rng, vocabulary_size, layer_sizes, damage_prob, damage_mode, ordered_indices)`
     - Today, in `damage_mode == "greedy"`, it creates a single deterministic pattern with the first `int(damage_prob)` indices and repeats it across the vocabulary.
 
-### Desired changes (where to implement)
-1) structural_perturbation.py
-   - Add a helper to build a singleton-gate mask for a single greedy index:
-     - `create_singleton_greedy_pattern(index: int, layer_sizes) -> jnp.bool_[num_nodes]`
-       - Returns a boolean mask with exactly one gate True at the specified absolute node index (validated to be a gate, not input/output).
-   - Option A (vocabulary approach): update `create_knockout_vocabulary(..., damage_mode="greedy_singleton")` to return a vocabulary where each entry knocks out exactly one gate from the `ordered_indices` list. Vocabulary size should match `len(ordered_indices)` or the desired subset.
-   - Option B (on-the-fly approach – recommended): keep `create_knockout_vocabulary` unchanged and generate singleton greedy masks inside the pool at damage time (see below). This avoids large vocabularies and ties selection directly to `perturb_counter`.
+### Implemented: Greedy rolling-window cycling (ties to perturb_counter)
 
-2) GraphPool.damage_fraction(...) in `boolean_nca_cc/training/pool/pool.py`
-   - Extend the signature to accept `damage_mode: str` and `greedy_ordered_indices: Optional[List[int]]`.
-   - Add a branch for greedy-cycling mode (e.g., `damage_mode in {"greedy", "greedy_cycle"}`):
-     - For the selected `damaged_idxs`, compute per-circuit position:
-       - `k = perturb_counter[idx] % len(greedy_ordered_indices)`
-       - `gate_idx = greedy_ordered_indices[k]`
-     - Build a singleton pattern per selected index using the new helper (`create_singleton_greedy_pattern(gate_idx, layer_sizes)`).
-     - Stack those masks into `new_patterns` and call `apply_knockouts(damaged_idxs, new_patterns)`.
-     - This naturally increments `perturb_counter` and rotates the greedy index per circuit over time.
-   - Keep existing random/vocabulary paths unchanged for other `damage_mode` values.
+We implemented a rolling-window greedy perturbation that advances with each circuit’s `perturb_counter` without modifying the existing `damage_fraction(...)` function.
 
-3) train_loop.py (call site)
-   - When calling `circuit_pool.damage_fraction(...)`, pass through `damage_mode` and `greedy_ordered_indices` from config. For greedy cycling, do NOT pass a vocabulary (let `damage_fraction` generate masks on the fly).
-   - Config already contains `pool.greedy_ordered_indices`; ensure it is plumbed.
+- structural_perturbation.py
+  - Added `create_group_greedy_pattern(ordered_indices, layer_sizes, start, size)`
+    - Builds a boolean mask for a wrap-around window over `ordered_indices`.
+    - JAX-friendly (no Python int coercions on tracers); uses mod/arange/gather.
 
-4) Configs (optional)
-   - In `configs/config.yaml`, clarify available `pool.damage_mode` values:
-     - `"shotgun" | "strip" | "greedy" | "greedy_cycle"`
-   - For `greedy_cycle`, rely on pool-level cycling with `perturb_counter` as described above.
+- pool/pool.py
+  - `GraphPool.apply_knockouts(idxs, new_knockout_patterns)` increments `perturb_counter` for affected indices.
+  - `damage_fraction(...)` left unchanged; we compose greedy masks in the train loop instead.
 
-### Evaluation impact
-- No changes required. Periodic knockout evaluation uses either fresh patterns or vocabulary-based sampling. If you want evaluation to also exercise the greedy cycle deterministically per pattern id, you can generate singleton greedy masks for the eval batch (optional).
+- training/train_loop.py
+  - At configured damage epochs, we select `damaged_idxs` via `get_reset_indices(...)` (same selection logic as before).
+  - For each damaged circuit, we compute:
+    - `count = perturb_counter[idx]`
+    - `start = (count * greedy_window_size) % len(greedy_ordered_indices)`
+    - `size = greedy_window_size` (defaults to 1 for single-index iteration)
+  - Build masks via `create_group_greedy_pattern(...)` (vmapped) and apply with `apply_knockouts(...)`.
+  - This rotates the window per circuit over time and increments `perturb_counter` automatically.
 
-### Summary of code touchpoints for greedy cycling
-- New helper: `structural_perturbation.create_singleton_greedy_pattern(...)`.
-- Extend: `GraphPool.damage_fraction(...)` to accept `damage_mode` + `greedy_ordered_indices` and generate singleton masks using `perturb_counter`.
-- Pass-through: `train_loop.py` to provide `damage_mode` and `greedy_ordered_indices` when applying pool damage.
-- Keep `evaluation.py` unchanged.
+### Config cheat sheet
+- Training
+  - `pool.greedy_ordered_indices: [...]`  # absolute node indices (non-input/output)
+  - `pool.greedy_window_size: 1|5|...`    # 1 = single-index cycling; k = k-wide rolling window
+  - `pool.damage_pool_enabled: true`
+  - `pool.damage_pool_interval, pool.damage_pool_fraction, pool.damage_strategy`: as before
+  - Note: when `greedy_ordered_indices` is set, the training damage path uses the rolling-window greedy logic and ignores `pool.damage_prob` (still used for random/vocab fallbacks only).
 
+- Evaluation
+  - Unchanged. To test a fixed greedy window of width k, set `eval.knockout_eval.damage_prob: k` and `pool.damage_mode: "greedy"` (this yields the first k indices, not sliding windows).
+  - To mirror the true sliding-window behavior in eval, provide a vocabulary of k-wide windows over the greedy list and evaluate on that vocabulary (or add a small generator in eval).
 
+### Interaction: damage_prob vs greedy_window_size
+- Training (greedy-window active): `greedy_window_size` determines how many greedy indices are perturbed per damage event; `damage_prob` is ignored in this branch.
+- Evaluation (greedy mode): `damage_prob` controls how many greedy indices are included (e.g., 5 = first 5). It does not automatically slide; sliding requires a custom vocabulary.

@@ -372,6 +372,7 @@ def main(cfg: DictConfig) -> None:
         damage_mode=cfg.pool.get("damage_mode", "shotgun"),
         damage_pool_damage_prob=cfg.pool.get("damage_prob", cfg.pool.get("persistent_knockout", {}).get("damage_prob", 0.0)),
         greedy_ordered_indices=cfg.pool.get("greedy_ordered_indices", None),
+        greedy_window_size=cfg.pool.get("greedy_window_size", 1),
         damage_eval_steps=cfg.pool.get("damage_eval_steps", 50),
         # Damage selection filtering parameters
         damage_min_pool_updates=cfg.pool.get("damage_min_pool_updates", 0),

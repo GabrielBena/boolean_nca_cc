@@ -75,7 +75,7 @@ pool:
   damage_combined_weights: [0.5, 0.5]
   damage_mode: "greedy"  # Options: "shotgun" (random), "strip" (localized), or "greedy" (ordered selection)
   # Number of gates to knock out when generating fresh patterns (ignored if vocabulary is used)
-  damage_prob: 15
+  damage_prob: 5
   # Damage-specific vocabulary size (decoupled from legacy persistent_knockout)
   damage_knockout_diversity: 1
   # Pool update step filtering for damage selection (prevents damage to over-optimized circuits)
@@ -87,6 +87,7 @@ pool:
   
   # Greedy damage mode configuration
   greedy_ordered_indices: [48, 17, 52, 146, 154, 30, 35, 33, 68, 145, 12, 99, 139, 46, 111, 144, 57, 153, 10, 64]
+  greedy_window_size: ${pool.damage_prob}  # If 1, defaults to single-index iteration per damage; otherwise rolling window size
 
 
 eval:

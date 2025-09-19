@@ -40,7 +40,8 @@ from boolean_nca_cc.utils.graph_builder import build_graph
 from boolean_nca_cc.training.pool.structural_perturbation import    (
     create_reproducible_knockout_pattern, 
     create_knockout_vocabulary,
-    create_strip_knockout_pattern
+    create_strip_knockout_pattern,
+    create_group_greedy_pattern,
 )
 from functools import partial
 from boolean_nca_cc.circuits.train import create_gate_mask_from_knockout_pattern
@@ -1308,6 +1309,7 @@ def train_model(
     # Damage-specific generation control (decoupled from legacy persistent_knockout)
     damage_pool_damage_prob: float = 0.0,
     greedy_ordered_indices: Optional[List[int]] = None,
+    greedy_window_size: int = 1,
     damage_eval_steps: int = 50,  # Number of message passing steps for damage evaluation
     # Damage selection filtering parameters
     damage_min_pool_updates: int = 0,  # Minimum pool updates before circuit can be damaged
@@ -1818,21 +1820,54 @@ def train_model(
                 and (epoch % damage_pool_interval == 0)
             ):
                 rng, damage_key = jax.random.split(rng)
-                
 
-                
-                # Use the existing knockout_vocabulary mechanism - the vocabulary already contains the right patterns
-                circuit_pool, damaged_idxs = circuit_pool.damage_fraction(
-                    key=damage_key,
+                # Select which circuits to damage using existing selection logic
+                damaged_idxs, _ = circuit_pool.get_reset_indices(
+                    damage_key,
                     fraction=damage_pool_fraction,
-                    layer_sizes=tuple(layer_sizes),
-                    damage_prob=float(damage_pool_damage_prob),
-                    selection_strategy=damage_strategy,
+                    reset_strategy=damage_strategy,
                     combined_weights=damage_combined_weights,
-                    knockout_vocabulary=knockout_vocabulary,
-                    min_pool_updates=damage_min_pool_updates,
-                    max_pool_updates=damage_max_pool_updates,
+                    invert_loss=True,
+                    max_pool_updates_for_damage=damage_max_pool_updates,
+                    min_pool_updates_for_damage=damage_min_pool_updates,
                 )
+
+                # Build greedy rolling-window patterns if configured; else fallback to vocabulary or random
+                new_patterns = None
+                if greedy_ordered_indices is not None and len(greedy_ordered_indices) > 0:
+                    # Compute start = (perturb_counter * window) % N, size = window (default 1 => single index)
+                    n = len(greedy_ordered_indices)
+                    window = max(1, int(greedy_window_size))
+
+                    def build_pattern(idx):
+                        count = circuit_pool.perturb_counter[idx]
+                        start = (count * window) % n
+                        return create_group_greedy_pattern(
+                            greedy_ordered_indices, tuple(layer_sizes), start, window
+                        )
+
+                    new_patterns = jax.vmap(build_pattern, in_axes=(0,))(damaged_idxs)
+                elif knockout_vocabulary is not None:
+                    # Sample vocabulary patterns for damaged indices
+                    vocab_size = knockout_vocabulary.shape[0]
+                    vocab_indices = jax.random.choice(
+                        damage_key, vocab_size, shape=(damaged_idxs.shape[0],), replace=True
+                    )
+                    new_patterns = knockout_vocabulary[vocab_indices]
+                else:
+                    # Fresh random patterns as last resort
+                    vmapped_pattern_creator = jax.vmap(
+                        lambda k: create_reproducible_knockout_pattern(
+                            key=k,
+                            layer_sizes=tuple(layer_sizes),
+                            damage_prob=float(damage_pool_damage_prob),
+                        )
+                    )
+                    pattern_keys = jax.random.split(damage_key, damaged_idxs.shape[0])
+                    new_patterns = vmapped_pattern_creator(pattern_keys)
+
+                # Apply into pool (increments perturb_counter internally)
+                circuit_pool = circuit_pool.apply_knockouts(damaged_idxs, new_patterns)
 
                 damaged_count = int(damaged_idxs.shape[0]) if hasattr(damaged_idxs, "shape") else 0
                 damaged_frac = damaged_count / float(pool_size) if pool_size > 0 else 0.0

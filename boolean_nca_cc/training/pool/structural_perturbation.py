@@ -233,3 +233,53 @@ def create_knockout_vocabulary(
     knockout_vocabulary = jax.vmap(pattern_creator_fn)(pattern_keys)
 
     return knockout_vocabulary
+
+
+def create_group_greedy_pattern(
+    ordered_indices: List[int],
+    layer_sizes: List[Tuple[int, int]],
+    start: int,
+    size: int,
+) -> jp.ndarray:
+    """
+    Create a knockout pattern by selecting a rolling window over ordered greedy indices.
+
+    The window begins at `start` and spans `size` indices, with wrap-around.
+
+    Args:
+        ordered_indices: Absolute node indices ordered by greedy importance.
+        layer_sizes: List of (total_gates, group_size) for each layer (unused but kept for API symmetry).
+        start: Start index into `ordered_indices` (will be modded by its length).
+        size: Number of indices to include (<= len(ordered_indices)).
+
+    Returns:
+        Boolean mask over all nodes where True indicates a knocked-out gate.
+    """
+    total_nodes = sum(total_gates for total_gates, _ in layer_sizes)
+    n = len(ordered_indices)
+
+    # Early outs for empty cases (keep shapes static for JIT)
+    base_mask = jp.zeros(total_nodes, dtype=jp.bool_)
+    if n == 0:
+        return base_mask
+
+    # Convert constants and inputs to JAX arrays
+    ordered = jp.array(ordered_indices, dtype=jp.int32)
+    s = jp.asarray(start, dtype=jp.int32)
+    k_in = jp.asarray(size, dtype=jp.int32)
+    n_arr = jp.asarray(n, dtype=jp.int32)
+
+    # Clamp window size to [0, n]
+    k = jp.minimum(jp.maximum(k_in, 0), n_arr)
+
+    # If k == 0, return zeros
+    def no_sel():
+        return base_mask
+
+    def with_sel():
+        # Positions within the ordered array with wrap-around
+        idx_positions = jp.mod(s + jp.arange(k, dtype=jp.int32), n_arr)
+        selected = ordered[idx_positions]
+        return base_mask.at[selected].set(True)
+
+    return jax.lax.cond(k == 0, no_sel, with_sel)
