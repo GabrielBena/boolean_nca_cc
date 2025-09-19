@@ -13,3 +13,9 @@ num_layers: 4 # 1 # 1
 dropout_rate: 0.0
 zero_init: false
 re_zero_update: true 
+  
+  # Damage behavior
+  # hard: current behavior (remove from attention, clamp logits, zero updates)
+  # reversible: keep nodes in attention and residual path; add logit bias to damaged nodes
+damage_behavior: "reversible"  # Options: "hard", "reversible"
+reversible_bias: -10.0

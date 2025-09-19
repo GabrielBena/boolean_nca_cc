@@ -46,6 +46,8 @@ class GraphPool(struct.PyTreeNode):
     reset_counter: Optional[Array] = None
     # Knockout patterns for persistent structural perturbations
     knockout_patterns: Optional[Array] = None
+    # Count how many times each circuit has been perturbed (damage applied)
+    perturb_counter: Optional[Array] = None
 
     @classmethod
     def create(
@@ -55,6 +57,7 @@ class GraphPool(struct.PyTreeNode):
         logits: PyTree = None,
         reset_counter: Optional[Array] = None,
         knockout_patterns: Optional[Array] = None,
+        perturb_counter: Optional[Array] = None,
     ) -> "GraphPool":
         """
         Create a new GraphPool instance from a batched GraphsTuple.
@@ -89,6 +92,10 @@ class GraphPool(struct.PyTreeNode):
             num_nodes = batched_graphs.nodes["logits"].shape[1]
             knockout_patterns = jp.zeros((size, num_nodes), dtype=jp.bool_)
 
+        # Initialize perturbation counter if not provided
+        if perturb_counter is None:
+            perturb_counter = jp.zeros(size, dtype=jp.int32)
+
         return cls(
             size=size,
             graphs=batched_graphs,
@@ -96,6 +103,7 @@ class GraphPool(struct.PyTreeNode):
             logits=logits,
             reset_counter=reset_counter,
             knockout_patterns=knockout_patterns,
+            perturb_counter=perturb_counter,
         )
 
     @jax.jit
@@ -395,7 +403,17 @@ class GraphPool(struct.PyTreeNode):
             new_knockout_patterns
         )
 
-        return self.replace(knockout_patterns=updated_knockout_patterns)
+        # Increment per-circuit perturbation counter for the affected indices
+        updated_perturb_counter = (
+            self.perturb_counter.at[idxs].add(1)
+            if self.perturb_counter is not None
+            else None
+        )
+
+        return self.replace(
+            knockout_patterns=updated_knockout_patterns,
+            perturb_counter=updated_perturb_counter,
+        )
 
     # @partial(
     #     jax.jit,
@@ -776,6 +794,14 @@ def initialize_graph_pool(
         # Apply the new patterns at the selected indices
         pool_knockout_patterns = pool_knockout_patterns.at[damage_indices].set(new_patterns)
 
+    # Initialize perturbation counter
+    perturb_counter = jp.zeros(pool_size, dtype=jp.int32)
+
     return GraphPool.create(
-        graphs, all_wires, all_logits, reset_counter, pool_knockout_patterns
+        graphs,
+        all_wires,
+        all_logits,
+        reset_counter,
+        pool_knockout_patterns,
+        perturb_counter,
     )

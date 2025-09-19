@@ -178,6 +178,9 @@ class CircuitSelfAttention(nnx.Module):
         type: str = "self_attention",
         zero_init: bool = True,
         re_zero_update: bool = False,
+        # Damage behavior parameters
+        damage_behavior: str = "hard",  # "hard" | "reversible"
+        reversible_bias: float = -4.0,
     ):
         """
         Initialize the circuit self-attention model.
@@ -206,6 +209,9 @@ class CircuitSelfAttention(nnx.Module):
         self.dropout_rate = dropout_rate
         self.num_heads = num_heads
         self.deterministic = True
+        # Damage behavior config
+        self.damage_behavior = damage_behavior
+        self.reversible_bias = float(reversible_bias)
 
         if (
             mlp_dim is None
@@ -426,9 +432,17 @@ class CircuitSelfAttention(nnx.Module):
 
         # Create attention mask if not provided
         if attention_mask is None:
+            # In reversible mode, we keep nodes connected in attention mask
+            knockout_for_mask = (
+                knockout_pattern if (knockout_pattern is not None and self.damage_behavior == "hard") else None
+            )
             attention_mask = self._create_attention_mask(
-                senders, receivers, knockout_pattern=knockout_pattern, bidirectional=True,
-                layer_neighbors=layer_neighbors, layer_sizes=layer_sizes
+                senders,
+                receivers,
+                knockout_pattern=knockout_for_mask,
+                bidirectional=True,
+                layer_neighbors=layer_neighbors,
+                layer_sizes=layer_sizes,
             )
 
         # Project features to the attention dimension
@@ -449,27 +463,44 @@ class CircuitSelfAttention(nnx.Module):
         logit_updates = logit_updates[0]
         hidden_updates = hidden_updates[0]
 
-        # Apply knockout pattern for complete gate removal
+        # Apply knockout pattern
         if knockout_pattern is not None:
             active_mask = ~knockout_pattern
-    
-            # SET TO LARGE NEGATIVE VALUES for knocked-out nodes (NEW)
-            # Use -10.0 which gives sigmoid(-10) ≈ 4.5e-5 ≈ 0.0
-            large_negative_value = -10.0
-            current_logits = jp.where(
-                active_mask[:, None], 
-                nodes["logits"], 
-                large_negative_value
-            )
-            current_hidden = nodes["hidden"] * active_mask[:, None]
-    
-            # Zero out updates for knocked-out nodes
-            logit_updates = logit_updates * active_mask[:, None]
-            hidden_updates = hidden_updates * active_mask[:, None]
-    
-            # Apply updates to modified features for complete isolation
-            updated_logits = current_logits + self.logit_scale * logit_updates
-            updated_hidden = current_hidden + self.hidden_scale * hidden_updates
+            if self.damage_behavior == "hard":
+                # Hard mode: fully remove damaged nodes' effect
+                large_negative_value = -10.0
+                current_logits = jp.where(
+                    active_mask[:, None],
+                    nodes["logits"],
+                    large_negative_value,
+                )
+                current_hidden = nodes["hidden"] * active_mask[:, None]
+
+                # Zero out updates for knocked-out nodes
+                logit_updates = logit_updates * active_mask[:, None]
+                hidden_updates = hidden_updates * active_mask[:, None]
+
+                # Apply updates to modified features for complete isolation
+                updated_logits = current_logits + self.logit_scale * logit_updates
+                updated_hidden = current_hidden + self.hidden_scale * hidden_updates
+            else:
+                # Reversible mode: keep nodes in graph; apply one-shot bias after one clean step
+                # Use JAX array for step count to remain jit/vmap friendly
+                step_count = jp.array(0.0, dtype=jp.float32)
+                if globals_ is not None and globals_.shape[-1] > 1:
+                    step_count = globals_[..., 1]
+
+                current_logits = nodes["logits"]
+                # Introduce perturbation at the first model application of the episode
+                # Aligns with eval: step 0 is baseline (no model call), step 1 injects
+                apply_bias = jp.where(step_count == 0.0, 1.0, 0.0)
+                bias_mask = knockout_pattern[:, None] * self.reversible_bias
+                # Only add bias on the exact injection step
+                current_logits = current_logits + (apply_bias * bias_mask)
+
+                # Residual updates remain active for all nodes
+                updated_logits = current_logits + self.logit_scale * logit_updates
+                updated_hidden = nodes["hidden"] + self.hidden_scale * hidden_updates
         else:
             # No knockouts applied - normal residual updates
             updated_logits = nodes["logits"] + self.logit_scale * logit_updates
