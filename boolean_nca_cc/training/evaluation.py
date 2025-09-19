@@ -23,6 +23,9 @@ from boolean_nca_cc.circuits.train import (
     binary_cross_entropy,
     compute_accuracy,
 )
+from boolean_nca_cc.training.pool.structural_perturbation import (
+    create_group_greedy_pattern,
+)
 
 
 class StepResult(NamedTuple):
@@ -381,6 +384,11 @@ def evaluate_model_stepwise_batched(
     knockout_patterns: Optional[jp.ndarray] = None,
     return_per_pattern: bool = False,  # New parameter
     layer_neighbors: bool = False,
+    # Periodic greedy re-damage during eval trajectory
+    greedy_eval_enabled: bool = False,
+    greedy_ordered_indices: Optional[List[int]] = None,
+    greedy_window_size: int = 1,
+    greedy_injection_recover_steps: int = 10,
 ) -> Dict:
     """
     Evaluate GNN performance on a batch of circuits by running message passing steps
@@ -493,6 +501,10 @@ def evaluate_model_stepwise_batched(
         initial_hard_accuracies=initial_hard_accuracies,
         batch_logits=batch_logits,
         layer_neighbors=layer_neighbors,
+        greedy_eval_enabled=greedy_eval_enabled,
+        greedy_ordered_indices=greedy_ordered_indices,
+        greedy_window_size=greedy_window_size,
+        greedy_injection_recover_steps=greedy_injection_recover_steps,
     )
 
 def evaluate_circuits_in_chunks(
@@ -594,6 +606,11 @@ def _evaluate_with_loop(
     initial_hard_accuracies: Optional[jp.ndarray] = None,
     batch_logits: Optional[List[jp.ndarray]] = None,
     layer_neighbors: bool = False,
+    # Greedy periodic injection controls
+    greedy_eval_enabled: bool = False,
+    greedy_ordered_indices: Optional[List[int]] = None,
+    greedy_window_size: int = 1,
+    greedy_injection_recover_steps: int = 7,
 ) -> Dict:
     """
     Evaluate using loop mode (original behavior).
@@ -626,10 +643,51 @@ def _evaluate_with_loop(
         lambda graph: extract_logits_from_graph(graph, logits_original_shapes)
     )
 
+    # Prepare greedy schedule state if enabled
+    batch_size = batch_wires[0].shape[0]
+    event_count = None
+    if greedy_eval_enabled and greedy_ordered_indices is not None and len(greedy_ordered_indices) > 0:
+        event_count = jp.zeros((batch_size,), dtype=jp.int32)
+        window = max(1, int(greedy_window_size))
+        greedy_len = int(len(greedy_ordered_indices))
+
     for step in range(1, n_message_steps + 1):
         # Apply model to all graphs in batch
-        if knockout_patterns is not None:
-            # Use a lambda to correctly map over the knockout_pattern keyword argument
+        # Determine per-step knockout patterns (dynamic greedy schedule or static patterns)
+        step_knockout_patterns = knockout_patterns
+        inject_now_mask = None
+        if event_count is not None:
+            # Injection schedule: step 1, then every (recover_steps + 1) steps
+            recover_steps = int(max(0, greedy_injection_recover_steps))
+            inject_now = (step == 1) or ((step - 1) % (recover_steps + 1) == 0)
+            inject_now_mask = jp.full((batch_size,), bool(inject_now), dtype=jp.bool_)
+
+            # Compute window starts from current event_count (pre-increment)
+            starts = ((event_count * window) % greedy_len).astype(jp.int32)
+
+            # Build patterns for this step
+            vm_build = jax.vmap(
+                lambda s: create_group_greedy_pattern(
+                    greedy_ordered_indices, layer_sizes, s, window
+                )
+            )
+            dynamic_patterns = vm_build(starts)
+            step_knockout_patterns = dynamic_patterns
+
+            # For reversible mode, force one-shot bias by zeroing step counters on injection steps
+            damage_behavior = getattr(model, "damage_behavior", "hard")
+            if damage_behavior == "reversible":
+                steps_before = current_graphs.globals[:, 1]
+                steps_after = jp.where(inject_now_mask, jp.zeros_like(steps_before), steps_before)
+                current_graphs = current_graphs._replace(
+                    globals=jp.stack([current_graphs.globals[:, 0], steps_after], axis=1)
+                )
+
+            # Increment event_count AFTER using it to compute starts (only on injection steps)
+            event_count = jp.where(inject_now_mask, event_count + 1, event_count)
+
+        # Apply model with per-step patterns if available
+        if step_knockout_patterns is not None:
             vmap_model = jax.vmap(
                 lambda g, k: model(
                     g,
@@ -638,7 +696,7 @@ def _evaluate_with_loop(
                     layer_sizes=layer_sizes,
                 )
             )
-            updated_graphs = vmap_model(current_graphs, knockout_patterns)
+            updated_graphs = vmap_model(current_graphs, step_knockout_patterns)
         else:
             vmap_model = jax.vmap(
                 lambda g: model(

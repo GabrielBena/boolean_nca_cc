@@ -86,7 +86,7 @@ pool:
   damage_eval_steps: ${eval.periodic_eval_inner_steps}
   
   # Greedy damage mode configuration
-  greedy_ordered_indices: [48, 17, 52, 146, 154, 30, 35, 33, 68, 145, 12, 99, 139, 46, 111, 144, 57, 153, 10, 64]
+  greedy_ordered_indices: [48,17,52,146,154,30,35,33,68,145,12,99,139,46,111,144,57,153,10,64,88,125,11,38,98,24,9,23,66,18,122,8,19,22,25,27,28,32,37,41,42,43,44,45,47,49,51,53,54,58,59,62,29]
   greedy_window_size: ${pool.damage_prob}  # If 1, defaults to single-index iteration per damage; otherwise rolling window size
 
 
@@ -103,6 +103,11 @@ eval:
   knockout_eval:
     enabled: true
     damage_prob: ${pool.damage_prob}
+    # Periodic greedy re-damage during stepwise eval (reversible-friendly)
+    greedy_eval_enabled: true            # Enable periodic greedy injections in eval trajectory
+    greedy_window_size: ${pool.greedy_window_size}  # Reuse pool's window size
+    greedy_injection_recover_steps: 5     # N recovery steps between injections
+    # Note: Greedy ordered indices are defined once under pool.greedy_ordered_indices
   
   # Hamming distance analysis
   hamming_analysis_dir: "results/hamming_analysis_mbs${training.meta_batch_size}_div${pool.damage_knockout_diversity}_dam${pool.damage_prob}"  # Directory for hamming analysis plots and CSVs

@@ -561,6 +561,11 @@ def run_knockout_periodic_evaluation(
             return_per_pattern=True,  # Enable per-pattern analysis
             layer_neighbors=layer_neighbors,
             # use_scan=use_scan,
+            # Periodic greedy re-damage schedule for eval
+            greedy_eval_enabled=bool(knockout_config.get("greedy_eval_enabled", False)),
+            greedy_ordered_indices=knockout_config.get("greedy_ordered_indices", None),
+            greedy_window_size=int(knockout_config.get("greedy_window_size", 1)),
+            greedy_injection_recover_steps=int(knockout_config.get("greedy_injection_recover_steps", 10)),
         )
 
         final_metrics_in = {
@@ -2018,12 +2023,17 @@ def train_model(
 
                     # Pass vocabulary and wandb_run for detailed checks
                     # Pass accumulated data and get updated version back
+                    # Ensure greedy indices are available to eval schedule
+                    local_knockout_eval = dict(knockout_eval) if knockout_eval is not None else {}
+                    if greedy_ordered_indices is not None:
+                        local_knockout_eval.setdefault("greedy_ordered_indices", greedy_ordered_indices)
+
                     ko_eval_results, accumulated_pattern_data = run_knockout_periodic_evaluation(
                         model=model,
                         knockout_vocabulary=knockout_vocabulary,
                         base_wires=base_wires,
                         base_logits=base_logits,
-                        knockout_config=knockout_eval,
+                        knockout_config=local_knockout_eval,
                         periodic_eval_test_seed=periodic_eval_test_seed,
                         x_data=x_data,
                         y_data=y_data,
