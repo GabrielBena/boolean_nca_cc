@@ -56,7 +56,7 @@ training:
     exponent: 1
     alpha: 1e-1 # final lr = 1% of initial lr
   # NUMBER OF EPOCHS
-  epochs: 8192 # 32 #6144
+  epochs: 5000 # 32 #6144
   # USE SCAN
   use_scan: false
 
@@ -106,7 +106,8 @@ eval:
     # Periodic greedy re-damage during stepwise eval (reversible-friendly)
     greedy_eval_enabled: true            # Enable periodic greedy injections in eval trajectory
     greedy_window_size: ${pool.greedy_window_size}  # Reuse pool's window size
-    greedy_injection_recover_steps: 5     # N recovery steps between injections
+    greedy_injection_recover_steps: 10     # N recovery steps between injections
+    greedy_num_injections: 10           # If set, number of injections then damage-free tail
     # Note: Greedy ordered indices are defined once under pool.greedy_ordered_indices
   
   # Hamming distance analysis
@@ -134,11 +135,11 @@ checkpoint:
 # Early stopping configuration
 early_stop:
   enabled: true  # Enable early stopping based on accuracy threshold
-  threshold: 0.995  # Accuracy threshold to trigger early stopping
+  threshold: 1  # Accuracy threshold to trigger early stopping
   metric: "hard_accuracy"  # Metric to monitor: "loss", "hard_loss", "accuracy", "hard_accuracy"
   source: "eval_ko_in"
-  patience: 10  # Number of epochs above threshold before stopping
-  min_epochs: 5000  # Minimum epochs before early stopping can trigger
+  patience: 2  # Number of evaluations above threshold before stopping (since eval runs every 1024 epochs)
+  min_epochs: 3072  # Minimum epochs before early stopping can trigger
 
 # Backpropagation baseline configuration
 backprop:

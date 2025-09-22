@@ -179,7 +179,7 @@ class CircuitSelfAttention(nnx.Module):
         zero_init: bool = True,
         re_zero_update: bool = False,
         # Damage behavior parameters
-        damage_behavior: str = "hard",  # "hard" | "reversible"
+        damage_behavior: str = "permanent",  # "permanent" | "reversible"
         reversible_bias: float = -4.0,
     ):
         """
@@ -434,7 +434,7 @@ class CircuitSelfAttention(nnx.Module):
         if attention_mask is None:
             # In reversible mode, we keep nodes connected in attention mask
             knockout_for_mask = (
-                knockout_pattern if (knockout_pattern is not None and self.damage_behavior == "hard") else None
+                knockout_pattern if (knockout_pattern is not None and self.damage_behavior == "permanent") else None
             )
             attention_mask = self._create_attention_mask(
                 senders,
@@ -466,8 +466,8 @@ class CircuitSelfAttention(nnx.Module):
         # Apply knockout pattern
         if knockout_pattern is not None:
             active_mask = ~knockout_pattern
-            if self.damage_behavior == "hard":
-                # Hard mode: fully remove damaged nodes' effect
+            if self.damage_behavior == "permanent":
+                # Permanent mode: fully remove damaged nodes' effect
                 large_negative_value = -10.0
                 current_logits = jp.where(
                     active_mask[:, None],

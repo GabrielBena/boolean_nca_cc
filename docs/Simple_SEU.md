@@ -10,15 +10,15 @@ This document summarizes the minimal reversible damage implementation (SEU-like)
 ### Where it’s implemented
 - Model toggle and behavior:
   - `boolean_nca_cc/models/self_attention.py` (class `CircuitSelfAttention`)
-    - Constructor now accepts `damage_behavior: "hard" | "reversible"` and `reversible_bias: float`.
+    - Constructor now accepts `damage_behavior: "permanent" | "reversible"` and `reversible_bias: float`.
     - In `__call__`:
-      - Hard mode: unchanged (prune attention, clamp logits to large negative, zero residual updates for damaged nodes).
+      - Permanent mode: unchanged (prune attention, clamp logits to large negative, zero residual updates for damaged nodes).
       - Reversible mode: attention mask ignores knockout (keep connectivity), no zeroing; at first step (`globals[..., 1] == 0`), add a logit bias to damaged nodes. All steps after that are clean updates (recovery path).
 
 - Config knobs:
   - `configs/model/self_attention.yaml`
     - `damage_behavior: "reversible"`
-    - `reversible_bias: -4.0` (tunable)
+    - `reversible_bias: -10.0` (tunable)
 
 - Pool damage tracking:
   - `boolean_nca_cc/training/pool/pool.py`
@@ -35,7 +35,7 @@ This document summarizes the minimal reversible damage implementation (SEU-like)
 
 ---
 
-## Next step: Greedy knockout patterns that cycle with perturb_counter
+## Greedy knockout patterns that cycle with perturb_counter
 
 Goal: For greedy damage, cycle through a fixed, ordered list of gate indices such that:
 - First perturbation of a circuit uses `greedy_indices[0]` (knock out that gate only).
@@ -66,22 +66,26 @@ We implemented a rolling-window greedy perturbation that advances with each circ
   - For each damaged circuit, we compute:
     - `count = perturb_counter[idx]`
     - `start = (count * greedy_window_size) % len(greedy_ordered_indices)`
-    - `size = greedy_window_size` (defaults to 1 for single-index iteration)
+    - `size = greedy_window_size` (configured as 5 via damage_prob linkage)
   - Build masks via `create_group_greedy_pattern(...)` (vmapped) and apply with `apply_knockouts(...)`.
   - This rotates the window per circuit over time and increments `perturb_counter` automatically.
 
 ### Config cheat sheet
 - Training
   - `pool.greedy_ordered_indices: [...]`  # absolute node indices (non-input/output)
-  - `pool.greedy_window_size: 1|5|...`    # 1 = single-index cycling; k = k-wide rolling window
+  - `pool.greedy_window_size: ${pool.damage_prob}`  # Links to damage_prob, actual value is 5
   - `pool.damage_pool_enabled: true`
   - `pool.damage_pool_interval, pool.damage_pool_fraction, pool.damage_strategy`: as before
-  - Note: when `greedy_ordered_indices` is set, the training damage path uses the rolling-window greedy logic and ignores `pool.damage_prob` (still used for random/vocab fallbacks only).
+  - `pool.damage_prob: 5`  # Controls both window size and fallback pattern generation
 
-- Evaluation
-  - Unchanged. To test a fixed greedy window of width k, set `eval.knockout_eval.damage_prob: k` and `pool.damage_mode: "greedy"` (this yields the first k indices, not sliding windows).
-  - To mirror the true sliding-window behavior in eval, provide a vocabulary of k-wide windows over the greedy list and evaluate on that vocabulary (or add a small generator in eval).
+- Evaluation  
+  - `eval.knockout_eval.damage_prob: ${pool.damage_prob}` # Inherits from pool config (5)
+  - `eval.knockout_eval.greedy_eval_enabled: true` # Enables periodic greedy re-damage during eval
+  - `eval.knockout_eval.greedy_window_size: ${pool.greedy_window_size}` # Reuses pool's window size
+  - `eval.knockout_eval.greedy_injection_recover_steps: 10` # Recovery steps between injections
+  - `eval.knockout_eval.greedy_num_injections: 10` # Number of injections then damage-free tail
 
 ### Interaction: damage_prob vs greedy_window_size
-- Training (greedy-window active): `greedy_window_size` determines how many greedy indices are perturbed per damage event; `damage_prob` is ignored in this branch.
-- Evaluation (greedy mode): `damage_prob` controls how many greedy indices are included (e.g., 5 = first 5). It does not automatically slide; sliding requires a custom vocabulary.
+- **Unified Parameter**: `damage_prob` controls the window size for greedy mode in both training and evaluation (value: 5)
+- **Training**: `greedy_window_size: ${pool.damage_prob}` creates a 5-gate rolling window
+- **Evaluation**: Can use the same patterns via vocabulary OR enable `greedy_eval_enabled` for periodic greedy re-damage during stepwise evaluation

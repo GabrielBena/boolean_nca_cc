@@ -566,6 +566,7 @@ def run_knockout_periodic_evaluation(
             greedy_ordered_indices=knockout_config.get("greedy_ordered_indices", None),
             greedy_window_size=int(knockout_config.get("greedy_window_size", 1)),
             greedy_injection_recover_steps=int(knockout_config.get("greedy_injection_recover_steps", 10)),
+            greedy_num_injections=knockout_config.get("greedy_num_injections", None),
         )
 
         final_metrics_in = {

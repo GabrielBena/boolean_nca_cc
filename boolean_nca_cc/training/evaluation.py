@@ -389,6 +389,7 @@ def evaluate_model_stepwise_batched(
     greedy_ordered_indices: Optional[List[int]] = None,
     greedy_window_size: int = 1,
     greedy_injection_recover_steps: int = 10,
+    greedy_num_injections: Optional[int] = None,
 ) -> Dict:
     """
     Evaluate GNN performance on a batch of circuits by running message passing steps
@@ -505,6 +506,7 @@ def evaluate_model_stepwise_batched(
         greedy_ordered_indices=greedy_ordered_indices,
         greedy_window_size=greedy_window_size,
         greedy_injection_recover_steps=greedy_injection_recover_steps,
+        greedy_num_injections=greedy_num_injections,
     )
 
 def evaluate_circuits_in_chunks(
@@ -611,6 +613,7 @@ def _evaluate_with_loop(
     greedy_ordered_indices: Optional[List[int]] = None,
     greedy_window_size: int = 1,
     greedy_injection_recover_steps: int = 7,
+    greedy_num_injections: Optional[int] = None,
 ) -> Dict:
     """
     Evaluate using loop mode (original behavior).
@@ -662,6 +665,12 @@ def _evaluate_with_loop(
             inject_now = (step == 1) or ((step - 1) % (recover_steps + 1) == 0)
             inject_now_mask = jp.full((batch_size,), bool(inject_now), dtype=jp.bool_)
 
+            # Respect maximum number of injections per circuit if provided
+            if greedy_num_injections is not None:
+                max_inj = int(greedy_num_injections)
+                can_inject_mask = event_count < max_inj
+                inject_now_mask = inject_now_mask & can_inject_mask
+
             # Compute window starts from current event_count (pre-increment)
             starts = ((event_count * window) % greedy_len).astype(jp.int32)
 
@@ -672,10 +681,13 @@ def _evaluate_with_loop(
                 )
             )
             dynamic_patterns = vm_build(starts)
-            step_knockout_patterns = dynamic_patterns
+            # Apply patterns only for circuits injecting this step; others get no damage
+            step_knockout_patterns = jp.where(
+                inject_now_mask[:, None], dynamic_patterns, jp.zeros_like(dynamic_patterns)
+            )
 
             # For reversible mode, force one-shot bias by zeroing step counters on injection steps
-            damage_behavior = getattr(model, "damage_behavior", "hard")
+            damage_behavior = getattr(model, "damage_behavior", "permanent")
             if damage_behavior == "reversible":
                 steps_before = current_graphs.globals[:, 1]
                 steps_after = jp.where(inject_now_mask, jp.zeros_like(steps_before), steps_before)
