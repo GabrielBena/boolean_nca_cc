@@ -561,14 +561,14 @@ def run_knockout_periodic_evaluation(
             return_per_pattern=True,  # Enable per-pattern analysis
             layer_neighbors=layer_neighbors,
             # use_scan=use_scan,
-            # Periodic greedy re-damage schedule for eval
-            greedy_eval_enabled=bool(knockout_config.get("greedy_eval_enabled", False)),
+            # Unified damage control system
+            damage_mode=knockout_config.get("damage_mode", "greedy"),
+            damage_injection_mode=knockout_config.get("damage_injection_mode", "multi"),
+            max_damage_per_circuit=int(knockout_config.get("max_damage_per_circuit", 10)),
             greedy_ordered_indices=knockout_config.get("greedy_ordered_indices", None),
             greedy_window_size=int(knockout_config.get("greedy_window_size", 1)),
             greedy_injection_recover_steps=int(knockout_config.get("greedy_injection_recover_steps", 10)),
-            greedy_num_injections=knockout_config.get("greedy_num_injections", None),
             # Vocabulary-based evaluation parameters
-            damage_mode=knockout_config.get("damage_mode", "greedy"),
             patterns_per_injection=int(knockout_config.get("patterns_per_injection", 1)),
             unseen_mode=bool(knockout_config.get("unseen_mode", False)),
             knockout_vocabulary=knockout_vocabulary,

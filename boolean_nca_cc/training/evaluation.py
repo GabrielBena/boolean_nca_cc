@@ -385,14 +385,15 @@ def evaluate_model_stepwise_batched(
     knockout_patterns: Optional[jp.ndarray] = None,
     return_per_pattern: bool = False,  # New parameter
     layer_neighbors: bool = False,
-    # Periodic greedy re-damage during eval trajectory
-    greedy_eval_enabled: bool = False,  # DEPRECATED: Use damage_mode to control periodic injections
+    # Unified damage control system
+    damage_mode: str = "greedy",  # Pattern type: "greedy", "greedy_vocabulary", "shotgun", "strip"
+    damage_injection_mode: str = "multi",  # "single" (one damage per circuit) or "multi" (multiple damages)
+    max_damage_per_circuit: int = 10,  # Maximum damage events per circuit
+    # Periodic injection timing (controlled by damage_mode)
     greedy_ordered_indices: Optional[List[int]] = None,
     greedy_window_size: int = 1,
     greedy_injection_recover_steps: int = 10,
-    greedy_num_injections: Optional[int] = None,
     # Vocabulary-based evaluation parameters
-    damage_mode: str = "greedy",  # Options: "greedy" (rolling window), "greedy_vocabulary" (vocabulary sampling)
     patterns_per_injection: int = 1,  # Number of patterns to sample per injection (for statistical robustness)
     unseen_mode: bool = False,  # If True, generate fresh patterns; if False, use vocabulary
     knockout_vocabulary: Optional[jp.ndarray] = None,  # Pre-generated vocabulary for seen evaluation
@@ -416,11 +417,21 @@ def evaluate_model_stepwise_batched(
         layer_sizes: List of (nodes, group_size) tuples for each layer
         knockout_patterns: Optional knockout patterns for each circuit
         return_per_pattern: Whether to return per-pattern metrics in addition to averages
+        damage_mode: Pattern type for damage generation
+        damage_injection_mode: "single" or "multi" damage per circuit
+        max_damage_per_circuit: Maximum damage events per circuit
 
     Returns:
         Dictionary with averaged metrics collected at each step.
         If return_per_pattern=True, also includes "per_pattern" key with individual metrics.
     """
+    # Validate new parameters
+    if damage_injection_mode not in ["single", "multi"]:
+        raise ValueError(f"damage_injection_mode must be 'single' or 'multi', got '{damage_injection_mode}'")
+    if max_damage_per_circuit < 1:
+        raise ValueError(f"max_damage_per_circuit must be >= 1, got {max_damage_per_circuit}")
+    if damage_injection_mode == "single" and max_damage_per_circuit != 1:
+        raise ValueError(f"damage_injection_mode='single' requires max_damage_per_circuit=1, got {max_damage_per_circuit}")
     batch_size = batch_wires[0].shape[0]
 
     # Build initial graphs for the batch
@@ -508,12 +519,12 @@ def evaluate_model_stepwise_batched(
         initial_hard_accuracies=initial_hard_accuracies,
         batch_logits=batch_logits,
         layer_neighbors=layer_neighbors,
-        greedy_eval_enabled=greedy_eval_enabled,
+        damage_mode=damage_mode,
+        damage_injection_mode=damage_injection_mode,
+        max_damage_per_circuit=max_damage_per_circuit,
         greedy_ordered_indices=greedy_ordered_indices,
         greedy_window_size=greedy_window_size,
         greedy_injection_recover_steps=greedy_injection_recover_steps,
-        greedy_num_injections=greedy_num_injections,
-        damage_mode=damage_mode,
         patterns_per_injection=patterns_per_injection,
         unseen_mode=unseen_mode,
         knockout_vocabulary=knockout_vocabulary,
@@ -618,14 +629,15 @@ def _evaluate_with_loop(
     initial_hard_accuracies: Optional[jp.ndarray] = None,
     batch_logits: Optional[List[jp.ndarray]] = None,
     layer_neighbors: bool = False,
-    # Greedy periodic injection controls
-    greedy_eval_enabled: bool = False,  # DEPRECATED: Use damage_mode to control periodic injections
+    # Unified damage control system
+    damage_mode: str = "greedy",  # Pattern type: "greedy", "greedy_vocabulary", "shotgun", "strip"
+    damage_injection_mode: str = "multi",  # "single" (one damage per circuit) or "multi" (multiple damages)
+    max_damage_per_circuit: int = 10,  # Maximum damage events per circuit
+    # Periodic injection timing (controlled by damage_mode)
     greedy_ordered_indices: Optional[List[int]] = None,
     greedy_window_size: int = 1,
     greedy_injection_recover_steps: int = 7,
-    greedy_num_injections: Optional[int] = None,
     # Vocabulary-based evaluation parameters
-    damage_mode: str = "greedy",  # Options: "greedy" (rolling window), "greedy_vocabulary" (vocabulary sampling)
     patterns_per_injection: int = 1,  # Number of patterns to sample per injection (for statistical robustness)
     unseen_mode: bool = False,  # If True, generate fresh patterns; if False, use vocabulary
     knockout_vocabulary: Optional[jp.ndarray] = None,  # Pre-generated vocabulary for seen evaluation
@@ -633,6 +645,13 @@ def _evaluate_with_loop(
     """
     Evaluate using loop mode (original behavior).
     """
+    # Validate new parameters
+    if damage_injection_mode not in ["single", "multi"]:
+        raise ValueError(f"damage_injection_mode must be 'single' or 'multi', got '{damage_injection_mode}'")
+    if max_damage_per_circuit < 1:
+        raise ValueError(f"max_damage_per_circuit must be >= 1, got {max_damage_per_circuit}")
+    if damage_injection_mode == "single" and max_damage_per_circuit != 1:
+        raise ValueError(f"damage_injection_mode='single' requires max_damage_per_circuit=1, got {max_damage_per_circuit}")
     # Run message passing steps
     current_graphs = batch_graphs
     
@@ -665,10 +684,7 @@ def _evaluate_with_loop(
     batch_size = batch_wires[0].shape[0]
     event_count = None
     # Enable periodic injections for greedy modes (damage_mode controls behavior)
-    periodic_injections_enabled = (
-        damage_mode in ["greedy", "greedy_vocabulary"] or 
-        greedy_eval_enabled  # Legacy fallback for old configs
-    )
+    periodic_injections_enabled = damage_mode in ["greedy", "greedy_vocabulary"]
     if periodic_injections_enabled and greedy_ordered_indices is not None and len(greedy_ordered_indices) > 0:
         event_count = jp.zeros((batch_size,), dtype=jp.int32)
         window = max(1, int(greedy_window_size))
@@ -685,11 +701,9 @@ def _evaluate_with_loop(
             inject_now = (step == 1) or ((step - 1) % (recover_steps + 1) == 0)
             inject_now_mask = jp.full((batch_size,), bool(inject_now), dtype=jp.bool_)
 
-            # Respect maximum number of injections per circuit if provided
-            if greedy_num_injections is not None:
-                max_inj = int(greedy_num_injections)
-                can_inject_mask = event_count < max_inj
-                inject_now_mask = inject_now_mask & can_inject_mask
+            # Respect maximum number of injections per circuit
+            can_inject_mask = event_count < max_damage_per_circuit
+            inject_now_mask = inject_now_mask & can_inject_mask
 
             # Generate patterns based on damage mode
             if damage_mode == "greedy":
@@ -730,7 +744,6 @@ def _evaluate_with_loop(
                     generated_patterns = vm_create_pattern(pattern_keys)
                 else:
                     # Sample from vocabulary (seen mode)
-                    print(f"EVAL DAMAGE DEBUG: Using VOCABULARY mode (vocab_size={knockout_vocabulary.shape[0]}, unseen_mode={unseen_mode})")
                     vocab_size = knockout_vocabulary.shape[0]
                     
                     # Sample vocabulary indices for each circuit in batch

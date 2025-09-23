@@ -80,7 +80,7 @@ pool:
   damage_knockout_diversity: 64
   # Pool update step filtering for damage selection (prevents damage to over-optimized circuits)
   damage_min_pool_updates: 0    # Minimum pool updates before circuit can be damaged
-  damage_max_pool_updates: 100   # Maximum pool updates before circuit becomes too fragile for damage
+  damage_max_pool_updates: 10000   # Maximum pool updates before circuit becomes too fragile for damage
   # Number of message passing steps for damage evaluation (baseline and recovery trajectories)
   # This should typically match or be close to the training n_message_steps for realistic recovery assessment
   damage_eval_steps: ${eval.periodic_eval_inner_steps}
@@ -103,17 +103,16 @@ eval:
   knockout_eval:
     enabled: true
     damage_prob: ${pool.damage_prob}
+    # Unified damage control system
+    damage_mode: ${pool.damage_mode}      # Pattern type: "greedy", "greedy_vocabulary", "shotgun", "strip"
+    damage_injection_mode: "multi"        # NEW: "single" (one damage per circuit) or "multi" (multiple damages)
+    max_damage_per_circuit: 10            # NEW: Maximum damage events per circuit (replaces greedy_num_injections)
     # Periodic injection timing (controlled by damage_mode)
     greedy_window_size: ${pool.greedy_window_size}  # Reuse pool's window size
     greedy_injection_recover_steps: 10     # N recovery steps between injections
-    greedy_num_injections: 10           # If set, number of injections then damage-free tail
     # Note: Greedy ordered indices are defined once under pool.greedy_ordered_indices
     
     # Vocabulary-based evaluation parameters
-    damage_mode: ${pool.damage_mode}      # Controls pattern type AND injection timing:
-                                          # "greedy" = periodic rolling window injections
-                                          # "greedy_vocabulary" = periodic vocabulary sampling injections  
-                                          # "shotgun"/"strip" = static patterns only (no periodic injections)
     patterns_per_injection: 1            # Number of patterns to sample per injection (statistical robustness)
     unseen_mode: false                    # If true, generate fresh patterns (unseen); if false, use training vocabulary (seen)
     # Note: knockout_vocabulary is passed automatically from training when unseen_mode=false

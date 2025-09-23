@@ -214,6 +214,97 @@ The system now supports sophisticated damage/recovery analysis with controlled v
 
 ---
 
+## Unified Damage Control System
+
+### **Current Implementation Analysis**
+
+**✅ What Works**:
+- **Training**: `perturb_counter` tracks damage events per circuit, automatically incremented
+- **Evaluation IN (`eval_ko_in`)**: Multi-damage supported via `event_count` with `greedy_num_injections` capping
+- **Pattern Generation**: Both rolling window and vocabulary modes functional
+- **Reversible Damage**: One-shot bias implementation working correctly
+
+**❌ Critical Gaps**:
+- **Training-Evaluation Mismatch**: `perturb_counter` (training) vs `event_count` (eval) are separate systems
+- **No Single-Damage Mode**: No mechanism to limit circuits to exactly one damage event
+- **Evaluation OUT (`eval_ko_out`)**: Uses static patterns only, no multi-damage support
+- **Unused Features**: `patterns_per_injection` parameter exists but not properly utilized
+
+### **Unified Damage Control Design**
+
+#### **Mode A: Single Damage Per Circuit**
+```yaml
+damage_mode: "greedy_vocabulary"  # or "greedy"
+damage_injection_mode: "single"   # NEW: single vs multi
+max_damage_per_circuit: 1         # NEW: unified control
+```
+
+**Training**: Only damage circuits where `perturb_counter == 0`
+**Evaluation**: Only damage circuits where `perturb_counter == 0`
+
+#### **Mode B: Multi-Damage Per Circuit**
+```yaml
+damage_mode: "greedy_vocabulary"  # or "greedy"  
+damage_injection_mode: "multi"    # NEW: single vs multi
+max_damage_per_circuit: 10        # NEW: unified control (replaces greedy_num_injections)
+```
+
+**Training**: Damage circuits where `perturb_counter < max_damage_per_circuit`
+**Evaluation**: Damage circuits where `perturb_counter < max_damage_per_circuit`
+
+### **Implementation Strategy**
+
+#### **Phase 1: Add Unified Configuration** ✅ **DONE**
+- Add `damage_injection_mode: "single" | "multi"` parameter
+- Add `max_damage_per_circuit: int` parameter (replaces `greedy_num_injections`)
+- Update config schema and parameter flow
+
+#### **Phase 2: Unify Counter Systems**
+- **Replace `event_count` with `perturb_counter`** in evaluation
+- **Pass `perturb_counter` from training pool to evaluation**
+- **Maintain same increment logic** but use unified variable name
+- Add debug logging for unified counter system
+
+#### **Phase 3: Implement Single-Damage Mode**
+- **Training**: Filter damaged circuits by `perturb_counter == 0`
+- **Evaluation**: Filter damaged circuits by `perturb_counter == 0`
+- Add debug logging for single-damage enforcement
+
+#### **Phase 4: Unify Multi-Damage Control**
+- **Training**: Use `perturb_counter < max_damage_per_circuit` filtering
+- **Evaluation**: Use `perturb_counter < max_damage_per_circuit` filtering
+- Ensure both modes respect the same damage limits
+
+#### **Phase 5: Fix Evaluation OUT Multi-Damage**
+- **Current**: `eval_ko_out` uses static patterns only
+- **Target**: Add multi-damage support to `eval_ko_out` using same `perturb_counter` logic
+- Enable `patterns_per_injection` for statistical robustness
+
+#### **Phase 6: Fix Vocabulary Mode Consistency**
+- **Training**: Keep random sampling but respect damage limits
+- **Evaluation**: Use vocabulary sampling but respect damage limits
+- Ensure `patterns_per_injection` works correctly
+
+### **Configuration Matrix**
+
+| Mode | Training Control | Eval IN Control | Eval OUT Control | Pattern Type |
+|------|------------------|-----------------|------------------|--------------|
+| **Single Rolling** | `perturb_counter == 0` | `perturb_counter == 0` | `perturb_counter == 0` | Deterministic sequence |
+| **Multi Rolling** | `perturb_counter < max` | `perturb_counter < max` | `perturb_counter < max` | Deterministic sequence |
+| **Single Vocab** | `perturb_counter == 0` | `perturb_counter == 0` | `perturb_counter == 0` | Random from vocabulary |
+| **Multi Vocab** | `perturb_counter < max` | `perturb_counter < max` | `perturb_counter < max` | Random from vocabulary |
+
+### **Key Benefits**
+
+1. **Unified Control**: Same damage limits across training and evaluation
+2. **Single Variable**: `perturb_counter` used consistently everywhere (no `event_count` confusion)
+3. **Single-Damage Mode**: Clean one-shot damage testing
+4. **Multi-Damage Support**: Both `eval_ko_in` and `eval_ko_out` support multi-damage
+5. **Statistical Robustness**: Proper `patterns_per_injection` utilization
+6. **Consistent Behavior**: Training and evaluation use same damage counting logic
+
+---
+
 ## Future Improvements
 
 ### 📋 **TODO: Strategic Config Refactoring (Option 3)**
