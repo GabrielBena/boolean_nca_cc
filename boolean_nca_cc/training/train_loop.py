@@ -567,6 +567,11 @@ def run_knockout_periodic_evaluation(
             greedy_window_size=int(knockout_config.get("greedy_window_size", 1)),
             greedy_injection_recover_steps=int(knockout_config.get("greedy_injection_recover_steps", 10)),
             greedy_num_injections=knockout_config.get("greedy_num_injections", None),
+            # Vocabulary-based evaluation parameters
+            damage_mode=knockout_config.get("damage_mode", "greedy"),
+            patterns_per_injection=int(knockout_config.get("patterns_per_injection", 1)),
+            unseen_mode=bool(knockout_config.get("unseen_mode", False)),
+            knockout_vocabulary=knockout_vocabulary,
         )
 
         final_metrics_in = {
@@ -1308,7 +1313,7 @@ def train_model(
     damage_pool_fraction: float = 0.0,
     damage_strategy: str = "uniform",
     damage_combined_weights: Tuple[float, float] = (0.5, 0.5),
-    damage_mode: str = "shotgun",  # Options: "shotgun" or "strip"
+    damage_mode: str = "shotgun",  # Options: "shotgun", "strip", "greedy", or "greedy_vocabulary"
     # Perturbation configurations
     persistent_knockout_config: Optional[Dict] = None,
     knockout_diversity: Optional[int] = None,  # Size of knockout pattern vocabulary for shared training/evaluation patterns
@@ -1393,7 +1398,8 @@ def train_model(
         damage_pool_fraction: Fraction of pool to damage when damage is applied.
         damage_strategy: Strategy for selecting circuits to damage.
         damage_combined_weights: Weights for combined damage selection strategy.
-        damage_mode: Type of damage pattern ("shotgun" for random, "strip" for localized).
+        damage_mode: Type of damage pattern ("shotgun" for random, "strip" for localized, 
+            "greedy" for rolling window, "greedy_vocabulary" for vocabulary sampling).
         persistent_knockout_config: Configuration for persistent knockout perturbations.
         knockout_diversity: Size of knockout pattern vocabulary for shared training/evaluation patterns
         damage_pool_damage_prob: Damage probability per node when generating fresh patterns.
@@ -1693,10 +1699,9 @@ def train_model(
 
     # Initialize knockout vocabulary if knockout_diversity is configured
     knockout_vocabulary = None
-    log.info(f"DEBUG: train_loop received knockout_diversity = {knockout_diversity}")
-    log.info(f"DEBUG: train_loop received damage_pool_damage_prob = {damage_pool_damage_prob}")
+    log.info(f"VOCAB CREATION DEBUG: knockout_diversity={knockout_diversity}, damage_pool_damage_prob={damage_pool_damage_prob}, damage_mode={damage_mode}")
     if knockout_diversity is not None and knockout_diversity > 0:
-        log.info(f"Creating knockout pattern vocabulary with {knockout_diversity} patterns")
+        log.info(f"VOCAB CREATION DEBUG: Creating knockout pattern vocabulary with {knockout_diversity} patterns")
         
         # Use dedicated damage seed for knockout pattern generation
         vocab_rng = jax.random.PRNGKey(damage_seed)
@@ -1715,7 +1720,9 @@ def train_model(
             ordered_indices=greedy_ordered_indices,
         )
         
-        log.info(f"Generated knockout vocabulary with shape: {knockout_vocabulary.shape}")
+        log.info(f"VOCAB CREATION DEBUG: SUCCESS - Generated vocabulary with shape: {knockout_vocabulary.shape}")
+    else:
+        log.warning(f"VOCAB CREATION DEBUG: VOCABULARY NOT CREATED - knockout_diversity={knockout_diversity}")
 
     # Save initial stable state if needed
     last_stable_state = {
@@ -1825,6 +1832,7 @@ def train_model(
                 and (damage_pool_damage_prob > 0.0 or knockout_vocabulary is not None)
                 and (epoch % damage_pool_interval == 0)
             ):
+                log.info(f"DAMAGE TRIGGER DEBUG: Damage applied at epoch {epoch} (vocabulary_exists={knockout_vocabulary is not None})")
                 rng, damage_key = jax.random.split(rng)
 
                 # Select which circuits to damage using existing selection logic
@@ -1838,10 +1846,12 @@ def train_model(
                     min_pool_updates_for_damage=damage_min_pool_updates,
                 )
 
-                # Build greedy rolling-window patterns if configured; else fallback to vocabulary or random
+                # Build damage patterns based on mode: greedy rolling-window, vocabulary sampling, or random
                 new_patterns = None
-                if greedy_ordered_indices is not None and len(greedy_ordered_indices) > 0:
-                    # Compute start = (perturb_counter * window) % N, size = window (default 1 => single index)
+                if (greedy_ordered_indices is not None and len(greedy_ordered_indices) > 0 
+                    and damage_mode == "greedy"):
+                    # Legacy rolling window mode: deterministic pattern progression
+                    log.info(f"TRAINING DAMAGE DEBUG: Using ROLLING WINDOW mode (damage_mode={damage_mode})")
                     n = len(greedy_ordered_indices)
                     window = max(1, int(greedy_window_size))
 
@@ -1855,6 +1865,7 @@ def train_model(
                     new_patterns = jax.vmap(build_pattern, in_axes=(0,))(damaged_idxs)
                 elif knockout_vocabulary is not None:
                     # Sample vocabulary patterns for damaged indices
+                    log.info(f"TRAINING DAMAGE DEBUG: Using VOCABULARY mode (vocab_size={knockout_vocabulary.shape[0]}, damage_mode={damage_mode})")
                     vocab_size = knockout_vocabulary.shape[0]
                     vocab_indices = jax.random.choice(
                         damage_key, vocab_size, shape=(damaged_idxs.shape[0],), replace=True
@@ -1862,6 +1873,7 @@ def train_model(
                     new_patterns = knockout_vocabulary[vocab_indices]
                 else:
                     # Fresh random patterns as last resort
+                    log.warning(f"TRAINING DAMAGE DEBUG: FALLBACK to RANDOM SHOTGUN patterns! (knockout_vocabulary=None, damage_mode={damage_mode})")
                     vmapped_pattern_creator = jax.vmap(
                         lambda k: create_reproducible_knockout_pattern(
                             key=k,

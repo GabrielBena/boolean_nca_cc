@@ -56,7 +56,7 @@ training:
     exponent: 1
     alpha: 1e-1 # final lr = 1% of initial lr
   # NUMBER OF EPOCHS
-  epochs: 5000 # 32 #6144
+  epochs: 8192 # 32 #6144
   # USE SCAN
   use_scan: false
 
@@ -73,11 +73,11 @@ pool:
   damage_pool_fraction: 0.15
   damage_strategy: "loss_biased"
   damage_combined_weights: [0.5, 0.5]
-  damage_mode: "greedy"  # Options: "shotgun" (random), "strip" (localized), or "greedy" (ordered selection)
+  damage_mode: "greedy_vocabulary"  # Options: "shotgun" (random), "strip" (localized), "greedy" (rolling window), or "greedy_vocabulary" (vocabulary sampling)
   # Number of gates to knock out when generating fresh patterns (ignored if vocabulary is used)
   damage_prob: 5
   # Damage-specific vocabulary size (decoupled from legacy persistent_knockout)
-  damage_knockout_diversity: 1
+  damage_knockout_diversity: 64
   # Pool update step filtering for damage selection (prevents damage to over-optimized circuits)
   damage_min_pool_updates: 0    # Minimum pool updates before circuit can be damaged
   damage_max_pool_updates: 100   # Maximum pool updates before circuit becomes too fragile for damage
@@ -103,12 +103,20 @@ eval:
   knockout_eval:
     enabled: true
     damage_prob: ${pool.damage_prob}
-    # Periodic greedy re-damage during stepwise eval (reversible-friendly)
-    greedy_eval_enabled: true            # Enable periodic greedy injections in eval trajectory
+    # Periodic injection timing (controlled by damage_mode)
     greedy_window_size: ${pool.greedy_window_size}  # Reuse pool's window size
     greedy_injection_recover_steps: 10     # N recovery steps between injections
     greedy_num_injections: 10           # If set, number of injections then damage-free tail
     # Note: Greedy ordered indices are defined once under pool.greedy_ordered_indices
+    
+    # Vocabulary-based evaluation parameters
+    damage_mode: ${pool.damage_mode}      # Controls pattern type AND injection timing:
+                                          # "greedy" = periodic rolling window injections
+                                          # "greedy_vocabulary" = periodic vocabulary sampling injections  
+                                          # "shotgun"/"strip" = static patterns only (no periodic injections)
+    patterns_per_injection: 1            # Number of patterns to sample per injection (statistical robustness)
+    unseen_mode: false                    # If true, generate fresh patterns (unseen); if false, use training vocabulary (seen)
+    # Note: knockout_vocabulary is passed automatically from training when unseen_mode=false
   
   # Hamming distance analysis
   hamming_analysis_dir: "results/hamming_analysis_mbs${training.meta_batch_size}_div${pool.damage_knockout_diversity}_dam${pool.damage_prob}"  # Directory for hamming analysis plots and CSVs
@@ -134,7 +142,7 @@ checkpoint:
 
 # Early stopping configuration
 early_stop:
-  enabled: true  # Enable early stopping based on accuracy threshold
+  enabled: false  # Enable early stopping based on accuracy threshold
   threshold: 1  # Accuracy threshold to trigger early stopping
   metric: "hard_accuracy"  # Metric to monitor: "loss", "hard_loss", "accuracy", "hard_accuracy"
   source: "eval_ko_in"

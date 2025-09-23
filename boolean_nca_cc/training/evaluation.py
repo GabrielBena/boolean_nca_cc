@@ -25,6 +25,7 @@ from boolean_nca_cc.circuits.train import (
 )
 from boolean_nca_cc.training.pool.structural_perturbation import (
     create_group_greedy_pattern,
+    create_greedy_subset_random_pattern,
 )
 
 
@@ -385,11 +386,16 @@ def evaluate_model_stepwise_batched(
     return_per_pattern: bool = False,  # New parameter
     layer_neighbors: bool = False,
     # Periodic greedy re-damage during eval trajectory
-    greedy_eval_enabled: bool = False,
+    greedy_eval_enabled: bool = False,  # DEPRECATED: Use damage_mode to control periodic injections
     greedy_ordered_indices: Optional[List[int]] = None,
     greedy_window_size: int = 1,
     greedy_injection_recover_steps: int = 10,
     greedy_num_injections: Optional[int] = None,
+    # Vocabulary-based evaluation parameters
+    damage_mode: str = "greedy",  # Options: "greedy" (rolling window), "greedy_vocabulary" (vocabulary sampling)
+    patterns_per_injection: int = 1,  # Number of patterns to sample per injection (for statistical robustness)
+    unseen_mode: bool = False,  # If True, generate fresh patterns; if False, use vocabulary
+    knockout_vocabulary: Optional[jp.ndarray] = None,  # Pre-generated vocabulary for seen evaluation
 ) -> Dict:
     """
     Evaluate GNN performance on a batch of circuits by running message passing steps
@@ -507,6 +513,10 @@ def evaluate_model_stepwise_batched(
         greedy_window_size=greedy_window_size,
         greedy_injection_recover_steps=greedy_injection_recover_steps,
         greedy_num_injections=greedy_num_injections,
+        damage_mode=damage_mode,
+        patterns_per_injection=patterns_per_injection,
+        unseen_mode=unseen_mode,
+        knockout_vocabulary=knockout_vocabulary,
     )
 
 def evaluate_circuits_in_chunks(
@@ -609,11 +619,16 @@ def _evaluate_with_loop(
     batch_logits: Optional[List[jp.ndarray]] = None,
     layer_neighbors: bool = False,
     # Greedy periodic injection controls
-    greedy_eval_enabled: bool = False,
+    greedy_eval_enabled: bool = False,  # DEPRECATED: Use damage_mode to control periodic injections
     greedy_ordered_indices: Optional[List[int]] = None,
     greedy_window_size: int = 1,
     greedy_injection_recover_steps: int = 7,
     greedy_num_injections: Optional[int] = None,
+    # Vocabulary-based evaluation parameters
+    damage_mode: str = "greedy",  # Options: "greedy" (rolling window), "greedy_vocabulary" (vocabulary sampling)
+    patterns_per_injection: int = 1,  # Number of patterns to sample per injection (for statistical robustness)
+    unseen_mode: bool = False,  # If True, generate fresh patterns; if False, use vocabulary
+    knockout_vocabulary: Optional[jp.ndarray] = None,  # Pre-generated vocabulary for seen evaluation
 ) -> Dict:
     """
     Evaluate using loop mode (original behavior).
@@ -646,10 +661,15 @@ def _evaluate_with_loop(
         lambda graph: extract_logits_from_graph(graph, logits_original_shapes)
     )
 
-    # Prepare greedy schedule state if enabled
+    # Prepare periodic injection schedule for applicable damage modes
     batch_size = batch_wires[0].shape[0]
     event_count = None
-    if greedy_eval_enabled and greedy_ordered_indices is not None and len(greedy_ordered_indices) > 0:
+    # Enable periodic injections for greedy modes (damage_mode controls behavior)
+    periodic_injections_enabled = (
+        damage_mode in ["greedy", "greedy_vocabulary"] or 
+        greedy_eval_enabled  # Legacy fallback for old configs
+    )
+    if periodic_injections_enabled and greedy_ordered_indices is not None and len(greedy_ordered_indices) > 0:
         event_count = jp.zeros((batch_size,), dtype=jp.int32)
         window = max(1, int(greedy_window_size))
         greedy_len = int(len(greedy_ordered_indices))
@@ -671,20 +691,70 @@ def _evaluate_with_loop(
                 can_inject_mask = event_count < max_inj
                 inject_now_mask = inject_now_mask & can_inject_mask
 
-            # Compute window starts from current event_count (pre-increment)
-            starts = ((event_count * window) % greedy_len).astype(jp.int32)
-
-            # Build patterns for this step
-            vm_build = jax.vmap(
-                lambda s: create_group_greedy_pattern(
-                    greedy_ordered_indices, layer_sizes, s, window
+            # Generate patterns based on damage mode
+            if damage_mode == "greedy":
+                # Legacy rolling window mode
+                starts = ((event_count * window) % greedy_len).astype(jp.int32)
+                vm_build = jax.vmap(
+                    lambda s: create_group_greedy_pattern(
+                        greedy_ordered_indices, layer_sizes, s, window
+                    )
                 )
-            )
-            dynamic_patterns = vm_build(starts)
-            # Apply patterns only for circuits injecting this step; others get no damage
-            step_knockout_patterns = jp.where(
-                inject_now_mask[:, None], dynamic_patterns, jp.zeros_like(dynamic_patterns)
-            )
+                dynamic_patterns = vm_build(starts)
+                # Apply patterns only for circuits injecting this step; others get no damage
+                step_knockout_patterns = jp.where(
+                    inject_now_mask[:, None], dynamic_patterns, jp.zeros_like(dynamic_patterns)
+                )
+            elif damage_mode == "greedy_vocabulary":
+                # Vocabulary-based mode with statistical robustness
+                total_nodes = sum(total_gates for total_gates, _ in layer_sizes)
+                
+                # Generate patterns for all circuits in batch, but only apply to injecting ones
+                damage_prob = greedy_window_size  # Use window size as damage amount
+                
+                if unseen_mode or knockout_vocabulary is None:
+                    # Generate fresh patterns from greedy indices (unseen mode)
+                    # Generate one pattern per circuit (even non-injecting ones for simpler JAX operations)
+                    print(f"EVAL DAMAGE DEBUG: FALLBACK to FRESH GREEDY patterns! (unseen_mode={unseen_mode}, knockout_vocabulary={'None' if knockout_vocabulary is None else f'shape={knockout_vocabulary.shape}'})")
+                    pattern_keys = jax.random.split(
+                        jax.random.PRNGKey(step + jp.sum(event_count)), 
+                        batch_size
+                    )
+                    
+                    # Generate patterns using vectorized function
+                    vm_create_pattern = jax.vmap(
+                        lambda k: create_greedy_subset_random_pattern(
+                            k, layer_sizes, damage_prob, greedy_ordered_indices
+                        )
+                    )
+                    generated_patterns = vm_create_pattern(pattern_keys)
+                else:
+                    # Sample from vocabulary (seen mode)
+                    print(f"EVAL DAMAGE DEBUG: Using VOCABULARY mode (vocab_size={knockout_vocabulary.shape[0]}, unseen_mode={unseen_mode})")
+                    vocab_size = knockout_vocabulary.shape[0]
+                    
+                    # Sample vocabulary indices for each circuit in batch
+                    vocab_keys = jax.random.split(
+                        jax.random.PRNGKey(step + jp.sum(event_count)), 
+                        batch_size
+                    )
+                    
+                    vm_sample_vocab = jax.vmap(
+                        lambda k: jax.random.choice(k, vocab_size, shape=(), replace=True)
+                    )
+                    vocab_indices = vm_sample_vocab(vocab_keys)
+                    
+                    # Get patterns from vocabulary
+                    generated_patterns = knockout_vocabulary[vocab_indices]
+                
+                # Apply patterns only to circuits that should inject this step
+                step_knockout_patterns = jp.where(
+                    inject_now_mask[:, None], generated_patterns, jp.zeros_like(generated_patterns)
+                )
+            else:
+                # Default: no patterns for unknown modes
+                total_nodes = sum(total_gates for total_gates, _ in layer_sizes)
+                step_knockout_patterns = jp.zeros((batch_size, total_nodes), dtype=jp.bool_)
 
             # For reversible mode, force one-shot bias by zeroing step counters on injection steps
             damage_behavior = getattr(model, "damage_behavior", "permanent")

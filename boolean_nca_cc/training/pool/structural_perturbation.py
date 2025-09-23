@@ -183,13 +183,52 @@ def create_greedy_knockout_pattern(
     return knockout_pattern
 
 
+def create_greedy_subset_random_pattern(
+    key: jax.random.PRNGKey,
+    layer_sizes: List[Tuple[int, int]],
+    damage_prob: float,
+    greedy_indices: List[int],
+) -> jp.ndarray:
+    """
+    Create a knockout pattern by randomly sampling from greedy indices.
+    
+    Args:
+        key: Random key for reproducible generation
+        layer_sizes: List of (total_gates, group_size) for each layer
+        damage_prob: Number of gates to knock out
+        greedy_indices: List of greedy gate indices to sample from
+        
+    Returns:
+        Boolean knockout pattern where True indicates knocked out gates
+    """
+    total_nodes = sum(total_gates for total_gates, _ in layer_sizes)
+    knockout_pattern = jp.zeros(total_nodes, dtype=jp.bool_)
+    
+    if damage_prob == 0 or not greedy_indices:
+        return knockout_pattern
+    
+    # Convert to JAX array and ensure we don't exceed available indices
+    greedy_indices_array = jp.array(greedy_indices, dtype=jp.int32)
+    num_knockouts = min(int(damage_prob), len(greedy_indices))
+    
+    # Randomly sample from greedy indices without replacement
+    knockout_indices = jax.random.choice(
+        key, greedy_indices_array, shape=(num_knockouts,), replace=False
+    )
+    
+    # Set the selected indices to True (knocked out)
+    knockout_pattern = knockout_pattern.at[knockout_indices].set(True)
+    
+    return knockout_pattern
+
+
 def create_knockout_vocabulary(
     rng: jax.random.PRNGKey,
     vocabulary_size: int,
     layer_sizes: List[Tuple[int, int]],
     damage_prob: float,
-    damage_mode: str = "shotgun",  # Options: "shotgun", "strip", or "greedy"
-    ordered_indices: Optional[List[int]] = None,  # Used when damage_mode == "greedy"
+    damage_mode: str = "shotgun",  # Options: "shotgun", "strip", "greedy", or "greedy_vocabulary"
+    ordered_indices: Optional[List[int]] = None,  # Used when damage_mode == "greedy" or "greedy_vocabulary"
 ) -> jp.ndarray:
     """
     Generates a fixed vocabulary of knockout patterns.
@@ -199,8 +238,12 @@ def create_knockout_vocabulary(
         vocabulary_size: The number of unique patterns to generate.
         layer_sizes: List of (total_gates, group_size) for each layer.
         damage_prob: The probability of knocking out a connection.
-        damage_mode: Type of damage pattern ("shotgun" for random, "strip" for localized, "greedy" for ordered selection).
-        ordered_indices: List of gate indices in order of selection for greedy mode.
+        damage_mode: Type of damage pattern:
+            - "shotgun": Random sampling from all eligible gates
+            - "strip": Localized damage patterns  
+            - "greedy": Single deterministic pattern from ordered indices (legacy)
+            - "greedy_vocabulary": Diverse patterns sampled from ordered indices
+        ordered_indices: List of gate indices for greedy modes.
 
     Returns:
         An array of knockout patterns of shape (vocabulary_size, ...).
@@ -214,6 +257,24 @@ def create_knockout_vocabulary(
             max_gates=int(damage_prob),
         )
         return jp.repeat(pattern[None, ...], vocabulary_size, axis=0)
+
+    # Greedy vocabulary mode: diverse patterns sampled from ordered indices
+    if damage_mode == "greedy_vocabulary":
+        if ordered_indices is None:
+            raise ValueError("ordered_indices must be provided for greedy_vocabulary mode")
+        
+        # Generate diverse patterns from greedy indices using random sampling
+        pattern_creator_fn = partial(
+            create_greedy_subset_random_pattern,
+            layer_sizes=layer_sizes,
+            damage_prob=damage_prob,
+            greedy_indices=ordered_indices,
+        )
+        
+        # Generate diverse patterns from greedy indices
+        pattern_keys = jax.random.split(rng, vocabulary_size)
+        knockout_vocabulary = jax.vmap(pattern_creator_fn)(pattern_keys)
+        return knockout_vocabulary
 
     # Select pattern creator based on damage mode
     if damage_mode == "strip":

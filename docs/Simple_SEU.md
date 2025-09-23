@@ -3,89 +3,262 @@
 This document summarizes the minimal reversible damage implementation (SEU-like), how it integrates with the existing training/eval pipeline, and how to extend greedy knockout patterns to cycle with a per-circuit perturbation counter.
 
 ### What “reversible” means here
+
 - Nodes are NOT removed from the attention graph and are NOT zeroed out of residual updates.
 - A one-shot logit bias is applied to damaged nodes at the first model step of the episode. Subsequent steps apply normal residual updates so the gate can be “healed.”
 - Evaluation remains unchanged and still reports: step 0 baseline (pre-damage), step 1 damage application, then recovery over following steps.
 
 ### Where it’s implemented
+
 - Model toggle and behavior:
+
   - `boolean_nca_cc/models/self_attention.py` (class `CircuitSelfAttention`)
     - Constructor now accepts `damage_behavior: "permanent" | "reversible"` and `reversible_bias: float`.
     - In `__call__`:
       - Permanent mode: unchanged (prune attention, clamp logits to large negative, zero residual updates for damaged nodes).
       - Reversible mode: attention mask ignores knockout (keep connectivity), no zeroing; at first step (`globals[..., 1] == 0`), add a logit bias to damaged nodes. All steps after that are clean updates (recovery path).
-
 - Config knobs:
+
   - `configs/model/self_attention.yaml`
     - `damage_behavior: "reversible"`
     - `reversible_bias: -10.0` (tunable)
-
 - Pool damage tracking:
+
   - `boolean_nca_cc/training/pool/pool.py`
     - The pool stores `knockout_patterns` per circuit slot.
     - New `perturb_counter: jnp.int32[pool_size]` tracks how many times each circuit has been damaged.
     - Incremented automatically in `GraphPool.apply_knockouts(idxs, new_patterns)`.
 
 ### How training and evaluation align
+
 - Training (loop path): sampled circuits receive their stored `knockout_pattern`; the model applies the one-shot bias on the first model call of the episode and then recovers.
 - Evaluation (`evaluation.py` batched stepwise): unchanged. Step 0 metrics are computed before the first model call; from step 1 onward, the model sees the `knockout_pattern`, applies the one-shot bias (reversible), and the plotted trajectory shows recovery.
 
 ### Pattern lifecycle
+
 - A circuit’s pattern is just an array stored in the pool for that slot. New damage events can overwrite the old pattern at any time (via `apply_knockouts` or `damage_fraction`). Each overwrite increments `perturb_counter` for that slot.
 
 ---
 
-## Greedy knockout patterns that cycle with perturb_counter
+## Greedy knockout patterns: Vocabulary-based and deterministic modes
 
-Goal: For greedy damage, cycle through a fixed, ordered list of gate indices such that:
-- First perturbation of a circuit uses `greedy_indices[0]` (knock out that gate only).
-- Second perturbation uses `greedy_indices[1]`, and so on; wrap around with modulo when reaching the end.
+### Primary Approach: Greedy Vocabulary with Statistical Sampling
 
-### Current utilities
+**Goal**: Create diverse damage patterns from greedy indices while maintaining seen/unseen distinction and statistical robustness.
+
+**Design**:
+
+- Generate a vocabulary of subset patterns from `greedy_ordered_indices`
+- Training: Random sampling from vocabulary for pool injections
+- Evaluation: Multiple patterns per injection for statistical confidence
+- Clear seen/unseen distinction through vocabulary reuse vs fresh generation
+
+### Legacy Approach: Deterministic Rolling Window
+
+**Goal**: Cycle through a fixed, ordered list of gate indices deterministically:
+
+- First perturbation of a circuit uses `greedy_indices[0:window_size]`
+- Second perturbation uses `greedy_indices[window_size:2*window_size]`, etc.
+- Wrap around with modulo when reaching the end
+
+### Implementation Files
+
 - `boolean_nca_cc/training/pool/structural_perturbation.py`
-  - `DEFAULT_GREEDY_ORDERED_INDICES`: default ordering.
-  - `create_greedy_knockout_pattern(ordered_indices, layer_sizes, max_gates)`
-  - `create_knockout_vocabulary(rng, vocabulary_size, layer_sizes, damage_prob, damage_mode, ordered_indices)`
-    - Today, in `damage_mode == "greedy"`, it creates a single deterministic pattern with the first `int(damage_prob)` indices and repeats it across the vocabulary.
+  - `DEFAULT_GREEDY_ORDERED_INDICES`: Default ordering of critical gate indices
+  - `create_greedy_knockout_pattern()`: Creates deterministic patterns from ordered indices
+  - `create_knockout_vocabulary()`: Extended to support vocabulary generation from greedy subsets
+  - `create_group_greedy_pattern()`: Rolling window pattern creation (legacy mode)
 
-### Implemented: Greedy rolling-window cycling (ties to perturb_counter)
+### Implementation: Vocabulary-based Greedy Patterns
 
-We implemented a rolling-window greedy perturbation that advances with each circuit’s `perturb_counter` without modifying the existing `damage_fraction(...)` function.
+**Greedy Vocabulary Mode** (`damage_mode: "greedy_vocabulary"`):
 
-- structural_perturbation.py
-  - Added `create_group_greedy_pattern(ordered_indices, layer_sizes, start, size)`
-    - Builds a boolean mask for a wrap-around window over `ordered_indices`.
-    - JAX-friendly (no Python int coercions on tracers); uses mod/arange/gather.
+- **Vocabulary Generation**: ✅ **IMPLEMENTED & TESTED**
 
-- pool/pool.py
-  - `GraphPool.apply_knockouts(idxs, new_knockout_patterns)` increments `perturb_counter` for affected indices.
-  - `damage_fraction(...)` left unchanged; we compose greedy masks in the train loop instead.
+  - Create `damage_knockout_diversity` subset patterns from `greedy_ordered_indices`
+  - Each subset has `damage_prob` gates (e.g., 5 gates per pattern)
+  - Uses random sampling from greedy indices only (no strip mode needed)
+  - Added `create_greedy_subset_random_pattern()` helper function
+  - Extended `create_knockout_vocabulary()` with new mode
+- **Training Injections**:
 
-- training/train_loop.py
-  - At configured damage epochs, we select `damaged_idxs` via `get_reset_indices(...)` (same selection logic as before).
-  - For each damaged circuit, we compute:
-    - `count = perturb_counter[idx]`
-    - `start = (count * greedy_window_size) % len(greedy_ordered_indices)`
-    - `size = greedy_window_size` (configured as 5 via damage_prob linkage)
-  - Build masks via `create_group_greedy_pattern(...)` (vmapped) and apply with `apply_knockouts(...)`.
-  - This rotates the window per circuit over time and increments `perturb_counter` automatically.
+  - `damage_pool_fraction` (15%) of circuits get damaged per injection epoch
+  - Each selected circuit receives one randomly sampled pattern from vocabulary
+  - Pool tracking via `perturb_counter` remains unchanged
+- **Evaluation Injections**:
+
+  - **Seen**: Sample `patterns_per_injection` patterns from training vocabulary
+  - **Unseen**: Generate `patterns_per_injection` fresh random subsets from greedy indices (no vocabulary reuse)
+  - Multiple patterns per injection enable statistical analysis
+
+### Legacy Implementation: Rolling Window Mode
+
+**Deterministic Rolling Window** (`damage_mode: "greedy"`):
+
+- At damage epochs, select `damaged_idxs` via `get_reset_indices(...)`
+- For each damaged circuit:
+  - `count = perturb_counter[idx]`
+  - `start = (count * greedy_window_size) % len(greedy_ordered_indices)`
+  - Build pattern via `create_group_greedy_pattern(ordered_indices, layer_sizes, start, window_size)`
+- Apply patterns and increment `perturb_counter` automatically
 
 ### Config cheat sheet
-- Training
-  - `pool.greedy_ordered_indices: [...]`  # absolute node indices (non-input/output)
-  - `pool.greedy_window_size: ${pool.damage_prob}`  # Links to damage_prob, actual value is 5
-  - `pool.damage_pool_enabled: true`
-  - `pool.damage_pool_interval, pool.damage_pool_fraction, pool.damage_strategy`: as before
-  - `pool.damage_prob: 5`  # Controls both window size and fallback pattern generation
 
-- Evaluation  
-  - `eval.knockout_eval.damage_prob: ${pool.damage_prob}` # Inherits from pool config (5)
-  - `eval.knockout_eval.greedy_eval_enabled: true` # Enables periodic greedy re-damage during eval
-  - `eval.knockout_eval.greedy_window_size: ${pool.greedy_window_size}` # Reuses pool's window size
-  - `eval.knockout_eval.greedy_injection_recover_steps: 10` # Recovery steps between injections
-  - `eval.knockout_eval.greedy_num_injections: 10` # Number of injections then damage-free tail
+#### Greedy Vocabulary Mode (Recommended)
 
-### Interaction: damage_prob vs greedy_window_size
-- **Unified Parameter**: `damage_prob` controls the window size for greedy mode in both training and evaluation (value: 5)
-- **Training**: `greedy_window_size: ${pool.damage_prob}` creates a 5-gate rolling window
-- **Evaluation**: Can use the same patterns via vocabulary OR enable `greedy_eval_enabled` for periodic greedy re-damage during stepwise evaluation
+```yaml
+pool:
+  damage_mode: "greedy_vocabulary"           # Enable vocabulary-based sampling
+  damage_knockout_diversity: 100            # Vocabulary size (number of subset patterns)
+  damage_prob: 5                           # Gates per subset pattern  
+  greedy_ordered_indices: [48,17,52,...]   # Greedy indices to sample from
+  damage_pool_enabled: true
+  damage_pool_fraction: 0.15               # 15% of circuits damaged per training injection
+  damage_pool_interval: 128                # Damage every 128 epochs
+
+eval:
+  knockout_eval:
+    patterns_per_injection: 8              # Multiple patterns per eval injection (statistical robustness)
+    unseen_mode: true                      # Generate fresh patterns vs reuse training vocabulary
+    greedy_injection_recover_steps: 10     # Recovery steps between injections
+    greedy_num_injections: 10              # Number of injections then damage-free tail
+```
+
+#### Legacy Rolling Window Mode
+
+```yaml
+pool:
+  damage_mode: "greedy"                    # Deterministic rolling window
+  greedy_window_size: ${pool.damage_prob}  # Window size (5)
+  damage_prob: 5                          # Gates per window
+  greedy_ordered_indices: [48,17,52,...]  # Ordered indices for rolling window
+```
+
+### Parameter Responsibilities
+
+- **`damage_pool_fraction`**: How many circuits get damaged per training injection
+- **`patterns_per_injection`**: How many patterns sampled per evaluation injection
+- **`damage_knockout_diversity`**: Vocabulary size (number of subset patterns)
+- **`damage_prob`**: Pattern size (gates per pattern)
+
+### Seen vs Unseen Patterns
+
+- **Seen**: Evaluation samples from the same vocabulary used during training
+- **Unseen**: Evaluation generates fresh random subsets from greedy indices (no vocabulary reuse)
+
+---
+
+## Advantages of Vocabulary Approach
+
+### Statistical Robustness
+
+- **Multiple patterns per injection**: `patterns_per_injection` enables confidence intervals and statistical analysis
+- **Diverse training exposure**: Circuits experience varied damage patterns rather than predictable sequences
+- **Reproducible randomness**: Vocabulary ensures consistent seen/unseen distinction across runs
+
+### Experimental Control
+
+- **Clear semantics**: "Seen" = trained on this pattern subset, "Unseen" = novel combination
+- **Scalable evaluation**: Adjustable `patterns_per_injection` balances thoroughness vs computational cost
+- **Parameter separation**: Clear roles for `damage_pool_fraction` (training) vs `patterns_per_injection` (eval)
+
+### Backward Compatibility
+
+- **Legacy preservation**: Deterministic rolling window mode remains available
+- **Parameter reuse**: Leverages existing `damage_knockout_diversity` for vocabulary size
+- **Evaluation integration**: Works with existing periodic injection infrastructure
+
+---
+
+## Implementation Status
+
+### ✅ **Completed: Step 1 - Vocabulary Generation**
+
+- **Added `create_greedy_subset_random_pattern()` function**: Randomly samples from greedy indices
+- **Extended `create_knockout_vocabulary()` with `"greedy_vocabulary"` mode**: Creates diverse pattern vocabularies
+- **Comprehensive testing validated**: Generates correct patterns, enforces greedy-only constraint, produces diversity
+- **Backward compatibility maintained**: All existing modes (`"shotgun"`, `"strip"`, `"greedy"`) unchanged
+
+### ✅ **Completed: Step 2 - Training Loop Integration**
+
+- **Integrated `"greedy_vocabulary"` mode with training loop**: Modified damage injection logic to support vocabulary sampling
+- **Updated damage mode selection**: Legacy `"greedy"` uses rolling window, `"greedy_vocabulary"` uses vocabulary sampling  
+- **Maintained backward compatibility**: All existing modes remain functional
+- **Updated documentation**: Function signatures and docstrings reflect new capabilities
+
+### ✅ **Completed: Step 3 - Evaluation Extension**
+
+- **Extended evaluation with vocabulary support**: Added `damage_mode`, `patterns_per_injection`, `unseen_mode`, `knockout_vocabulary` parameters
+- **Maintained greedy injection structure**: Reused existing `greedy_injection_recover_steps`, `greedy_num_injections` parameters and injection schedule
+- **Implemented seen/unseen modes**: Vocabulary sampling vs fresh pattern generation for comprehensive evaluation
+- **Preserved backward compatibility**: Legacy `"greedy"` rolling window mode remains unchanged
+
+### ✅ **Completed: Step 4 - Config Integration**
+
+- **Updated config schema**: Added `damage_mode`, `patterns_per_injection`, `unseen_mode` to `knockout_eval` section
+- **Enhanced parameter flow**: Config parameters now flow through `train.py` → `train_loop.py` → `evaluation.py`
+- **Backward compatibility**: Existing configs work with sensible defaults for new parameters
+- **Example config provided**: Complete greedy vocabulary configuration in `config.yaml`
+
+### 🎉 **Complete Implementation Summary**
+
+**Greedy Vocabulary Mode** is now fully integrated into the Boolean NCA training pipeline:
+
+1. **Pattern Generation**: `create_greedy_subset_random_pattern()` samples diverse subsets from greedy indices
+2. **Vocabulary Creation**: `create_knockout_vocabulary(..., damage_mode="greedy_vocabulary")` builds pattern libraries  
+3. **Training Integration**: Pool damage injection uses vocabulary sampling vs rolling window based on `damage_mode`
+4. **Evaluation Extension**: Stepwise evaluation supports seen/unseen patterns with statistical robustness
+5. **Config Framework**: Complete parameter flow from YAML configs through training to evaluation
+
+The system now supports sophisticated damage/recovery analysis with controlled vocabulary diversity while maintaining full backward compatibility with existing approaches.
+
+---
+
+## Future Improvements
+
+### 📋 **TODO: Strategic Config Refactoring (Option 3)**
+
+**Goal**: Streamline damage mode configuration and eliminate redundant `greedy_eval_enabled` parameter.
+
+**Planned Changes**:
+1. **Rename `greedy_eval_enabled` → `multi_injections`**: Single boolean to control static vs periodic injection behavior
+2. **Add missing static modes**: 
+   - Static `"greedy_vocabulary"` (replaces `"shotgun"` - no wasted indices)
+   - Static `"greedy"` (for completeness)
+3. **Unified config semantics**:
+   ```yaml
+   knockout_eval:
+     damage_mode: "greedy_vocabulary"  # Pattern type
+     multi_injections: true           # Static (false) vs Periodic (true)
+   ```
+
+**Complete Matrix Target**:
+| `damage_mode` | `multi_injections: false` | `multi_injections: true` |
+|---------------|---------------------------|--------------------------|
+| `"shotgun"` | ✅ Vocab sampling | 🔄 *Future: periodic shotgun* |
+| `"strip"` | ✅ Vocab sampling | 🔄 *Future: periodic strip* |  
+| `"greedy"` | 🔨 **Add: static greedy** | ✅ Rolling window |
+| `"greedy_vocabulary"` | 🔨 **Add: static vocab** | ✅ Fresh/vocab patterns |
+
+**Benefits**: 
+- **Clearer semantics**: One parameter controls injection timing, another controls pattern type
+- **Better static modes**: Static greedy_vocabulary is superior to shotgun (no wasted indices)
+- **Future extensibility**: Framework for adding periodic shotgun/strip modes later
+- **Reduced config confusion**: Eliminates `greedy_eval_enabled` redundancy
+
+**Estimated Effort**: 2-3 hours
+
+---
+
+### ✅ **Completed: `greedy_eval_enabled` Disentanglement**
+
+**Problem**: Redundant configuration with `greedy_eval_enabled` and `damage_mode` controlling overlapping behavior.
+
+**Solution**: 
+- **`damage_mode` now controls both pattern type AND injection timing**:
+  - `"greedy"` and `"greedy_vocabulary"` → Periodic injections enabled
+  - `"shotgun"` and `"strip"` → Static patterns only (no periodic injections)
+- **`greedy_eval_enabled` marked as DEPRECATED** with legacy fallback support
+- **Updated config comments** to clarify the unified control mechanism
+
+**Result**: Cleaner, more intuitive configuration where `damage_mode` is the single source of truth for evaluation behavior.
