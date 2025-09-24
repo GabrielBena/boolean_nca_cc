@@ -516,8 +516,9 @@ class GraphPool(struct.PyTreeNode):
         reset_strategy: str = "uniform",
         combined_weights: Tuple[float, float] = (0.5, 0.5),
         invert_loss: bool = False,  # For damage mode
-        max_pool_updates_for_damage: Optional[int] = None,  # Max pool updates for damage mode only
-        min_pool_updates_for_damage: Optional[int] = None,  # Min pool updates for damage mode only
+        # Unified damage control parameters
+        damage_injection_mode: str = "multi",  # "single" or "multi"
+        max_damage_per_circuit: int = 10,  # Maximum damage events per circuit
     ) -> Tuple[Array, float]:
         """
         Get indices of circuits to reset based on the specified strategy.
@@ -529,6 +530,9 @@ class GraphPool(struct.PyTreeNode):
             fraction: Fraction of pool to reset (between 0 and 1)
             reset_strategy: Strategy for selecting graphs to reset
             combined_weights: Weights for loss and steps in combined strategy
+            invert_loss: If True, invert loss-based selection (for damage mode)
+            damage_injection_mode: "single" for one damage per circuit, "multi" for multiple
+            max_damage_per_circuit: Maximum damage events per circuit (unified control)
 
         Returns:
             Tuple of (reset_indices, avg_steps_of_reset_circuits)
@@ -641,22 +645,21 @@ class GraphPool(struct.PyTreeNode):
                 f"Must be 'uniform', 'steps_biased', 'loss_biased', or 'combined'."
             )
 
-        # Apply damage mode pool update filtering if specified
-        if (max_pool_updates_for_damage is not None or min_pool_updates_for_damage is not None) and self.graphs.globals is not None:
-            update_steps = self.graphs.globals[..., 1]
-            
-            # Build eligibility mask
-            eligible_mask = jp.ones(self.size, dtype=jp.bool_)
-            
-            if max_pool_updates_for_damage is not None:
-                eligible_mask = eligible_mask & (update_steps < max_pool_updates_for_damage)
-            
-            if min_pool_updates_for_damage is not None:
-                eligible_mask = eligible_mask & (update_steps >= min_pool_updates_for_damage)
+        # Apply unified damage control filtering based on perturb_counter
+        if invert_loss and self.perturb_counter is not None:
+            # This is damage mode - filter by perturb_counter
+            if damage_injection_mode == "single":
+                # Single damage mode: only damage circuits with perturb_counter == 0
+                eligible_mask = self.perturb_counter == 0
+                log.info(f"Single damage mode: filtering circuits with perturb_counter == 0")
+            else:
+                # Multi damage mode: only damage circuits with perturb_counter < max_damage_per_circuit
+                eligible_mask = self.perturb_counter < max_damage_per_circuit
+                log.info(f"Multi damage mode: filtering circuits with perturb_counter < {max_damage_per_circuit}")
             
             if not jp.any(eligible_mask):
                 # Fallback to uniform selection if no circuits meet criteria
-                log.warning(f"No circuits meet damage criteria: min_pool_updates={min_pool_updates_for_damage}, max_pool_updates={max_pool_updates_for_damage}")
+                log.warning(f"No circuits meet damage criteria: damage_injection_mode={damage_injection_mode}, max_damage_per_circuit={max_damage_per_circuit}")
                 reset_idxs = jax.random.choice(
                     key, self.size, shape=(num_reset,), replace=False
                 )
@@ -666,11 +669,14 @@ class GraphPool(struct.PyTreeNode):
                 if len(eligible_indices) < num_reset:
                     # If not enough eligible circuits, take all available
                     reset_idxs = eligible_indices
+                    log.info(f"Only {len(eligible_indices)} circuits eligible for damage, taking all available")
                 else:
                     # Sample from eligible circuits
                     reset_idxs = jax.random.choice(
                         key, eligible_indices, shape=(num_reset,), replace=False
                     )
+                    log.info(f"Sampled {num_reset} circuits from {len(eligible_indices)} eligible circuits")
+        
 
         # Calculate average update steps of graphs being reset
         avg_steps_reset = self.get_average_update_steps_for_indices(reset_idxs)

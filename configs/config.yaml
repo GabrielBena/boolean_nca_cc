@@ -75,12 +75,13 @@ pool:
   damage_combined_weights: [0.5, 0.5]
   damage_mode: "greedy_vocabulary"  # Options: "shotgun" (random), "strip" (localized), "greedy" (rolling window), or "greedy_vocabulary" (vocabulary sampling)
   # Number of gates to knock out when generating fresh patterns (ignored if vocabulary is used)
-  damage_prob: 5
+  damage_prob: 10
   # Damage-specific vocabulary size (decoupled from legacy persistent_knockout)
-  damage_knockout_diversity: 64
-  # Pool update step filtering for damage selection (prevents damage to over-optimized circuits)
-  damage_min_pool_updates: 0    # Minimum pool updates before circuit can be damaged
-  damage_max_pool_updates: 10000   # Maximum pool updates before circuit becomes too fragile for damage
+  damage_knockout_diversity: 1
+  
+  # Unified damage control system
+  damage_injection_mode: "multi"  # "single" (static) or "multi" (periodic)
+  max_damage_per_circuit: 10      # Maximum damage events per circuit
   # Number of message passing steps for damage evaluation (baseline and recovery trajectories)
   # This should typically match or be close to the training n_message_steps for realistic recovery assessment
   damage_eval_steps: ${eval.periodic_eval_inner_steps}
@@ -105,8 +106,8 @@ eval:
     damage_prob: ${pool.damage_prob}
     # Unified damage control system
     damage_mode: ${pool.damage_mode}      # Pattern type: "greedy", "greedy_vocabulary", "shotgun", "strip"
-    damage_injection_mode: "multi"        # NEW: "single" (one damage per circuit) or "multi" (multiple damages)
-    max_damage_per_circuit: 10            # NEW: Maximum damage events per circuit (replaces greedy_num_injections)
+    damage_injection_mode: ${pool.damage_injection_mode}        # NEW: "single" (one damage per circuit) or "multi" (multiple damages)
+    max_damage_per_circuit: ${pool.max_damage_per_circuit}         # NEW: Maximum damage events per circuit (replaces greedy_num_injections)
     # Periodic injection timing (controlled by damage_mode)
     greedy_window_size: ${pool.greedy_window_size}  # Reuse pool's window size
     greedy_injection_recover_steps: 10     # N recovery steps between injections
@@ -114,8 +115,7 @@ eval:
     
     # Vocabulary-based evaluation parameters
     patterns_per_injection: 1            # Number of patterns to sample per injection (statistical robustness)
-    unseen_mode: false                    # If true, generate fresh patterns (unseen); if false, use training vocabulary (seen)
-    # Note: knockout_vocabulary is passed automatically from training when unseen_mode=false
+    # Note: If vocabulary is provided by training, eval_ko_in will be seen; eval_ko_out always runs unseen
   
   # Hamming distance analysis
   hamming_analysis_dir: "results/hamming_analysis_mbs${training.meta_batch_size}_div${pool.damage_knockout_diversity}_dam${pool.damage_prob}"  # Directory for hamming analysis plots and CSVs

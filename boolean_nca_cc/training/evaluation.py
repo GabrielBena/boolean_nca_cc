@@ -395,8 +395,7 @@ def evaluate_model_stepwise_batched(
     greedy_injection_recover_steps: int = 10,
     # Vocabulary-based evaluation parameters
     patterns_per_injection: int = 1,  # Number of patterns to sample per injection (for statistical robustness)
-    unseen_mode: bool = False,  # If True, generate fresh patterns; if False, use vocabulary
-    knockout_vocabulary: Optional[jp.ndarray] = None,  # Pre-generated vocabulary for seen evaluation
+    knockout_vocabulary: Optional[jp.ndarray] = None,  # If provided => seen (sample from vocab); else => unseen (fresh)
 ) -> Dict:
     """
     Evaluate GNN performance on a batch of circuits by running message passing steps
@@ -526,7 +525,6 @@ def evaluate_model_stepwise_batched(
         greedy_window_size=greedy_window_size,
         greedy_injection_recover_steps=greedy_injection_recover_steps,
         patterns_per_injection=patterns_per_injection,
-        unseen_mode=unseen_mode,
         knockout_vocabulary=knockout_vocabulary,
     )
 
@@ -639,8 +637,7 @@ def _evaluate_with_loop(
     greedy_injection_recover_steps: int = 7,
     # Vocabulary-based evaluation parameters
     patterns_per_injection: int = 1,  # Number of patterns to sample per injection (for statistical robustness)
-    unseen_mode: bool = False,  # If True, generate fresh patterns; if False, use vocabulary
-    knockout_vocabulary: Optional[jp.ndarray] = None,  # Pre-generated vocabulary for seen evaluation
+    knockout_vocabulary: Optional[jp.ndarray] = None,  # If provided => seen; else => unseen (fresh)
 ) -> Dict:
     """
     Evaluate using loop mode (original behavior).
@@ -682,11 +679,11 @@ def _evaluate_with_loop(
 
     # Prepare periodic injection schedule for applicable damage modes
     batch_size = batch_wires[0].shape[0]
-    event_count = None
+    eval_perturb_counter = None
     # Enable periodic injections for greedy modes (damage_mode controls behavior)
     periodic_injections_enabled = damage_mode in ["greedy", "greedy_vocabulary"]
     if periodic_injections_enabled and greedy_ordered_indices is not None and len(greedy_ordered_indices) > 0:
-        event_count = jp.zeros((batch_size,), dtype=jp.int32)
+        eval_perturb_counter = jp.zeros((batch_size,), dtype=jp.int32)
         window = max(1, int(greedy_window_size))
         greedy_len = int(len(greedy_ordered_indices))
 
@@ -695,20 +692,20 @@ def _evaluate_with_loop(
         # Determine per-step knockout patterns (dynamic greedy schedule or static patterns)
         step_knockout_patterns = knockout_patterns
         inject_now_mask = None
-        if event_count is not None:
+        if eval_perturb_counter is not None:
             # Injection schedule: step 1, then every (recover_steps + 1) steps
             recover_steps = int(max(0, greedy_injection_recover_steps))
             inject_now = (step == 1) or ((step - 1) % (recover_steps + 1) == 0)
             inject_now_mask = jp.full((batch_size,), bool(inject_now), dtype=jp.bool_)
 
             # Respect maximum number of injections per circuit
-            can_inject_mask = event_count < max_damage_per_circuit
+            can_inject_mask = eval_perturb_counter < max_damage_per_circuit
             inject_now_mask = inject_now_mask & can_inject_mask
 
             # Generate patterns based on damage mode
             if damage_mode == "greedy":
                 # Legacy rolling window mode
-                starts = ((event_count * window) % greedy_len).astype(jp.int32)
+                starts = ((eval_perturb_counter * window) % greedy_len).astype(jp.int32)
                 vm_build = jax.vmap(
                     lambda s: create_group_greedy_pattern(
                         greedy_ordered_indices, layer_sizes, s, window
@@ -726,12 +723,11 @@ def _evaluate_with_loop(
                 # Generate patterns for all circuits in batch, but only apply to injecting ones
                 damage_prob = greedy_window_size  # Use window size as damage amount
                 
-                if unseen_mode or knockout_vocabulary is None:
-                    # Generate fresh patterns from greedy indices (unseen mode)
+                if knockout_vocabulary is None:
+                    # Generate fresh patterns from greedy indices (unseen)
                     # Generate one pattern per circuit (even non-injecting ones for simpler JAX operations)
-                    print(f"EVAL DAMAGE DEBUG: FALLBACK to FRESH GREEDY patterns! (unseen_mode={unseen_mode}, knockout_vocabulary={'None' if knockout_vocabulary is None else f'shape={knockout_vocabulary.shape}'})")
                     pattern_keys = jax.random.split(
-                        jax.random.PRNGKey(step + jp.sum(event_count)), 
+                        jax.random.PRNGKey(step + int(jp.sum(eval_perturb_counter)) + 1000),  # Offset for unseen patterns
                         batch_size
                     )
                     
@@ -742,13 +738,14 @@ def _evaluate_with_loop(
                         )
                     )
                     generated_patterns = vm_create_pattern(pattern_keys)
+                    
                 else:
-                    # Sample from vocabulary (seen mode)
+                    # Sample from vocabulary (seen)
                     vocab_size = knockout_vocabulary.shape[0]
                     
                     # Sample vocabulary indices for each circuit in batch
                     vocab_keys = jax.random.split(
-                        jax.random.PRNGKey(step + jp.sum(event_count)), 
+                        jax.random.PRNGKey(step + int(jp.sum(eval_perturb_counter))),  # No offset for seen patterns
                         batch_size
                     )
                     
@@ -778,8 +775,8 @@ def _evaluate_with_loop(
                     globals=jp.stack([current_graphs.globals[:, 0], steps_after], axis=1)
                 )
 
-            # Increment event_count AFTER using it to compute starts (only on injection steps)
-            event_count = jp.where(inject_now_mask, event_count + 1, event_count)
+            # Increment eval_perturb_counter AFTER using it to compute starts (only on injection steps)
+            eval_perturb_counter = jp.where(inject_now_mask, eval_perturb_counter + 1, eval_perturb_counter)
 
         # Apply model with per-step patterns if available
         if step_knockout_patterns is not None:

@@ -374,9 +374,9 @@ def main(cfg: DictConfig) -> None:
         greedy_ordered_indices=cfg.pool.get("greedy_ordered_indices", None),
         greedy_window_size=cfg.pool.get("greedy_window_size", 1),
         damage_eval_steps=cfg.pool.get("damage_eval_steps", 50),
-        # Damage selection filtering parameters
-        damage_min_pool_updates=cfg.pool.get("damage_min_pool_updates", 0),
-        damage_max_pool_updates=cfg.pool.get("damage_max_pool_updates", 10),
+        # Unified damage control parameters
+        damage_injection_mode=cfg.pool.get("damage_injection_mode", "multi"),
+        max_damage_per_circuit=cfg.pool.get("max_damage_per_circuit", 10),
         damage_seed=cfg.damage_seed,
         # Perturbation configurations
         persistent_knockout_config=cfg.pool.get("persistent_knockout", None),

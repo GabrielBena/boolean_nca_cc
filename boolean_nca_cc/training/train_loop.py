@@ -570,8 +570,7 @@ def run_knockout_periodic_evaluation(
             greedy_injection_recover_steps=int(knockout_config.get("greedy_injection_recover_steps", 10)),
             # Vocabulary-based evaluation parameters
             patterns_per_injection=int(knockout_config.get("patterns_per_injection", 1)),
-            unseen_mode=bool(knockout_config.get("unseen_mode", False)),
-            knockout_vocabulary=knockout_vocabulary,
+            knockout_vocabulary=knockout_vocabulary,  # If provided => seen; else => unseen
         )
 
         final_metrics_in = {
@@ -588,20 +587,6 @@ def run_knockout_periodic_evaluation(
             hard_acc_std = float(jp.std(final_hard_accuracies_in))
             final_metrics_in["eval_ko_in/final_hard_accuracy_std"] = hard_acc_std
 
-        # 2. Generate OUT-of-distribution knockout patterns (always fresh, different seed)
-        log.info(f"Running OUT-of-distribution Knockout evaluation with fresh patterns ({eval_batch_size} patterns)...")
-        
-        pattern_creator_fn = partial(
-            create_reproducible_knockout_pattern,
-            layer_sizes=true_layer_sizes,
-            damage_prob=knockout_config["damage_prob"],
-        )
-        
-        # Use different seed for OOD patterns
-        ood_rng = jax.random.PRNGKey(periodic_eval_test_seed + 1)
-        out_pattern_keys = jax.random.split(ood_rng, eval_batch_size)
-        out_knockout_patterns = jax.vmap(pattern_creator_fn)(out_pattern_keys)
-        
         
         # Replicate base circuit for the batch
         out_wires = jax.tree.map(
@@ -615,7 +600,7 @@ def run_knockout_periodic_evaluation(
             eval_fn=evaluate_model_stepwise_batched,
             wires=out_wires,
             logits=out_logits,
-            knockout_patterns=out_knockout_patterns,
+            knockout_patterns=None,  # No pre-generated patterns for OUT evaluation
             target_chunk_size=eval_batch_size,
             model=model,
             x_data=x_data,
@@ -628,7 +613,16 @@ def run_knockout_periodic_evaluation(
             layer_sizes=layer_sizes,
             return_per_pattern=True,  # Enable per-pattern analysis
             layer_neighbors=layer_neighbors,
-            # use_scan=use_scan,
+            # Unified damage control for OUT (unseen) evaluation
+            damage_mode=knockout_config.get("damage_mode", "greedy"),
+            damage_injection_mode=knockout_config.get("damage_injection_mode", "multi"),
+            max_damage_per_circuit=int(knockout_config.get("max_damage_per_circuit", 10)),
+            greedy_ordered_indices=knockout_config.get("greedy_ordered_indices", None),
+            greedy_window_size=int(knockout_config.get("greedy_window_size", 1)),
+            greedy_injection_recover_steps=int(knockout_config.get("greedy_injection_recover_steps", 10)),
+            # For OUT, force unseen by not providing a vocabulary
+            patterns_per_injection=int(knockout_config.get("patterns_per_injection", 1)),
+            knockout_vocabulary=None,  # Force unseen patterns for OUT evaluation
         )
 
         final_metrics_out = {
@@ -638,6 +632,7 @@ def run_knockout_periodic_evaluation(
             "eval_ko_out/final_hard_accuracy": step_metrics_out["hard_accuracy"][-1],
             "eval_ko_out/epoch": epoch,
         }
+        
 
         # Log main metrics normally (these will create panels)
         main_metrics = {**final_metrics_in, **final_metrics_out}
@@ -1322,9 +1317,9 @@ def train_model(
     greedy_ordered_indices: Optional[List[int]] = None,
     greedy_window_size: int = 1,
     damage_eval_steps: int = 50,  # Number of message passing steps for damage evaluation
-    # Damage selection filtering parameters
-    damage_min_pool_updates: int = 0,  # Minimum pool updates before circuit can be damaged
-    damage_max_pool_updates: int = 10,  # Maximum pool updates before circuit becomes too fragile for damage
+    # Unified damage control parameters
+    damage_injection_mode: str = "multi",  # "single" (one damage per circuit) or "multi" (multiple damages)
+    max_damage_per_circuit: int = 10,  # Maximum damage events per circuit
     damage_seed: int = 481,  # Independent seed for damage pattern generation
     knockout_eval: Optional[Dict] = None,
     # Learning rate scheduling
@@ -1404,6 +1399,8 @@ def train_model(
         knockout_diversity: Size of knockout pattern vocabulary for shared training/evaluation patterns
         damage_pool_damage_prob: Damage probability per node when generating fresh patterns.
         damage_eval_steps: Number of message passing steps for damage evaluation (baseline and recovery).
+        damage_injection_mode: "single" for one damage per circuit, "multi" for multiple damages.
+        max_damage_per_circuit: Maximum damage events per circuit (unified control).
         knockout_eval: Configuration for knockout evaluation during training.
         key: Random seed
         wiring_fixed_key: Fixed key for generating wirings when wiring_mode='fixed'
@@ -1440,7 +1437,15 @@ def train_model(
         hamming_analysis_dir: Directory for hamming analysis plots and CSVs
         backprop_config: Configuration for one-time backprop evaluation
     """
-       # Initialize random key
+       # Validate unified damage control parameters
+    if damage_injection_mode not in ["single", "multi"]:
+        raise ValueError(f"damage_injection_mode must be 'single' or 'multi', got '{damage_injection_mode}'")
+    if max_damage_per_circuit < 1:
+        raise ValueError(f"max_damage_per_circuit must be >= 1, got {max_damage_per_circuit}")
+    if damage_injection_mode == "single" and max_damage_per_circuit != 1:
+        raise ValueError(f"damage_injection_mode='single' requires max_damage_per_circuit=1, got {max_damage_per_circuit}")
+
+    # Initialize random key
     rng = jax.random.PRNGKey(key)
 
     # Get dimension from layer sizes
@@ -1833,17 +1838,19 @@ def train_model(
                 and (epoch % damage_pool_interval == 0)
             ):
                 log.info(f"DAMAGE TRIGGER DEBUG: Damage applied at epoch {epoch} (vocabulary_exists={knockout_vocabulary is not None})")
+                log.info(f"UNIFIED DAMAGE CONTROL: mode={damage_injection_mode}, max_damage_per_circuit={max_damage_per_circuit}")
                 rng, damage_key = jax.random.split(rng)
 
-                # Select which circuits to damage using existing selection logic
+                # Select which circuits to damage using unified damage control
                 damaged_idxs, _ = circuit_pool.get_reset_indices(
                     damage_key,
                     fraction=damage_pool_fraction,
                     reset_strategy=damage_strategy,
                     combined_weights=damage_combined_weights,
                     invert_loss=True,
-                    max_pool_updates_for_damage=damage_max_pool_updates,
-                    min_pool_updates_for_damage=damage_min_pool_updates,
+                    # Unified damage control parameters
+                    damage_injection_mode=damage_injection_mode,
+                    max_damage_per_circuit=max_damage_per_circuit,
                 )
 
                 # Build damage patterns based on mode: greedy rolling-window, vocabulary sampling, or random
@@ -1889,9 +1896,19 @@ def train_model(
 
                 damaged_count = int(damaged_idxs.shape[0]) if hasattr(damaged_idxs, "shape") else 0
                 damaged_frac = damaged_count / float(pool_size) if pool_size > 0 else 0.0
-                log.info(
-                    f"Damage applied at epoch {epoch}: count={damaged_count}, fraction={damaged_frac:.4f}"
-                )
+                
+                # Log damage application results with perturb_counter info
+                if circuit_pool.perturb_counter is not None:
+                    max_perturb_count = int(jp.max(circuit_pool.perturb_counter))
+                    circuits_with_damage = int(jp.sum(circuit_pool.perturb_counter > 0))
+                    log.info(
+                        f"Damage applied at epoch {epoch}: count={damaged_count}, fraction={damaged_frac:.4f}, "
+                        f"max_perturb_count={max_perturb_count}, circuits_with_damage={circuits_with_damage}"
+                    )
+                else:
+                    log.info(
+                        f"Damage applied at epoch {epoch}: count={damaged_count}, fraction={damaged_frac:.4f}"
+                    )
                 if wandb_run:
                     wandb_run.log(
                         {

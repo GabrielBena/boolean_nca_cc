@@ -230,6 +230,21 @@ The system now supports sophisticated damage/recovery analysis with controlled v
 - **Evaluation OUT (`eval_ko_out`)**: Uses static patterns only, no multi-damage support
 - **Unused Features**: `patterns_per_injection` parameter exists but not properly utilized
 
+### **Counter System Clarification**
+
+**Training Pool `perturb_counter`**:
+- Tracks cumulative damage events per circuit across all training epochs
+- Incremented by `pool.apply_knockouts()` during training
+- Persists across training epochs and is used for rolling window patterns
+- **Not relevant for evaluation** - each evaluation trajectory starts fresh
+
+**Evaluation `eval_perturb_counter`** (formerly `event_count`):
+- Tracks damage events per circuit **within a single evaluation trajectory**
+- Resets to zero for each new evaluation run
+- Used to cap damage injections per circuit (`eval_perturb_counter < max_damage_per_circuit`)
+- Used for rolling window start positions and random seed generation
+- **Independent of training pool state**
+
 ### **Unified Damage Control Design**
 
 #### **Mode A: Single Damage Per Circuit**
@@ -254,54 +269,67 @@ max_damage_per_circuit: 10        # NEW: unified control (replaces greedy_num_in
 
 ### **Implementation Strategy**
 
-#### **Phase 1: Add Unified Configuration** ✅ **DONE**
+#### **Phase 1: Add Unified Configuration** ✅ **COMPLETED**
 - Add `damage_injection_mode: "single" | "multi"` parameter
 - Add `max_damage_per_circuit: int` parameter (replaces `greedy_num_injections`)
 - Update config schema and parameter flow
 
-#### **Phase 2: Unify Counter Systems**
-- **Replace `event_count` with `perturb_counter`** in evaluation
-- **Pass `perturb_counter` from training pool to evaluation**
-- **Maintain same increment logic** but use unified variable name
-- Add debug logging for unified counter system
+#### **Phase 2: Unify Counter Systems** ✅ **COMPLETED**
+- **Rename `event_count` → `eval_perturb_counter`** in evaluation for clarity
+- **Keep evaluation counter independent** from training pool's `perturb_counter` (they serve different purposes)
+- **Maintain same increment logic** - evaluation tracks per-trajectory damage, training tracks cumulative damage
+- **No functional changes needed** - the evaluation counter already properly caps damage injections per circuit
 
-#### **Phase 3: Implement Single-Damage Mode**
+#### **Phase 3: Implement Single-Damage Mode** ✅ **COMPLETED**
 - **Training**: Filter damaged circuits by `perturb_counter == 0`
 - **Evaluation**: Filter damaged circuits by `perturb_counter == 0`
 - Add debug logging for single-damage enforcement
 
-#### **Phase 4: Unify Multi-Damage Control**
+#### **Phase 4: Unify Multi-Damage Control** ✅ **COMPLETED**
 - **Training**: Use `perturb_counter < max_damage_per_circuit` filtering
 - **Evaluation**: Use `perturb_counter < max_damage_per_circuit` filtering
 - Ensure both modes respect the same damage limits
 
-#### **Phase 5: Fix Evaluation OUT Multi-Damage**
+#### **Phase 5: Fix Evaluation OUT Multi-Damage** ✅ **COMPLETED**
 - **Current**: `eval_ko_out` uses static patterns only
 - **Target**: Add multi-damage support to `eval_ko_out` using same `perturb_counter` logic
 - Enable `patterns_per_injection` for statistical robustness
+- **Implementation**: 
+  - Removed `unseen_mode` toggle - evaluation now always runs both seen (IN) and unseen (OUT)
+  - OUT evaluation uses `knockout_vocabulary=None` to force unseen pattern generation
+  - Added random seed offset (+1000) for OUT evaluation to ensure different patterns from IN
+  - Both IN and OUT evaluations now support unified damage control system
+  - Fixed critical bug where OUT evaluation was using same patterns as IN due to identical random seeds
 
-#### **Phase 6: Fix Vocabulary Mode Consistency**
+#### **Phase 6: Fix Vocabulary Mode Consistency** ✅ **COMPLETED**
 - **Training**: Keep random sampling but respect damage limits
 - **Evaluation**: Use vocabulary sampling but respect damage limits
 - Ensure `patterns_per_injection` works correctly
+- **Implementation**: 
+  - Vocabulary mode consistency achieved through unified damage control system
+  - Both training and evaluation respect `max_damage_per_circuit` limits
+  - `patterns_per_injection` parameter properly utilized for statistical robustness
+  - Clean separation between seen (vocabulary) and unseen (fresh) pattern generation
 
 ### **Configuration Matrix**
 
 | Mode | Training Control | Eval IN Control | Eval OUT Control | Pattern Type |
 |------|------------------|-----------------|------------------|--------------|
-| **Single Rolling** | `perturb_counter == 0` | `perturb_counter == 0` | `perturb_counter == 0` | Deterministic sequence |
-| **Multi Rolling** | `perturb_counter < max` | `perturb_counter < max` | `perturb_counter < max` | Deterministic sequence |
-| **Single Vocab** | `perturb_counter == 0` | `perturb_counter == 0` | `perturb_counter == 0` | Random from vocabulary |
-| **Multi Vocab** | `perturb_counter < max` | `perturb_counter < max` | `perturb_counter < max` | Random from vocabulary |
+| **Single Rolling** | `perturb_counter == 0` | `eval_perturb_counter == 0` | `eval_perturb_counter == 0` | Deterministic sequence |
+| **Multi Rolling** | `perturb_counter < max` | `eval_perturb_counter < max` | `eval_perturb_counter < max` | Deterministic sequence |
+| **Single Vocab** | `perturb_counter == 0` | `eval_perturb_counter == 0` | `eval_perturb_counter == 0` | Random from vocabulary |
+| **Multi Vocab** | `perturb_counter < max` | `eval_perturb_counter < max` | `eval_perturb_counter < max` | Random from vocabulary |
+
+**Note**: Training uses pool's `perturb_counter` (cumulative across epochs), evaluation uses `eval_perturb_counter` (per-trajectory).
 
 ### **Key Benefits**
 
-1. **Unified Control**: Same damage limits across training and evaluation
-2. **Single Variable**: `perturb_counter` used consistently everywhere (no `event_count` confusion)
+1. **Unified Control**: Same damage limits across training and evaluation (via `max_damage_per_circuit`)
+2. **Clear Naming**: `eval_perturb_counter` clearly indicates evaluation-specific counter (no confusion with training pool)
 3. **Single-Damage Mode**: Clean one-shot damage testing
 4. **Multi-Damage Support**: Both `eval_ko_in` and `eval_ko_out` support multi-damage
 5. **Statistical Robustness**: Proper `patterns_per_injection` utilization
-6. **Consistent Behavior**: Training and evaluation use same damage counting logic
+6. **Independent Systems**: Training and evaluation counters serve their respective purposes without interference
 
 ---
 
