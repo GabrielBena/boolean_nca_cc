@@ -394,7 +394,6 @@ def evaluate_model_stepwise_batched(
     greedy_window_size: int = 1,
     greedy_injection_recover_steps: int = 10,
     # Vocabulary-based evaluation parameters
-    patterns_per_injection: int = 1,  # Number of patterns to sample per injection (for statistical robustness)
     knockout_vocabulary: Optional[jp.ndarray] = None,  # If provided => seen (sample from vocab); else => unseen (fresh)
 ) -> Dict:
     """
@@ -524,7 +523,6 @@ def evaluate_model_stepwise_batched(
         greedy_ordered_indices=greedy_ordered_indices,
         greedy_window_size=greedy_window_size,
         greedy_injection_recover_steps=greedy_injection_recover_steps,
-        patterns_per_injection=patterns_per_injection,
         knockout_vocabulary=knockout_vocabulary,
     )
 
@@ -636,7 +634,6 @@ def _evaluate_with_loop(
     greedy_window_size: int = 1,
     greedy_injection_recover_steps: int = 7,
     # Vocabulary-based evaluation parameters
-    patterns_per_injection: int = 1,  # Number of patterns to sample per injection (for statistical robustness)
     knockout_vocabulary: Optional[jp.ndarray] = None,  # If provided => seen; else => unseen (fresh)
 ) -> Dict:
     """

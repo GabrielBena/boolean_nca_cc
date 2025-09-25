@@ -87,8 +87,8 @@ This document summarizes the minimal reversible damage implementation (SEU-like)
   - Pool tracking via `perturb_counter` remains unchanged
 - **Evaluation Injections**:
 
-  - **Seen**: Sample `patterns_per_injection` patterns from training vocabulary
-  - **Unseen**: Generate `patterns_per_injection` fresh random subsets from greedy indices (no vocabulary reuse)
+- **Seen**: Sample patterns from training vocabulary
+- **Unseen**: Generate fresh random subsets from greedy indices (no vocabulary reuse)
   - Multiple patterns per injection enable statistical analysis
 
 ### Legacy Implementation: Rolling Window Mode
@@ -118,7 +118,6 @@ pool:
 
 eval:
   knockout_eval:
-    patterns_per_injection: 8              # Multiple patterns per eval injection (statistical robustness)
     unseen_mode: true                      # Generate fresh patterns vs reuse training vocabulary
     greedy_injection_recover_steps: 10     # Recovery steps between injections
     greedy_num_injections: 10              # Number of injections then damage-free tail
@@ -137,7 +136,6 @@ pool:
 ### Parameter Responsibilities
 
 - **`damage_pool_fraction`**: How many circuits get damaged per training injection
-- **`patterns_per_injection`**: How many patterns sampled per evaluation injection
 - **`damage_knockout_diversity`**: Vocabulary size (number of subset patterns)
 - **`damage_prob`**: Pattern size (gates per pattern)
 
@@ -152,15 +150,15 @@ pool:
 
 ### Statistical Robustness
 
-- **Multiple patterns per injection**: `patterns_per_injection` enables confidence intervals and statistical analysis
+- **Statistical robustness**: Batch size provides confidence intervals and statistical analysis
 - **Diverse training exposure**: Circuits experience varied damage patterns rather than predictable sequences
 - **Reproducible randomness**: Vocabulary ensures consistent seen/unseen distinction across runs
 
 ### Experimental Control
 
 - **Clear semantics**: "Seen" = trained on this pattern subset, "Unseen" = novel combination
-- **Scalable evaluation**: Adjustable `patterns_per_injection` balances thoroughness vs computational cost
-- **Parameter separation**: Clear roles for `damage_pool_fraction` (training) vs `patterns_per_injection` (eval)
+- **Scalable evaluation**: Adjustable batch size balances thoroughness vs computational cost
+- **Parameter separation**: Clear roles for `damage_pool_fraction` (training) vs batch size (eval)
 
 ### Backward Compatibility
 
@@ -188,14 +186,14 @@ pool:
 
 ### ✅ **Completed: Step 3 - Evaluation Extension**
 
-- **Extended evaluation with vocabulary support**: Added `damage_mode`, `patterns_per_injection`, `unseen_mode`, `knockout_vocabulary` parameters
+- **Extended evaluation with vocabulary support**: Added `damage_mode`, `knockout_vocabulary` parameters
 - **Maintained greedy injection structure**: Reused existing `greedy_injection_recover_steps`, `greedy_num_injections` parameters and injection schedule
 - **Implemented seen/unseen modes**: Vocabulary sampling vs fresh pattern generation for comprehensive evaluation
 - **Preserved backward compatibility**: Legacy `"greedy"` rolling window mode remains unchanged
 
 ### ✅ **Completed: Step 4 - Config Integration**
 
-- **Updated config schema**: Added `damage_mode`, `patterns_per_injection`, `unseen_mode` to `knockout_eval` section
+- **Updated config schema**: Added `damage_mode` to `knockout_eval` section
 - **Enhanced parameter flow**: Config parameters now flow through `train.py` → `train_loop.py` → `evaluation.py`
 - **Backward compatibility**: Existing configs work with sensible defaults for new parameters
 - **Example config provided**: Complete greedy vocabulary configuration in `config.yaml`
@@ -228,7 +226,7 @@ The system now supports sophisticated damage/recovery analysis with controlled v
 - **Training-Evaluation Mismatch**: `perturb_counter` (training) vs `event_count` (eval) are separate systems
 - **No Single-Damage Mode**: No mechanism to limit circuits to exactly one damage event
 - **Evaluation OUT (`eval_ko_out`)**: Uses static patterns only, no multi-damage support
-- **Unused Features**: `patterns_per_injection` parameter exists but not properly utilized
+- **Unused Features**: Some parameters exist but are not properly utilized
 
 ### **Counter System Clarification**
 
@@ -293,7 +291,7 @@ max_damage_per_circuit: 10        # NEW: unified control (replaces greedy_num_in
 #### **Phase 5: Fix Evaluation OUT Multi-Damage** ✅ **COMPLETED**
 - **Current**: `eval_ko_out` uses static patterns only
 - **Target**: Add multi-damage support to `eval_ko_out` using same `perturb_counter` logic
-- Enable `patterns_per_injection` for statistical robustness
+- Enable statistical robustness via batch size
 - **Implementation**: 
   - Removed `unseen_mode` toggle - evaluation now always runs both seen (IN) and unseen (OUT)
   - OUT evaluation uses `knockout_vocabulary=None` to force unseen pattern generation
@@ -304,11 +302,11 @@ max_damage_per_circuit: 10        # NEW: unified control (replaces greedy_num_in
 #### **Phase 6: Fix Vocabulary Mode Consistency** ✅ **COMPLETED**
 - **Training**: Keep random sampling but respect damage limits
 - **Evaluation**: Use vocabulary sampling but respect damage limits
-- Ensure `patterns_per_injection` works correctly
+- Ensure statistical robustness works correctly
 - **Implementation**: 
   - Vocabulary mode consistency achieved through unified damage control system
   - Both training and evaluation respect `max_damage_per_circuit` limits
-  - `patterns_per_injection` parameter properly utilized for statistical robustness
+  - Statistical robustness achieved via batch size and per-pattern data collection
   - Clean separation between seen (vocabulary) and unseen (fresh) pattern generation
 
 ### **Configuration Matrix**
@@ -328,7 +326,7 @@ max_damage_per_circuit: 10        # NEW: unified control (replaces greedy_num_in
 2. **Clear Naming**: `eval_perturb_counter` clearly indicates evaluation-specific counter (no confusion with training pool)
 3. **Single-Damage Mode**: Clean one-shot damage testing
 4. **Multi-Damage Support**: Both `eval_ko_in` and `eval_ko_out` support multi-damage
-5. **Statistical Robustness**: Proper `patterns_per_injection` utilization
+5. **Statistical Robustness**: Proper batch size and per-pattern data utilization
 6. **Independent Systems**: Training and evaluation counters serve their respective purposes without interference
 
 ---
@@ -381,3 +379,71 @@ max_damage_per_circuit: 10        # NEW: unified control (replaces greedy_num_in
 - **Updated config comments** to clarify the unified control mechanism
 
 **Result**: Cleaner, more intuitive configuration where `damage_mode` is the single source of truth for evaluation behavior.
+
+---
+
+## Multi-Damage Plotting Support
+
+### ✅ **Completed: Multi-Damage Trajectory Plotting**
+
+**Goal**: Extend the plotting function to support multi-damage injections during evaluation trajectories with proper statistical aggregation.
+
+**Implementation**:
+
+#### **Phase 1: Remove Artificial Concatenations** ✅ **COMPLETED**
+- **Removed all artificial step concatenations** from `plot_combined_bp_sa_stepwise_performance`
+- **Eliminated step shifting and artificial pre-damage data** that caused step count mismatches
+- **Used SA evaluation data as-is** (already includes step 0 pre-damage state)
+- **Simplified per-pattern data handling** without artificial extensions
+
+#### **Phase 2: Rebuild BP Trajectory Alignment** ✅ **COMPLETED**
+- **Rebuilt BP trajectory to match SA structure**:
+  - SA: `[step0_pre_damage, step1, step2, ..., stepN]` (n_message_steps + 1 total)
+  - BP: `[step0_pre_damage, step1, step2, ..., stepN]` (epochs + 1 total)
+- **Added pre-damage state to BP trajectory** using same pre-damage accuracy as SA
+- **Aligned step counting** so both trajectories start from step 0 (pre-damage)
+- **Implemented fallback truncation** for step count differences at trajectory end
+
+#### **Phase 3: Fix Damage Injection Parameters** ✅ **COMPLETED**
+- **Fixed `greedy_ordered_indices` parameter passing**:
+  - Problem: Plotting function tried to access from `knockout_eval.get("greedy_ordered_indices", None)`
+  - Solution: Pass `greedy_ordered_indices` directly from `train_model` function parameters
+  - Result: Damage injection system now properly initializes and applies multi-damage
+- **Added comprehensive debug logging** to track damage injection parameters and data flow
+- **Ensured parameter consistency** between `run_knockout_periodic_evaluation` and plotting function
+
+#### **Phase 4: Statistical Aggregation** ✅ **COMPLETED**
+- **Preserved existing per-pattern statistical handling**:
+  - Mean ± std calculation across patterns at each step
+  - Error bands for both seen (IN) and unseen (OUT) trajectories
+  - Proper normalization using pre-damage performance as baseline
+- **Maintained backward compatibility** with static damage modes
+- **Added multi-damage support** for both vocabulary and rolling window modes
+
+### **Key Benefits**
+
+1. **Clean Trajectory Visualization**: Multi-damage trajectories now show proper damage/recovery curves instead of flat lines
+2. **Statistical Robustness**: Mean ± std error bands provide confidence intervals for multi-damage analysis
+3. **Unified Parameter Flow**: Consistent parameter passing between training evaluation and plotting
+4. **Backward Compatibility**: Static damage modes continue to work unchanged
+5. **Debug Visibility**: Comprehensive logging helps diagnose damage injection issues
+
+### **Configuration Integration**
+
+The plotting function now supports the complete multi-damage configuration matrix:
+
+```yaml
+knockout_eval:
+  damage_mode: "greedy_vocabulary"  # or "greedy"
+  damage_injection_mode: "multi"    # or "single"
+  max_damage_per_circuit: 10        # Maximum damage events per circuit
+  greedy_window_size: 5             # Gates per damage pattern
+  greedy_injection_recover_steps: 10 # Recovery steps between injections
+
+pool:
+  greedy_ordered_indices: [48,17,52,...] # Critical gate indices for damage
+```
+
+### **Result**
+
+The plotting function now generates proper multi-damage trajectory plots that match the quality and statistical robustness of the stepwise wandb logs from `run_knockout_periodic_evaluation`, with both seen and unseen damage patterns showing realistic damage/recovery dynamics.
