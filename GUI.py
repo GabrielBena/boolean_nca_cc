@@ -37,16 +37,18 @@ from boolean_nca_cc.training.checkpointing import (
     load_config_from_wandb,
     load_model_from_config_and_checkpoint,
 )
-from boolean_nca_cc.training.eval_datasets import (
-    _create_circuit_batch_with_pattern,
-)
 from boolean_nca_cc.training.evaluation import (
     evaluate_model_stepwise_generator,
     get_loss_from_wires_logits,
 )
 
-# Import genetic mutation functions
-from boolean_nca_cc.training.pool.perturbation import mutate_wires_swap
+# Import structural perturbation utilities for GAMMA RAYS mode
+from boolean_nca_cc.training.pool.structural_perturbation import (
+    create_greedy_subset_random_pattern,
+    DEFAULT_GREEDY_ORDERED_INDICES,
+)
+from boolean_nca_cc.circuits.train import create_gate_mask_from_knockout_pattern
+
 
 # Configure logging to show INFO messages
 logging.basicConfig(level=logging.INFO, format="%(name)s - %(levelname)s - %(message)s")
@@ -214,12 +216,18 @@ class CircuitOptimizationDemo:
         self.accuracy_log = np.zeros(max_trainstep_n, np.float32)
         self.hard_accuracy_log = np.zeros(max_trainstep_n, np.float32)
 
-        # Mutation settings
-        self.mutation_rate = 0.05
 
         # Optimization method configuration
         self.optimization_methods = ["Backprop", "GNN", "Self-Attention"]
         self.optimization_method_idx = 0
+
+        # Mutation settings (for template/reference)
+        self.mutation_rate = 0.05
+
+        # Perturbation type selection
+        self.perturbation_types = ["Wire Shuffle", "GAMMA RAYS"]
+        self.perturbation_type_idx = 0
+        self.perturbation_type = self.perturbation_types[self.perturbation_type_idx]
 
         # Model instances (only pre-trained, frozen models)
         self.frozen_model = None
@@ -269,7 +277,7 @@ class CircuitOptimizationDemo:
         # Model loading preferences
         self.load_modes = ["Latest Checkpoint", "Best Model"]
         self.load_mode_idx = 1  # Default to best model
-        self.prefer_metric = "eval_out_hard_accuracy"  # For best model selection
+        self.prefer_metric = "eval_ko_in_hard_accuracy"  # For best model selection - matches checkpointing config
 
         # Initialize visualization
         self.setup_visualization()
@@ -336,16 +344,20 @@ class CircuitOptimizationDemo:
                 initial_diversity = 16  # Use higher diversity for OOD
                 base_seed = self.evaluation_base_seed + 10000
 
-            # Create wire batch using the same logic as training evaluation
-            batch_wires, batch_logits, actual_batch_size = _create_circuit_batch_with_pattern(
-                rng=jax.random.PRNGKey(base_seed),
-                layer_sizes=self.layer_sizes,
-                arity=self.arity,
-                batch_size=initial_diversity,  # Generate multiple wires to choose from
-                wiring_mode=wiring_mode,
-                initial_diversity=initial_diversity,
-                get_all_wirings=True,  # Get all available wirings
-            )
+            # Create wire batch using simple inline implementation
+            batch_wires = []
+            batch_logits = []
+            
+            for i in range(initial_diversity):
+                # Generate each circuit with a different seed
+                circuit_key = jax.random.PRNGKey(base_seed + i)
+                wires, logits = gen_circuit(
+                    circuit_key, self.layer_sizes, arity=self.arity
+                )
+                batch_wires.append(wires)
+                batch_logits.append(logits)
+            
+            actual_batch_size = initial_diversity
 
             # Store available wires and logits
             self.available_wires = [
@@ -660,6 +672,9 @@ class CircuitOptimizationDemo:
                 "config.model.type": model_type,
                 "config.training.wiring_mode": self.wiring_mode,
                 "config.circuit.task": self.available_tasks[self.task_idx],
+                "config.training.training_mode": "repair",  # Match your config's training mode
+                "config.pool.damage_mode": "greedy_vocabulary",  # Match your config's damage mode
+                "config.pool.damage_injection_mode": "multi",  # Match your config's damage injection mode
             }
 
             # Load frozen model based on selected mode
@@ -677,7 +692,7 @@ class CircuitOptimizationDemo:
                     run_from_last=1,
                     use_cache=True,
                     prefer_metric=self.prefer_metric,  # Will use intelligent selection if None
-                    metric_name="best/eval_out_hard_accuracy",
+                    metric_name="best/eval_ko_in_hard_accuracy",
                 )
 
                 if loaded_config.circuit.num_layers != self.layer_n:
@@ -1028,6 +1043,7 @@ class CircuitOptimizationDemo:
 
         print("Circuit regenerated successfully")
 
+    # ===== WIRE PERTURBATION ANALOGUE TO REVERSIBLE DAMAGE PERTURBATION =====
     def mutate_wires_random(self, mutation_rate=None, reset_logs=True):
         """Mutate current circuit wires using genetic mutation with specified rate"""
         if mutation_rate is None:
@@ -1145,6 +1161,55 @@ class CircuitOptimizationDemo:
             print(f"Error mutating one wire: {e}")
             import traceback
 
+            print(f"Traceback: {traceback.format_exc()}")
+
+    def _apply_gate_damage_perturbation(self, damage_prob: int = 8, bias: float = -5.0):
+        """
+        Apply GAMMA RAYS damage perturbation by baking knockout pattern into logits.
+        
+        Args:
+            damage_prob: Number of gates to knock out (default 8)
+            bias: Negative bias value for knocked-out gates (default -5.0)
+        """
+        try:
+            # 1) Reset logs and current logits like wire shuffle
+            self.step_i = 0
+            self.loss_log[:] = 0
+            self.hard_log[:] = 0
+            self.accuracy_log[:] = 0
+            self.hard_accuracy_log[:] = 0
+            self.logits = self.logits0  # do NOT mutate logits0
+
+            # 2) Sample a flat knockout pattern (seen-like, minimal)
+            key = jax.random.PRNGKey(np.random.randint(0, 1_000_000))
+            pattern = create_greedy_subset_random_pattern(
+                key, self.layer_sizes, int(damage_prob), DEFAULT_GREEDY_ORDERED_INDICES
+            )
+
+            # 3) Build per-layer masks for viz and for shaping logits
+            layer_gate_masks = create_gate_mask_from_knockout_pattern(self.layer_sizes, pattern)
+            self.gate_mask = [m.astype(np.float32) for m in layer_gate_masks]  # for draw_circuit()
+
+            # 4) Apply damage into logits at masked gates
+            damaged_logits = [l.copy() for l in self.logits]
+            for li in range(1, len(self.layer_sizes) - 1):  # skip input(0) and output(-1)
+                gate_n, group_size = self.layer_sizes[li]
+                group_n = gate_n // group_size
+                mask = np.array(layer_gate_masks[li]).reshape(group_n, group_size)  # True = KO
+                damaged_logits[li - 1] = np.where(mask[..., None], bias, damaged_logits[li - 1])
+            self.logits = damaged_logits
+
+            # 5) Reinit generator identically to wire shuffle path
+            self.model_generator = None
+            self.last_step_result = None
+            self.initialize_optimization_method()
+            self.initialize_activations()
+
+            print(f"Applied GAMMA RAYS damage: {damage_prob} gates knocked out with bias {bias}")
+
+        except Exception as e:
+            print(f"Error applying gate damage perturbation: {e}")
+            import traceback
             print(f"Traceback: {traceback.format_exc()}")
 
     def reset_circuit(self):
@@ -1669,8 +1734,12 @@ class CircuitOptimizationDemo:
                 if self.load_mode_idx == 1:  # Best Model mode
                     prefer_metrics = [
                         "Auto (Intelligent Selection)",
+                        "eval_ko_in_hard_accuracy",  # Matches checkpointing config
+                        "eval_ko_out_hard_accuracy",
                         "eval_in_hard_accuracy",
                         "eval_out_hard_accuracy",
+                        "eval_ko_in_hard_loss",
+                        "eval_ko_out_hard_loss",
                         "eval_in_hard_loss",
                         "eval_out_hard_loss",
                         "training_hard_accuracy",
@@ -1848,6 +1917,15 @@ class CircuitOptimizationDemo:
                     imgui.ImVec4(0.7, 0.7, 0.7, 1.0),
                     "Training wires only available in 'fixed' mode",
                 )
+
+            # ===== WIRE PERTURBATION ANALOGUE TO REVERSIBLE DAMAGE PERTURBATION =====
+            # Perturbation type selection
+            imgui.separator()
+            perturbation_changed, self.perturbation_type_idx = imgui.combo(
+                "Perturbation Type", self.perturbation_type_idx, self.perturbation_types
+            )
+            if perturbation_changed:
+                self.perturbation_type = self.perturbation_types[self.perturbation_type_idx]
 
             # Mutation controls
             imgui.separator()
