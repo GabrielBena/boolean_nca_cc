@@ -20,7 +20,15 @@ from datetime import datetime
 
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.models import CircuitSelfAttention
-from boolean_nca_cc.training.checkpointing import save_checkpoint
+from boolean_nca_cc.training.checkpointing import (
+    save_checkpoint,
+    setup_checkpoint_dir,
+    save_periodic_checkpoint,
+    save_best_checkpoint,
+    save_stable_state,
+    get_metric_value,
+    check_early_stopping,
+)
 
 from boolean_nca_cc.training.schedulers import (
     should_reset_pool,
@@ -114,267 +122,6 @@ def _log_to_wandb(
     except Exception as e:
         log.warning(f"Error logging to wandb: {e}")
 
-def _setup_checkpoint_dir(checkpoint_dir: str | None, wandb_id: str | None) -> str | None:
-    """Setup checkpoint directory with unique identifier."""
-    if checkpoint_dir is None:
-        return None
-
-    # Create unique checkpoint directory using wandb ID or timestamp
-    unique_id = wandb_id if wandb_id else datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    checkpoint_path = os.path.join(checkpoint_dir, f"run_{unique_id}")
-    os.makedirs(checkpoint_path, exist_ok=True)
-    log.info(f"Checkpoints will be saved to: {checkpoint_path}")
-
-    return checkpoint_path
-
-
-def _save_periodic_checkpoint(
-    checkpoint_path: str,
-    model,
-    optimizer,
-    metrics: dict,
-    epoch: int,
-    checkpoint_interval: int,
-    wandb_run=None,
-) -> None:
-    """Save periodic checkpoint if interval allows."""
-    if checkpoint_path is None or epoch == 0 or epoch % checkpoint_interval != 0:
-        return
-
-    ckpt_filename = "latest_checkpoint.pkl"
-    # log.info(f"Saving periodic checkpoint at epoch {epoch}")
-
-    try:
-        save_checkpoint(
-            model,
-            optimizer,
-            metrics,
-            {"epoch": epoch},
-            epoch,
-            checkpoint_path,
-            filename=ckpt_filename,
-        )
-
-        # Log to wandb if enabled
-        if wandb_run:
-            wandb_run.save(os.path.join(checkpoint_path, ckpt_filename))
-
-            # Also log this as an artifact for better tracking in wandb
-            try:
-                artifact = wandb_run.Artifact("latest_checkpoint", type="model")
-                artifact.add_file(os.path.join(checkpoint_path, ckpt_filename))
-                wandb_run.log_artifact(artifact)
-            except Exception as e:
-                log.warning(f"Error logging checkpoint as artifact: {e}")
-
-    except Exception as e:
-        log.warning(f"Error saving checkpoint: {e}")
-
-
-def _save_best_checkpoint(
-    checkpoint_path: str,
-    is_best: bool,
-    save_best: bool,
-    model,
-    optimizer,
-    metrics: dict,
-    epoch: int,
-    best_metric: str,
-    current_metric_value: float,
-    wandb_run=None,
-) -> None:
-    """Save best checkpoint if enabled and is best."""
-    if not (checkpoint_path and save_best and is_best):
-        return
-
-    # Use a fixed filename for the best model to avoid creating multiple files
-    best_filename = f"best_model_{best_metric}.pkl"
-    log.info(
-        f"Saving best model at epoch {epoch} with {best_metric}={current_metric_value:.4f}"
-    )
-
-    try:
-        save_checkpoint(
-            model,
-            optimizer,
-            metrics,
-            {"epoch": epoch, f"best_{best_metric}": current_metric_value},
-            epoch,
-            checkpoint_path,
-            filename=best_filename,
-        )
-
-        # Log to wandb if enabled
-        if wandb_run:
-            wandb_run.log({f"best/{best_metric}": current_metric_value, "best/epoch": epoch})
-
-            # Save the best model to wandb (will overwrite the previous best)
-            wandb_run.save(os.path.join(checkpoint_path, best_filename))
-
-            # Also log this as an artifact for better tracking in wandb
-            try:
-                artifact = wandb_run.Artifact(f"best_model_{best_metric}", type="model")
-                artifact.add_file(os.path.join(checkpoint_path, best_filename))
-                wandb_run.log_artifact(artifact)
-            except Exception as e:
-                log.warning(f"Error logging best model as artifact: {e}")
-    except Exception as e:
-        log.warning(f"Error saving best checkpoint: {e}")
-
-
-def _save_stable_state(
-    checkpoint_path: str,
-    save_stable_states: bool,
-    last_stable_state: dict,
-    epoch: int,
-    wandb_run=None,
-) -> None:
-    """Save the last stable state before NaN loss."""
-    if not (checkpoint_path and save_stable_states):
-        return
-
-    try:
-        stable_path = os.path.join(checkpoint_path, f"stable_state_epoch_{epoch - 1}.pkl")
-        # log.info(f"Saving last stable state to {stable_path}")
-        save_checkpoint(
-            last_stable_state["model"],
-            last_stable_state["optimizer"],
-            last_stable_state["metrics"],
-            {"epoch": epoch - 1},
-            epoch - 1,
-            os.path.dirname(stable_path),
-            filename=os.path.basename(stable_path),
-        )
-
-        # Log to wandb if enabled
-        if wandb_run:
-            wandb_run.log({"training/early_stop_epoch": epoch - 1})
-            wandb_run.alert(
-                title="Training Stopped - NaN Loss",
-                text=f"Training stopped at epoch {epoch} due to NaN loss. Last stable state saved.",
-                level=wandb_run.AlertLevel.WARN,
-            )
-    except Exception as e:
-        log.warning(f"Error saving stable state: {e}")
-
-
-def _check_early_stopping(
-    stop_accuracy_enabled: bool,
-    epoch: int,
-    stop_accuracy_min_epochs: int,
-    early_stop_triggered: bool,
-    stop_accuracy_metric: str,
-    stop_accuracy_source: str,
-    training_metrics: dict,
-    current_eval_metrics: dict | None,
-    stop_accuracy_threshold: float,
-    first_threshold_epoch: int | None,
-    epochs_above_threshold: int,
-    stop_accuracy_patience: int,
-    rng: jax.random.PRNGKey,
-) -> tuple[bool, bool, int, int | None, dict | None, jax.random.PRNGKey]:
-    """
-    Check early stopping conditions and handle early stopping logic.
-
-    Returns:
-        Tuple of (should_break, early_stop_triggered, epochs_above_threshold,
-                 first_threshold_epoch, updated_current_eval_metrics, updated_rng)
-    """
-    if not stop_accuracy_enabled or early_stop_triggered:
-        return (
-            False,
-            early_stop_triggered,
-            epochs_above_threshold,
-            first_threshold_epoch,
-            current_eval_metrics,
-            rng,
-        )
-
-    # Get the accuracy value for early stopping
-    try:
-        stop_accuracy_value = _get_metric_value(
-            stop_accuracy_metric,
-            stop_accuracy_source,
-            training_metrics,
-            current_eval_metrics,
-        )
-    except (ValueError, KeyError):
-        if stop_accuracy_source == "eval" and current_eval_metrics is None:
-            # Evaluation metrics not available, skip early stopping check this epoch
-            stop_accuracy_value = None
-        else:
-            # Fallback to training metrics if eval not available
-            stop_accuracy_value = _get_metric_value(
-                stop_accuracy_metric,
-                "training",
-                training_metrics,
-                current_eval_metrics,
-            )
-
-    if stop_accuracy_value is None:
-        return (
-            False,
-            early_stop_triggered,
-            epochs_above_threshold,
-            first_threshold_epoch,
-            current_eval_metrics,
-            rng,
-        )
-
-    if stop_accuracy_value >= stop_accuracy_threshold:
-        if first_threshold_epoch is None:
-            first_threshold_epoch = epoch
-            log.info(
-                f"Reached accuracy threshold {stop_accuracy_threshold:.4f} "
-                f"({stop_accuracy_source}_{stop_accuracy_metric}={stop_accuracy_value:.4f}) "
-                f"at epoch {epoch}. Starting patience countdown."
-            )
-        epochs_above_threshold += 1
-
-        # Check if we should stop (only after minimum epochs requirement is met)
-        if epochs_above_threshold >= stop_accuracy_patience and epoch >= stop_accuracy_min_epochs:
-            early_stop_triggered = True
-            log.info(
-                f"Early stopping triggered! "
-                f"Accuracy {stop_accuracy_source}_{stop_accuracy_metric}={stop_accuracy_value:.4f} "
-                f"has been above threshold {stop_accuracy_threshold:.4f} "
-                f"for {stop_accuracy_patience} epochs. "
-                f"Stopping at epoch {epoch}."
-            )
-
-            return (
-                True,
-                early_stop_triggered,
-                epochs_above_threshold,
-                first_threshold_epoch,
-                current_eval_metrics,
-                rng,
-            )
-        elif epochs_above_threshold >= stop_accuracy_patience and epoch < stop_accuracy_min_epochs:
-            # Log that we would stop but are waiting for minimum epochs
-            # log.info(
-            #     f"Early stopping condition met "
-            #     f"(accuracy {stop_accuracy_source}_{stop_accuracy_metric}={stop_accuracy_value:.4f} "
-            #     f"above threshold {stop_accuracy_threshold:.4f} for {stop_accuracy_patience} epochs), "
-            #     f"but waiting until minimum epoch {stop_accuracy_min_epochs} (currently at epoch {epoch})."
-            # )
-            pass
-    else:
-        # Reset counter if accuracy drops below threshold
-        if epochs_above_threshold > 0:
-            log.info("Accuracy dropped below threshold. Resetting early stopping counter.")
-        epochs_above_threshold = 0
-        first_threshold_epoch = None
-
-    return (
-        False,
-        early_stop_triggered,
-        epochs_above_threshold,
-        first_threshold_epoch,
-        current_eval_metrics,
-        rng,
-    )
 
 
 def _log_final_wandb_metrics(wandb_run, results: Dict, epochs: int) -> None:
@@ -401,50 +148,6 @@ def _log_final_wandb_metrics(wandb_run, results: Dict, epochs: int) -> None:
         log.warning(f"Error logging final metrics to wandb: {e}")
 
 
-def _get_metric_value(
-    metric_name: str,
-    metric_source: str,
-    training_metrics: Dict,
-    eval_metrics: Dict = None,
-) -> float:
-    """
-    Get metric value from the appropriate source.
-
-    Args:
-        metric_name: Name of the metric ('loss', 'hard_loss', 'accuracy', 'hard_accuracy')
-        metric_source: Source of the metric ('training', 'eval', or 'eval_ko_in')
-        training_metrics: Dictionary with training metrics
-        eval_metrics: Dictionary with evaluation metrics (optional)
-
-    Returns:
-        The metric value as a float
-    """
-    if metric_source == "training":
-        return training_metrics[metric_name]
-    elif metric_source == "eval":
-        if eval_metrics is None:
-            raise ValueError("Evaluation metrics not available for eval source")
-        # Map to evaluation metric keys (use IN-distribution evaluation for consistency)
-        eval_key_map = {
-            "loss": "eval_in/final_loss",
-            "hard_loss": "eval_in/final_hard_loss",
-            "accuracy": "eval_in/final_accuracy",
-            "hard_accuracy": "eval_in/final_hard_accuracy",
-        }
-        return eval_metrics[eval_key_map[metric_name]]
-    elif metric_source == "eval_ko_in":
-        if eval_metrics is None:
-            raise ValueError("Knockout evaluation metrics not available for eval_ko_in source")
-        # Map to knockout evaluation metric keys
-        eval_key_map = {
-            "loss": "eval_ko_in/final_loss",
-            "hard_loss": "eval_ko_in/final_hard_loss",
-            "accuracy": "eval_ko_in/final_accuracy",
-            "hard_accuracy": "eval_ko_in/final_hard_accuracy",
-        }
-        return eval_metrics[eval_key_map[metric_name]]
-    else:
-        raise ValueError(f"Unknown metric source: {metric_source}")
 
 def run_knockout_periodic_evaluation(
     model,
@@ -1780,7 +1483,7 @@ def train_model(
 
 
     # Setup checkpointing directory
-    checkpoint_path = _setup_checkpoint_dir(checkpoint_dir, wandb_id)
+    checkpoint_path = setup_checkpoint_dir(checkpoint_dir, wandb_id)
 
     # Track best model
     best_metric_value = float("-inf") if "accuracy" in best_metric else float("inf")
@@ -2027,7 +1730,7 @@ def train_model(
             if jp.isnan(loss):
                 log.warning(f"Loss is NaN at epoch {epoch}, returning last stable state")
                 # Save the last stable state if enabled
-                _save_stable_state(
+                save_stable_state(
                     checkpoint_path,
                     save_stable_states,
                     last_stable_state,
@@ -2202,7 +1905,7 @@ def train_model(
 
                 # Step 3: Get current metric value for best model tracking using modular approach
                 try:
-                    current_metric_value = _get_metric_value(
+                    current_metric_value = get_metric_value(
                         best_metric,
                         best_metric_source,
                         training_metrics,
@@ -2214,7 +1917,7 @@ def train_model(
                             f"Best metric source is 'eval' but periodic evaluation is disabled. "
                             f"Falling back to training metrics for {best_metric}."
                         )
-                        current_metric_value = _get_metric_value(
+                        current_metric_value = get_metric_value(
                             best_metric,
                             "training",
                             training_metrics,
@@ -2240,7 +1943,7 @@ def train_model(
 
                 # Step 4: Save checkpoints (periodic always, best if improvement detected)
                 if checkpoint_enabled:
-                    _save_periodic_checkpoint(
+                    save_periodic_checkpoint(
                         checkpoint_path,
                         model,
                         optimizer,
@@ -2257,7 +1960,7 @@ def train_model(
                     )
 
                     # Save best model if enabled and is best
-                    _save_best_checkpoint(
+                    save_best_checkpoint(
                         checkpoint_path,
                         is_best,
                         save_best,
@@ -2286,7 +1989,7 @@ def train_model(
                     first_threshold_epoch,
                     current_eval_metrics,
                     rng,
-                ) = _check_early_stopping(
+                ) = check_early_stopping(
                     stop_accuracy_enabled=stop_accuracy_enabled,
                     epoch=epoch,
                     stop_accuracy_min_epochs=stop_accuracy_min_epochs,

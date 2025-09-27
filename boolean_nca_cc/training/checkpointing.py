@@ -305,7 +305,7 @@ def instantiate_model_from_config(config, seed=0):
 
         if config.circuit.layer_sizes is None:
             layer_sizes = generate_layer_sizes(
-                input_n, output_n, arity, layer_n=config.circuit.num_layers
+                input_n, output_n, arity, layer_n=config.circuit.num_layers,
             )
         else:
             layer_sizes = config.circuit.layer_sizes
@@ -425,13 +425,14 @@ def load_config_from_wandb(
     project: str = "boolean-nca-cc",
     entity: str = "marcello-barylli-growai",
     download_dir: str = "saves",
-    filename: str = "best_model_hard_accuracy",
+    filename: str = "best_model",
     filetype: str = "pkl",
     run_from_last: int = 1,
     use_cache: bool = True,
     force_download: bool = False,
     select_by_best_metric: bool = False,
-    metric_name: str = "hard_accuracy",
+    metric_name: str = "eval_ko_in/final_hard_accuracy",
+    prefer_metric: str | None = None,
 ) -> tuple[Any, str, str]:
     """
     Load config and checkpoint information from WandB artifacts.
@@ -563,20 +564,39 @@ def load_config_from_wandb(
 
     if not best_models:
         log.info(f"No artifacts found matching '{filename}'")
-        # Try to find any model artifacts
-        model_artifacts = [a for a in artifacts if "model" in a.name.lower()]
-        if model_artifacts:
-            log.info("Found other model artifacts:")
-            for a in model_artifacts:
-                log.info(f"  - {a.name}")
-            raise ValueError(
-                f"No {filename} artifacts found for run {run.id}, but found other model artifacts. Please check the artifact names."
-            )
+        # Fallback: try latest checkpoint artifacts
+        latest_ckpts = [a for a in artifacts if "latest_checkpoint" in a.name]
+        if latest_ckpts:
+            # Pick the most recent one (artifacts are usually in chronological order)
+            selected_artifact = latest_ckpts[-1]
+            log.info(f"Falling back to latest checkpoint artifact: {selected_artifact.name}")
         else:
-            raise ValueError(f"No model artifacts found for run {run.id}")
+            # Try to find any model artifacts for better error reporting
+            model_artifacts = [a for a in artifacts if "model" in a.name.lower()]
+            if model_artifacts:
+                log.info("Found other model artifacts:")
+                for a in model_artifacts:
+                    log.info(f"  - {a.name}")
+                raise ValueError(
+                    f"No {filename} or latest_checkpoint artifacts found for run {run.id},"
+                    " but found other model artifacts. Please check the artifact names."
+                )
+            else:
+                raise ValueError(f"No model artifacts found for run {run.id}")
+    else:
+        # Intelligent selection of best model artifact
+        if len(best_models) == 1:
+            selected_artifact = best_models[0]
+            log.info(f"Found single best model artifact: {selected_artifact.name}")
+        else:
+            log.info(f"Found {len(best_models)} best model artifacts:")
+            for a in best_models:
+                log.info(f"  - {a.name}")
 
-    latest_best = best_models[-1]
-    log.info(f"Found best model artifact: {latest_best.name}")
+            selected_artifact = _select_best_artifact(best_models, prefer_metric)
+            log.info(f"Selected best model artifact: {selected_artifact.name}")
+
+    latest_best = selected_artifact
 
     # Create download directory if it doesn't exist
     download_path = os.path.join(download_dir, f"run_{run.id}")
@@ -646,13 +666,14 @@ def load_best_model_from_wandb(
     project: str = "boolean-nca-cc",
     entity: str = "marcello-barylli-growai",
     download_dir: str = "saves",
-    filename: str = "best_model_eval_ko_hard_accuracy",
+    filename: str = "best_model",
     filetype: str = "pkl",
     run_from_last: int = 1,
     use_cache: bool = True,
     force_download: bool = False,
     select_by_best_metric: bool = False,
-    metric_name: str = "hard_accuracy",
+    metric_name: str = "eval_ko_in/final_hard_accuracy",
+    prefer_metric: str | None = None,
 ) -> tuple[Any, dict[str, Any], Any]:
     """
     Load the best model from WandB artifacts with full backward compatibility.
@@ -683,6 +704,11 @@ def load_best_model_from_wandb(
         full loaded state, and the complete hydra config used during training
     """
 
+    # For backward compatibility, if filename is the old style, update it to be more generic
+    if filename == "best_model_hard_accuracy":
+        log.info("Detected old-style filename, updating to generic 'best_model' for compatibility")
+        filename = "best_model"
+
     # Load config and checkpoint information
     config, checkpoint_path, run_id = load_config_from_wandb(
         run_id=run_id,
@@ -697,6 +723,7 @@ def load_best_model_from_wandb(
         force_download=force_download,
         select_by_best_metric=select_by_best_metric,
         metric_name=metric_name,
+        prefer_metric=prefer_metric,
     )
 
     # Load model from config and checkpoint
@@ -708,3 +735,562 @@ def load_best_model_from_wandb(
     )
 
     return model, loaded_dict, config
+
+
+# Best Model Tracking and Checkpointing Functions
+
+
+class BestModelTracker:
+    """
+    Unified best model tracker that can handle multiple metrics and save the best models.
+
+    This class tracks the best models for different metrics (e.g., in-distribution vs out-of-distribution)
+    and saves checkpoints when improvements are detected.
+    """
+
+    def __init__(self):
+        self.best_metrics = {}  # metric_key -> best_value
+        self.best_epochs = {}  # metric_key -> epoch when best was achieved
+
+    def add_metric(self, metric_key: str, initial_value: float = None):
+        """Add a new metric to track."""
+        if initial_value is None:
+            # Default to worst possible value based on metric type
+            initial_value = float("-inf") if "accuracy" in metric_key.lower() else float("inf")
+
+        self.best_metrics[metric_key] = initial_value
+        self.best_epochs[metric_key] = -1
+
+    def is_better(self, metric_key: str, current_value: float) -> bool:
+        """Check if current value is better than the best for this metric."""
+        if metric_key not in self.best_metrics:
+            self.add_metric(metric_key)
+
+        best_value = self.best_metrics[metric_key]
+
+        if "accuracy" in metric_key.lower():
+            return current_value > best_value  # Higher is better
+        else:
+            return current_value < best_value  # Lower is better
+
+    def update(self, metric_key: str, current_value: float, epoch: int) -> bool:
+        """Update the best value if current is better. Returns True if updated."""
+        if self.is_better(metric_key, current_value):
+            self.best_metrics[metric_key] = current_value
+            self.best_epochs[metric_key] = epoch
+            return True
+        return False
+
+    def get_best_value(self, metric_key: str) -> float:
+        """Get the best value for a metric."""
+        return self.best_metrics.get(
+            metric_key, float("-inf") if "accuracy" in metric_key.lower() else float("inf")
+        )
+
+    def get_best_epoch(self, metric_key: str) -> int:
+        """Get the epoch when the best value was achieved."""
+        return self.best_epochs.get(metric_key, -1)
+
+
+def get_metric_value(
+    metric_name: str,
+    metric_source: str,
+    training_metrics: dict,
+    eval_metrics: dict | None = None,
+) -> float:
+    """
+    Get metric value from the appropriate source.
+
+    Args:
+        metric_name: Name of the metric ('loss', 'hard_loss', 'accuracy', 'hard_accuracy')
+        metric_source: Source of the metric ('training' or 'eval')
+        training_metrics: Dictionary with training metrics
+        eval_metrics: Dictionary with evaluation metrics (optional)
+
+    Returns:
+        The metric value as a float
+    """
+    if metric_source == "training":
+        return training_metrics[metric_name]
+    elif metric_source == "eval":
+        if eval_metrics is None:
+            raise ValueError("Evaluation metrics not available for eval source")
+
+        # Map to evaluation metric keys (use IN-distribution evaluation for consistency)
+        eval_key_map = {
+            "loss": "eval_ko_in/final_loss",
+            "hard_loss": "eval_ko_in/final_hard_loss",
+            "accuracy": "eval_ko_in/final_accuracy",
+            "hard_accuracy": "eval_ko_in/final_hard_accuracy",
+        }
+
+        # Fallback map to OUT-of-distribution evaluation metrics
+        eval_out_key_map = {
+            "loss": "eval_ko_out/final_loss",
+            "hard_loss": "eval_ko_out/final_hard_loss",
+            "accuracy": "eval_ko_out/final_accuracy",
+            "hard_accuracy": "eval_ko_out/final_hard_accuracy",
+        }
+
+        # Try IN-distribution metrics first, fallback to OUT-of-distribution if not available
+        primary_key = eval_key_map[metric_name]
+        fallback_key = eval_out_key_map[metric_name]
+
+        if primary_key in eval_metrics:
+            return eval_metrics[primary_key]
+        elif fallback_key in eval_metrics:
+            return eval_metrics[fallback_key]
+        else:
+            raise KeyError(f"Neither {primary_key} nor {fallback_key} found in evaluation metrics")
+    elif metric_source == "eval_ko_in":
+        if eval_metrics is None:
+            raise ValueError("Knockout evaluation metrics not available for eval_ko_in source")
+        # Map to knockout evaluation metric keys
+        eval_key_map = {
+            "loss": "eval_ko_in/final_loss",
+            "hard_loss": "eval_ko_in/final_hard_loss",
+            "accuracy": "eval_ko_in/final_accuracy",
+            "hard_accuracy": "eval_ko_in/final_hard_accuracy",
+        }
+        return eval_metrics[eval_key_map[metric_name]]
+    else:
+        raise ValueError(f"Unknown metric source: {metric_source}")
+
+
+def setup_checkpoint_dir(checkpoint_dir: str | None, wandb_id: str | None) -> str | None:
+    """Setup checkpoint directory with unique identifier."""
+    if checkpoint_dir is None:
+        return None
+
+    # Create unique checkpoint directory using wandb ID or timestamp
+    from datetime import datetime
+    unique_id = wandb_id if wandb_id else datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    checkpoint_path = os.path.join(checkpoint_dir, f"run_{unique_id}")
+    os.makedirs(checkpoint_path, exist_ok=True)
+    log.info(f"Checkpoints will be saved to: {checkpoint_path}")
+
+    return checkpoint_path
+
+
+def save_periodic_checkpoint(
+    checkpoint_path: str,
+    model,
+    optimizer,
+    metrics: dict,
+    epoch: int,
+    checkpoint_interval: int,
+    wandb_run=None,
+) -> None:
+    """Save periodic checkpoint if interval allows."""
+    if checkpoint_path is None or epoch == 0 or epoch % checkpoint_interval != 0:
+        return
+
+    ckpt_filename = "latest_checkpoint.pkl"
+
+    try:
+        save_checkpoint(
+            model,
+            optimizer,
+            metrics,
+            {"epoch": epoch},
+            epoch,
+            checkpoint_path,
+            filename=ckpt_filename,
+        )
+
+        # Log to wandb if enabled
+        if wandb_run:
+            wandb_run.save(os.path.join(checkpoint_path, ckpt_filename))
+
+            # Also log this as an artifact for better tracking in wandb
+            try:
+                artifact = wandb_run.Artifact("latest_checkpoint", type="model")
+                artifact.add_file(os.path.join(checkpoint_path, ckpt_filename))
+                wandb_run.log_artifact(artifact)
+            except Exception as e:
+                log.warning(f"Error logging checkpoint as artifact: {e}")
+
+    except Exception as e:
+        log.warning(f"Error saving checkpoint: {e}")
+
+
+def save_best_checkpoint(
+    checkpoint_path: str,
+    is_best: bool,
+    save_best: bool,
+    model,
+    optimizer,
+    metrics: dict,
+    epoch: int,
+    best_metric: str,
+    current_metric_value: float,
+    wandb_run=None,
+) -> None:
+    """Save best checkpoint if enabled and is best."""
+    if not (checkpoint_path and save_best and is_best):
+        return
+
+    # Use a consistent filename for the best model regardless of metric
+    # This ensures compatibility with loading logic that expects "best_model.pkl"
+    best_filename = "best_model.pkl"
+    log.info(
+        f"Saving best model at epoch {epoch} with {best_metric}={current_metric_value:.4f}"
+    )
+
+    try:
+        save_checkpoint(
+            model,
+            optimizer,
+            metrics,
+            {"epoch": epoch, f"best_{best_metric}": current_metric_value},
+            epoch,
+            checkpoint_path,
+            filename=best_filename,
+        )
+
+        # Log to wandb if enabled
+        if wandb_run:
+            wandb_run.log({f"best/{best_metric}": current_metric_value, "best/epoch": epoch})
+
+            # Save the best model to wandb (will overwrite the previous best)
+            wandb_run.save(os.path.join(checkpoint_path, best_filename))
+
+            # Also log this as an artifact for better tracking in wandb
+            try:
+                artifact = wandb_run.Artifact("best_model", type="model")
+                artifact.add_file(os.path.join(checkpoint_path, best_filename))
+                wandb_run.log_artifact(artifact)
+            except Exception as e:
+                log.warning(f"Error logging best model as artifact: {e}")
+    except Exception as e:
+        log.warning(f"Error saving best checkpoint: {e}")
+
+
+def save_stable_state(
+    checkpoint_path: str,
+    save_stable_states: bool,
+    last_stable_state: dict,
+    epoch: int,
+    wandb_run=None,
+) -> None:
+    """Save the last stable state before NaN loss."""
+    if not (checkpoint_path and save_stable_states):
+        return
+
+    try:
+        stable_path = os.path.join(checkpoint_path, f"stable_state_epoch_{epoch - 1}.pkl")
+        save_checkpoint(
+            last_stable_state["model"],
+            last_stable_state["optimizer"],
+            last_stable_state["metrics"],
+            {"epoch": epoch - 1},
+            epoch - 1,
+            os.path.dirname(stable_path),
+            filename=os.path.basename(stable_path),
+        )
+
+        # Log to wandb if enabled
+        if wandb_run:
+            wandb_run.log({"training/early_stop_epoch": epoch - 1})
+            wandb_run.alert(
+                title="Training Stopped - NaN Loss",
+                text=f"Training stopped at epoch {epoch} due to NaN loss. Last stable state saved.",
+                level=wandb_run.AlertLevel.WARN,
+            )
+    except Exception as e:
+        log.warning(f"Error saving stable state: {e}")
+
+
+def track_and_save_best_models(
+    best_model_tracker: BestModelTracker,
+    checkpoint_path: str | None,
+    save_best: bool,
+    model,
+    optimizer,
+    metrics: dict,
+    epoch: int,
+    training_metrics: dict | None = None,
+    eval_metrics: dict | None = None,
+    wandb_run=None,
+    track_metrics: list[str] | None = None,
+) -> dict:
+    """
+    Unified function to track and save best models for multiple metrics.
+
+    This function can handle both training and evaluation metrics, and track
+    the best models for both in-distribution and out-of-distribution evaluations.
+
+    Args:
+        best_model_tracker: BestModelTracker instance
+        checkpoint_path: Path to save checkpoints
+        save_best: Whether to save best models
+        model: Model to save
+        optimizer: Optimizer to save
+        metrics: Training metrics to save with checkpoint
+        epoch: Current epoch
+        training_metrics: Training metrics dict (optional)
+        eval_metrics: Evaluation metrics dict (optional)
+        wandb_run: WandB run object (optional)
+        track_metrics: List of specific metrics to track in format "source_metric"
+                      (e.g., ["eval_ko_in_hard_accuracy", "eval_ko_out_hard_accuracy"]).
+                      If None, tracks all available metrics.
+
+    Returns:
+        Dictionary with information about which models were updated
+    """
+    updates = {}
+
+    # Collect all available metrics
+    available_metrics = []
+
+    # Add training metrics if available
+    if training_metrics:
+        for metric in ["hard_accuracy", "accuracy", "hard_loss", "loss"]:
+            if metric in training_metrics:
+                available_metrics.append(("training", metric, training_metrics[metric]))
+
+    # Add evaluation metrics if available
+    if eval_metrics:
+        # In-distribution metrics
+        for metric in ["hard_accuracy", "accuracy", "hard_loss", "loss"]:
+            eval_key = f"eval_ko_in/final_{metric}"
+            if eval_key in eval_metrics:
+                available_metrics.append(("eval_ko_in", metric, eval_metrics[eval_key]))
+
+        # Out-of-distribution metrics
+        for metric in ["hard_accuracy", "accuracy", "hard_loss", "loss"]:
+            eval_key = f"eval_ko_out/final_{metric}"
+            if eval_key in eval_metrics:
+                available_metrics.append(("eval_ko_out", metric, eval_metrics[eval_key]))
+
+    # Filter metrics to track based on configuration
+    if track_metrics is not None:
+        # Only track specified metrics
+        metrics_to_track = []
+        for source, metric, value in available_metrics:
+            metric_key = f"{source}_{metric}"
+            if metric_key in track_metrics:
+                metrics_to_track.append((source, metric, value))
+    else:
+        # Track all available metrics (backward compatibility)
+        metrics_to_track = available_metrics
+
+    # Track and save best models for each specified metric
+    for source, metric, value in metrics_to_track:
+        metric_key = f"{source}_{metric}"
+
+        # Check if this is a new best
+        if best_model_tracker.update(metric_key, value, epoch):
+            updates[metric_key] = {
+                "value": value,
+                "epoch": epoch,
+                "previous_best": best_model_tracker.get_best_value(metric_key),
+            }
+
+            # Save best checkpoint
+            save_best_checkpoint(
+                checkpoint_path=checkpoint_path,
+                is_best=True,
+                save_best=save_best,
+                model=model,
+                optimizer=optimizer,
+                metrics=metrics,
+                epoch=epoch,
+                best_metric=metric_key,
+                current_metric_value=value,
+                wandb_run=wandb_run,
+            )
+
+            log.info(f"New best {metric_key}: {value:.4f} at epoch {epoch}")
+
+    return updates
+
+
+def check_early_stopping(
+    stop_accuracy_enabled: bool,
+    epoch: int,
+    stop_accuracy_min_epochs: int,
+    early_stop_triggered: bool,
+    stop_accuracy_metric: str,
+    stop_accuracy_source: str,
+    training_metrics: dict,
+    current_eval_metrics: dict | None,
+    stop_accuracy_threshold: float,
+    first_threshold_epoch: int | None,
+    epochs_above_threshold: int,
+    stop_accuracy_patience: int,
+    rng: jax.random.PRNGKey,
+) -> tuple[bool, bool, int, int | None, dict | None, jax.random.PRNGKey]:
+    """
+    Check early stopping conditions and handle early stopping logic.
+
+    Returns:
+        Tuple of (should_break, early_stop_triggered, epochs_above_threshold,
+                 first_threshold_epoch, updated_current_eval_metrics, updated_rng)
+    """
+    if not stop_accuracy_enabled or early_stop_triggered:
+        return (
+            False,
+            early_stop_triggered,
+            epochs_above_threshold,
+            first_threshold_epoch,
+            current_eval_metrics,
+            rng,
+        )
+
+    # Get the accuracy value for early stopping
+    try:
+        stop_accuracy_value = get_metric_value(
+            stop_accuracy_metric,
+            stop_accuracy_source,
+            training_metrics,
+            current_eval_metrics,
+        )
+    except (ValueError, KeyError):
+        if stop_accuracy_source == "eval" and current_eval_metrics is None:
+            # Evaluation metrics not available, skip early stopping check this epoch
+            stop_accuracy_value = None
+        else:
+            # Fallback to training metrics if eval not available
+            stop_accuracy_value = get_metric_value(
+                stop_accuracy_metric,
+                "training",
+                training_metrics,
+                current_eval_metrics,
+            )
+
+    if stop_accuracy_value is None:
+        return (
+            False,
+            early_stop_triggered,
+            epochs_above_threshold,
+            first_threshold_epoch,
+            current_eval_metrics,
+            rng,
+        )
+
+    if stop_accuracy_value >= stop_accuracy_threshold:
+        if first_threshold_epoch is None:
+            first_threshold_epoch = epoch
+            log.info(
+                f"Reached accuracy threshold {stop_accuracy_threshold:.4f} "
+                f"({stop_accuracy_source}_{stop_accuracy_metric}={stop_accuracy_value:.4f}) "
+                f"at epoch {epoch}. Starting patience countdown."
+            )
+        epochs_above_threshold += 1
+
+        # Check if we should stop (only after minimum epochs requirement is met)
+        if epochs_above_threshold >= stop_accuracy_patience and epoch >= stop_accuracy_min_epochs:
+            early_stop_triggered = True
+            log.info(
+                f"Early stopping triggered! "
+                f"Accuracy {stop_accuracy_source}_{stop_accuracy_metric}={stop_accuracy_value:.4f} "
+                f"has been above threshold {stop_accuracy_threshold:.4f} "
+                f"for {stop_accuracy_patience} epochs. "
+                f"Stopping at epoch {epoch}."
+            )
+
+            return (
+                True,
+                early_stop_triggered,
+                epochs_above_threshold,
+                first_threshold_epoch,
+                current_eval_metrics,
+                rng,
+            )
+        elif epochs_above_threshold >= stop_accuracy_patience and epoch < stop_accuracy_min_epochs:
+            # Would stop but waiting for minimum epochs
+            pass
+    else:
+        # Reset counter if accuracy drops below threshold
+        if epochs_above_threshold > 0:
+            log.info("Accuracy dropped below threshold. Resetting early stopping counter.")
+        epochs_above_threshold = 0
+        first_threshold_epoch = None
+
+    return (
+        False,
+        early_stop_triggered,
+        epochs_above_threshold,
+        first_threshold_epoch,
+        current_eval_metrics,
+        rng,
+    )
+
+
+# WandB integration functions
+def _select_best_artifact(artifacts: list, prefer_metric: str | None = None):
+    """
+    Intelligently select the best artifact from multiple best model artifacts.
+
+    Args:
+        artifacts: List of WandB artifacts to choose from
+        prefer_metric: Optional specific metric to prefer (e.g., "eval_ko_in_hard_accuracy")
+
+    Returns:
+        Selected artifact
+    """
+    if not artifacts:
+        raise ValueError("No artifacts provided for selection")
+
+    if len(artifacts) == 1:
+        return artifacts[0]
+
+    # Extract metric names from artifact names
+    artifact_metrics = []
+    for artifact in artifacts:
+        # Extract metric from artifact name (e.g., "best_model_eval_ko_in_hard_accuracy" -> "eval_ko_in_hard_accuracy")
+        name_parts = artifact.name.split("best_model_")
+        if len(name_parts) > 1:
+            metric_part = name_parts[1]
+            # Remove version suffix if present (e.g., ":v0")
+            if ":" in metric_part:
+                metric_part = metric_part.split(":")[0]
+            artifact_metrics.append((artifact, metric_part))
+        else:
+            # Fallback for artifacts that don't follow the new naming scheme
+            artifact_metrics.append((artifact, "unknown"))
+
+    # If a specific metric is preferred, try to find it
+    if prefer_metric:
+        for artifact, metric in artifact_metrics:
+            if metric == prefer_metric:
+                log.info(f"Found preferred metric '{prefer_metric}' in artifact: {artifact.name}")
+                return artifact
+        log.warning(f"Preferred metric '{prefer_metric}' not found, using intelligent selection")
+
+    # Intelligent selection priority:
+    # 1. Eval metrics over training metrics
+    # 2. Hard metrics over soft metrics
+    # 3. In-distribution over out-of-distribution
+    # 4. Accuracy over loss
+
+    def metric_priority(metric: str) -> tuple[int, int, int, int]:
+        """Calculate priority score for a metric (lower is better)."""
+        # Eval vs training (0 = eval, 1 = training)
+        eval_score = 0 if metric.startswith("eval") else 1
+
+        # Hard vs soft (0 = hard, 1 = soft)
+        hard_score = 0 if "hard" in metric else 1
+
+        # In vs out distribution (0 = in, 1 = out, 2 = neither)
+        if "eval_ko_in" in metric:
+            dist_score = 0
+        elif "eval_ko_out" in metric:
+            dist_score = 1
+        else:
+            dist_score = 2
+
+        # Accuracy vs loss (0 = accuracy, 1 = loss)
+        acc_score = 0 if "accuracy" in metric else 1
+
+        return (eval_score, hard_score, dist_score, acc_score)
+
+    # Sort artifacts by priority
+    artifact_metrics.sort(key=lambda x: metric_priority(x[1]))
+
+    selected_artifact, selected_metric = artifact_metrics[0]
+    log.info(f"Selected artifact with metric '{selected_metric}' using intelligent priority")
+
+    return selected_artifact

@@ -34,9 +34,15 @@ Reuse the existing "reset → reinit generator" flow. For damage, "bake" the kno
 
 ### One-button flow ✅ PARTIALLY COMPLETED
 - Dropdown: `perturbation_types = ["Wire Shuffle", "GAMMA RAYS"]` ✅ COMPLETED
+- Damage baking path (`_apply_gate_damage_perturbation`) ✅ COMPLETED
+  - Resets logs and restores `logits0` ✅ COMPLETED
+  - Samples pattern and builds masks ✅ COMPLETED
+  - Applies bias into damaged logits ✅ COMPLETED
+  - Reinitializes generator and activations ✅ COMPLETED
+  - Reads `damage_prob`, `greedy_ordered_indices`, and `damage_seed` from config ✅ COMPLETED
 - Button: "PERTURB" ⏳ PENDING
   - Wire Shuffle: call existing mutation (unchanged)
-  - GAMMA RAYS: reset to baseline logits, sample a pattern, apply it into logits, reinit generator (exactly like wire shuffle does after changing `wires`)
+  - GAMMA RAYS: call `_apply_gate_damage_perturbation` (pending one-button hookup)
 
 ### Implementation sketch (GUI-only)
 ```python

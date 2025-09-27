@@ -10,6 +10,7 @@ No model training occurs - only circuit logit optimization.
 """
 
 import logging
+import yaml
 
 import IPython
 import jax
@@ -40,6 +41,9 @@ from boolean_nca_cc.training.checkpointing import (
 from boolean_nca_cc.training.evaluation import (
     evaluate_model_stepwise_generator,
     get_loss_from_wires_logits,
+)
+from boolean_nca_cc.training.preconfigure import (
+    preconfigure_circuit_logits,
 )
 
 # Import structural perturbation utilities for GAMMA RAYS mode
@@ -148,6 +152,59 @@ def zoom(a, k=2):
     return np.repeat(np.repeat(a, k, 1), k, 0)
 
 
+def mutate_wires_swap(wires, key, mutation_rate=0.05, n_swaps_per_layer=None):
+    """
+    Mutate wires by swapping connections within each layer.
+    
+    Args:
+        wires: List of wire arrays for each layer
+        key: JAX random key
+        mutation_rate: Probability of mutation per layer
+        n_swaps_per_layer: Number of swaps per layer (if None, calculated from mutation_rate)
+    
+    Returns:
+        List of mutated wire arrays
+    """
+    mutated_wires = []
+    
+    for i, wire_layer in enumerate(wires):
+        key, subkey = jax.random.split(key)
+        
+        # Calculate number of swaps for this layer
+        if n_swaps_per_layer is None:
+            # Calculate based on mutation_rate
+            total_connections = wire_layer.size
+            n_swaps = int(total_connections * mutation_rate)
+        else:
+            n_swaps = n_swaps_per_layer
+        
+        if n_swaps == 0 or wire_layer.size < 2:
+            # No swaps possible or needed
+            mutated_wires.append(wire_layer.copy())
+            continue
+        
+        # Flatten the wire layer for easier manipulation
+        flat_wires = wire_layer.flatten()
+        
+        # Perform swaps
+        for _ in range(n_swaps):
+            if len(flat_wires) < 2:
+                break
+                
+            # Choose two different indices to swap
+            key, subkey = jax.random.split(key)
+            indices = jax.random.choice(subkey, len(flat_wires), shape=(2,), replace=False)
+            
+            # Swap the values
+            flat_wires = flat_wires.at[indices[0]].set(wire_layer.flatten()[indices[1]])
+            flat_wires = flat_wires.at[indices[1]].set(wire_layer.flatten()[indices[0]])
+        
+        # Reshape back to original shape
+        mutated_wires.append(flat_wires.reshape(wire_layer.shape))
+    
+    return mutated_wires
+
+
 def unpack(x, bit_n=8):
     """Unpack integers to binary representation"""
     return (x[..., None] >> np.r_[:bit_n]) & 1
@@ -178,35 +235,55 @@ class CircuitOptimizationDemo:
 
         # Wiring configuration
         self.wiring_modes = ["fixed", "random"]
-        self.wiring_mode_idx = 1
+        self.wiring_mode_idx = 0  # fixed (matches config.yaml training pattern)
         self.wiring_mode = self.wiring_modes[self.wiring_mode_idx]
-        self.wiring_seed = 42  # Direct control over wiring seed
+        self.wiring_seed = 42  # Will be set from training config if available
         self.wiring_key = jax.random.PRNGKey(self.wiring_seed)
 
         # Training-consistent wire generation
         self.initial_diversity = 1  # Number of different wirings to use (like in training)
-        self.evaluation_base_seed = 42  # Base seed for evaluation datasets
-        self.use_training_wires = False  # Whether to use training-consistent wire generation
+        self.evaluation_base_seed = 42  # Will be set from training config if available
+        self.use_training_wires = True  # Mirror training default of fixed wiring key
         self.distribution_modes = ["IN-distribution", "OUT-of-distribution"]
         self.distribution_mode_idx = 0  # Default to IN-distribution
         self.current_wire_idx = 0  # Index of current wire within the distribution
         self.available_wires = []  # List of available wire sets for current distribution
         self.available_logits = []  # List of available logit sets for current distribution
+        self.damage_seed = 481  # Will be set from training config if available
+        self.greedy_ordered_indices = None  # Prefer from training config
+        self.default_damage_prob = None  # Prefer from training config
+        self.training_mode = "repair"  # Will be set from config
+        # Preconfiguration params (used in repair mode)
+        self.preconfig_steps = 200
+        self.preconfig_lr = 1.0
+        self.preconfig_optimizer = "adamw"
+        self.preconfig_weight_decay = 0.0
+        self.preconfig_beta1 = 0.9
+        self.preconfig_beta2 = 0.999
 
         # Optimization configuration
         self.loss_type = "l4"
         self.learning_rate = 1.0  # Learning rate for backprop
         self.n_message_steps = 1
 
-        # Initialize circuit using shared functions
-        self.initialize_circuit()
+        # Load training config defaults (circuit, seeds, loss, damage, mode)
+        self._load_training_config_defaults()
 
-        # Task configuration
+        # Task configuration (ensure we have task to build x/y for preconfigure)
         self.available_tasks = list(TASKS.keys())
-        self.task_idx = 6
+        if not hasattr(self, "task_idx") or not (0 <= getattr(self, "task_idx", -1) < len(self.available_tasks)):
+            self.task_idx = (
+                self.available_tasks.index("binary_multiply")
+                if "binary_multiply" in self.available_tasks
+                else 0
+            )
         self.task_text = "Hello Neural CA"  # Shorter text works better with performance mode
         self.noise_p = 0.5
-        self.update_task()
+        # Initialize circuit using shared functions (may preconfigure in repair mode)
+        self.initialize_circuit()
+
+        # Now that circuit exists, initialize task and visuals safely
+        self.update_task(reset_logs=False)
 
         # Optimization state
         self.step_i = 0
@@ -268,7 +345,7 @@ class CircuitOptimizationDemo:
         self.active_case_i = 123 % self.case_n
 
         # WandB integration
-        self.wandb_entity = "m2snn"
+        self.wandb_entity = "marcello-barylli-growai"  # matches config.yaml
         self.wandb_project = "boolean-nca-cc"
         self.wandb_download_dir = "saves"
         self.run_id = None
@@ -291,12 +368,63 @@ class CircuitOptimizationDemo:
         # Initialize activations now that everything is set up
         self.initialize_activations()
 
+    def _load_training_config_defaults(self):
+        """Load defaults from training config.yaml and apply to GUI state."""
+        try:
+            with open("configs/config.yaml", "r") as f:
+                cfg = yaml.safe_load(f)
+
+            # Circuit
+            circuit_cfg = cfg.get("circuit", {})
+            self.input_n = circuit_cfg.get("input_bits", self.input_n)
+            self.output_n = circuit_cfg.get("output_bits", self.output_n)
+            self.arity = circuit_cfg.get("arity", self.arity)
+            self.layer_n = circuit_cfg.get("num_layers", self.layer_n)
+
+            # Loss
+            training_cfg = cfg.get("training", {})
+            self.loss_type = training_cfg.get("loss_type", self.loss_type)
+            self.training_mode = training_cfg.get("training_mode", self.training_mode)
+
+            # Seeds
+            self.wiring_seed = cfg.get("test_seed", self.wiring_seed)
+            self.wiring_key = jax.random.PRNGKey(self.wiring_seed)
+            self.evaluation_base_seed = cfg.get("test_seed", self.evaluation_base_seed)
+            self.damage_seed = cfg.get("damage_seed", self.damage_seed)
+
+            # Damage defaults
+            pool_cfg = cfg.get("pool", {})
+            self.default_damage_prob = pool_cfg.get("damage_prob", self.default_damage_prob)
+            self.greedy_ordered_indices = pool_cfg.get(
+                "greedy_ordered_indices", DEFAULT_GREEDY_ORDERED_INDICES
+            )
+
+            # Preconfiguration params (from backprop block)
+            backprop_cfg = cfg.get("backprop", {})
+            self.preconfig_steps = int(backprop_cfg.get("epochs", self.preconfig_steps))
+            self.preconfig_lr = float(backprop_cfg.get("learning_rate", self.preconfig_lr))
+            self.preconfig_optimizer = backprop_cfg.get("optimizer", self.preconfig_optimizer)
+            self.preconfig_weight_decay = float(backprop_cfg.get("weight_decay", self.preconfig_weight_decay))
+            self.preconfig_beta1 = float(backprop_cfg.get("beta1", self.preconfig_beta1))
+            self.preconfig_beta2 = float(backprop_cfg.get("beta2", self.preconfig_beta2))
+
+            # Task
+            task_name = circuit_cfg.get("task")
+            if task_name and task_name in TASKS:
+                self.available_tasks = list(TASKS.keys())
+                self.task_idx = self.available_tasks.index(task_name)
+
+            # Case count
+            self.case_n = 1 << self.input_n
+        except Exception as e:
+            print(f"Warning: Could not load training config defaults: {e}")
+
     def initialize_circuit(self):
         """Initialize circuit using shared infrastructure"""
         # Generate layer sizes using shared function
-        self.layer_sizes = generate_layer_sizes(
-            self.input_n, self.output_n, self.arity, self.layer_n, self.width_factor
-        )
+        self.layer_sizes = list(generate_layer_sizes(
+            self.input_n, self.output_n, self.arity, self.layer_n
+        ))
 
         if self.use_training_wires and self.wiring_mode == "fixed":
             # Use training-consistent wire generation
@@ -337,36 +465,63 @@ class CircuitOptimizationDemo:
                 # Use IN-distribution (matches training pattern)
                 wiring_mode = "fixed"
                 initial_diversity = self.initial_diversity
-                base_seed = self.evaluation_base_seed
+                # Match training: use test_seed as wiring_fixed_key
+                base_seed = self.wiring_seed
             else:
                 # Use OUT-of-distribution (always random)
                 wiring_mode = "random"
                 initial_diversity = 16  # Use higher diversity for OOD
                 base_seed = self.evaluation_base_seed + 10000
 
-            # Create wire batch using simple inline implementation
+            # Create wire batch using gen_circuit or preconfigure depending on training_mode
             batch_wires = []
             batch_logits = []
             
             for i in range(initial_diversity):
                 # Generate each circuit with a different seed
                 circuit_key = jax.random.PRNGKey(base_seed + i)
-                wires, logits = gen_circuit(
-                    circuit_key, self.layer_sizes, arity=self.arity
-                )
-                batch_wires.append(wires)
-                batch_logits.append(logits)
+                if self.training_mode == "repair" and wiring_mode == "fixed":
+                    # Ensure we have task data available for preconfigure
+                    if not hasattr(self, "input_x") or not hasattr(self, "y0"):
+                        task_name = self.available_tasks[self.task_idx]
+                        task_kwargs = {"input_bits": self.input_n, "output_bits": self.output_n}
+                        if task_name == "text":
+                            task_kwargs["text"] = self.task_text
+                        elif task_name == "noise":
+                            task_kwargs["noise_p"] = self.noise_p
+                            task_kwargs["seed"] = 42
+                        x_data, y_data = get_task_data(task_name, self.case_n, **task_kwargs)
+                    else:
+                        x_data, y_data = self.input_x, self.y0
+
+                    wires, logits = preconfigure_circuit_logits(
+                        wiring_key=circuit_key,
+                        layer_sizes=self.layer_sizes,
+                        arity=self.arity,
+                        x_data=x_data,
+                        y_data=y_data,
+                        loss_type=self.loss_type,
+                        steps=self.preconfig_steps,
+                        lr=self.preconfig_lr,
+                        optimizer=self.preconfig_optimizer,
+                        weight_decay=self.preconfig_weight_decay,
+                        beta1=self.preconfig_beta1,
+                        beta2=self.preconfig_beta2,
+                    )
+                    batch_wires.append(wires)
+                    batch_logits.append(logits)
+                else:
+                    wires, logits = gen_circuit(
+                        circuit_key, self.layer_sizes, arity=self.arity
+                    )
+                    batch_wires.append(wires)
+                    batch_logits.append(logits)
             
             actual_batch_size = initial_diversity
 
-            # Store available wires and logits
-            self.available_wires = [
-                jax.tree.map(lambda x, idx=i: x[idx], batch_wires) for i in range(actual_batch_size)
-            ]
-            self.available_logits = [
-                jax.tree.map(lambda x, idx=i: x[idx], batch_logits)
-                for i in range(actual_batch_size)
-            ]
+            # Store available wires and logits as lists of circuits (no tree-map/indexing)
+            self.available_wires = batch_wires  # List[ List[np.ndarray] ]
+            self.available_logits = batch_logits  # List[ List[np.ndarray] ]
 
             # Use the current wire index (clamped to available range)
             self.current_wire_idx = min(self.current_wire_idx, len(self.available_wires) - 1)
@@ -549,19 +704,20 @@ class CircuitOptimizationDemo:
         """Initialize ImGui textures once context is available"""
         if not self.imgui_initialized:
             try:
-                dummy_texture = imgui.get_io().fonts.tex_id
+                # Since tex_id is not used in draw_lut, we can use None as placeholder
+                # The texture tuples are stored but never actually used for rendering
                 self.input_texture = (
-                    dummy_texture,
+                    None,  # tex_id not used in draw_lut function
                     self.inputs_img.shape[1],
                     self.inputs_img.shape[0],
                 )
                 self.output_texture = (
-                    dummy_texture,
+                    None,  # tex_id not used in draw_lut function
                     self.outputs_img.shape[1],
                     self.outputs_img.shape[0],
                 )
                 self.ground_truth_texture = (
-                    dummy_texture,
+                    None,  # tex_id not used in draw_lut function
                     self.ground_truth_img.shape[1],
                     self.ground_truth_img.shape[0],
                 )
@@ -670,7 +826,7 @@ class CircuitOptimizationDemo:
                 "config.circuit.arity": self.arity,
                 # "config.circuit.num_layers": self.layer_n,
                 "config.model.type": model_type,
-                "config.training.wiring_mode": self.wiring_mode,
+                # Note: wiring_mode doesn't exist in training config - training always uses fixed wiring
                 "config.circuit.task": self.available_tasks[self.task_idx],
                 "config.training.training_mode": "repair",  # Match your config's training mode
                 "config.pool.damage_mode": "greedy_vocabulary",  # Match your config's damage mode
@@ -694,20 +850,6 @@ class CircuitOptimizationDemo:
                     prefer_metric=self.prefer_metric,  # Will use intelligent selection if None
                     metric_name="best/eval_ko_in_hard_accuracy",
                 )
-
-                if loaded_config.circuit.num_layers != self.layer_n:
-                    print(
-                        f"Layer number mismatch: {loaded_config.circuit.num_layers} != {self.layer_n}"
-                    )
-                    print(f"Using layer number: {self.layer_n}")
-                    loaded_config.circuit.num_layers = self.layer_n
-
-                if loaded_config.circuit.get("width_factor", 2) != self.width_factor:
-                    print(
-                        f"Width factor mismatch: {loaded_config.circuit.get('width_factor', 2)} != {self.width_factor}"
-                    )
-                    print(f"Using width factor: {self.width_factor}")
-                    loaded_config.circuit.width_factor = self.width_factor
 
                 model, loaded_dict = load_model_from_config_and_checkpoint(
                     config=loaded_config,
@@ -734,20 +876,6 @@ class CircuitOptimizationDemo:
                     use_cache=True,
                 )
 
-                if loaded_config.circuit.num_layers != self.layer_n:
-                    print(
-                        f"Layer number mismatch: {loaded_config.circuit.num_layers} != {self.layer_n}"
-                    )
-                    print(f"Using layer number: {self.layer_n}")
-                    loaded_config.circuit.num_layers = self.layer_n
-
-                if loaded_config.circuit.width_factor != self.width_factor:
-                    print(
-                        f"Width factor mismatch: {loaded_config.circuit.width_factor} != {self.width_factor}"
-                    )
-                    print(f"Using width factor: {self.width_factor}")
-                    loaded_config.circuit.width_factor = self.width_factor
-
                 model, loaded_dict = load_model_from_config_and_checkpoint(
                     config=loaded_config,
                     checkpoint_path=checkpoint_path,
@@ -756,6 +884,38 @@ class CircuitOptimizationDemo:
 
                 self.frozen_model = model
                 self.loaded_run_id = loaded_dict.get("run_id", "unknown")
+
+            # Align GUI state from loaded config (mirror training conditions)
+            try:
+                # Circuit core parameters
+                self.input_n = getattr(loaded_config.circuit, "input_bits", self.input_n)
+                self.output_n = getattr(loaded_config.circuit, "output_bits", self.output_n)
+                self.arity = getattr(loaded_config.circuit, "arity", self.arity)
+                self.layer_n = getattr(loaded_config.circuit, "num_layers", self.layer_n)
+
+                # Seeds
+                self.wiring_seed = getattr(loaded_config, "test_seed", self.wiring_seed)
+                self.wiring_key = jax.random.PRNGKey(self.wiring_seed)
+                self.damage_seed = getattr(loaded_config, "damage_seed", self.damage_seed)
+
+                # Loss type
+                if hasattr(loaded_config, "training") and hasattr(loaded_config.training, "loss_type"):
+                    self.loss_type = loaded_config.training.loss_type
+
+                # Task
+                if hasattr(loaded_config, "circuit") and hasattr(loaded_config.circuit, "task"):
+                    task_name = loaded_config.circuit.task
+                    if task_name in TASKS:
+                        self.available_tasks = list(TASKS.keys())
+                        self.task_idx = self.available_tasks.index(task_name)
+
+                # Damage params
+                if hasattr(loaded_config, "pool"):
+                    self.default_damage_prob = getattr(loaded_config.pool, "damage_prob", self.default_damage_prob)
+                    if hasattr(loaded_config.pool, "greedy_ordered_indices"):
+                        self.greedy_ordered_indices = list(getattr(loaded_config.pool, "greedy_ordered_indices"))
+            except Exception as align_e:
+                print(f"Warning: Could not fully align GUI from loaded config: {align_e}")
 
             # Extract hidden_dim from loaded config for graph compatibility
             if hasattr(loaded_config, "model") and hasattr(loaded_config.model, "hidden_dim"):
@@ -786,6 +946,12 @@ class CircuitOptimizationDemo:
                 self.model_use_globals = (
                     True  # Default for GNN models (not applicable but for consistency)
                 )
+
+            # After aligning parameters, regenerate circuit to ensure parity with training config
+            try:
+                self.regenerate_circuit(reset_logs=True)
+            except Exception as regen_e:
+                print(f"Warning: Could not regenerate circuit after loading config: {regen_e}")
 
             return True
 
@@ -1163,15 +1329,18 @@ class CircuitOptimizationDemo:
 
             print(f"Traceback: {traceback.format_exc()}")
 
-    def _apply_gate_damage_perturbation(self, damage_prob: int = 8, bias: float = -5.0):
+    def _apply_gate_damage_perturbation(self, damage_prob: int | None = None, bias: float = -5.0):
         """
         Apply GAMMA RAYS damage perturbation by baking knockout pattern into logits.
         
         Args:
-            damage_prob: Number of gates to knock out (default 8)
+            damage_prob: Number of gates to knock out (default uses training config)
             bias: Negative bias value for knocked-out gates (default -5.0)
         """
         try:
+            # Use training-configured defaults when not provided
+            if damage_prob is None:
+                damage_prob = int(self.default_damage_prob) if self.default_damage_prob is not None else 8
             # 1) Reset logs and current logits like wire shuffle
             self.step_i = 0
             self.loss_log[:] = 0
@@ -1181,19 +1350,27 @@ class CircuitOptimizationDemo:
             self.logits = self.logits0  # do NOT mutate logits0
 
             # 2) Sample a flat knockout pattern (seen-like, minimal)
-            key = jax.random.PRNGKey(np.random.randint(0, 1_000_000))
+            key = jax.random.PRNGKey(int(self.damage_seed))
+            
+            # Use layer_sizes directly (should be a list of tuples)
+            layer_sizes_list = self.layer_sizes
+            print(f"Debug: layer_sizes type: {type(layer_sizes_list)}, value: {layer_sizes_list}")
+            
             pattern = create_greedy_subset_random_pattern(
-                key, self.layer_sizes, int(damage_prob), DEFAULT_GREEDY_ORDERED_INDICES
+                key,
+                layer_sizes_list,
+                int(damage_prob),
+                self.greedy_ordered_indices if self.greedy_ordered_indices is not None else DEFAULT_GREEDY_ORDERED_INDICES,
             )
 
             # 3) Build per-layer masks for viz and for shaping logits
-            layer_gate_masks = create_gate_mask_from_knockout_pattern(self.layer_sizes, pattern)
+            layer_gate_masks = create_gate_mask_from_knockout_pattern(pattern, layer_sizes_list)
             self.gate_mask = [m.astype(np.float32) for m in layer_gate_masks]  # for draw_circuit()
 
             # 4) Apply damage into logits at masked gates
             damaged_logits = [l.copy() for l in self.logits]
-            for li in range(1, len(self.layer_sizes) - 1):  # skip input(0) and output(-1)
-                gate_n, group_size = self.layer_sizes[li]
+            for li in range(1, len(layer_sizes_list) - 1):  # skip input(0) and output(-1)
+                gate_n, group_size = layer_sizes_list[li]
                 group_n = gate_n // group_size
                 mask = np.array(layer_gate_masks[li]).reshape(group_n, group_size)  # True = KO
                 damaged_logits[li - 1] = np.where(mask[..., None], bias, damaged_logits[li - 1])
@@ -1944,6 +2121,21 @@ class CircuitOptimizationDemo:
             if imgui.button("Mutate One"):
                 # Mutate exactly one wire in one random layer
                 self.mutate_one_wire()
+
+            # PERTURB button - calls appropriate method based on perturbation type
+            imgui.separator()
+            if imgui.button("PERTURB", (120, 0)):
+                if self.perturbation_type == "Wire Shuffle":
+                    # Apply genetic mutation to current wires using the slider value
+                    self.mutate_wires_random()
+                elif self.perturbation_type == "GAMMA RAYS":
+                    # Apply gate damage perturbation
+                    self._apply_gate_damage_perturbation()
+                else:
+                    print(f"Unknown perturbation type: {self.perturbation_type}")
+
+            imgui.same_line()
+            imgui.text(f"({self.perturbation_type})")
 
             # Task selection
             imgui.separator_text("Task")
