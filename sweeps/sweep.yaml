@@ -12,5 +12,5 @@ sweep:
         circuit.input_bits: [8, 8, 8, 6]
         
     - group2:
-        training.n_message_steps: [2, 5, 10, 20]
-        training.batch_chunk_size: [1024, 1024, 512, 256]
+        training.n_message_steps: [2, 5, 10, 20, 50]
+        training.batch_chunk_size: [512, 512, 256, 256, 128]
