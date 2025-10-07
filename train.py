@@ -51,6 +51,14 @@ from boolean_nca_cc.utils.pool_stats import (
 # Configure logging
 log = logging.getLogger(__name__)
 
+if os.path.exists("/mnt/storage/gb21"):
+    wandb_cache_dir = "/mnt/storage/gb21/wandb/cache"
+    wandb_artifact_dir = "/mnt/storage/gb21/wandb/artifacts"
+    os.environ["WANDB_CACHE_DIR"] = wandb_cache_dir
+    os.environ["WANDB_ARTIFACT_DIR"] = wandb_artifact_dir
+    os.makedirs(wandb_cache_dir, exist_ok=True)
+    os.makedirs(wandb_artifact_dir, exist_ok=True)
+
 
 def extract_track_metrics_config(cfg) -> list[str] | None:
     """
@@ -550,7 +558,6 @@ def main(cfg: DictConfig) -> None:
         os.makedirs(output_dir, exist_ok=True)
     else:
         output_dir = os.getcwd()
-    log.info(f"Output directory: {output_dir}")
 
     # Initialize wandb if enabled
     wandb_run = None
@@ -564,6 +571,8 @@ def main(cfg: DictConfig) -> None:
             group=cfg.wandb.group,
         )
         wandb_run = wandb.run
+
+    log.info(f"Output directory: {output_dir}")
 
     # Generate circuit layer sizes
     input_n, output_n = cfg.circuit.input_bits, cfg.circuit.output_bits
@@ -669,6 +678,8 @@ def main(cfg: DictConfig) -> None:
     if cfg.checkpoint.enabled:
         checkpoint_dir = os.path.join(output_dir, "checkpoints")
         os.makedirs(checkpoint_dir, exist_ok=True)
+        if cfg.checkpoint.save_on_mnt_storage:
+            checkpoint_dir = checkpoint_dir.replace("/home/", "/mnt/storage/")
     else:
         checkpoint_dir = None
 
@@ -818,6 +829,8 @@ def main(cfg: DictConfig) -> None:
             run_id=wandb_run.id,
             dry_run=False,
             verbose=True,
+            entity=cfg.wandb.entity,
+            project=cfg.wandb.project,
         )
         wandb.finish()
 
