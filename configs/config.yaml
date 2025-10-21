@@ -45,14 +45,14 @@ training:
   wiring_mode: "random"  # Options: "fixed", "genetic", or "random"
   initial_diversity: 256
   # INNER LOOP
-  n_message_steps: 5  # Number of message passing steps per training iteration
+  n_message_steps: 10  # Number of message passing steps per training iteration
   # LOSS TYPE
   loss_type: "l4"  # Options: "l4", "l2", or "bce"
   random_loss_step: false  # Use random message passing step for loss computation
   use_beta_loss_step: false  # Use beta distribution for random loss step (varies from early to late steps through training)
   # BATCH SIZE
   meta_batch_size: 512
-  batch_chunk_size: null  # Sequential batch processing chunk size (null means use meta_batch_size)
+  batch_chunk_size: 256  # Sequential batch processing chunk size (null means use meta_batch_size)
   # OPTIMIZATION
   learning_rate: 1e-4
   weight_decay: 1e-5
@@ -72,8 +72,8 @@ training:
 # Pool configuration for meta-learning
 pool:
   size: 8096
-  reset_fraction: null
-  reset_interval: 128
+  reset_fraction: 0.33
+  reset_interval: null
   reset_strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
   

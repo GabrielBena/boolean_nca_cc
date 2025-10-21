@@ -6,11 +6,12 @@ sweep:
   grid:  # parameters to combine in all possible ways
     training.loss_type: [l4, bce]
     training.learning_rate: [7e-5, 1e-4, 3e-4]
+
   paired:
     - group1:
         circuit.task : [reverse, add, binary_multiply, text]
         circuit.input_bits: [8, 8, 8, 6]
         
     - group2:
-        training.n_message_steps: [2, 5, 10, 20, 50]
-        training.batch_chunk_size: [512, 512, 256, 256, 128]
+        training.n_message_steps: [5, 10, 25, 50]
+        training.batch_chunk_size: [512, 256, 128, 64]
