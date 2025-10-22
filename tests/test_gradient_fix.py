@@ -58,7 +58,7 @@ def test_gnn_gradient_flow():
     import optax
 
     opt_fn = optax.adamw(1e-3, weight_decay=1e-5)
-    optimizer = nnx.Optimizer(gnn, opt_fn)
+    optimizer = nnx.Optimizer(gnn, opt_fn, wrt=nnx.Param)
 
     def loss_fn(model):
         """Simple loss function for testing."""
@@ -98,7 +98,7 @@ def test_gnn_gradient_flow():
     print(f"  Loss: {loss:.6f}")
 
     # Update model and check hidden features change
-    optimizer.update(grads)
+    optimizer.update(gnn, grads)
 
     return has_grads, len(zero_grad_paths) < 5  # Allow some parameters to have zero grads
 
@@ -146,7 +146,7 @@ def test_self_attention_gradient_flow():
     import optax
 
     opt_fn = optax.adamw(1e-3, weight_decay=1e-5)
-    optimizer = nnx.Optimizer(attn_model, opt_fn)
+    optimizer = nnx.Optimizer(attn_model, opt_fn, wrt=nnx.Param)
 
     def loss_fn(model):
         """Simple loss function for testing."""
@@ -204,7 +204,7 @@ def test_self_attention_gradient_flow():
                 gradients_flow_eventually = True
 
         # Update model
-        optimizer.update(grads)
+        optimizer.update(attn_model, grads)
 
         # Update initial hidden for next comparison
         initial_hidden = updated_graph.nodes["hidden"]

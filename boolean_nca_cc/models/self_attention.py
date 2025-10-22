@@ -227,16 +227,18 @@ class CircuitSelfAttention(nnx.Module):
         self.feature_proj = nnx.Linear(input_feature_dim, self.attention_dim, rngs=rngs)
 
         # Self-attention layers
-        self.attention_layers = [
-            SelfAttentionBlock(
-                feature_dim=self.attention_dim,
-                mlp_dim=mlp_dim,
-                num_heads=num_heads,
-                dropout_rate=dropout_rate,
-                rngs=rngs,
-            )
-            for _ in range(num_layers)
-        ]
+        self.attention_layers = nnx.List(
+            [
+                SelfAttentionBlock(
+                    feature_dim=self.attention_dim,
+                    mlp_dim=mlp_dim,
+                    num_heads=num_heads,
+                    dropout_rate=dropout_rate,
+                    rngs=rngs,
+                )
+                for _ in range(num_layers)
+            ]
+        )
 
         # Output projections for both logits and hidden features
         self.logit_proj = nnx.Linear(

@@ -59,7 +59,7 @@ def test_multi_step_gradients():
     import optax
 
     opt_fn = optax.adamw(1e-3, weight_decay=1e-5)
-    optimizer = nnx.Optimizer(attn_model, opt_fn)
+    optimizer = nnx.Optimizer(attn_model, opt_fn, wrt=nnx.Param)
 
     def loss_fn(model):
         current_graph = model(graph)
@@ -71,7 +71,7 @@ def test_multi_step_gradients():
     print("\n🌅 Warming up the network...")
     for warmup_step in range(3):
         loss, grads = nnx.value_and_grad(loss_fn)(attn_model)
-        optimizer.update(grads)
+        optimizer.update(attn_model, grads)
 
         # Check gradients after warmup
         has_grads, zero_grad_paths = check_gradients(

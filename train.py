@@ -8,7 +8,12 @@ when training boolean circuits, using either Graph Neural Networks or Self-Atten
 
 import os
 
+# Configure JAX/XLA memory allocation BEFORE importing JAX
+# Use "platform" allocator - slower but actually releases memory after pool resets
+# The default BFC allocator is faster but pools memory aggressively, causing OOM at pool resets
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
+os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
 
 import logging
 from functools import partial

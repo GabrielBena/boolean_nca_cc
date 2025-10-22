@@ -23,7 +23,6 @@ from boolean_nca_cc.training.checkpointing import (
     BestModelTracker,
     check_early_stopping,
     save_periodic_checkpoint,
-    save_stable_state,
     setup_checkpoint_dir,
 )
 from boolean_nca_cc.training.eval_datasets import (
@@ -802,7 +801,7 @@ def train_model(
             optax.zero_nans(),
             optax.adamw(learning_rate=schedule, weight_decay=weight_decay),
         )
-        optimizer = nnx.Optimizer(model, opt_fn)
+        optimizer = nnx.Optimizer(model, opt_fn, wrt=nnx.Param)
     else:
         # Use the provided optimizer
         optimizer = init_optimizer
@@ -989,7 +988,7 @@ def train_model(
         )
 
         # Update GNN parameters
-        optimizer.update(grads)
+        optimizer.update(model, grads)
 
         # Update pool with the updated graphs and logits (wires stay the same)
         updated_pool = pool.update(idxs, updated_graphs, batch_of_logits=updated_logits)
@@ -1248,7 +1247,7 @@ def train_model(
         )
 
         # Update GNN parameters with accumulated gradients
-        optimizer.update(accumulated_grads)
+        optimizer.update(model, accumulated_grads)
 
         # Update pool with the updated graphs and logits
         updated_pool = pool.update(
@@ -1418,6 +1417,15 @@ def train_model(
                 # Update last reset epoch
                 last_reset_epoch = epoch
                 diversity = circuit_pool.get_wiring_diversity(layer_sizes)
+
+                # Clear JAX caches to reduce memory fragmentation
+                # After pool reset, fresh circuits with new wiring patterns may trigger
+                # JIT recompilation on the next training step. Clearing caches helps
+                # JAX reallocate memory more efficiently and removes old compiled kernels.
+                # import gc
+
+                # gc.collect()  # Python garbage collection first
+                # jax.clear_caches()  # Then clear JAX's compilation cache
 
             # Record metrics
             losses.append(float(loss))

@@ -545,7 +545,7 @@ def gradient_check_step(model, optimizer, loss_fn, *loss_args, verbose=True, **l
     (loss, aux), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model, *loss_args, **loss_kwargs)
 
     # Update optimizer
-    optimizer.update(grads)
+    optimizer.update(model, grads)
 
     # Check gradients
     has_grads, zero_grad_paths = check_gradients(
