@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Training-compatible boolean circuits demo using shared infrastructure.
+Minimal GUI for circuit optimization with Self-Attention and Backprop.
 
-This demo shows live circuit optimization where:
+This minimal demo shows live circuit optimization where:
 - Backprop: Direct gradient-based optimization of circuit logits
-- GNN/Self-Attention: Pre-trained models suggest logit improvements (frozen models)
+- Self-Attention: Pre-trained models suggest logit improvements (frozen models)
+- GAMMA RAYS: Reversible damage perturbation visualization
 
 No model training occurs - only circuit logit optimization.
 """
@@ -152,59 +153,6 @@ def zoom(a, k=2):
     return np.repeat(np.repeat(a, k, 1), k, 0)
 
 
-def mutate_wires_swap(wires, key, mutation_rate=0.05, n_swaps_per_layer=None):
-    """
-    Mutate wires by swapping connections within each layer.
-    
-    Args:
-        wires: List of wire arrays for each layer
-        key: JAX random key
-        mutation_rate: Probability of mutation per layer
-        n_swaps_per_layer: Number of swaps per layer (if None, calculated from mutation_rate)
-    
-    Returns:
-        List of mutated wire arrays
-    """
-    mutated_wires = []
-    
-    for i, wire_layer in enumerate(wires):
-        key, subkey = jax.random.split(key)
-        
-        # Calculate number of swaps for this layer
-        if n_swaps_per_layer is None:
-            # Calculate based on mutation_rate
-            total_connections = wire_layer.size
-            n_swaps = int(total_connections * mutation_rate)
-        else:
-            n_swaps = n_swaps_per_layer
-        
-        if n_swaps == 0 or wire_layer.size < 2:
-            # No swaps possible or needed
-            mutated_wires.append(wire_layer.copy())
-            continue
-        
-        # Flatten the wire layer for easier manipulation
-        flat_wires = wire_layer.flatten()
-        
-        # Perform swaps
-        for _ in range(n_swaps):
-            if len(flat_wires) < 2:
-                break
-                
-            # Choose two different indices to swap
-            key, subkey = jax.random.split(key)
-            indices = jax.random.choice(subkey, len(flat_wires), shape=(2,), replace=False)
-            
-            # Swap the values
-            flat_wires = flat_wires.at[indices[0]].set(wire_layer.flatten()[indices[1]])
-            flat_wires = flat_wires.at[indices[1]].set(wire_layer.flatten()[indices[0]])
-        
-        # Reshape back to original shape
-        mutated_wires.append(flat_wires.reshape(wire_layer.shape))
-    
-    return mutated_wires
-
-
 def unpack(x, bit_n=8):
     """Unpack integers to binary representation"""
     return (x[..., None] >> np.r_[:bit_n]) & 1
@@ -218,7 +166,7 @@ class CircuitOptimizationDemo:
     Demo showing live circuit optimization.
 
     - Backprop: Direct gradient-based logit optimization
-    - GNN/Self-Attention: Pre-trained models suggest logit improvements
+    - Self-Attention: Pre-trained models suggest logit improvements
     """
 
     def __init__(self):
@@ -240,16 +188,9 @@ class CircuitOptimizationDemo:
         self.wiring_seed = 42  # Will be set from training config if available
         self.wiring_key = jax.random.PRNGKey(self.wiring_seed)
 
-        # Training-consistent wire generation
-        self.initial_diversity = 1  # Number of different wirings to use (like in training)
-        self.evaluation_base_seed = 42  # Will be set from training config if available
-        self.use_training_wires = True  # Mirror training default of fixed wiring key
-        self.distribution_modes = ["IN-distribution", "OUT-of-distribution"]
-        self.distribution_mode_idx = 0  # Default to IN-distribution
-        self.current_wire_idx = 0  # Index of current wire within the distribution
-        self.available_wires = []  # List of available wire sets for current distribution
-        self.available_logits = []  # List of available logit sets for current distribution
+        # Simplified wiring (no training-consistent wire generation in minimal version)
         self.damage_seed = 481  # Will be set from training config if available
+        self.evaluation_base_seed = 42  # Will be set from training config if available
         self.greedy_ordered_indices = None  # Prefer from training config
         self.default_damage_prob = None  # Prefer from training config
         self.training_mode = "repair"  # Will be set from config
@@ -295,16 +236,11 @@ class CircuitOptimizationDemo:
 
 
         # Optimization method configuration
-        self.optimization_methods = ["Backprop", "GNN", "Self-Attention"]
+        self.optimization_methods = ["Backprop", "Self-Attention"]
         self.optimization_method_idx = 0
 
-        # Mutation settings (for template/reference)
-        self.mutation_rate = 0.05
-
-        # Perturbation type selection
-        self.perturbation_types = ["Wire Shuffle", "GAMMA RAYS"]
-        self.perturbation_type_idx = 0
-        self.perturbation_type = self.perturbation_types[self.perturbation_type_idx]
+        # Perturbation type (only GAMMA RAYS in minimal version)
+        self.perturbation_type = "GAMMA RAYS"
 
         # Model instances (only pre-trained, frozen models)
         self.frozen_model = None
@@ -431,18 +367,40 @@ class CircuitOptimizationDemo:
             self.input_n, self.output_n, self.arity, self.layer_n
         ))
 
-        if self.use_training_wires and self.wiring_mode == "fixed":
-            # Use training-consistent wire generation
-            self._initialize_training_consistent_wires()
+        # Use preconfigure_circuit_logits in repair mode (matches training), otherwise gen_circuit
+        if self.training_mode == "repair" and self.wiring_mode == "fixed":
+            # Ensure we have task data available for preconfigure
+            if not hasattr(self, "input_x") or not hasattr(self, "y0"):
+                task_name = self.available_tasks[self.task_idx]
+                task_kwargs = {"input_bits": self.input_n, "output_bits": self.output_n}
+                if task_name == "text":
+                    task_kwargs["text"] = self.task_text
+                elif task_name == "noise":
+                    task_kwargs["noise_p"] = self.noise_p
+                    task_kwargs["seed"] = 42
+                x_data, y_data = get_task_data(task_name, self.case_n, **task_kwargs)
+            else:
+                x_data, y_data = self.input_x, self.y0
+
+            self.wires, self.logits = preconfigure_circuit_logits(
+                wiring_key=self.wiring_key,
+                layer_sizes=self.layer_sizes,
+                arity=self.arity,
+                x_data=x_data,
+                y_data=y_data,
+                loss_type=self.loss_type,
+                steps=self.preconfig_steps,
+                lr=self.preconfig_lr,
+                optimizer=self.preconfig_optimizer,
+                weight_decay=self.preconfig_weight_decay,
+                beta1=self.preconfig_beta1,
+                beta2=self.preconfig_beta2,
+            )
         else:
-            # Use original circuit generation
+            # Use simple circuit generation for non-repair modes
             self.wires, self.logits = gen_circuit(
                 self.wiring_key, self.layer_sizes, arity=self.arity
             )
-            # Clear available wires when not using training wires
-            self.available_wires = []
-            self.available_logits = []
-            self.current_wire_idx = 0
 
         # Store initial logits
         self.logits0 = self.logits
@@ -460,173 +418,6 @@ class CircuitOptimizationDemo:
         # Reset the model generator when circuit changes
         self.model_generator = None
         self.last_step_result = None
-
-    def _initialize_training_consistent_wires(self):
-        """Initialize wires using training-consistent generation (like in eval_datasets)"""
-        try:
-            distribution_mode = self.distribution_modes[self.distribution_mode_idx]
-
-            if distribution_mode == "IN-distribution":
-                # Use IN-distribution (matches training pattern)
-                wiring_mode = "fixed"
-                initial_diversity = self.initial_diversity
-                # Match training: use test_seed as wiring_fixed_key
-                base_seed = self.wiring_seed
-            else:
-                # Use OUT-of-distribution (always random)
-                wiring_mode = "random"
-                initial_diversity = 16  # Use higher diversity for OOD
-                base_seed = self.evaluation_base_seed + 10000
-
-            # Create wire batch using gen_circuit or preconfigure depending on training_mode
-            batch_wires = []
-            batch_logits = []
-            
-            for i in range(initial_diversity):
-                # Generate each circuit with a different seed
-                circuit_key = jax.random.PRNGKey(base_seed + i)
-                if self.training_mode == "repair" and wiring_mode == "fixed":
-                    # Ensure we have task data available for preconfigure
-                    if not hasattr(self, "input_x") or not hasattr(self, "y0"):
-                        task_name = self.available_tasks[self.task_idx]
-                        task_kwargs = {"input_bits": self.input_n, "output_bits": self.output_n}
-                        if task_name == "text":
-                            task_kwargs["text"] = self.task_text
-                        elif task_name == "noise":
-                            task_kwargs["noise_p"] = self.noise_p
-                            task_kwargs["seed"] = 42
-                        x_data, y_data = get_task_data(task_name, self.case_n, **task_kwargs)
-                    else:
-                        x_data, y_data = self.input_x, self.y0
-
-                    wires, logits = preconfigure_circuit_logits(
-                        wiring_key=circuit_key,
-                        layer_sizes=self.layer_sizes,
-                        arity=self.arity,
-                        x_data=x_data,
-                        y_data=y_data,
-                        loss_type=self.loss_type,
-                        steps=self.preconfig_steps,
-                        lr=self.preconfig_lr,
-                        optimizer=self.preconfig_optimizer,
-                        weight_decay=self.preconfig_weight_decay,
-                        beta1=self.preconfig_beta1,
-                        beta2=self.preconfig_beta2,
-                    )
-                    batch_wires.append(wires)
-                    batch_logits.append(logits)
-                else:
-                    wires, logits = gen_circuit(
-                        circuit_key, self.layer_sizes, arity=self.arity
-                    )
-                    batch_wires.append(wires)
-                    batch_logits.append(logits)
-            
-            actual_batch_size = initial_diversity
-
-            # Store available wires and logits as lists of circuits (no tree-map/indexing)
-            self.available_wires = batch_wires  # List[ List[np.ndarray] ]
-            self.available_logits = batch_logits  # List[ List[np.ndarray] ]
-
-            # Use the current wire index (clamped to available range)
-            self.current_wire_idx = min(self.current_wire_idx, len(self.available_wires) - 1)
-            self.wires = self.available_wires[self.current_wire_idx]
-            self.logits = self.available_logits[self.current_wire_idx]
-
-            print(
-                f"Initialized {distribution_mode} wires: {actual_batch_size} available, using index {self.current_wire_idx}"
-            )
-            print(f"  - Wiring mode: {wiring_mode}, Initial diversity: {initial_diversity}")
-
-        except Exception as e:
-            print(f"Error initializing training-consistent wires: {e}")
-            import traceback
-
-            print(f"Traceback: {traceback.format_exc()}")
-            # Fallback to original generation
-            self.wires, self.logits = gen_circuit(
-                self.wiring_key, self.layer_sizes, arity=self.arity
-            )
-            self.available_wires = []
-            self.available_logits = []
-            self.current_wire_idx = 0
-
-    def switch_to_wire_index(self, wire_idx: int):
-        """Switch to a specific wire within the current distribution"""
-        if not self.available_wires or not self.use_training_wires:
-            print("No training wires available to switch to")
-            return
-
-        if wire_idx < 0 or wire_idx >= len(self.available_wires):
-            print(f"Wire index {wire_idx} out of range [0, {len(self.available_wires) - 1}]")
-            return
-
-        self.current_wire_idx = wire_idx
-        self.wires = self.available_wires[self.current_wire_idx]
-        self.logits = self.available_logits[self.current_wire_idx]
-        self.logits0 = self.logits  # Update initial logits
-
-        # Reset optimization state but keep the same task
-        self.step_i = 0
-        self.loss_log = np.zeros(max_trainstep_n, np.float32)
-        self.hard_log = np.zeros(max_trainstep_n, np.float32)
-        self.accuracy_log = np.zeros(max_trainstep_n, np.float32)
-        self.hard_accuracy_log = np.zeros(max_trainstep_n, np.float32)
-
-        # Reset the model generator when wires change
-        self.model_generator = None
-        self.last_step_result = None
-
-        # Reinitialize optimization method for new circuit
-        self.initialize_optimization_method()
-
-        # Update gate masks for new wiring
-        self.reset_gate_mask()
-
-        # Refresh activations
-        self.initialize_activations()
-
-        distribution_mode = self.distribution_modes[self.distribution_mode_idx]
-        print(f"Switched to {distribution_mode} wire {wire_idx} of {len(self.available_wires)}")
-
-    def switch_distribution_mode(self, mode_idx: int):
-        """Switch between IN-distribution and OUT-of-distribution modes"""
-        if mode_idx < 0 or mode_idx >= len(self.distribution_modes):
-            print(f"Distribution mode index {mode_idx} out of range")
-            return
-
-        old_mode = self.distribution_modes[self.distribution_mode_idx]
-        self.distribution_mode_idx = mode_idx
-        new_mode = self.distribution_modes[self.distribution_mode_idx]
-
-        if old_mode != new_mode:
-            print(f"Switching from {old_mode} to {new_mode}")
-            # Reset wire index when switching distributions
-            self.current_wire_idx = 0
-            # Reinitialize with new distribution
-            if self.use_training_wires and self.wiring_mode == "fixed":
-                self._initialize_training_consistent_wires()
-                self.logits0 = self.logits  # Update initial logits
-
-                # Reset optimization state
-                self.step_i = 0
-                self.loss_log = np.zeros(max_trainstep_n, np.float32)
-                self.hard_log = np.zeros(max_trainstep_n, np.float32)
-                self.accuracy_log = np.zeros(max_trainstep_n, np.float32)
-                self.hard_accuracy_log = np.zeros(max_trainstep_n, np.float32)
-
-                # Reset the model generator when distribution changes
-                self.model_generator = None
-                self.last_step_result = None
-
-                # Reinitialize optimization method
-                self.initialize_optimization_method()
-
-                # Update gate masks
-                self.reset_gate_mask()
-
-                # Refresh activations
-                self.initialize_activations()
 
     def update_task(self, reset_logs=True):
         """Update current task using shared task infrastructure"""
@@ -746,10 +537,12 @@ class CircuitOptimizationDemo:
             self.model_generator = None
             self.last_step_result = None
 
-        elif method_name in ["GNN", "Self-Attention"]:
+        elif method_name == "Self-Attention":
             # Try to load pre-trained frozen model
             if self.try_load_wandb_model():
                 print(f"Loaded frozen {method_name} model from WandB")
+                if self.loaded_run_id:
+                    print(f"  WandB Run ID: {self.loaded_run_id}")
                 self.logit_optimizer = None  # No optimizer needed for frozen models
                 self.logit_opt_state = None  # No optimizer state needed for frozen models
                 # Initialize the generator for step-by-step evaluation
@@ -823,7 +616,7 @@ class CircuitOptimizationDemo:
         """Try to load frozen model from WandB"""
         try:
             method_name = self.optimization_methods[self.optimization_method_idx]
-            model_type = "gnn" if method_name == "GNN" else "self_attention"
+            model_type = "self_attention"
 
             filters = {
                 "config.circuit.input_bits": self.input_n,
@@ -948,9 +741,7 @@ class CircuitOptimizationDemo:
                         f"Could not find use_globals in config, using default: {self.model_use_globals}"
                     )
             else:
-                self.model_use_globals = (
-                    True  # Default for GNN models (not applicable but for consistency)
-                )
+                self.model_use_globals = True  # Always True for self-attention models
 
             # After aligning parameters, regenerate circuit to ensure parity with training config
             try:
@@ -1046,10 +837,16 @@ class CircuitOptimizationDemo:
             # Import the circuit runner from the shared infrastructure
             from boolean_nca_cc.circuits.model import run_circuit
 
+            # Use visualization damage mask during flash period, otherwise no mask
+            # Note: Flash ticks are decremented in draw_circuit() to ensure proper timing
+            viz_mask = None
+            if self._viz_flash_ticks > 0 and len(self._viz_damage_mask) > 0:
+                viz_mask = self._viz_damage_mask
+
             # Run circuit to get layer-by-layer activations
             # This returns [input_acts, layer1_acts, layer2_acts, ..., output_acts]
             self.act = run_circuit(
-                current_logits, self.wires, self.input_x, hard=False, gate_mask=self.gate_mask
+                current_logits, self.wires, self.input_x, hard=False, gate_mask=viz_mask
             )
 
             # Generate error mask for visualization
@@ -1064,7 +861,7 @@ class CircuitOptimizationDemo:
         return loss, hard_loss, accuracy, hard_accuracy
 
     def optimize_with_unified_model(self):
-        """Use the unified generator from training code to optimize with frozen GNN/Self-Attention model"""
+        """Use the unified generator from training code to optimize with frozen Self-Attention model"""
         if self.frozen_model is None:
             print("No frozen model loaded, falling back to backprop")
             self.optimization_method_idx = 0
@@ -1108,10 +905,16 @@ class CircuitOptimizationDemo:
 
                 # Generate circuit activations for visualization using the same method as backprop
                 try:
+                    # Use visualization damage mask during flash period, otherwise no mask
+                    # Note: Flash ticks are decremented in draw_circuit() to ensure proper timing
+                    viz_mask = None
+                    if self._viz_flash_ticks > 0 and len(self._viz_damage_mask) > 0:
+                        viz_mask = self._viz_damage_mask
+
                     # Run circuit to get layer-by-layer activations
                     # This returns [input_acts, layer1_acts, layer2_acts, ..., output_acts]
                     self.act = run_circuit(
-                        self.logits, self.wires, self.input_x, hard=False, gate_mask=self.gate_mask
+                        self.logits, self.wires, self.input_x, hard=False, gate_mask=viz_mask
                     )
 
                     # Generate error mask for visualization
@@ -1214,126 +1017,6 @@ class CircuitOptimizationDemo:
 
         print("Circuit regenerated successfully")
 
-    # ===== WIRE PERTURBATION ANALOGUE TO REVERSIBLE DAMAGE PERTURBATION =====
-    def mutate_wires_random(self, mutation_rate=None, reset_logs=False):
-        """Mutate current circuit wires using genetic mutation with specified rate"""
-        if mutation_rate is None:
-            mutation_rate = self.mutation_rate
-
-        try:
-            # Generate a random key for mutation
-            import random
-
-            mutation_seed = random.randint(0, 99999)
-            mutation_key = jax.random.PRNGKey(mutation_seed)
-
-            # Apply mutation to current wires
-            mutated_wires = mutate_wires_swap(self.wires, mutation_key, mutation_rate)
-
-            # Update the circuit with mutated wires
-            self.wires = mutated_wires
-
-            # Reset optimization state but keep the same task
-            if reset_logs:
-                self.step_i = 0
-                self.loss_log = np.zeros(max_trainstep_n, np.float32)
-                self.hard_log = np.zeros(max_trainstep_n, np.float32)
-                self.accuracy_log = np.zeros(max_trainstep_n, np.float32)
-                self.hard_accuracy_log = np.zeros(max_trainstep_n, np.float32)
-
-            # Reset logits to initial state for fair comparison
-            self.logits = self.logits0
-
-            # Reset the model generator when wires change
-            self.model_generator = None
-            self.last_step_result = None
-
-            # Reinitialize optimization method for new circuit
-            self.initialize_optimization_method()
-
-            # Update gate masks for new wiring
-            self.reset_gate_mask()
-
-            # Refresh activations
-            self.initialize_activations()
-
-            print(f"Wires mutated with rate {mutation_rate} (seed: {mutation_seed})")
-
-        except Exception as e:
-            print(f"Error mutating wires: {e}")
-            import traceback
-
-            print(f"Traceback: {traceback.format_exc()}")
-
-    def mutate_one_wire(self, reset_logs=False):
-        """Mutate exactly one wire in one randomly selected layer"""
-        try:
-            # Generate a random key for mutation
-            import random
-
-            mutation_seed = random.randint(0, 99999)
-
-            # Pick a random layer to mutate (skip if no layers have enough connections)
-            available_layers = []
-            for i, wire_layer in enumerate(self.wires):
-                if wire_layer.size >= 2:  # Need at least 2 connections to swap
-                    available_layers.append(i)
-
-            if not available_layers:
-                print("No layers available for mutation (need at least 2 connections per layer)")
-                return
-
-            # Choose random layer
-            layer_to_mutate = random.choice(available_layers)
-
-            # Create a copy of wires
-            mutated_wires = [w.copy() for w in self.wires]
-
-            # Mutate only the selected layer with exactly 1 swap
-            layer_key = jax.random.PRNGKey(mutation_seed + layer_to_mutate)
-            mutated_layer = mutate_wires_swap(
-                [self.wires[layer_to_mutate]],
-                layer_key,
-                mutation_rate=0.0,
-                n_swaps_per_layer=1,
-            )
-            mutated_wires[layer_to_mutate] = mutated_layer[0]
-
-            # Update the circuit with mutated wires
-            self.wires = mutated_wires
-
-            # Reset optimization state but keep the same task
-            if reset_logs:
-                self.step_i = 0
-                self.loss_log = np.zeros(max_trainstep_n, np.float32)
-                self.hard_log = np.zeros(max_trainstep_n, np.float32)
-                self.accuracy_log = np.zeros(max_trainstep_n, np.float32)
-                self.hard_accuracy_log = np.zeros(max_trainstep_n, np.float32)
-
-            # Reset logits to initial state for fair comparison
-            self.logits = self.logits0
-
-            # Reset the model generator when wires change
-            self.model_generator = None
-            self.last_step_result = None
-
-            # Reinitialize optimization method for new circuit
-            self.initialize_optimization_method()
-
-            # Update gate masks for new wiring
-            self.reset_gate_mask()
-
-            # Refresh activations
-            self.initialize_activations()
-
-            print(f"Mutated exactly one wire in layer {layer_to_mutate} (seed: {mutation_seed})")
-
-        except Exception as e:
-            print(f"Error mutating one wire: {e}")
-            import traceback
-
-            print(f"Traceback: {traceback.format_exc()}")
-
     def _apply_gate_damage_perturbation(self, damage_prob: int | None = None, bias: float | None = None):
         """
         Apply GAMMA RAYS damage perturbation by baking knockout pattern into logits.
@@ -1353,7 +1036,8 @@ class CircuitOptimizationDemo:
                 bias = self.damage_bias
             
             # 1) Sample damage pattern (skip inputs and outputs)
-            key = jax.random.PRNGKey(int(self.damage_seed))
+            # Randomize seed each time to get different patterns on each click
+            key = jax.random.PRNGKey(np.random.randint(0, 1_000_000))
             
             # Use layer_sizes directly (should be a list of tuples)
             layer_sizes_list = self.layer_sizes
@@ -1438,7 +1122,7 @@ class CircuitOptimizationDemo:
             self.logit_opt_state = opt_fn.init(self.logits)
             self.logit_optimizer = opt_fn
         else:
-            # Reinitialize generator for GNN/Self-Attention
+            # Reinitialize generator for Self-Attention
             self.initialize_model_generator()
 
         print("Circuit reset to initial state")
@@ -1544,12 +1228,20 @@ class CircuitOptimizationDemo:
                         else:
                             self.active_case_i = self.active_case_i ^ (1 << i)
 
-                # Show masked gates
-                if (
-                    li < len(self.gate_mask)
-                    and i < len(self.gate_mask[li])
-                    and self.gate_mask[li][i] == 0.0
-                ):
+                # Show masked gates (use viz damage mask during flash, otherwise gate_mask)
+                is_damaged = False
+                if self._viz_flash_ticks > 0 and len(self._viz_damage_mask) > 0:
+                    # During flash period, check visualization damage mask
+                    if li < len(self._viz_damage_mask) and i < len(self._viz_damage_mask[li]):
+                        # Convert to numpy for comparison if needed
+                        mask_val = float(self._viz_damage_mask[li][i])
+                        is_damaged = (mask_val == 0.0)
+                else:
+                    # Normal mode: check regular gate mask
+                    if li < len(self.gate_mask) and i < len(self.gate_mask[li]):
+                        is_damaged = (self.gate_mask[li][i] == 0.0)
+                
+                if is_damaged:
                     dl.add_rect_filled(p0, p1, 0xA00000FF, 4)
 
             # Draw group boundaries
@@ -1585,7 +1277,7 @@ class CircuitOptimizationDemo:
                         self.use_message_viz
                         and self.optimization_methods[self.optimization_method_idx] != "Backprop"
                     ):
-                        # Colorful visualization for GNN/Self-Attention
+                        # Colorful visualization for Self-Attention
                         import random
 
                         r = random.randint(0, 255)
@@ -1612,6 +1304,10 @@ class CircuitOptimizationDemo:
             prev_gate_x = gate_x
             prev_act = act
             prev_y = y
+        
+        # Decrement flash ticks at the end of drawing (after all gates are drawn)
+        if self._viz_flash_ticks > 0:
+            self._viz_flash_ticks -= 1
 
     def draw_lut(self, name, img, tex_id):
         """Draw visualization using ImGui"""
@@ -1898,7 +1594,7 @@ class CircuitOptimizationDemo:
                     imgui.SliderFlags_.logarithmic.value,
                 )
 
-            elif method_name in ["GNN", "Self-Attention"]:
+            elif method_name == "Self-Attention":
                 _, self.n_message_steps = imgui.slider_int(
                     "Message Steps", self.n_message_steps, 1, 10
                 )
@@ -2054,119 +1750,17 @@ class CircuitOptimizationDemo:
                 self.wiring_key = jax.random.PRNGKey(self.wiring_seed)
                 self.regenerate_circuit(reset_logs=False)  # This will invalidate cache
 
-            # Training-consistent wiring controls
-            imgui.separator_text("Training-Consistent Wiring")
-
-            # Enable/disable training wires (only available in fixed mode)
-            if self.wiring_mode == "fixed":
-                training_wires_changed, self.use_training_wires = imgui.checkbox(
-                    "Use Training Wires", self.use_training_wires
-                )
-                if training_wires_changed:
-                    self.regenerate_circuit()
-
-                if self.use_training_wires:
-                    # Initial diversity control
-                    diversity_changed, self.initial_diversity = imgui.slider_int(
-                        "Initial Diversity", self.initial_diversity, 1, 16
-                    )
-                    if diversity_changed:
-                        self.regenerate_circuit()
-
-                    # Evaluation base seed control
-                    eval_seed_changed, self.evaluation_base_seed = imgui.input_int(
-                        "Evaluation Seed", self.evaluation_base_seed
-                    )
-                    if eval_seed_changed:
-                        self.evaluation_base_seed = max(0, self.evaluation_base_seed)
-                        if self.use_training_wires:
-                            self.regenerate_circuit()
-
-                    # Distribution mode selection
-                    dist_changed, self.distribution_mode_idx = imgui.combo(
-                        "Distribution", self.distribution_mode_idx, self.distribution_modes
-                    )
-                    if dist_changed:
-                        self.switch_distribution_mode(self.distribution_mode_idx)
-
-                    # Wire switching controls
-                    if self.available_wires:
-                        num_wires = len(self.available_wires)
-                        imgui.text(f"Available wires: {num_wires}")
-
-                        # Wire index slider
-                        wire_changed, new_wire_idx = imgui.slider_int(
-                            "Wire Index", self.current_wire_idx, 0, num_wires - 1
-                        )
-                        if wire_changed:
-                            self.switch_to_wire_index(new_wire_idx)
-
-                        # Previous/Next wire buttons
-                        if imgui.button("← Previous Wire") and self.current_wire_idx > 0:
-                            self.switch_to_wire_index(self.current_wire_idx - 1)
-
-                        imgui.same_line()
-                        if imgui.button("Next Wire →") and self.current_wire_idx < num_wires - 1:
-                            self.switch_to_wire_index(self.current_wire_idx + 1)
-
-                        # Show current distribution and wire info
-                        current_dist = self.distribution_modes[self.distribution_mode_idx]
-                        imgui.text_colored(
-                            imgui.ImVec4(0.0, 1.0, 0.0, 1.0),
-                            f"Current: {current_dist} wire {self.current_wire_idx + 1}/{num_wires}",
-                        )
-                    else:
-                        imgui.text_colored(
-                            imgui.ImVec4(1.0, 1.0, 0.0, 1.0), "No training wires loaded"
-                        )
-            else:
-                imgui.text_colored(
-                    imgui.ImVec4(0.7, 0.7, 0.7, 1.0),
-                    "Training wires only available in 'fixed' mode",
-                )
-
-            # ===== WIRE PERTURBATION ANALOGUE TO REVERSIBLE DAMAGE PERTURBATION =====
-            # Perturbation type selection
-            imgui.separator()
-            perturbation_changed, self.perturbation_type_idx = imgui.combo(
-                "Perturbation Type", self.perturbation_type_idx, self.perturbation_types
-            )
-            if perturbation_changed:
-                self.perturbation_type = self.perturbation_types[self.perturbation_type_idx]
-
-            # Mutation controls
-            imgui.separator()
-
-            # Mutation rate slider
-            _, self.mutation_rate = imgui.slider_float(
-                "Mutation Rate", self.mutation_rate, 0.01, 0.5, "%.3f"
-            )
-
-            # Mutation buttons
-            if imgui.button("Mutate Random"):
-                # Apply genetic mutation to current wires using the slider value
-                self.mutate_wires_random()
-
-            imgui.same_line()
-            if imgui.button("Mutate One"):
-                # Mutate exactly one wire in one random layer
-                self.mutate_one_wire()
-
-            # PERTURB button - calls appropriate method based on perturbation type
-            imgui.separator()
+            # ===== GAMMA RAYS PERTURBATION =====
+            imgui.separator_text("GAMMA RAYS Perturbation")
+            imgui.text("Apply reversible damage to circuit gates")
+            
+            # PERTURB button - applies GAMMA RAYS damage
             if imgui.button("PERTURB", (120, 0)):
-                if self.perturbation_type == "Wire Shuffle":
-                    # Apply genetic mutation to current wires using the slider value
-                    # Preserve plot history (reset_logs=False)
-                    self.mutate_wires_random(reset_logs=False)
-                elif self.perturbation_type == "GAMMA RAYS":
-                    # Apply gate damage perturbation (preserves plot history automatically)
-                    self._apply_gate_damage_perturbation()
-                else:
-                    print(f"Unknown perturbation type: {self.perturbation_type}")
-
+                # Apply gate damage perturbation (preserves plot history automatically)
+                self._apply_gate_damage_perturbation()
+            
             imgui.same_line()
-            imgui.text(f"({self.perturbation_type})")
+            imgui.text("(GAMMA RAYS)")
 
             # Task selection
             imgui.separator_text("Task")
@@ -2238,23 +1832,11 @@ class CircuitOptimizationDemo:
             imgui.text(f"Plot Type: {self.plot_types[self.plot_type_idx]}")
             imgui.text(f"Display Mode: {self.loss_display_modes[self.loss_display_mode_idx]}")
 
-            # Training wire status
-            if self.use_training_wires:
-                current_dist = self.distribution_modes[self.distribution_mode_idx]
-                imgui.text(f"Training Wires: {current_dist}")
-                if self.available_wires:
-                    imgui.text(f"Wire: {self.current_wire_idx + 1}/{len(self.available_wires)}")
-                imgui.text(f"Initial Diversity: {self.initial_diversity}")
-                imgui.text(f"Eval Seed: {self.evaluation_base_seed}")
-            else:
-                imgui.text("Training Wires: Disabled")
 
             # Model-specific status
             if method_name == "Self-Attention" and self.frozen_model is not None:
                 imgui.text(f"Model hidden_dim: {self.model_hidden_dim}")
                 imgui.text(f"Model use_globals: {self.model_use_globals}")
-            elif method_name == "GNN" and self.frozen_model is not None:
-                imgui.text(f"Model hidden_dim: {self.model_hidden_dim}")
 
             if hasattr(self, "current_pred_hard"):
                 try:
@@ -2310,15 +1892,16 @@ class CircuitOptimizationDemo:
 
 if __name__ == "__main__":
     try:
-        print("Starting Circuit Optimization Demo...")
+        print("Starting Minimal Circuit Optimization Demo...")
         print("- Backprop: Direct gradient-based logit optimization")
-        print("- GNN/Self-Attention: Frozen models suggest logit improvements")
+        print("- Self-Attention: Frozen models suggest logit improvements")
+        print("- GAMMA RAYS: Reversible damage perturbation")
 
         demo = CircuitOptimizationDemo()
 
         immapp.run(
             demo.gui,
-            window_title="Circuit Optimization Demo",
+            window_title="Circuit Optimization Demo (Minimal)",
             window_size=(1200, 800),
             fps_idle=10,
             with_implot=True,
