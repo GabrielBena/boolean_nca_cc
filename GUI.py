@@ -337,6 +337,11 @@ class CircuitOptimizationDemo:
         self.wire_masks = []
         self.reset_gate_mask()
 
+        # Reversible damage visualization state (for GAMMA RAYS)
+        self._viz_damage_mask = []  # Per-layer masks (1.0=active, 0.0=damaged) for visualization only
+        self._viz_flash_ticks = 0  # Counter for single-tick red flash (0 = no flash)
+        self.damage_bias = -10.0  # Negative bias value for damaged gates
+
         # Store activations for circuit visualization
         self.act = []
         self.err_mask = None
@@ -1329,27 +1334,25 @@ class CircuitOptimizationDemo:
 
             print(f"Traceback: {traceback.format_exc()}")
 
-    def _apply_gate_damage_perturbation(self, damage_prob: int | None = None, bias: float = -5.0):
+    def _apply_gate_damage_perturbation(self, damage_prob: int | None = None, bias: float | None = None):
         """
         Apply GAMMA RAYS damage perturbation by baking knockout pattern into logits.
         
+        Implements reversible damage: damage is baked into current logits (reversible by model healing),
+        with visualization-only mask for single-tick red flash.
+        
         Args:
             damage_prob: Number of gates to knock out (default uses training config)
-            bias: Negative bias value for knocked-out gates (default -5.0)
+            bias: Negative bias value for knocked-out gates (default uses self.damage_bias)
         """
         try:
             # Use training-configured defaults when not provided
             if damage_prob is None:
                 damage_prob = int(self.default_damage_prob) if self.default_damage_prob is not None else 8
-            # 1) Reset logs and current logits like wire shuffle
-            self.step_i = 0
-            self.loss_log[:] = 0
-            self.hard_log[:] = 0
-            self.accuracy_log[:] = 0
-            self.hard_accuracy_log[:] = 0
-            self.logits = self.logits0  # do NOT mutate logits0
-
-            # 2) Sample a flat knockout pattern (seen-like, minimal)
+            if bias is None:
+                bias = self.damage_bias
+            
+            # 1) Sample damage pattern (skip inputs and outputs)
             key = jax.random.PRNGKey(int(self.damage_seed))
             
             # Use layer_sizes directly (should be a list of tuples)
@@ -1363,26 +1366,50 @@ class CircuitOptimizationDemo:
                 self.greedy_ordered_indices if self.greedy_ordered_indices is not None else DEFAULT_GREEDY_ORDERED_INDICES,
             )
 
-            # 3) Build per-layer masks for viz and for shaping logits
+            # 2) Build per-layer masks; set self._viz_damage_mask for the upcoming visualization flash
             layer_gate_masks = create_gate_mask_from_knockout_pattern(pattern, layer_sizes_list)
-            self.gate_mask = [m.astype(np.float32) for m in layer_gate_masks]  # for draw_circuit()
-
-            # 4) Apply damage into logits at masked gates
-            damaged_logits = [l.copy() for l in self.logits]
+            # Store visualization mask (1.0=active, 0.0=damaged) - for visualization only
+            self._viz_damage_mask = [m.astype(np.float32) for m in layer_gate_masks]
+            
+            # 3) Bake damage into current logits (reversible)
+            # Start from logits0 to ensure we don't accumulate damage
+            damaged_logits = [l.copy() for l in self.logits0]
+            # Iterate over hidden layers only (skip input layer 0 and output layer -1)
             for li in range(1, len(layer_sizes_list) - 1):  # skip input(0) and output(-1)
-                gate_n, group_size = layer_sizes_list[li]
-                group_n = gate_n // group_size
-                mask = np.array(layer_gate_masks[li]).reshape(group_n, group_size)  # True = KO
-                damaged_logits[li - 1] = np.where(mask[..., None], bias, damaged_logits[li - 1])
+                logits_idx = li - 1  # logits[0] corresponds to layer 1, etc.
+                if logits_idx < len(damaged_logits) and li < len(layer_gate_masks):
+                    # Reshape mask to match logits shape
+                    gate_n, group_size = layer_sizes_list[li]
+                    group_n = gate_n // group_size
+                    mask_reshaped = np.array(layer_gate_masks[li]).reshape(group_n, group_size)
+                    # Apply damage bias where mask is 0.0 (damaged)
+                    damaged_logits[logits_idx] = np.where(
+                        mask_reshaped[..., None] == 0.0, 
+                        bias, 
+                        damaged_logits[logits_idx]
+                    )
             self.logits = damaged_logits
 
-            # 5) Reinit generator identically to wire shuffle path
+            # 4) Initialize viz flash: self._viz_flash_ticks = 1
+            self._viz_flash_ticks = 3
+
+            # 5) Reset counters/logs and re-init generator state from CURRENT logits
+            self.step_i = 0
+            self.loss_log[:] = 0
+            self.hard_log[:] = 0
+            self.accuracy_log[:] = 0
+            self.hard_accuracy_log[:] = 0
+            
+            # Re-init generator so the very next logged tick reflects damage
             self.model_generator = None
             self.last_step_result = None
-            self.initialize_optimization_method()
+            self.initialize_model_generator()  # Rebuild state from CURRENT logits
+            
+            # Initialize activations
             self.initialize_activations()
 
             print(f"Applied GAMMA RAYS damage: {damage_prob} gates knocked out with bias {bias}")
+            print(f"  - Visualization flash enabled for 1 tick")
 
         except Exception as e:
             print(f"Error applying gate damage perturbation: {e}")
@@ -1390,13 +1417,17 @@ class CircuitOptimizationDemo:
             print(f"Traceback: {traceback.format_exc()}")
 
     def reset_circuit(self):
-        """Reset circuit to initial state"""
+        """Reset circuit to initial state (full reset: clears damage and restores logits0)"""
         self.logits = self.logits0
         self.step_i = 0
         self.loss_log = np.zeros(max_trainstep_n, np.float32)
         self.hard_log = np.zeros(max_trainstep_n, np.float32)
         self.accuracy_log = np.zeros(max_trainstep_n, np.float32)
         self.hard_accuracy_log = np.zeros(max_trainstep_n, np.float32)
+
+        # Clear reversible damage visualization state
+        self._viz_damage_mask = []
+        self._viz_flash_ticks = 0
 
         # Reset the model generator when circuit is reset
         self.model_generator = None
