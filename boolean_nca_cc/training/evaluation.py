@@ -145,6 +145,7 @@ def evaluate_model_stepwise_generator(
     loss_type: str = "l4",
     bidirectional_edges: bool = True,
     layer_sizes: List[Tuple[int, int]] = None,
+    layer_neighbors: bool = False,
 ) -> Generator[StepResult, None, None]:
     """
     Generator that yields step-by-step evaluation results for GNN model optimization.
@@ -206,6 +207,11 @@ def evaluate_model_stepwise_generator(
 
     graph = update_output_node_loss(graph, layer_sizes, initial_res.mean(axis=0))
 
+    # Debug: Log initial graph globals
+    initial_globals_loss = float(graph.globals[0]) if graph.globals is not None else 0.0
+    initial_globals_steps = float(graph.globals[1]) if graph.globals is not None and graph.globals.shape[-1] > 1 else 0.0
+    print(f"[Generator Init] Step 0: globals=[loss={initial_globals_loss:.6f}, update_steps={initial_globals_steps:.0f}]")
+
     # Yield initial state (step 0)
     yield StepResult(
         step=0,
@@ -228,10 +234,25 @@ def evaluate_model_stepwise_generator(
         current_update_steps = 0
         if graph.globals is not None and graph.globals.shape[-1] > 1:
             current_update_steps = graph.globals[..., 1]
+        
+        # Debug: Log graph state before model call
+        before_loss = float(graph.globals[0]) if graph.globals is not None else 0.0
+        before_steps = float(current_update_steps)
+        if step <= 5 or step % 50 == 0:  # Log first 5 steps and every 50th step
+            print(f"[Generator Step {step}] Before model call: globals=[loss={before_loss:.6f}, update_steps={before_steps:.0f}]")
 
         # Apply one step of model processing (EXACTLY like training inner loop)
         # Note: training does multiple steps in a batch, but we do one at a time for live demo
-        updated_graph = model(graph)
+        # Pass layer_sizes and layer_neighbors to match training eval behavior
+        if isinstance(model, CircuitSelfAttention):
+            updated_graph = model(
+                graph,
+                layer_neighbors=layer_neighbors,
+                layer_sizes=layer_sizes,
+            )
+        else:
+            # For GNN models, call without these parameters (they don't support them)
+            updated_graph = model(graph)
 
         # Use the unified get_loss_and_update_graph function for consistency
         updated_graph, loss, current_logits, aux = get_loss_and_update_graph(
@@ -259,6 +280,12 @@ def evaluate_model_stepwise_generator(
         updated_graph = updated_graph._replace(
             globals=jp.array([loss, current_update_steps + 1], dtype=jp.float32)
         )
+
+        # Debug: Log graph state after update
+        after_loss = float(updated_graph.globals[0]) if updated_graph.globals is not None else 0.0
+        after_steps = float(updated_graph.globals[1]) if updated_graph.globals is not None and updated_graph.globals.shape[-1] > 1 else 0.0
+        if step <= 5 or step % 50 == 0:  # Log first 5 steps and every 50th step
+            print(f"[Generator Step {step}] After update: globals=[loss={after_loss:.6f}, update_steps={after_steps:.0f}], accuracy={accuracy:.4f}, hard_accuracy={hard_accuracy:.4f}")
 
         # Update the graph variable for next iteration
         graph = updated_graph

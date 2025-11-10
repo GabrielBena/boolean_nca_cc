@@ -295,7 +295,8 @@ class CircuitOptimizationDemo:
         # Model loading preferences
         self.load_modes = ["Latest Checkpoint", "Best Model"]
         self.load_mode_idx = 1  # Default to best model
-        self.prefer_metric = "eval_ko_in_hard_accuracy"  # For best model selection - matches checkpointing config
+        # prefer_metric is now auto-derived from config's checkpoint settings
+        self.prefer_metric = "eval_ko_in_hard_accuracy"  # Fallback default (will be overridden by config)
 
         # Initialize visualization
         self.setup_visualization()
@@ -408,6 +409,20 @@ class CircuitOptimizationDemo:
         print(f"Circuit initialized with {sum(logit.size for logit in self.logits0)} parameters")
         print(f"Layer structure: {self.layer_sizes}")
 
+        # Compute and log initial loss directly from circuit (before any model is loaded)
+        # Debug: print initial loss
+        if hasattr(self, "input_x") and hasattr(self, "y0"):
+            try:
+                initial_loss, initial_aux = get_loss_from_wires_logits(
+                    self.logits, self.wires, self.input_x, self.y0, self.loss_type
+                )
+                initial_hard_loss, _, _, initial_accuracy, initial_hard_accuracy, _, _ = initial_aux
+                print(f"[Circuit Init] Direct loss computation (before model): loss={float(initial_loss):.6f}, hard_loss={float(initial_hard_loss):.4f}, accuracy={float(initial_accuracy):.4f}, hard_accuracy={float(initial_hard_accuracy):.4f}")
+            except Exception as e:
+                print(f"[Circuit Init] Could not compute initial loss: {e}")
+        else:
+            print("[Circuit Init] Task data not yet available, will compute loss after task setup")
+
         # Reset gate masks for new circuit structure
         self.reset_gate_mask()
 
@@ -440,6 +455,18 @@ class CircuitOptimizationDemo:
                 task_kwargs["seed"] = 42
 
             self.input_x, self.y0 = get_task_data(task_name, self.case_n, **task_kwargs)
+            
+            # Compute and log initial loss directly from circuit after task setup (before any model)
+            # Debug: print initial loss
+            if hasattr(self, "logits") and self.logits is not None:
+                try:
+                    initial_loss, initial_aux = get_loss_from_wires_logits(
+                        self.logits, self.wires, self.input_x, self.y0, self.loss_type
+                    )
+                    initial_hard_loss, _, _, initial_accuracy, initial_hard_accuracy, _, _ = initial_aux
+                    print(f"[Task Setup] Direct loss computation (before model): loss={float(initial_loss):.6f}, hard_loss={float(initial_hard_loss):.4f}, accuracy={float(initial_accuracy):.4f}, hard_accuracy={float(initial_hard_accuracy):.4f}")
+                except Exception as e:
+                    print(f"[Task Setup] Could not compute initial loss: {e}")
         except Exception as e:
             print(f"Error loading task '{task_name}': {e}")
             # Fallback to copy task
@@ -581,6 +608,7 @@ class CircuitOptimizationDemo:
                 loss_type=self.loss_type,
                 bidirectional_edges=True,
                 layer_sizes=self.layer_sizes,
+                layer_neighbors=False,  # Match training default (can be enhanced to read from config)
             )
 
             # Get the initial state (step 0)
@@ -635,7 +663,26 @@ class CircuitOptimizationDemo:
             load_mode = self.load_modes[self.load_mode_idx]
 
             if load_mode == "Best Model":
-                # Use the new best model loading with intelligent selection
+                # First, load config to get checkpoint settings (for metric derivation)
+                # We'll do a quick load to get the config, then reload with correct metrics
+                temp_config, _, _ = load_config_from_wandb(
+                    run_id=self.run_id,
+                    filters=filters if not self.run_id else None,
+                    project=self.wandb_project,
+                    entity=self.wandb_entity,
+                    download_dir=self.wandb_download_dir,
+                    filename="latest_checkpoint",  # Just to get config, not the actual model
+                    select_by_best_metric=False,
+                    run_from_last=1,
+                    use_cache=True,
+                )
+                
+                # Derive metric name from config's checkpoint settings
+                from boolean_nca_cc.training.checkpointing import derive_checkpoint_metric_from_config
+                metric_name, prefer_metric = derive_checkpoint_metric_from_config(temp_config)
+                print(f"Using checkpoint metric from config: {metric_name} (prefer: {prefer_metric})")
+                
+                # Now load the actual best model with the correct metric
                 loaded_config, checkpoint_path, run_id = load_config_from_wandb(
                     run_id=self.run_id,
                     filters=filters if not self.run_id else None,
@@ -645,8 +692,8 @@ class CircuitOptimizationDemo:
                     select_by_best_metric=True,
                     run_from_last=1,
                     use_cache=True,
-                    prefer_metric=self.prefer_metric,  # Will use intelligent selection if None
-                    metric_name="best/eval_ko_in_hard_accuracy",
+                    prefer_metric=prefer_metric,  # Use metric derived from config
+                    metric_name=metric_name,  # Use metric name derived from config
                 )
 
                 model, loaded_dict = load_model_from_config_and_checkpoint(

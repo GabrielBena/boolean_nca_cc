@@ -256,80 +256,13 @@ To converge with training/eval:
 ## Next Order of Operations: Critical Issues to Resolve
 
 ### 🔴 Issue 2: Self-Attention Model Accuracy Drift
-**Problem**: When loading a self-attention model, accuracy slowly drifts downwards over time, eventually hitting ~0.6. However, during training, the eval loop shows perfect accuracy (>1.0) for >150 inner loop steps.
+**Status**: See dedicated document [`self_attention_accuracy_drift.md`](self_attention_accuracy_drift.md) for full investigation details.
 
-**Observations**:
-- Backprop works fine, converging to accuracy 1.0
-- Self-attention model shows stable performance in training eval loop
-- Live GUI loop shows progressive accuracy degradation
-- Mismatch between training eval and live GUI behavior
+**Summary**: When loading a self-attention model, accuracy slowly drifts downwards over time, eventually hitting ~0.6. However, during training, the eval loop shows perfect accuracy (>1.0) for >150 inner loop steps. The goal is to maintain accuracy ~1.0 when the circuit is initialized to accuracy 1.0.
 
-**Potential Causes**:
-1. **Mismatch in live loop vs. eval loop conditions**:
-   - Different initialization (graph state, globals, step counters)
-   - Different number of message steps per iteration
-   - Different loss computation timing
-   - Missing or incorrect parameters in generator initialization
+**Key Evidence**: First generator step increases loss from 0.0266 → 0.2349 (9x increase), then continues drifting upward to 88.3226 over 200 steps.
 
-2. **Checkpointing issue**:
-   - Model saved might not be the one showing stable performance
-   - Model state incomplete (missing optimizer state, graph state, etc.)
-   - Version mismatch between training and loading code
-
-3. **Generator state management**:
-   - Generator not properly reinitialized after damage
-   - Graph globals (update_steps counter) accumulating incorrectly
-   - Hidden state not properly reset between iterations
-
-4. **Model behavior differences**:
-   - Training uses batched evaluation, GUI uses single circuit
-   - Training uses different loss computation path
-   - Training eval might use different damage injection timing
-
-**Investigation Needed**:
-- Compare exact initialization between `evaluate_model_stepwise_generator` (GUI) and `evaluate_model_stepwise_batched` (training eval). Specifically, in @train_loop.py, eval_ko_in_steps/hard_accuracy gives stepwise accuracy readings that show great and stable accuracy.
-- Check if graph globals are properly initialized (especially `update_steps` counter)
-- Verify checkpoint loading includes all necessary state
-- Compare step-by-step logits updates between training eval and GUI
-- Check if `n_message_steps` in GUI matches training eval inner steps
-- Verify loss computation uses same path in both cases
-
-
-**Critical Evidence from Terminal Logs:
-```
-Initializing model generator with:
-  - hidden_dim: 64
-  - use_globals: True
-  - model type: CircuitSelfAttention
-Initialized model generator with initial loss: 0.0266
-Step 0: Loss = 0.2349, Hard Loss = 4.0000
-Step 100: Loss = 29.7506, Hard Loss = 110.0000
-Step 200: Loss = 88.3226, Hard Loss = 248.0000
-```
-
-**Key Findings**:
-initial loss upon generator initilisation of 0.23 is not terrible, but not great either
-
-2. **🔴 Loss still increases over time**:, loss continues to drift upward:
-   - Step 0: 0.2349 (9x increase from initial)
-   - Step 100: 29.7506 (127x increase from initial)
-   - Step 200: 88.3226 (332x increase from initial)
-   - This confirms the drift issue persists even with correct preconfiguration.
-
-3. **First generator step increases loss**: The first step increases loss from 0.0266 → 0.2349 (9x increase). While this is much better than the previous 2x increase from a high baseline, it still suggests the first generator step is applying updates that degrade performance.
-
-**Most Likely Root Cause**:
-- **Generator initialization using wrong state**: Graph globals (especially `update_steps` counter), hidden features, or initial graph representation don't match training conditions
-- **First step applying incorrect updates**: Possibly due to wrong `update_steps` counter causing the model to think it's at a different step than it actually is
-- **Mismatch between training eval and GUI generator initialization**: Training eval may initialize graph state differently than GUI generator
-- **Progressive degradation**: Each step continues to worsen performance, suggesting systematic issues with how model updates are being applied
-
-**Action Items Based on Logs**:
-Most important reference: conditions in @train_loop.py which generate eval_ko_in_steps/hard_accuracy as logged to wandb. These track the stepwise accuracy readings of an inner loop, and show great performance.
-2. Compare generator initialization between training eval and GUI (especially graph globals initialization)
-3. Inspect first generator step: why does it increase loss from 0.0266 → 0.2349 (9x)? Check `update_steps` counter and graph globals
-4. Verify graph state (globals, hidden features) matches training eval initialization exactly
-5. Investigate why loss continues to drift upward over 200 steps despite correct initialization
+**Most Likely Root Cause**: Generator initialization using wrong state (graph globals, especially `update_steps` counter) that doesn't match training conditions.
 
 ---
 
@@ -365,23 +298,7 @@ Most important reference: conditions in @train_loop.py which generate eval_ko_in
 ## Investigation Priority
 
 1. **High Priority**: Issue 2 (Self-Attention drift) - Core functionality broken
+   - See [`self_attention_accuracy_drift.md`](self_attention_accuracy_drift.md) for detailed investigation plan
 2. **High Priority**: Issue 3 (PERTURB reset) - Masks underlying drift issue
-
-## Next Steps
-
-### Immediate Priority (Based on Log Evidence)
-1. **Inspect first generator step**: Why does loss increase from 0.0266 → 0.2349 (9x)? Check `update_steps` counter and graph globals initialization
-2. **Compare graph globals initialization** between training eval and GUI generator (especially `update_steps` counter)
-3. **Investigate progressive drift**: Why does loss continue to increase from 0.2349 → 29.7506 → 88.3226 over 200 steps?
-
-### High Priority
-4. **Compare exact initialization and step execution** between `evaluate_model_stepwise_generator` (GUI) and `evaluate_model_stepwise_batched` (training eval)
-5. **Verify graph state (globals, hidden features)** matches training eval initialization exactly
-6. **Add debug logging** to track logits state, accuracy, and graph globals at each step
-
-### Medium Priority
-7. **Verify checkpoint loading** includes all necessary model state
-8. **Fix PERTURB to preserve current logits** (or make reset explicit) (Issue 3)
-9. **Cross-reference wandb eval panel** for run `pljk5kp6` (twilight-butterfly-686) to compare training eval metrics with GUI behavior
 
 

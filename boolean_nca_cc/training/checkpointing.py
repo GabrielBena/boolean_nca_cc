@@ -419,6 +419,31 @@ def load_checkpoint_legacy(checkpoint_path):
 
 
 # WandB integration functions
+def derive_checkpoint_metric_from_config(config: Any) -> tuple[str, str]:
+    """
+    Derive checkpoint metric name and prefer_metric from config's checkpoint settings.
+    
+    Args:
+        config: Hydra config object with checkpoint settings
+        
+    Returns:
+        Tuple of (metric_name, prefer_metric) where:
+        - metric_name: Full metric name for wandb summary (e.g., "best/eval_ko_in_hard_accuracy")
+        - prefer_metric: Metric key for artifact selection (e.g., "eval_ko_in_hard_accuracy")
+    """
+    # Get checkpoint settings from config
+    best_metric = getattr(config.checkpoint, "best_metric", "hard_accuracy")
+    best_metric_source = getattr(config.checkpoint, "best_metric_source", "eval_ko_in")
+    
+    # Construct metric key (matches format used in train_loop.py: f"{best_metric_source}_{best_metric}")
+    metric_key = f"{best_metric_source}_{best_metric}"
+    
+    # For wandb summary, use "best/" prefix
+    metric_name = f"best/{metric_key}"
+    
+    return metric_name, metric_key
+
+
 def load_config_from_wandb(
     run_id: str | None = None,
     filters: dict[str, Any] | None = None,
@@ -832,16 +857,27 @@ def get_metric_value(
             "hard_accuracy": "eval_ko_out/final_hard_accuracy",
         }
 
-        # Try IN-distribution metrics first, fallback to OUT-of-distribution if not available
+        # Fallback map to no-damage evaluation metrics (for zero-damage training runs)
+        eval_no_damage_key_map = {
+            "loss": "eval_no_damage/final_loss",
+            "hard_loss": "eval_no_damage/final_hard_loss",
+            "accuracy": "eval_no_damage/final_accuracy",
+            "hard_accuracy": "eval_no_damage/final_hard_accuracy",
+        }
+
+        # Try IN-distribution metrics first, fallback to OUT-of-distribution, then no-damage
         primary_key = eval_key_map[metric_name]
         fallback_key = eval_out_key_map[metric_name]
+        no_damage_key = eval_no_damage_key_map[metric_name]
 
         if primary_key in eval_metrics:
             return eval_metrics[primary_key]
         elif fallback_key in eval_metrics:
             return eval_metrics[fallback_key]
+        elif no_damage_key in eval_metrics:
+            return eval_metrics[no_damage_key]
         else:
-            raise KeyError(f"Neither {primary_key} nor {fallback_key} found in evaluation metrics")
+            raise KeyError(f"None of {primary_key}, {fallback_key}, or {no_damage_key} found in evaluation metrics")
     elif metric_source == "eval_ko_in":
         if eval_metrics is None:
             raise ValueError("Knockout evaluation metrics not available for eval_ko_in source")
@@ -851,6 +887,17 @@ def get_metric_value(
             "hard_loss": "eval_ko_in/final_hard_loss",
             "accuracy": "eval_ko_in/final_accuracy",
             "hard_accuracy": "eval_ko_in/final_hard_accuracy",
+        }
+        return eval_metrics[eval_key_map[metric_name]]
+    elif metric_source == "eval_no_damage":
+        if eval_metrics is None:
+            raise ValueError("No-damage evaluation metrics not available for eval_no_damage source")
+        # Map to no-damage evaluation metric keys
+        eval_key_map = {
+            "loss": "eval_no_damage/final_loss",
+            "hard_loss": "eval_no_damage/final_hard_loss",
+            "accuracy": "eval_no_damage/final_accuracy",
+            "hard_accuracy": "eval_no_damage/final_hard_accuracy",
         }
         return eval_metrics[eval_key_map[metric_name]]
     else:

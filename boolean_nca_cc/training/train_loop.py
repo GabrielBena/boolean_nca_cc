@@ -92,6 +92,8 @@ def _init_wandb(wandb_logging: bool, wandb_run_config: dict | None = None) -> An
             wandb.define_metric("training/*", step_metric="training/epoch")
             wandb.define_metric("eval_ko_in/*", step_metric="eval_ko_in/epoch")
             wandb.define_metric("eval_ko_out/*", step_metric="eval_ko_out/epoch")
+            wandb.define_metric("eval_no_damage/*", step_metric="eval_no_damage/epoch")
+            wandb.define_metric("eval_no_damage_steps/*", step_metric="eval_no_damage_steps/epoch")
 
             # Make the run summary of this metric be its max over the run
             # so sweeps can optimize it even if it's logged periodically
@@ -1902,6 +1904,83 @@ def train_model(
                     # Set current eval metrics to the combined dictionary if any evals ran
                     current_eval_metrics = ko_eval_results.get("final_metrics_in", None)
                 
+                # Simple no-damage evaluation: just evaluate model on base circuit
+                # This tests if the model degrades well-configured circuits even when trained without damage
+                if knockout_eval_base_circuit is not None and epoch % periodic_eval_interval == 0:
+                    base_wires, base_logits = knockout_eval_base_circuit
+                    
+                    # Replicate base circuit for batch
+                    eval_batch_size = 16  # Small batch for simple eval
+                    eval_wires = jax.tree.map(
+                        lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_wires
+                    )
+                    eval_logits = jax.tree.map(
+                        lambda x: jp.repeat(x[None, ...], eval_batch_size, axis=0), base_logits
+                    )
+                    
+                    # Evaluate without any damage (knockout_patterns=None)
+                    step_metrics = evaluate_circuits_in_chunks(
+                        eval_fn=evaluate_model_stepwise_batched,
+                        wires=eval_wires,
+                        logits=eval_logits,
+                        knockout_patterns=None,  # No damage!
+                        target_chunk_size=eval_batch_size,
+                        model=model,
+                        x_data=x_data,
+                        y_data=y_data,
+                        input_n=input_n,
+                        arity=arity,
+                        circuit_hidden_dim=circuit_hidden_dim,
+                        n_message_steps=periodic_eval_inner_steps,
+                        loss_type=loss_type,
+                        layer_sizes=layer_sizes,
+                        return_per_pattern=False,
+                        layer_neighbors=layer_neighbors,
+                        # Disable damage injection (knockout_patterns=None means no damage will be applied)
+                        damage_mode="greedy",  # Won't matter since no patterns
+                        damage_injection_mode="single",
+                        max_damage_per_circuit=1,  # Required by validation, but no damage applied since knockout_patterns=None
+                    )
+                    
+                    # Log metrics similar to knockout eval
+                    final_metrics = {
+                        "eval_no_damage/final_loss": step_metrics["soft_loss"][-1],
+                        "eval_no_damage/final_hard_loss": step_metrics["hard_loss"][-1],
+                        "eval_no_damage/final_accuracy": step_metrics["soft_accuracy"][-1],
+                        "eval_no_damage/final_hard_accuracy": step_metrics["hard_accuracy"][-1],
+                        "eval_no_damage/epoch": epoch,
+                    }
+                    
+                    # Add to all_eval_metrics for best model tracking
+                    all_eval_metrics.update(final_metrics)
+                    
+                    if wandb_run:
+                        wandb_run.log(final_metrics)
+                    
+                    # Log stepwise if enabled
+                    if periodic_eval_log_stepwise:
+                        for step_idx in range(len(step_metrics["step"])):
+                            wandb_run.log({
+                                "eval_no_damage_steps/step": step_metrics["step"][step_idx],
+                                "eval_no_damage_steps/loss": step_metrics["soft_loss"][step_idx],
+                                "eval_no_damage_steps/hard_loss": step_metrics["hard_loss"][step_idx],
+                                "eval_no_damage_steps/accuracy": step_metrics["soft_accuracy"][step_idx],
+                                "eval_no_damage_steps/hard_accuracy": step_metrics["hard_accuracy"][step_idx],
+                                "eval_no_damage_steps/epoch": epoch,
+                            })
+                    
+                    log.info(
+                        f"No-Damage Eval (epoch {epoch}): "
+                        f"Loss={final_metrics['eval_no_damage/final_loss']:.4f}, "
+                        f"Acc={final_metrics['eval_no_damage/final_accuracy']:.4f}, "
+                        f"Hard Acc={final_metrics['eval_no_damage/final_hard_accuracy']:.4f}"
+                    )
+                    
+                    # Update current_eval_metrics (merge if already set, otherwise set)
+                    if current_eval_metrics is None:
+                        current_eval_metrics = final_metrics
+                    else:
+                        current_eval_metrics.update(final_metrics)
 
                 # Step 3: Get current metric value for best model tracking using modular approach
                 try:

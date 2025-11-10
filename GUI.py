@@ -359,7 +359,8 @@ class CircuitOptimizationDemo:
         # Model loading preferences
         self.load_modes = ["Latest Checkpoint", "Best Model"]
         self.load_mode_idx = 1  # Default to best model
-        self.prefer_metric = "eval_ko_in_hard_accuracy"  # For best model selection - matches checkpointing config
+        # prefer_metric is now auto-derived from config's checkpoint settings
+        self.prefer_metric = "eval_ko_in_hard_accuracy"  # Fallback default (will be overridden by config)
 
         # Initialize visualization
         self.setup_visualization()
@@ -788,6 +789,7 @@ class CircuitOptimizationDemo:
                 loss_type=self.loss_type,
                 bidirectional_edges=True,
                 layer_sizes=self.layer_sizes,
+                layer_neighbors=False,  # Match training default (can be enhanced to read from config)
             )
 
             # Get the initial state (step 0)
@@ -842,7 +844,26 @@ class CircuitOptimizationDemo:
             load_mode = self.load_modes[self.load_mode_idx]
 
             if load_mode == "Best Model":
-                # Use the new best model loading with intelligent selection
+                # First, load config to get checkpoint settings (for metric derivation)
+                # We'll do a quick load to get the config, then reload with correct metrics
+                temp_config, _, _ = load_config_from_wandb(
+                    run_id=self.run_id,
+                    filters=filters if not self.run_id else None,
+                    project=self.wandb_project,
+                    entity=self.wandb_entity,
+                    download_dir=self.wandb_download_dir,
+                    filename="latest_checkpoint",  # Just to get config, not the actual model
+                    select_by_best_metric=False,
+                    run_from_last=1,
+                    use_cache=True,
+                )
+                
+                # Derive metric name from config's checkpoint settings
+                from boolean_nca_cc.training.checkpointing import derive_checkpoint_metric_from_config
+                metric_name, prefer_metric = derive_checkpoint_metric_from_config(temp_config)
+                print(f"Using checkpoint metric from config: {metric_name} (prefer: {prefer_metric})")
+                
+                # Now load the actual best model with the correct metric
                 loaded_config, checkpoint_path, run_id = load_config_from_wandb(
                     run_id=self.run_id,
                     filters=filters if not self.run_id else None,
@@ -852,8 +873,8 @@ class CircuitOptimizationDemo:
                     select_by_best_metric=True,
                     run_from_last=1,
                     use_cache=True,
-                    prefer_metric=self.prefer_metric,  # Will use intelligent selection if None
-                    metric_name="best/eval_ko_in_hard_accuracy",
+                    prefer_metric=prefer_metric,  # Use metric derived from config
+                    metric_name=metric_name,  # Use metric name derived from config
                 )
 
                 model, loaded_dict = load_model_from_config_and_checkpoint(
