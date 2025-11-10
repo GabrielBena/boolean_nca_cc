@@ -422,6 +422,22 @@ def run_final_bp_sa_comparison(
     )
     
     log.info(f"Generated fresh circuit for final evaluation")
+    
+    # Handle case where knockout_vocabulary might be None (e.g., when damage_pool_enabled=false)
+    if knockout_vocabulary is None:
+        log.warning("knockout_vocabulary is None - skipping final BP vs SA comparison evaluation")
+        return {
+            "comparison/mean_bp_accuracy": 0.0,
+            "comparison/mean_sa_accuracy": 0.0,
+            "comparison/bp_std": 0.0,
+            "comparison/sa_std": 0.0,
+            "plot_data": {
+                "pattern_indices": [],
+                "bp_accuracies": [],
+                "sa_accuracies": [],
+            }
+        }
+    
     log.info(f"Evaluating SA model on {len(knockout_vocabulary)} vocabulary patterns")
     
     # Use entire vocabulary instead of sampling

@@ -1502,7 +1502,7 @@ def train_model(
     # Track last reset epoch for scheduling
     last_reset_epoch = -1  # Initialize to -1 so first check works correctly
 
-    # Initialize knockout evaluation if enabled
+    # Initialize knockout evaluation base circuit (needed for both knockout eval and no-damage eval)
     knockout_eval_base_circuit = None
     if knockout_eval and knockout_eval.get("enabled"):
         # Store base circuit for on-demand evaluation (no pre-created datasets)
@@ -1512,6 +1512,14 @@ def train_model(
         else:
             knockout_eval_base_circuit = gen_circuit(wiring_fixed_key, layer_sizes, arity=arity)
         log.info("Base circuit created for knockout evaluation")
+    elif periodic_eval_inner_steps > 0:
+        # Even if knockout eval is disabled, we need base circuit for no-damage evaluation
+        log.info("Knockout evaluation disabled - will use no-damage evaluation")
+        if training_mode == "repair" and base_wires_preconfig is not None:
+            knockout_eval_base_circuit = (base_wires_preconfig, base_logits_preconfig)
+        else:
+            knockout_eval_base_circuit = gen_circuit(wiring_fixed_key, layer_sizes, arity=arity)
+        log.info("Base circuit created for no-damage evaluation")
 
     # Initialize knockout vocabulary if knockout_diversity is configured
     knockout_vocabulary = None
@@ -1906,7 +1914,12 @@ def train_model(
                 
                 # Simple no-damage evaluation: just evaluate model on base circuit
                 # This tests if the model degrades well-configured circuits even when trained without damage
-                if knockout_eval_base_circuit is not None and epoch % periodic_eval_interval == 0:
+                # Only run when knockout eval is disabled (otherwise knockout eval handles evaluation)
+                if (
+                    (not knockout_eval or not knockout_eval.get("enabled"))
+                    and knockout_eval_base_circuit is not None
+                    and epoch % periodic_eval_interval == 0
+                ):
                     base_wires, base_logits = knockout_eval_base_circuit
                     
                     # Replicate base circuit for batch
