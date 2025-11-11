@@ -64,14 +64,14 @@ pool:
   size: 1024
   reset_fraction: 0.15
   reset_interval: 128
-  reset_strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
+  reset_strategy: "combined"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
 
   # Sample-based damage (applied post-step, independent of resets)
   damage_pool_enabled: true  # Enabled to test uniform damage strategy
   damage_pool_interval: 128
   damage_pool_fraction: 0.15
-  damage_strategy: "uniform"  # Changed from "loss_biased" to test if uniform damage prevents drift
+  damage_strategy: "loss_biased"  # Changed from "loss_biased" to test if uniform damage prevents drift
   damage_combined_weights: [0.5, 0.5]
   damage_mode: "greedy_vocabulary"  # Options: "shotgun" (random), "strip" (localized), "greedy" (rolling window), or "greedy_vocabulary" (vocabulary sampling)
   # Number of gates to knock out when generating fresh patterns (ignored if vocabulary is used)
@@ -138,7 +138,7 @@ checkpoint:
   interval: 1031  # prime number 
   save_best: true  # Save best model based on metric
   best_metric: "hard_accuracy"  # Metric to track for best model
-  best_metric_source: "eval"  # Source for best metric: "training", "eval" (auto-fallback), "eval_ko_in", or "eval_no_damage"
+  best_metric_source: "eval_ko_in"  # Source for best metric: "training", "eval" (auto-fallback), "eval_ko_in", or "eval_no_damage"
   # "eval" will automatically use eval_no_damage when knockout_eval is disabled
   save_stable_states: false  # Save last stable state before NaN loss
 
@@ -147,7 +147,7 @@ early_stop:
   enabled: true  # Enable early stopping based on accuracy threshold
   threshold: 1  # Accuracy threshold to trigger early stopping
   metric: "hard_accuracy"  # Metric to monitor: "loss", "hard_loss", "accuracy", "hard_accuracy"
-  source: "eval"  # Source for early stopping metric: "training", "eval" (auto-fallback), "eval_ko_in", or "eval_no_damage"
+  source: "eval_ko_in"  # Source for early stopping metric: "training", "eval" (auto-fallback), "eval_ko_in", or "eval_no_damage"
   # "eval" will automatically use eval_no_damage when knockout_eval is disabled
   patience: 2  # Number of evaluations above threshold before stopping (since eval runs every 1024 epochs)
   min_epochs: 3072  # Minimum epochs before early stopping can trigger

@@ -94,6 +94,8 @@ def _init_wandb(wandb_logging: bool, wandb_run_config: dict | None = None) -> An
             wandb.define_metric("eval_ko_out/*", step_metric="eval_ko_out/epoch")
             wandb.define_metric("eval_no_damage/*", step_metric="eval_no_damage/epoch")
             wandb.define_metric("eval_no_damage_steps/*", step_metric="eval_no_damage_steps/epoch")
+            wandb.define_metric("model/*", step_metric="training/epoch")
+            wandb.define_metric("scheduler/*", step_metric="training/epoch")
 
             # Make the run summary of this metric be its max over the run
             # so sweeps can optimize it even if it's logged periodically
@@ -109,6 +111,50 @@ def _init_wandb(wandb_logging: bool, wandb_run_config: dict | None = None) -> An
         return None
     except Exception as e:
         log.warning(f"Error initializing wandb: {e}. Running without wandb logging.")
+        return None
+
+# DEBUG BLOCK: Add scale parameters if available (for re_zero_update models)
+def _extract_scale_parameter(model, param_name: str) -> float:
+    """
+    Extract the value of a scale parameter from the model.
+    
+    Handles both CircuitSelfAttention (direct attributes) and CircuitGNN 
+    (nested in node_update module).
+    
+    Args:
+        model: The model instance (CircuitSelfAttention or CircuitGNN)
+        param_name: Name of the parameter ('logit_scale' or 'hidden_scale')
+        
+    Returns:
+        The scalar value of the parameter, or None if not found
+    """
+    try:
+        # Try direct attribute first (CircuitSelfAttention)
+        if hasattr(model, param_name):
+            param = getattr(model, param_name)
+        # Try nested in node_update (CircuitGNN)
+        elif hasattr(model, 'node_update') and hasattr(model.node_update, param_name):
+            param = getattr(model.node_update, param_name)
+        else:
+            return None
+        
+        # If it's a nnx.Param, extract the value
+        if isinstance(param, nnx.Param):
+            value = param.value
+            # Convert JAX array to Python float
+            if hasattr(value, 'item'):
+                return float(value.item())
+            elif hasattr(value, '__len__') and len(value) > 0:
+                return float(value[0])
+            else:
+                return float(value)
+        # If it's a scalar (when re_zero_update=False), return it directly
+        elif isinstance(param, (int, float)):
+            return float(param)
+        
+        return None
+    except Exception as e:
+        log.warning(f"Error extracting {param_name}: {e}")
         return None
 
 
@@ -1818,6 +1864,16 @@ def train_model(
                 # Add learning rate if available
                 schedule_value = schedule(epoch) if schedule is not None else learning_rate
                 metrics_dict["scheduler/learning_rate"] = schedule_value
+
+                # DEBUG BLOCK: Add scale parameters if available (for re_zero_update models)
+                # Add scale parameters if available (for re_zero_update models)
+                logit_scale = _extract_scale_parameter(model, "logit_scale")
+                if logit_scale is not None:
+                    metrics_dict["model/logit_scale"] = logit_scale
+                
+                hidden_scale = _extract_scale_parameter(model, "hidden_scale")
+                if hidden_scale is not None:
+                    metrics_dict["model/hidden_scale"] = hidden_scale
 
                 # Add early stopping metrics if enabled
                 if stop_accuracy_enabled:

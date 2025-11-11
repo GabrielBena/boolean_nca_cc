@@ -37,6 +37,40 @@ This document focuses on investigating and resolving the accuracy drift issue wh
 - When circuit is initialized to accuracy 1.0, it should maintain that accuracy for a while at least
 - Model should maintain stable performance similar to training eval loop
 
+**Critical Discovery: Multi-Inject Evaluation Loop Timing**
+
+**Investigation Finding**: The multi-inject evaluation loop does NOT run a warm-up period before applying damage. Damage is injected at step 1, immediately after the initial evaluation (step 0).
+
+**Current Evaluation Behavior**:
+- **Step 0**: Initial evaluation (pre-damage baseline, accuracy ~1.0) - logged before loop starts
+- **Step 1**: First damage injection + first model update
+- **Step 11, 21, 31, ...**: Subsequent damage injections (every `recover_steps + 1` steps, where `recover_steps=10`)
+
+**Key Insight**: In wandb eval curves, accuracy stays stable at 1.0 for the first N steps (before damage is applied). This suggests:
+1. **The model IS capable of maintaining a well-configured circuit** (accuracy 1.0) without degrading it
+2. **The GUI starts with the same preconfigured state as eval step 0** (same logits, same circuit configuration)
+3. **The GUI's immediate degradation suggests a mismatch** in how the model processes updates in GUI vs. eval context
+
+**This challenges the hypothesis that "the model always applies updates"** - if that were true, eval would also degrade immediately. The fact that eval maintains accuracy suggests the model CAN handle good circuits, but something in the GUI context is different.
+
+**Solution Implemented: Damage Start Offset**
+
+Added `damage_start_offset` parameter to allow warm-up period before first damage:
+- **`damage_start_offset: int = 0`**: Number of steps to run before first damage injection
+- **`damage_start_offset_random: bool = False`**: If True, randomize offset per circuit (0 to `damage_start_offset`)
+- **`damage_start_offset_seed: int = 42`**: Seed for random offset generation
+
+**Usage Examples**:
+- `damage_start_offset: 10` → Run 10 steps (1-10) before first damage at step 11
+- `damage_start_offset: 10, damage_start_offset_random: true` → Random offset 0-10 per circuit
+- `damage_start_offset: 0` → Current behavior (damage at step 1)
+
+**Implementation Location**: `boolean_nca_cc/training/evaluation.py` in `_evaluate_with_loop()`
+
+**Next Steps**: Test with `damage_start_offset: 10` to see if eval maintains accuracy during warm-up period, then compare with GUI behavior during the same period. This will help isolate whether the issue is:
+- Model behavior (if both degrade during warm-up)
+- GUI-specific initialization (if eval maintains but GUI degrades)
+
 ---
 
 ## Potential Root Causes
@@ -121,7 +155,7 @@ Step 200: Loss = 88.3226, Hard Loss = 248.0000
 
 **Status**: ✅ Fix applied, but **does NOT resolve the accuracy drift issue**. The drift persists, indicating there are additional root causes to investigate.
 
-### 🔴 ROOT CAUSE IDENTIFIED: Model Always Applies Updates
+### 🔴 HYPOTHESIS CHALLENGED: Model Always Applies Updates
 
 **Critical Finding from Logs**:
 - Preconfigured circuit: `loss=0.026637, hard_accuracy=0.9971` (not perfect, but very good)
@@ -129,7 +163,7 @@ Step 200: Loss = 88.3226, Hard Loss = 248.0000
 - **First model step**: Loss increases 9x (`0.026637` → `0.234872`) while accuracy stays `1.0000`
 - **Progressive drift**: Loss continues increasing over 200 steps
 
-**Root Cause**:
+**Original Hypothesis**:
 The model was trained to optimize circuits from a **worse starting state**. It always applies learned residual updates:
 ```python
 updated_logits = nodes["logits"] + self.logit_scale * logit_updates
@@ -140,19 +174,21 @@ When given a well-configured circuit (via preconfigure), the model:
 2. Still applies updates optimized for improving worse circuits
 3. These updates degrade performance because they're inappropriate for the current state
 
-**The model has no mechanism to "do nothing" when the circuit is already well-configured.**
+**Challenge to Hypothesis**:
+- **Eval loop shows model CAN maintain accuracy 1.0** for multiple steps before damage is applied
+- This suggests the model IS capable of handling well-configured circuits
+- The GUI's immediate degradation suggests a **GUI-specific issue**, not a fundamental model limitation
 
-**Why this happens**:
-- Model was trained on circuits that needed improvement
-- Training data didn't include many "already perfect" circuits
-- Model learned to always apply updates, assuming circuits need improvement
-- No conditional logic to skip updates when loss is already low
+**Revised Hypothesis**:
+The issue may not be that "the model always applies updates" but rather:
+1. **GUI initialization mismatch**: Graph state (globals, hidden features, `update_steps` counter) doesn't match training eval initialization
+2. **Context difference**: Single-circuit generator vs. batched evaluation behaves differently
+3. **State accumulation**: Graph globals or hidden state accumulating incorrectly in GUI context
 
-**Potential Solutions**:
-1. **Training fix**: Train model on circuits with varying quality, including already-good circuits
-2. **Inference fix**: Add conditional logic to skip/scale updates when loss is below threshold
-3. **Loss-based gating**: Scale update magnitude based on current loss (smaller updates when loss is low)
-4. **Zero-init check**: If model uses zero_init, updates might be too aggressive for good circuits
+**Potential Solutions** (if hypothesis is correct):
+1. **Fix GUI initialization**: Ensure graph globals match training eval exactly
+2. **Fix state management**: Ensure `update_steps` counter and hidden state match training conditions
+3. **Compare step-by-step**: Use `damage_start_offset: 10` to compare eval vs GUI during warm-up period
 
 ### Testing Strategy: Zero-Damage Training Run
 
@@ -279,35 +315,42 @@ When running zero-damage training, the checkpoint system needs to be configured 
 
 ### Active Investigation Items
 
-1. **Compare graph globals initialization** between training eval and GUI generator (especially `update_steps` counter)
+1. **✅ COMPLETED: Multi-Inject Evaluation Loop Investigation**
+   - **Finding**: Damage is injected at step 1 (no warm-up period)
+   - **Finding**: Eval shows model CAN maintain accuracy 1.0 for multiple steps before damage
+   - **Solution**: Implemented `damage_start_offset` parameter to allow warm-up period
+   - **Next**: Test with `damage_start_offset: 10` to compare eval vs GUI during warm-up period
+   - **Priority**: High - This will help isolate whether issue is model behavior or GUI-specific
+
+2. **Compare graph globals initialization** between training eval and GUI generator (especially `update_steps` counter)
    - Verify initial values match exactly
    - Check if counter is being reset or initialized incorrectly
    - **Priority**: High - `update_steps` counter affects model behavior via graph globals
 
-2. **Investigate first generator step degradation**: Why does loss increase from 0.0266 → 0.2349 (9x) on first step?
+3. **Investigate first generator step degradation**: Why does loss increase from 0.0266 → 0.2349 (9x) on first step?
    - Check if `update_steps` counter is being read correctly on first step
    - Verify graph globals are properly initialized before first model call
    - Compare first step behavior between GUI and training eval
 
-3. **Investigate progressive drift**: Why does loss continue to increase from 0.2349 → 29.7506 → 88.3226 over 200 steps?
+4. **Investigate progressive drift**: Why does loss continue to increase from 0.2349 → 29.7506 → 88.3226 over 200 steps?
    - Check if graph globals are accumulating incorrectly
    - Verify hidden state updates are correct
    - Compare update mechanism between GUI and training eval
    - Check if `update_steps` counter increments correctly
 
-4. **Compare graph state initialization** between training eval and GUI generator
+5. **Compare graph state initialization** between training eval and GUI generator
    - Verify graph construction matches exactly (especially positional encodings)
    - Compare initial hidden features
    - Check if build_graph parameters match
 
 ### High Priority (Continued)
 
-5. **Compare exact initialization and step execution** between `evaluate_model_stepwise_generator` (GUI) and `evaluate_model_stepwise_batched` (training eval)
+6. **Compare exact initialization and step execution** between `evaluate_model_stepwise_generator` (GUI) and `evaluate_model_stepwise_batched` (training eval)
    - Most important reference: conditions in `train_loop.py` which generate `eval_ko_in_steps/hard_accuracy` as logged to wandb
    - These track the stepwise accuracy readings of an inner loop, and show great performance
    - **Key difference**: Training eval uses batched evaluation, GUI uses single circuit - need to verify this doesn't cause issues
 
-6. **Add debug logging** to track logits state, accuracy, and graph globals at each step
+7. **Add debug logging** to track logits state, accuracy, and graph globals at each step
    - ✅ **COMPLETED**: Added debug logging to `evaluate_model_stepwise_generator`
    - Logs initial graph globals (step 0)
    - Logs graph globals before and after model call for first 5 steps and every 50th step
@@ -347,11 +390,13 @@ When running zero-damage training, the checkpoint system needs to be configured 
 
 - ✅ **Fixed**: Model call parameter mismatch (layer_sizes/layer_neighbors) - but does NOT resolve drift
 - ✅ **Identified**: Preconfigured circuit has `loss=0.026637, hard_accuracy=0.9971` (not perfect, but close)
-- 🔴 **Root Cause Identified**: Model always applies learned updates, even to well-configured circuits
-  - Model was trained to improve circuits from worse states
-  - When given a well-configured circuit (accuracy ~1.0), model still applies updates
-  - These updates degrade performance because they're optimized for different starting conditions
-  - First step: loss increases 9x (0.026637 → 0.234872) while accuracy stays 1.0
-  - Progressive drift: Each step continues to apply inappropriate updates
-- 🔴 **Active**: Need to investigate why model doesn't recognize "good enough" state and stop updating
+- ✅ **Investigated**: Multi-inject evaluation loop timing - damage injected at step 1 (no warm-up)
+- ✅ **Implemented**: `damage_start_offset` parameter to allow warm-up period before first damage
+- 🔴 **Hypothesis Challenged**: Original hypothesis that "model always applies updates" is challenged by:
+  - Eval loop shows model CAN maintain accuracy 1.0 for multiple steps before damage
+  - This suggests model IS capable of handling well-configured circuits
+  - GUI's immediate degradation suggests GUI-specific initialization or state management issue
+- 🔴 **Active**: Need to test with `damage_start_offset: 10` to compare eval vs GUI during warm-up period
+  - If both degrade: Confirms model behavior issue
+  - If eval maintains but GUI degrades: Confirms GUI-specific initialization issue
 
