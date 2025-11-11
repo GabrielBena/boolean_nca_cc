@@ -264,6 +264,36 @@ To converge with training/eval:
 
 **Most Likely Root Cause**: Generator initialization using wrong state (graph globals, especially `update_steps` counter) that doesn't match training conditions.
 
+**Investigation: Multi-Inject Evaluation Loop Timing**
+
+**Key Finding**: The multi-inject evaluation loop does NOT run a warm-up period before applying damage. Damage is injected at step 1, immediately after the initial evaluation (step 0).
+
+**Current Evaluation Behavior**:
+- **Step 0**: Initial evaluation (pre-damage baseline, accuracy ~1.0) - logged before loop starts
+- **Step 1**: First damage injection + first model update
+- **Step 11, 21, 31, ...**: Subsequent damage injections (every `recover_steps + 1` steps)
+
+**Critical Insight**: In wandb eval curves, accuracy stays stable at 1.0 for the first N steps (before damage). This suggests:
+1. The model IS capable of maintaining a well-configured circuit (accuracy 1.0) without degrading it
+2. The GUI starts with the same preconfigured state as eval step 0
+3. The GUI's immediate degradation suggests a mismatch in how the model processes updates in GUI vs. eval context
+
+**Solution Implemented: Damage Start Offset**
+
+Added `damage_start_offset` parameter to allow warm-up period before first damage:
+- **`damage_start_offset: int = 0`**: Number of steps to run before first damage injection
+- **`damage_start_offset_random: bool = False`**: If True, randomize offset per circuit (0 to `damage_start_offset`)
+- **`damage_start_offset_seed: int = 42`**: Seed for random offset generation
+
+**Usage**:
+- `damage_start_offset: 10` → Run 10 steps (1-10) before first damage at step 11
+- `damage_start_offset: 10, damage_start_offset_random: true` → Random offset 0-10 per circuit
+- `damage_start_offset: 0` → Current behavior (damage at step 1)
+
+**Implementation Location**: `boolean_nca_cc/training/evaluation.py` in `_evaluate_with_loop()`
+
+**Next Steps**: Test with `damage_start_offset: 10` to see if eval maintains accuracy during warm-up period, then compare with GUI behavior during the same period.
+
 ---
 
 ### 🔴 Issue 3: PERTURB Resets Logits to Previous State
@@ -299,6 +329,9 @@ To converge with training/eval:
 
 1. **High Priority**: Issue 2 (Self-Attention drift) - Core functionality broken
    - See [`self_attention_accuracy_drift.md`](self_attention_accuracy_drift.md) for detailed investigation plan
+   - **New Finding**: Eval loop shows model CAN maintain accuracy 1.0 for multiple steps (before damage)
+   - **Solution Implemented**: `damage_start_offset` parameter allows warm-up period before first damage
+   - **Next**: Test with `damage_start_offset: 10` to compare eval vs GUI behavior during warm-up period
 2. **High Priority**: Issue 3 (PERTURB reset) - Masks underlying drift issue
 
 

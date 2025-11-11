@@ -273,6 +273,10 @@ def run_knockout_periodic_evaluation(
             greedy_ordered_indices=knockout_config.get("greedy_ordered_indices", None),
             greedy_window_size=int(knockout_config.get("greedy_window_size", 1)),
             greedy_injection_recover_steps=int(knockout_config.get("greedy_injection_recover_steps", 10)),
+            # Damage start offset parameters
+            damage_start_offset=int(knockout_config.get("damage_start_offset", 0)),
+            damage_start_offset_random=knockout_config.get("damage_start_offset_random", False),
+            damage_start_offset_seed=int(knockout_config.get("damage_start_offset_seed", 42)),
             # Vocabulary-based evaluation parameters
             knockout_vocabulary=knockout_vocabulary,  # If provided => seen; else => unseen
         )
@@ -324,6 +328,10 @@ def run_knockout_periodic_evaluation(
             greedy_ordered_indices=knockout_config.get("greedy_ordered_indices", None),
             greedy_window_size=int(knockout_config.get("greedy_window_size", 1)),
             greedy_injection_recover_steps=int(knockout_config.get("greedy_injection_recover_steps", 10)),
+            # Damage start offset parameters
+            damage_start_offset=int(knockout_config.get("damage_start_offset", 0)),
+            damage_start_offset_random=knockout_config.get("damage_start_offset_random", False),
+            damage_start_offset_seed=int(knockout_config.get("damage_start_offset_seed", 42)),
             # For OUT, force unseen by not providing a vocabulary
             knockout_vocabulary=None,  # Force unseen patterns for OUT evaluation
         )
@@ -580,6 +588,10 @@ def plot_combined_bp_sa_stepwise_performance(
     greedy_ordered_indices: Optional[List[int]] = None,
     greedy_window_size: int = 1,
     greedy_injection_recover_steps: int = 10,
+    # Damage start offset (warm-up period before first damage)
+    damage_start_offset: int = 0,  # Number of steps to run before first damage injection
+    damage_start_offset_random: bool = False,  # If True, randomize offset per circuit
+    damage_start_offset_seed: int = 42,  # Seed for random offset generation
     knockout_vocabulary: Optional[jp.ndarray] = None,
 ):
     """
@@ -673,6 +685,9 @@ def plot_combined_bp_sa_stepwise_performance(
             greedy_ordered_indices=greedy_ordered_indices,
             greedy_window_size=greedy_window_size,
             greedy_injection_recover_steps=greedy_injection_recover_steps,
+            damage_start_offset=damage_start_offset,
+            damage_start_offset_random=damage_start_offset_random,
+            damage_start_offset_seed=damage_start_offset_seed,
             knockout_vocabulary=knockout_vocabulary,
         )
     else:
@@ -748,6 +763,9 @@ def plot_combined_bp_sa_stepwise_performance(
                 greedy_ordered_indices=greedy_ordered_indices,
                 greedy_window_size=greedy_window_size,
                 greedy_injection_recover_steps=greedy_injection_recover_steps,
+                damage_start_offset=damage_start_offset,
+                damage_start_offset_random=damage_start_offset_random,
+                damage_start_offset_seed=damage_start_offset_seed,
                 knockout_vocabulary=None,  # Force unseen patterns for OOD evaluation
             )
         else:
@@ -2276,6 +2294,9 @@ def train_model(
                 greedy_ordered_indices=greedy_ordered_indices,
                 greedy_window_size=int(knockout_eval.get("greedy_window_size", 1)),
                 greedy_injection_recover_steps=int(knockout_eval.get("greedy_injection_recover_steps", 10)),
+                damage_start_offset=int(knockout_eval.get("damage_start_offset", 0)),
+                damage_start_offset_random=knockout_eval.get("damage_start_offset_random", False),
+                damage_start_offset_seed=int(knockout_eval.get("damage_start_offset_seed", 42)),
                 knockout_vocabulary=knockout_vocabulary,
             )
             

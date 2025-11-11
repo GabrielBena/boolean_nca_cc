@@ -420,6 +420,10 @@ def evaluate_model_stepwise_batched(
     greedy_ordered_indices: Optional[List[int]] = None,
     greedy_window_size: int = 1,
     greedy_injection_recover_steps: int = 10,
+    # Damage start offset (warm-up period before first damage)
+    damage_start_offset: int = 0,  # Number of steps to run before first damage injection
+    damage_start_offset_random: bool = False,  # If True, randomize offset per circuit (0 to damage_start_offset)
+    damage_start_offset_seed: int = 42,  # Seed for random offset generation
     # Vocabulary-based evaluation parameters
     knockout_vocabulary: Optional[jp.ndarray] = None,  # If provided => seen (sample from vocab); else => unseen (fresh)
 ) -> Dict:
@@ -457,6 +461,8 @@ def evaluate_model_stepwise_batched(
         raise ValueError(f"max_damage_per_circuit must be >= 1, got {max_damage_per_circuit}")
     if damage_injection_mode == "single" and max_damage_per_circuit != 1:
         raise ValueError(f"damage_injection_mode='single' requires max_damage_per_circuit=1, got {max_damage_per_circuit}")
+    if damage_start_offset < 0:
+        raise ValueError(f"damage_start_offset must be >= 0, got {damage_start_offset}")
     batch_size = batch_wires[0].shape[0]
 
     # Build initial graphs for the batch
@@ -550,6 +556,9 @@ def evaluate_model_stepwise_batched(
         greedy_ordered_indices=greedy_ordered_indices,
         greedy_window_size=greedy_window_size,
         greedy_injection_recover_steps=greedy_injection_recover_steps,
+        damage_start_offset=damage_start_offset,
+        damage_start_offset_random=damage_start_offset_random,
+        damage_start_offset_seed=damage_start_offset_seed,
         knockout_vocabulary=knockout_vocabulary,
     )
 
@@ -660,6 +669,10 @@ def _evaluate_with_loop(
     greedy_ordered_indices: Optional[List[int]] = None,
     greedy_window_size: int = 1,
     greedy_injection_recover_steps: int = 7,
+    # Damage start offset (warm-up period before first damage)
+    damage_start_offset: int = 0,  # Number of steps to run before first damage injection
+    damage_start_offset_random: bool = False,  # If True, randomize offset per circuit (0 to damage_start_offset)
+    damage_start_offset_seed: int = 42,  # Seed for random offset generation
     # Vocabulary-based evaluation parameters
     knockout_vocabulary: Optional[jp.ndarray] = None,  # If provided => seen; else => unseen (fresh)
 ) -> Dict:
@@ -710,6 +723,17 @@ def _evaluate_with_loop(
         eval_perturb_counter = jp.zeros((batch_size,), dtype=jp.int32)
         window = max(1, int(greedy_window_size))
         greedy_len = int(len(greedy_ordered_indices))
+    
+    # Compute per-circuit damage start offsets
+    if damage_start_offset_random:
+        # Generate random offset per circuit (0 to damage_start_offset inclusive)
+        offset_rng = jax.random.PRNGKey(damage_start_offset_seed)
+        per_circuit_offsets = jax.random.randint(
+            offset_rng, (batch_size,), 0, damage_start_offset + 1, dtype=jp.int32
+        )
+    else:
+        # Fixed offset for all circuits
+        per_circuit_offsets = jp.full((batch_size,), damage_start_offset, dtype=jp.int32)
 
     for step in range(1, n_message_steps + 1):
         # Apply model to all graphs in batch
@@ -717,10 +741,16 @@ def _evaluate_with_loop(
         step_knockout_patterns = knockout_patterns
         inject_now_mask = None
         if eval_perturb_counter is not None:
-            # Injection schedule: step 1, then every (recover_steps + 1) steps
+            # Injection schedule: after offset, then every (recover_steps + 1) steps
             recover_steps = int(max(0, greedy_injection_recover_steps))
-            inject_now = (step == 1) or ((step - 1) % (recover_steps + 1) == 0)
-            inject_now_mask = jp.full((batch_size,), bool(inject_now), dtype=jp.bool_)
+            # First damage after offset: step == (offset + 1)
+            # Subsequent damages: step == offset + 1 + n*(recover_steps + 1) for n >= 1
+            # Which simplifies to: (step - offset - 1) > 0 and (step - offset - 1) % (recover_steps + 1) == 0
+            steps_since_first_damage = step - per_circuit_offsets - 1
+            first_damage = (steps_since_first_damage == 0)
+            subsequent_damage = (steps_since_first_damage > 0) & ((steps_since_first_damage % (recover_steps + 1)) == 0)
+            inject_now = first_damage | subsequent_damage
+            inject_now_mask = inject_now
 
             # Respect maximum number of injections per circuit
             can_inject_mask = eval_perturb_counter < max_damage_per_circuit
