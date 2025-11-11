@@ -327,6 +327,10 @@ class CircuitOptimizationDemo:
         # DEBUG: Scale parameter values (for re_zero_update models)
         self.model_logit_scale = None
         self.model_hidden_scale = None
+        
+        # DEBUG: Checkpoint metadata (epoch, step)
+        self.checkpoint_epoch = None
+        self.checkpoint_step = None
 
         # Store activations for circuit visualization
         self.act = []
@@ -613,9 +617,11 @@ class CircuitOptimizationDemo:
             # Reset generator when switching to backprop
             self.model_generator = None
             self.last_step_result = None
-            # DEBUG: Clear scale values when switching to backprop
+            # DEBUG: Clear scale values and checkpoint metadata when switching to backprop
             self.model_logit_scale = None
             self.model_hidden_scale = None
+            self.checkpoint_epoch = None
+            self.checkpoint_step = None
             # END DEBUG
 
         elif method_name == "Self-Attention":
@@ -630,9 +636,11 @@ class CircuitOptimizationDemo:
                 self.initialize_model_generator()
             else:
                 print(f"Could not load {method_name} model. Falling back to Backprop.")
-                # DEBUG: Clear scale values when model loading fails
+                # DEBUG: Clear scale values and checkpoint metadata when model loading fails
                 self.model_logit_scale = None
                 self.model_hidden_scale = None
+                self.checkpoint_epoch = None
+                self.checkpoint_step = None
                 # END DEBUG
                 self.optimization_method_idx = 0
                 self.initialize_optimization_method()
@@ -764,6 +772,24 @@ class CircuitOptimizationDemo:
                 self.frozen_model = model
                 self.loaded_run_id = run_id
                 self.loaded_run_id = loaded_dict.get("run_id", "unknown")
+                
+                # DEBUG BLOCK: Extract checkpoint metadata (epoch, step)
+                # Extract step (always available)
+                self.checkpoint_step = loaded_dict.get("step")
+                
+                # Extract epoch from config (available for periodic/best checkpoints)
+                checkpoint_config = loaded_dict.get("config", {})
+                if isinstance(checkpoint_config, dict):
+                    self.checkpoint_epoch = checkpoint_config.get("epoch")
+                else:
+                    # Config might be an OmegaConf object
+                    self.checkpoint_epoch = getattr(checkpoint_config, "epoch", None)
+                
+                if self.checkpoint_step is not None:
+                    print(f"DEBUG: Checkpoint step = {self.checkpoint_step}")
+                if self.checkpoint_epoch is not None:
+                    print(f"DEBUG: Checkpoint epoch = {self.checkpoint_epoch}")
+                # END DEBUG BLOCK
 
             else:  # Latest Checkpoint
                 # Use the original checkpoint loading
@@ -787,6 +813,24 @@ class CircuitOptimizationDemo:
 
                 self.frozen_model = model
                 self.loaded_run_id = loaded_dict.get("run_id", "unknown")
+                
+                # DEBUG BLOCK: Extract checkpoint metadata (epoch, step)
+                # Extract step (always available)
+                self.checkpoint_step = loaded_dict.get("step")
+                
+                # Extract epoch from config (available for periodic/best checkpoints)
+                checkpoint_config = loaded_dict.get("config", {})
+                if isinstance(checkpoint_config, dict):
+                    self.checkpoint_epoch = checkpoint_config.get("epoch")
+                else:
+                    # Config might be an OmegaConf object
+                    self.checkpoint_epoch = getattr(checkpoint_config, "epoch", None)
+                
+                if self.checkpoint_step is not None:
+                    print(f"DEBUG: Checkpoint step = {self.checkpoint_step}")
+                if self.checkpoint_epoch is not None:
+                    print(f"DEBUG: Checkpoint epoch = {self.checkpoint_epoch}")
+                # END DEBUG BLOCK
 
             # Align GUI state from loaded config (mirror training conditions)
             try:
@@ -1958,6 +2002,19 @@ class CircuitOptimizationDemo:
             if method_name == "Self-Attention" and self.frozen_model is not None:
                 imgui.text(f"Model hidden_dim: {self.model_hidden_dim}")
                 imgui.text(f"Model use_globals: {self.model_use_globals}")
+                
+                # DEBUG BLOCK: Display checkpoint metadata (epoch, step)
+                if self.checkpoint_step is not None:
+                    imgui.text(f"DEBUG: Checkpoint step = {self.checkpoint_step}")
+                if self.checkpoint_epoch is not None:
+                    imgui.text(f"DEBUG: Checkpoint epoch = {self.checkpoint_epoch}")
+                elif self.checkpoint_step is not None:
+                    # Step available but epoch not - might be an older checkpoint format
+                    imgui.text_colored(
+                        imgui.ImVec4(0.7, 0.7, 0.7, 1.0),
+                        "DEBUG: Checkpoint epoch = N/A (not in checkpoint)"
+                    )
+                # END DEBUG BLOCK
                 
                 # DEBUG BLOCK: Display scale parameters
                 if self.model_logit_scale is not None:
