@@ -101,6 +101,8 @@ Added `damage_start_offset` parameter to allow warm-up period before first damag
 
 ## Critical Evidence from Terminal Logs
 
+### Initial Findings (Before Checkpoint Loading Fix)
+
 ```
 Initializing model generator with:
   - hidden_dim: 64
@@ -112,7 +114,7 @@ Step 100: Loss = 29.7506, Hard Loss = 110.0000
 Step 200: Loss = 88.3226, Hard Loss = 248.0000
 ```
 
-**Key Findings**:
+**Key Findings from Initial Investigation**:
 
 1. **Initial loss is reasonable**: Initial loss upon generator initialization of 0.0266 is not terrible, but not great either.
 
@@ -124,9 +126,78 @@ Step 200: Loss = 88.3226, Hard Loss = 248.0000
    - Step 200: 88.3226 (332x increase from initial)
    - This confirms the drift issue persists even with correct preconfiguration.
 
-**Most Likely Root Cause**:
+### ✅ FIXED: Checkpoint Loading Issue
+
+**Problem**: GUI was loading checkpoint from epoch 0 instead of the latest best checkpoint (epoch 3072).
+
+**Root Cause**: 
+- Early cache check was returning cached checkpoint before artifact selection logic ran
+- Artifact selection wasn't properly selecting the most recent artifact version
+- Cached files weren't being invalidated when selecting best model
+
+**Fix Applied**:
+1. Modified `load_config_from_wandb` to skip early cache return when `select_by_best_metric=True`
+2. Improved `_select_best_artifact` to select most recent artifact by version when all have "unknown" metric names
+3. Added file path resolution to handle WandB artifact download directory structure
+4. Added force re-download logic when selecting best model
+
+**Files Changed**:
+- `boolean_nca_cc/training/checkpointing.py`: Updated cache logic, artifact selection, and file path resolution
+
+**Status**: ✅ **FIXED** - GUI now correctly loads checkpoint from epoch 3072 (latest best model) instead of epoch 0.
+
+### Updated Findings (After Checkpoint Loading Fix)
+
+```
+DEBUG: Checkpoint step = 3072
+DEBUG: Checkpoint epoch = 3072
+DEBUG: Model logit_scale = -0.005198457
+DEBUG: Model hidden_scale = 0.000816561
+Initializing model generator with:
+  - hidden_dim: 64
+  - use_globals: True
+  - model type: CircuitSelfAttention
+[Generator Init] Step 0: globals=[loss=0.026637, update_steps=0]
+Initialized model generator with initial loss: 0.0266
+[Generator Step 1] After update: globals=[loss=0.115496, update_steps=1], accuracy=1.0000, hard_accuracy=0.9980
+Step 0: Loss = 0.1155, Hard Loss = 4.0000
+[Generator Step 5] After update: globals=[loss=0.423418, update_steps=5], accuracy=0.9990, hard_accuracy=0.9893
+[Generator Step 50] After update: globals=[loss=6.712050, update_steps=50], accuracy=0.9868, hard_accuracy=0.9761
+[Generator Step 100] After update: globals=[loss=31.361713, update_steps=100], accuracy=0.9453, hard_accuracy=0.9302
+Step 100: Loss = 32.0606, Hard Loss = 143.0000
+[Generator Step 200] After update: globals=[loss=108.135963, update_steps=200], accuracy=0.8887, hard_accuracy=0.8867
+Step 200: Loss = 108.8238, Hard Loss = 235.0000
+```
+
+**Key Findings from Updated Investigation**:
+
+1. **✅ Checkpoint loading now works correctly**: 
+   - Loading checkpoint from epoch 3072 (latest best model) instead of epoch 0
+   - Model scale parameters are different: `logit_scale = -0.005198457`, `hidden_scale = 0.000816561`
+   - These match the trained model state from the final checkpoint
+
+2. **🔴 Accuracy drift STILL persists** even with correct checkpoint:
+   - Initial: `loss=0.026637, hard_accuracy=0.9971` (step 0)
+   - Step 1: `loss=0.115496, hard_accuracy=0.9980` (loss increased 4.3x, accuracy slightly improved)
+   - Step 5: `loss=0.423418, hard_accuracy=0.9893` (accuracy starting to degrade)
+   - Step 50: `loss=6.712050, hard_accuracy=0.9761` (significant degradation)
+   - Step 100: `loss=31.361713, hard_accuracy=0.9302` (continuing to degrade)
+   - Step 200: `loss=108.135963, hard_accuracy=0.8867` (severe degradation)
+
+3. **🔴 Progressive degradation continues**: 
+   - Loss increases from 0.0266 → 0.1155 → 0.4234 → 6.71 → 31.36 → 108.14 over 200 steps
+   - Hard accuracy degrades from 0.9971 → 0.9980 → 0.9893 → 0.9761 → 0.9302 → 0.8867
+   - This confirms the drift issue is **NOT** caused by loading the wrong checkpoint
+
+4. **Interesting observation**: 
+   - First step shows slight accuracy improvement (0.9971 → 0.9980) but loss increases (0.0266 → 0.1155)
+   - This suggests the model is making updates, but they're not beneficial for the well-configured circuit
+   - Accuracy starts degrading from step 5 onwards, indicating systematic issues with update application
+
+**Most Likely Root Cause** (Updated):
+- **✅ RULED OUT**: Checkpoint loading issue - confirmed not the cause
 - **Generator initialization using wrong state**: Graph globals (especially `update_steps` counter), hidden features, or initial graph representation don't match training conditions
-- **First step applying incorrect updates**: Possibly due to wrong `update_steps` counter causing the model to think it's at a different step than it actually is
+- **First step applying incorrect updates**: Model applies updates optimized for damaged circuits, which degrade well-configured circuits
 - **Mismatch between training eval and GUI generator initialization**: Training eval may initialize graph state differently than GUI generator
 - **Progressive degradation**: Each step continues to worsen performance, suggesting systematic issues with how model updates are being applied
 
@@ -315,24 +386,40 @@ When running zero-damage training, the checkpoint system needs to be configured 
 
 ### Active Investigation Items
 
-1. **✅ COMPLETED: Multi-Inject Evaluation Loop Investigation**
+1. **✅ COMPLETED: Checkpoint Loading Fix**
+   - **Problem**: GUI was loading checkpoint from epoch 0 instead of latest best checkpoint (epoch 3072)
+   - **Root Cause**: Early cache check bypassed artifact selection, artifact selection wasn't picking latest version
+   - **Solution**: Modified `load_config_from_wandb` to skip cache when `select_by_best_metric=True`, improved artifact selection, added file path resolution
+   - **Result**: GUI now correctly loads checkpoint from epoch 3072
+   - **Finding**: Accuracy drift **still persists** with correct checkpoint, confirming checkpoint loading was NOT the root cause
+   - **Status**: ✅ Fixed
+
+2. **✅ COMPLETED: Multi-Inject Evaluation Loop Investigation**
    - **Finding**: Damage is injected at step 1 (no warm-up period)
    - **Finding**: Eval shows model CAN maintain accuracy 1.0 for multiple steps before damage
    - **Solution**: Implemented `damage_start_offset` parameter to allow warm-up period
    - **Next**: Test with `damage_start_offset: 10` to compare eval vs GUI during warm-up period
    - **Priority**: High - This will help isolate whether issue is model behavior or GUI-specific
 
-2. **Compare graph globals initialization** between training eval and GUI generator (especially `update_steps` counter)
+3. **Compare graph globals initialization** between training eval and GUI generator (especially `update_steps` counter)
    - Verify initial values match exactly
    - Check if counter is being reset or initialized incorrectly
    - **Priority**: High - `update_steps` counter affects model behavior via graph globals
 
-3. **Investigate first generator step degradation**: Why does loss increase from 0.0266 → 0.2349 (9x) on first step?
+4. **Investigate first generator step degradation**: Why does loss increase from 0.0266 → 0.1155 (4.3x) on first step?
+   - **Updated**: With correct checkpoint (epoch 3072), first step shows 4.3x loss increase (vs 9x with epoch 0 checkpoint)
    - Check if `update_steps` counter is being read correctly on first step
    - Verify graph globals are properly initialized before first model call
    - Compare first step behavior between GUI and training eval
+   - **Note**: First step shows slight accuracy improvement (0.9971 → 0.9980) but loss increases, suggesting updates are being applied but not beneficial
 
-4. **Investigate progressive drift**: Why does loss continue to increase from 0.2349 → 29.7506 → 88.3226 over 200 steps?
+5. **Investigate progressive drift**: Why does loss continue to increase from 0.1155 → 6.71 → 31.36 → 108.14 over 200 steps?
+   - **Updated**: With correct checkpoint (epoch 3072), drift pattern is similar but slightly different:
+     - Step 1: 0.1155 (4.3x increase from initial)
+     - Step 50: 6.71 (252x increase from initial)
+     - Step 100: 31.36 (1177x increase from initial)
+     - Step 200: 108.14 (4058x increase from initial)
+   - **Confirmed**: Drift persists even with correct checkpoint, ruling out checkpoint loading as root cause
    - Check if graph globals are accumulating incorrectly
    - Verify hidden state updates are correct
    - Compare update mechanism between GUI and training eval
@@ -389,13 +476,19 @@ When running zero-damage training, the checkpoint system needs to be configured 
 ## Investigation Status
 
 - ✅ **Fixed**: Model call parameter mismatch (layer_sizes/layer_neighbors) - but does NOT resolve drift
+- ✅ **Fixed**: Checkpoint loading issue - GUI now correctly loads checkpoint from epoch 3072 instead of epoch 0
 - ✅ **Identified**: Preconfigured circuit has `loss=0.026637, hard_accuracy=0.9971` (not perfect, but close)
 - ✅ **Investigated**: Multi-inject evaluation loop timing - damage injected at step 1 (no warm-up)
 - ✅ **Implemented**: `damage_start_offset` parameter to allow warm-up period before first damage
+- ✅ **Ruled Out**: Checkpoint loading issue - confirmed NOT the cause of accuracy drift (drift persists with correct checkpoint)
 - 🔴 **Hypothesis Challenged**: Original hypothesis that "model always applies updates" is challenged by:
   - Eval loop shows model CAN maintain accuracy 1.0 for multiple steps before damage
   - This suggests model IS capable of handling well-configured circuits
   - GUI's immediate degradation suggests GUI-specific initialization or state management issue
+- 🔴 **Confirmed**: Accuracy drift persists even with correct checkpoint (epoch 3072):
+  - Loss increases 4.3x on first step (0.0266 → 0.1155)
+  - Accuracy starts degrading from step 5 onwards
+  - Progressive degradation continues over 200 steps (accuracy: 0.9971 → 0.8867)
 - 🔴 **Active**: Need to test with `damage_start_offset: 10` to compare eval vs GUI during warm-up period
   - If both degrade: Confirms model behavior issue
   - If eval maintains but GUI degrades: Confirms GUI-specific initialization issue

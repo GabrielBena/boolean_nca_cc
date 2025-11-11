@@ -38,7 +38,8 @@ from boolean_nca_cc.training.schedulers import (
 from boolean_nca_cc.training.pool.pool import GraphPool, initialize_graph_pool
 from boolean_nca_cc.training.evaluation import (
     evaluate_model_stepwise_batched,
-    get_loss_and_update_graph, evaluate_circuits_in_chunks
+    get_loss_and_update_graph, evaluate_circuits_in_chunks,
+    get_loss_from_wires_logits,
 )
 from boolean_nca_cc.training.preconfigure import preconfigure_circuit_logits
 # Removed unused knockout dataset imports since we now use vocabulary-based evaluation
@@ -1400,6 +1401,20 @@ def train_model(
             beta1=pre_b1,
             beta2=pre_b2,
         )
+        
+        # Log preconfigured circuit metrics
+        preconfig_loss, preconfig_aux = get_loss_from_wires_logits(
+            base_logits_preconfig, base_wires_preconfig, x_data, y_data, loss_type
+        )
+        preconfig_hard_loss, _, _, preconfig_accuracy, preconfig_hard_accuracy, _, _ = preconfig_aux
+        log.info(
+            f"Preconfigured circuit metrics: "
+            f"loss={float(preconfig_loss):.6f}, "
+            f"hard_loss={float(preconfig_hard_loss):.4f}, "
+            f"accuracy={float(preconfig_accuracy):.4f}, "
+            f"hard_accuracy={float(preconfig_hard_accuracy):.4f}"
+        )
+        
         if wandb_logging and wandb_run:
             wandb_run.log({
                 "preconfig/steps": preconfig_steps,

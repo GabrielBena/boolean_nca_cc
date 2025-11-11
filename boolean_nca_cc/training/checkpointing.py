@@ -551,6 +551,7 @@ def load_config_from_wandb(
         run_id = run.id
 
     # Check for cached checkpoint
+    # Skip early cache return when selecting by best metric to ensure we get the latest artifact
     expected_checkpoint_path = None
     if run_id:
         local_artifact_dir = os.path.join(download_dir, f"run_{run_id}")
@@ -558,7 +559,8 @@ def load_config_from_wandb(
         log.info(f"Checking for local checkpoint at: {expected_checkpoint_path}")
 
         # Check if we should use local cache
-        if use_cache and not force_download and os.path.exists(expected_checkpoint_path):
+        # Skip cache when selecting by best metric to ensure we get the latest artifact version
+        if use_cache and not force_download and not select_by_best_metric and os.path.exists(expected_checkpoint_path):
             log.info(f"Found cached checkpoint for run {run_id}. Loading config from disk.")
             try:
                 api = wandb.Api()
@@ -571,6 +573,8 @@ def load_config_from_wandb(
                     f"Error loading config from local checkpoint {expected_checkpoint_path}: {e}"
                 )
                 log.info("Proceeding to download from WandB.")
+        elif select_by_best_metric:
+            log.info("Selecting by best metric - skipping early cache to ensure latest artifact selection.")
         elif force_download:
             log.info("Force download enabled, skipping local cache.")
         elif not use_cache:
@@ -618,7 +622,7 @@ def load_config_from_wandb(
             for a in best_models:
                 log.info(f"  - {a.name}")
 
-            selected_artifact = _select_best_artifact(best_models, prefer_metric)
+            selected_artifact = _select_best_artifact(best_models, prefer_metric, run)
             log.info(f"Selected best model artifact: {selected_artifact.name}")
 
     latest_best = selected_artifact
@@ -627,10 +631,78 @@ def load_config_from_wandb(
     download_path = os.path.join(download_dir, f"run_{run.id}")
     os.makedirs(download_path, exist_ok=True)
 
-    # Download the artifact
-    log.info(f"Downloading artifact to {download_path}")
+    # When selecting best model, we should ensure we get the latest artifact
+    # Check if cached file exists and if it might be from an older artifact
+    cached_checkpoint_path = os.path.join(download_path, f"{filename}.{filetype}")
+    should_force_download = False
+    
+    if use_cache and os.path.exists(cached_checkpoint_path):
+        # If we're selecting by best metric, we should re-download to ensure we have the latest
+        if select_by_best_metric:
+            log.info("Selecting best model - forcing re-download to ensure latest artifact")
+            should_force_download = True
+        else:
+            log.info(f"Using cached checkpoint at {cached_checkpoint_path}")
+    
+    # Download the artifact (will re-download if should_force_download or if not cached)
+    log.info(f"Downloading artifact '{latest_best.name}' to {download_path}")
+    if should_force_download:
+        # Remove cached file and artifact directory to force re-download
+        if os.path.exists(cached_checkpoint_path):
+            try:
+                os.remove(cached_checkpoint_path)
+                log.info("Removed cached checkpoint to force re-download of latest artifact")
+            except Exception as e:
+                log.warning(f"Could not remove cached checkpoint: {e}")
+        
+        # Also try to remove the artifact directory if it exists (WandB may cache artifacts)
+        import shutil
+        artifact_name_clean = latest_best.name.split(":")[0]  # Remove version suffix
+        potential_artifact_dir = os.path.join(download_path, artifact_name_clean)
+        if os.path.exists(potential_artifact_dir):
+            try:
+                shutil.rmtree(potential_artifact_dir)
+                log.info(f"Removed artifact directory {potential_artifact_dir} to force re-download")
+            except Exception as e:
+                log.warning(f"Could not remove artifact directory: {e}")
+    
     artifact_dir = latest_best.download(root=download_path)
+    
+    # WandB artifact download may create subdirectories, so we need to find the actual file
+    # Try the expected path first
     checkpoint_path = os.path.join(artifact_dir, f"{filename}.{filetype}")
+    
+    # If file doesn't exist at expected path, search for it in the artifact directory
+    if not os.path.exists(checkpoint_path):
+        log.info(f"File not found at expected path {checkpoint_path}, searching in artifact directory...")
+        # Search recursively for the file
+        for root, dirs, files in os.walk(artifact_dir):
+            for file in files:
+                if file == f"{filename}.{filetype}":
+                    checkpoint_path = os.path.join(root, file)
+                    log.info(f"Found checkpoint file at: {checkpoint_path}")
+                    break
+            if os.path.exists(checkpoint_path):
+                break
+        
+        # If still not found, try looking for any .pkl file in the artifact directory
+        if not os.path.exists(checkpoint_path):
+            log.warning(f"Could not find {filename}.{filetype} in artifact directory, searching for any .pkl file...")
+            for root, dirs, files in os.walk(artifact_dir):
+                for file in files:
+                    if file.endswith(f".{filetype}"):
+                        checkpoint_path = os.path.join(root, file)
+                        log.info(f"Found {filetype} file at: {checkpoint_path}")
+                        break
+                if os.path.exists(checkpoint_path):
+                    break
+    
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(
+            f"Could not find checkpoint file {filename}.{filetype} in downloaded artifact directory: {artifact_dir}"
+        )
+    
+    log.info(f"Using checkpoint file at: {checkpoint_path}")
 
     # Get config from run
     config = OmegaConf.create(run.config)
@@ -680,6 +752,22 @@ def load_model_from_config_and_checkpoint(
         loaded_dict["run_id"] = run_id
     if "config" not in loaded_dict:
         loaded_dict["config"] = config
+
+    # DEBUG BLOCK: Log checkpoint metadata (epoch, step)
+    # Log checkpoint metadata for debugging
+    step = loaded_dict.get("step")
+    checkpoint_config = loaded_dict.get("config", {})
+    if isinstance(checkpoint_config, dict):
+        epoch = checkpoint_config.get("epoch")
+    else:
+        epoch = getattr(checkpoint_config, "epoch", None)
+    
+    if step is not None:
+        log.info(f"Loaded checkpoint at step: {step}")
+    if epoch is not None:
+        log.info(f"Loaded checkpoint at epoch: {epoch}")
+    if step is None and epoch is None:
+        log.warning("Could not determine checkpoint epoch/step from loaded data")
 
     return model, loaded_dict
 
@@ -1267,13 +1355,14 @@ def check_early_stopping(
 
 
 # WandB integration functions
-def _select_best_artifact(artifacts: list, prefer_metric: str | None = None):
+def _select_best_artifact(artifacts: list, prefer_metric: str | None = None, run=None):
     """
     Intelligently select the best artifact from multiple best model artifacts.
 
     Args:
         artifacts: List of WandB artifacts to choose from
         prefer_metric: Optional specific metric to prefer (e.g., "eval_ko_in_hard_accuracy")
+        run: Optional WandB run object to check run history for metric values
 
     Returns:
         Selected artifact
@@ -1337,7 +1426,102 @@ def _select_best_artifact(artifacts: list, prefer_metric: str | None = None):
     # Sort artifacts by priority
     artifact_metrics.sort(key=lambda x: metric_priority(x[1]))
 
-    selected_artifact, selected_metric = artifact_metrics[0]
-    log.info(f"Selected artifact with metric '{selected_metric}' using intelligent priority")
+    # If all metrics are "unknown", try to use WandB run history to find the best one
+    if all(metric == "unknown" for _, metric in artifact_metrics):
+        log.info("All artifacts have 'unknown' metric names, attempting to select by WandB run history")
+        
+        # Try to use WandB run history to find which artifact corresponds to highest metric
+        if run is not None and prefer_metric is not None:
+            try:
+                # Check run summary for the best metric value
+                metric_key = f"best/{prefer_metric}"
+                if metric_key in run.summary:
+                    best_metric_value = run.summary[metric_key]
+                    log.info(f"Found best metric value in run summary: {metric_key}={best_metric_value}")
+                    
+                    # Try to find which artifact was logged when this metric was achieved
+                    # Scan run history to find when this metric was logged
+                    history = run.scan_history(keys=[metric_key])
+                    best_epoch = None
+                    for row in history:
+                        if metric_key in row and row[metric_key] == best_metric_value:
+                            # Found the epoch where this metric was achieved
+                            if "epoch" in row:
+                                best_epoch = row["epoch"]
+                                break
+                    
+                    if best_epoch is not None:
+                        log.info(f"Best metric was achieved at epoch {best_epoch}, selecting artifact created around that time")
+                        # Select artifact by creation time (most recent artifacts are usually logged later)
+                        # Sort by version number (higher = more recent)
+                        def get_version(artifact):
+                            if ":" in artifact.name:
+                                version_str = artifact.name.split(":")[-1]
+                                try:
+                                    return int(version_str.lstrip("v"))
+                                except ValueError:
+                                    return 0
+                            return 0
+                        artifact_metrics.sort(key=lambda x: get_version(x[0]), reverse=True)
+                        selected_artifact, selected_metric = artifact_metrics[0]
+                        log.info(f"Selected most recent artifact: {selected_artifact.name} (version {get_version(selected_artifact)})")
+                    else:
+                        # Fallback to version-based selection
+                        log.warning("Could not find epoch for best metric, using version-based selection")
+                        def get_version(artifact):
+                            if ":" in artifact.name:
+                                version_str = artifact.name.split(":")[-1]
+                                try:
+                                    return int(version_str.lstrip("v"))
+                                except ValueError:
+                                    return 0
+                            return 0
+                        artifact_metrics.sort(key=lambda x: get_version(x[0]), reverse=True)
+                        selected_artifact, selected_metric = artifact_metrics[0]
+                        log.info(f"Selected most recent artifact by version: {selected_artifact.name} (version {get_version(selected_artifact)})")
+                else:
+                    # No metric in summary, use version-based selection
+                    log.warning(f"Metric {metric_key} not found in run summary, using version-based selection")
+                    def get_version(artifact):
+                        if ":" in artifact.name:
+                            version_str = artifact.name.split(":")[-1]
+                            try:
+                                return int(version_str.lstrip("v"))
+                            except ValueError:
+                                return 0
+                        return 0
+                    artifact_metrics.sort(key=lambda x: get_version(x[0]), reverse=True)
+                    selected_artifact, selected_metric = artifact_metrics[0]
+                    log.info(f"Selected most recent artifact by version: {selected_artifact.name} (version {get_version(selected_artifact)})")
+            except Exception as e:
+                log.warning(f"Error checking WandB run history: {e}, falling back to version-based selection")
+                def get_version(artifact):
+                    if ":" in artifact.name:
+                        version_str = artifact.name.split(":")[-1]
+                        try:
+                            return int(version_str.lstrip("v"))
+                        except ValueError:
+                            return 0
+                    return 0
+                artifact_metrics.sort(key=lambda x: get_version(x[0]), reverse=True)
+                selected_artifact, selected_metric = artifact_metrics[0]
+                log.info(f"Selected most recent artifact by version: {selected_artifact.name} (version {get_version(selected_artifact)})")
+        else:
+            # No run or prefer_metric, use version-based selection
+            log.info("No run or prefer_metric provided, selecting most recent artifact by version")
+            def get_version(artifact):
+                if ":" in artifact.name:
+                    version_str = artifact.name.split(":")[-1]
+                    try:
+                        return int(version_str.lstrip("v"))
+                    except ValueError:
+                        return 0
+                return 0
+            artifact_metrics.sort(key=lambda x: get_version(x[0]), reverse=True)
+            selected_artifact, selected_metric = artifact_metrics[0]
+            log.info(f"Selected most recent artifact: {selected_artifact.name} (version {get_version(selected_artifact)})")
+    else:
+        selected_artifact, selected_metric = artifact_metrics[0]
+        log.info(f"Selected artifact with metric '{selected_metric}' using intelligent priority: {selected_artifact.name}")
 
     return selected_artifact
