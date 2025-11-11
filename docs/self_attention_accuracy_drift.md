@@ -37,6 +37,69 @@ This document focuses on investigating and resolving the accuracy drift issue wh
 - When circuit is initialized to accuracy 1.0, it should maintain that accuracy for a while at least
 - Model should maintain stable performance similar to training eval loop
 
+---
+
+## 🎯 PRIMARY SUSPECT: Preconfiguration Mismatch
+
+**Status**: **ACTIVE INVESTIGATION - PRIMARY SUSPECT**
+
+### Critical Finding
+
+**Test Script Results (test_gui_vs_eval_conditions.py)**:
+- ✅ When preconfiguration matches training exactly: **Perfect accuracy (1.0000) achieved**
+- ✅ Preconfigured circuit metrics: `loss=0.000058, hard_loss=0.0000, accuracy=1.0000, hard_accuracy=1.0000`
+- ✅ No accuracy drift observed when preconfiguration is correct
+
+**GUI Results (GUI_minimal.py)**:
+- 🔴 Preconfigured circuit metrics: `loss=0.026637, hard_loss=6.0000, accuracy=1.0000, hard_accuracy=0.9971`
+- 🔴 Loss is **460x higher** than training (0.026637 vs 0.000058)
+- 🔴 Hard accuracy is **0.29% lower** than perfect (0.9971 vs 1.0000)
+- 🔴 Accuracy drift occurs when starting from imperfect preconfiguration
+
+### Root Cause Analysis
+
+The test script successfully achieves perfect preconfiguration by:
+1. ✅ Extracting backprop config from loaded WandB config using `OmegaConf.to_container()`
+2. ✅ Using exact same parameters: `steps=200, lr=1.0, optimizer=adamw, weight_decay=0.1, beta1=0.8, beta2=0.8`
+3. ✅ Using correct `test_seed` from loaded config for wiring generation
+4. ✅ Generating fresh task data for preconfiguration
+
+The GUI still shows preconfiguration issues despite fixes:
+- ✅ Backprop config extraction implemented (matches test script)
+- ✅ Preconfig params updated from loaded WandB config
+- ✅ Wiring seed updated from loaded config
+- 🔴 **Still showing higher loss and imperfect accuracy**
+
+### Hypothesis
+
+**The accuracy drift is caused by imperfect preconfiguration**:
+1. When preconfiguration achieves perfect accuracy (1.0000), the model maintains stable performance
+2. When preconfiguration is imperfect (0.9971), the model starts from a degraded state
+3. The model's learned updates are optimized for perfect circuits, so imperfect circuits degrade further
+4. The 0.29% accuracy gap compounds over time, leading to progressive drift
+
+### Investigation Status
+
+**Fixes Applied**:
+- ✅ Added `_extract_backprop_config_from_loaded_config()` method to extract backprop config from WandB config
+- ✅ Updated `try_load_wandb_model()` to extract and update preconfig params from loaded config
+- ✅ Improved `test_seed` extraction with robust OmegaConf handling
+- ✅ Always generate fresh task data for preconfiguration (matches test script)
+- ✅ Added detailed logging for preconfig params and results
+
+**Remaining Issues**:
+- 🔴 GUI still shows `loss=0.026637` vs training `loss=0.000058` (460x difference)
+- 🔴 GUI still shows `hard_accuracy=0.9971` vs training `hard_accuracy=1.0000` (0.29% gap)
+- 🔴 Need to identify why preconfiguration isn't converging to perfect accuracy in GUI
+
+**Next Steps**:
+1. Compare detailed logs between test script and GUI to identify parameter differences
+2. Verify task data generation matches exactly (shapes, values)
+3. Check if JAX random state or initialization order affects preconfiguration
+4. Investigate if GUI context (ImGui, visualization) affects preconfiguration determinism
+
+---
+
 **Critical Discovery: Multi-Inject Evaluation Loop Timing**
 
 **Investigation Finding**: The multi-inject evaluation loop does NOT run a warm-up period before applying damage. Damage is injected at step 1, immediately after the initial evaluation (step 0).
@@ -75,27 +138,54 @@ Added `damage_start_offset` parameter to allow warm-up period before first damag
 
 ## Potential Root Causes
 
-### 1. Mismatch in Live Loop vs. Eval Loop Conditions
+### 🎯 1. Preconfiguration Mismatch (PRIMARY SUSPECT)
+**Status**: Active investigation - strongest evidence points here
+
+- **Evidence**: Test script achieves perfect preconfiguration (1.0000) → No drift
+- **Evidence**: GUI shows imperfect preconfiguration (0.9971) → Drift occurs
+- **Evidence**: Loss is 460x higher in GUI (0.026637 vs 0.000058)
+- **Root Cause**: Preconfiguration parameters or process don't match training exactly
+- **Impact**: Starting from imperfect circuit state causes progressive degradation
+- **Fixes Applied**: Backprop config extraction, preconfig param updates, wiring seed fixes
+- **Remaining**: GUI still shows imperfect preconfiguration - need to identify exact cause
+
+**Specific Issues**:
+- Backprop config extraction from WandB config (fixed)
+- Preconfig parameter matching (fixed)
+- Wiring seed matching (fixed)
+- Task data generation (fixed)
+- **Unknown**: Why GUI preconfiguration still doesn't converge to perfect accuracy
+
+### 2. Mismatch in Live Loop vs. Eval Loop Conditions
+**Status**: Secondary suspect - may be related to preconfiguration
+
 - Different initialization (graph state, globals, step counters)
 - Different number of message steps per iteration
 - Different loss computation timing
 - Missing or incorrect parameters in generator initialization
 
-### 2. Checkpointing Issue
-- Model saved might not be the one showing stable performance
-- Model state incomplete (missing optimizer state, graph state, etc.)
-- Version mismatch between training and loading code
-
 ### 3. Generator State Management
+**Status**: Secondary suspect - may be related to preconfiguration
+
 - Generator not properly initialized
 - Graph globals (update_steps counter) accumulating incorrectly
 - Hidden state not properly reset between iterations
 - Graph state initialization doesn't match training conditions
 
-### 4. Model Behavior Differences
+### 4. Checkpointing Issue
+**Status**: ✅ Ruled Out
+
+- ✅ Model loading confirmed correct (epoch 3072)
+- ✅ Checkpoint loading issue fixed
+- ✅ Drift persists with correct checkpoint, confirming checkpoint is not the cause
+
+### 5. Model Behavior Differences
+**Status**: Secondary suspect - evidence suggests this is NOT the primary cause
+
 - Training uses batched evaluation, GUI uses single circuit
 - Training uses different loss computation path
 - Training eval might use different initialization timing
+- **Note**: Test script shows model CAN maintain perfect accuracy when preconfiguration is correct
 
 ---
 
@@ -477,19 +567,24 @@ When running zero-damage training, the checkpoint system needs to be configured 
 
 - ✅ **Fixed**: Model call parameter mismatch (layer_sizes/layer_neighbors) - but does NOT resolve drift
 - ✅ **Fixed**: Checkpoint loading issue - GUI now correctly loads checkpoint from epoch 3072 instead of epoch 0
-- ✅ **Identified**: Preconfigured circuit has `loss=0.026637, hard_accuracy=0.9971` (not perfect, but close)
 - ✅ **Investigated**: Multi-inject evaluation loop timing - damage injected at step 1 (no warm-up)
 - ✅ **Implemented**: `damage_start_offset` parameter to allow warm-up period before first damage
 - ✅ **Ruled Out**: Checkpoint loading issue - confirmed NOT the cause of accuracy drift (drift persists with correct checkpoint)
+- 🎯 **PRIMARY SUSPECT IDENTIFIED**: Preconfiguration mismatch
+  - ✅ **Test script confirms**: Perfect preconfiguration (1.0000) → No drift
+  - ✅ **Test script confirms**: Preconfiguration matches training exactly → Perfect accuracy
+  - 🔴 **GUI issue**: Preconfiguration imperfect (0.9971) → Drift occurs
+  - 🔴 **GUI issue**: Loss 460x higher than training (0.026637 vs 0.000058)
+  - ✅ **Fixes applied**: Backprop config extraction, preconfig param updates, wiring seed fixes
+  - 🔴 **Remaining**: GUI still shows imperfect preconfiguration despite fixes
 - 🔴 **Hypothesis Challenged**: Original hypothesis that "model always applies updates" is challenged by:
   - Eval loop shows model CAN maintain accuracy 1.0 for multiple steps before damage
   - This suggests model IS capable of handling well-configured circuits
-  - GUI's immediate degradation suggests GUI-specific initialization or state management issue
-- 🔴 **Confirmed**: Accuracy drift persists even with correct checkpoint (epoch 3072):
-  - Loss increases 4.3x on first step (0.0266 → 0.1155)
-  - Accuracy starts degrading from step 5 onwards
-  - Progressive degradation continues over 200 steps (accuracy: 0.9971 → 0.8867)
-- 🔴 **Active**: Need to test with `damage_start_offset: 10` to compare eval vs GUI during warm-up period
-  - If both degrade: Confirms model behavior issue
-  - If eval maintains but GUI degrades: Confirms GUI-specific initialization issue
+  - Test script confirms: Perfect preconfiguration → No drift
+  - GUI's degradation is likely due to imperfect preconfiguration, not model behavior
+- 🔴 **Active Investigation**: Preconfiguration mismatch in GUI
+  - Need to identify why GUI preconfiguration doesn't achieve perfect accuracy
+  - Compare detailed logs between test script and GUI
+  - Verify all parameters match exactly (task data, layer sizes, random seeds)
+  - Investigate if GUI context affects preconfiguration determinism
 

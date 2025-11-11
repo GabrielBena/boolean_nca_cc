@@ -485,22 +485,25 @@ class CircuitOptimizationDemo:
 
         # Use preconfigure_circuit_logits in repair mode (matches training), otherwise gen_circuit
         if self.training_mode == "repair" and self.wiring_mode == "fixed":
-            # Ensure we have task data available for preconfigure
-            if not hasattr(self, "input_x") or not hasattr(self, "y0"):
-                task_name = self.available_tasks[self.task_idx]
-                task_kwargs = {"input_bits": self.input_n, "output_bits": self.output_n}
-                if task_name == "text":
-                    task_kwargs["text"] = self.task_text
-                elif task_name == "noise":
-                    task_kwargs["noise_p"] = self.noise_p
-                    task_kwargs["seed"] = 42
-                x_data, y_data = get_task_data(task_name, self.case_n, **task_kwargs)
-            else:
-                x_data, y_data = self.input_x, self.y0
+            # Always generate fresh task data for preconfiguration to ensure it matches current task settings
+            # (matches test script approach - always generates fresh task data)
+            task_name = self.available_tasks[self.task_idx]
+            task_kwargs = {"input_bits": self.input_n, "output_bits": self.output_n}
+            if task_name == "text":
+                task_kwargs["text"] = self.task_text
+            elif task_name == "noise":
+                task_kwargs["noise_p"] = self.noise_p
+                task_kwargs["seed"] = 42
+            
+            x_data, y_data = get_task_data(task_name, self.case_n, **task_kwargs)
+            print(f"Task data: {task_name}, Input shape: {x_data.shape}, Output shape: {y_data.shape}, case_n={self.case_n}")
 
             # DEBUG: (Actually flagged as TEMPFIX, there is probably a less bloaty fox for this)
             # Log preconfig params being used (matches test script)
             print(f"Preconfiguring circuit with params (matching train_loop.py):")
+            print(f"  wiring_seed={self.wiring_seed} (from config test_seed)")
+            print(f"  layer_sizes={self.layer_sizes}")
+            print(f"  arity={self.arity}, loss_type={self.loss_type}")
             print(f"  steps={self.preconfig_steps}, lr={self.preconfig_lr}, optimizer={self.preconfig_optimizer}")
             print(f"  weight_decay={self.preconfig_weight_decay}, beta1={self.preconfig_beta1}, beta2={self.preconfig_beta2}")
             
@@ -924,10 +927,21 @@ class CircuitOptimizationDemo:
                 self.arity = getattr(loaded_config.circuit, "arity", self.arity)
                 self.layer_n = getattr(loaded_config.circuit, "num_layers", self.layer_n)
 
-                # Seeds
-                self.wiring_seed = getattr(loaded_config, "test_seed", self.wiring_seed)
+                # Seeds - extract test_seed with robust handling (matches test script)
+                if hasattr(loaded_config, "test_seed"):
+                    self.wiring_seed = getattr(loaded_config, "test_seed", self.wiring_seed)
+                elif isinstance(loaded_config, dict) and "test_seed" in loaded_config:
+                    self.wiring_seed = loaded_config["test_seed"]
+                else:
+                    # Try OmegaConf-style access
+                    try:
+                        self.wiring_seed = loaded_config.get("test_seed", self.wiring_seed) if hasattr(loaded_config, "get") else self.wiring_seed
+                    except:
+                        pass  # Keep existing value
+                
                 self.wiring_key = jax.random.PRNGKey(self.wiring_seed)
-                self.damage_seed = getattr(loaded_config, "damage_seed", self.damage_seed)
+                self.damage_seed = getattr(loaded_config, "damage_seed", self.damage_seed) if hasattr(loaded_config, "damage_seed") else self.damage_seed
+                print(f"Updated wiring_seed={self.wiring_seed} from loaded config (matches train.py wiring_fixed_key)")
 
                 # Loss type
                 if hasattr(loaded_config, "training") and hasattr(loaded_config.training, "loss_type"):
