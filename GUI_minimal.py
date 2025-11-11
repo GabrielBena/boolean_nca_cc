@@ -132,6 +132,52 @@ def calc_gate_use_masks(input_n, wires, logits):
     return gate_masks[::-1], wire_masks[::-1]
 
 
+# DEBUG BLOCK: Extract scale parameters from loaded model (for re_zero_update models)
+def _extract_scale_parameter(model, param_name: str) -> float | None:
+    """
+    Extract the value of a scale parameter from the model.
+    
+    Handles both CircuitSelfAttention (direct attributes) and CircuitGNN 
+    (nested in node_update module).
+    
+    Args:
+        model: The model instance (CircuitSelfAttention or CircuitGNN)
+        param_name: Name of the parameter ('logit_scale' or 'hidden_scale')
+        
+    Returns:
+        The scalar value of the parameter, or None if not found
+    """
+    try:
+        # Try direct attribute first (CircuitSelfAttention)
+        if hasattr(model, param_name):
+            param = getattr(model, param_name)
+        # Try nested in node_update (CircuitGNN)
+        elif hasattr(model, 'node_update') and hasattr(model.node_update, param_name):
+            param = getattr(model.node_update, param_name)
+        else:
+            return None
+        
+        # If it's a nnx.Param, extract the value
+        if isinstance(param, nnx.Param):
+            value = param.value
+            # Convert JAX array to Python float
+            if hasattr(value, 'item'):
+                return float(value.item())
+            elif hasattr(value, '__len__') and len(value) > 0:
+                return float(value[0])
+            else:
+                return float(value)
+        # If it's a scalar (when re_zero_update=False), return it directly
+        elif isinstance(param, (int, float)):
+            return float(param)
+        
+        return None
+    except Exception as e:
+        print(f"Warning: Error extracting {param_name}: {e}")
+        return None
+# END DEBUG BLOCK
+
+
 ######################## helper functions ##############################
 
 
@@ -277,6 +323,10 @@ class CircuitOptimizationDemo:
         self._viz_damage_mask = []  # Per-layer masks (1.0=active, 0.0=damaged) for visualization only
         self._viz_flash_ticks = 0  # Counter for single-tick red flash (0 = no flash)
         self.damage_bias = -10.0  # Negative bias value for damaged gates
+
+        # DEBUG: Scale parameter values (for re_zero_update models)
+        self.model_logit_scale = None
+        self.model_hidden_scale = None
 
         # Store activations for circuit visualization
         self.act = []
@@ -563,6 +613,10 @@ class CircuitOptimizationDemo:
             # Reset generator when switching to backprop
             self.model_generator = None
             self.last_step_result = None
+            # DEBUG: Clear scale values when switching to backprop
+            self.model_logit_scale = None
+            self.model_hidden_scale = None
+            # END DEBUG
 
         elif method_name == "Self-Attention":
             # Try to load pre-trained frozen model
@@ -576,6 +630,10 @@ class CircuitOptimizationDemo:
                 self.initialize_model_generator()
             else:
                 print(f"Could not load {method_name} model. Falling back to Backprop.")
+                # DEBUG: Clear scale values when model loading fails
+                self.model_logit_scale = None
+                self.model_hidden_scale = None
+                # END DEBUG
                 self.optimization_method_idx = 0
                 self.initialize_optimization_method()
                 return
@@ -795,6 +853,22 @@ class CircuitOptimizationDemo:
                 self.regenerate_circuit(reset_logs=True)
             except Exception as regen_e:
                 print(f"Warning: Could not regenerate circuit after loading config: {regen_e}")
+
+            # DEBUG BLOCK: Extract and store scale parameters from loaded model
+            if self.frozen_model is not None:
+                self.model_logit_scale = _extract_scale_parameter(self.frozen_model, "logit_scale")
+                self.model_hidden_scale = _extract_scale_parameter(self.frozen_model, "hidden_scale")
+                
+                if self.model_logit_scale is not None:
+                    print(f"DEBUG: Model logit_scale = {self.model_logit_scale:.9f}")
+                else:
+                    print("DEBUG: Model logit_scale not found (may not use re_zero_update)")
+                
+                if self.model_hidden_scale is not None:
+                    print(f"DEBUG: Model hidden_scale = {self.model_hidden_scale:.9f}")
+                else:
+                    print("DEBUG: Model hidden_scale not found (may not use re_zero_update)")
+            # END DEBUG BLOCK
 
             return True
 
@@ -1884,6 +1958,38 @@ class CircuitOptimizationDemo:
             if method_name == "Self-Attention" and self.frozen_model is not None:
                 imgui.text(f"Model hidden_dim: {self.model_hidden_dim}")
                 imgui.text(f"Model use_globals: {self.model_use_globals}")
+                
+                # DEBUG BLOCK: Display scale parameters
+                if self.model_logit_scale is not None:
+                    # Color code based on magnitude (red if too small, green if reasonable)
+                    if abs(self.model_logit_scale) < 1e-5:
+                        color = imgui.ImVec4(1.0, 0.0, 0.0, 1.0)  # Red for too small
+                    elif 0.001 <= abs(self.model_logit_scale) <= 0.1:
+                        color = imgui.ImVec4(0.0, 1.0, 0.0, 1.0)  # Green for reasonable
+                    else:
+                        color = imgui.ImVec4(1.0, 1.0, 0.0, 1.0)  # Yellow for unusual
+                    imgui.text_colored(color, f"DEBUG: logit_scale = {self.model_logit_scale:.9f}")
+                else:
+                    imgui.text_colored(
+                        imgui.ImVec4(0.7, 0.7, 0.7, 1.0),
+                        "DEBUG: logit_scale = N/A (not using re_zero_update)"
+                    )
+                
+                if self.model_hidden_scale is not None:
+                    # Color code based on magnitude (red if too small, green if reasonable)
+                    if abs(self.model_hidden_scale) < 1e-5:
+                        color = imgui.ImVec4(1.0, 0.0, 0.0, 1.0)  # Red for too small
+                    elif 0.001 <= abs(self.model_hidden_scale) <= 0.1:
+                        color = imgui.ImVec4(0.0, 1.0, 0.0, 1.0)  # Green for reasonable
+                    else:
+                        color = imgui.ImVec4(1.0, 1.0, 0.0, 1.0)  # Yellow for unusual
+                    imgui.text_colored(color, f"DEBUG: hidden_scale = {self.model_hidden_scale:.9f}")
+                else:
+                    imgui.text_colored(
+                        imgui.ImVec4(0.7, 0.7, 0.7, 1.0),
+                        "DEBUG: hidden_scale = N/A (not using re_zero_update)"
+                    )
+                # END DEBUG BLOCK
 
             if hasattr(self, "current_pred_hard"):
                 try:
