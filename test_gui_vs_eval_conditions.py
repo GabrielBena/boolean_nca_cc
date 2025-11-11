@@ -19,6 +19,9 @@ import yaml
 import jax
 import jax.numpy as jp
 import numpy as np
+from omegaconf import OmegaConf
+import matplotlib.pyplot as plt
+import os
 
 from boolean_nca_cc import generate_layer_sizes
 from boolean_nca_cc.circuits.model import gen_circuit
@@ -41,7 +44,7 @@ log = logging.getLogger(__name__)
 
 
 def load_model_like_gui(run_id: str = "vayt4820"):
-    """
+    """x
     Load model exactly like GUI_minimal.py does.
     
     Args:
@@ -134,7 +137,17 @@ def setup_circuit_like_gui(config, wiring_key):
     loss_type = getattr(config.training, "loss_type", "l4") if hasattr(config, "training") else "l4"
     
     # Get test_seed from config (matches train.py: wiring_fixed_key=jax.random.PRNGKey(cfg.test_seed))
-    test_seed = getattr(config, "test_seed", 42) if hasattr(config, "test_seed") else 42
+    # Handle both OmegaConf and dict access
+    if hasattr(config, "test_seed"):
+        test_seed = getattr(config, "test_seed", 42)
+    elif isinstance(config, dict) and "test_seed" in config:
+        test_seed = config["test_seed"]
+    else:
+        # Try OmegaConf-style access
+        try:
+            test_seed = config.get("test_seed", 42) if hasattr(config, "get") else 42
+        except:
+            test_seed = 42
     log.info(f"Using test_seed={test_seed} from config (matches train.py wiring_fixed_key)")
     
     # Generate layer sizes
@@ -161,14 +174,36 @@ def setup_circuit_like_gui(config, wiring_key):
         # Then fall back to local config.yaml (matches train.py behavior)
         # train.py uses: preconfig_steps=cfg.backprop.epochs, preconfig_lr=cfg.backprop.learning_rate
         # and passes backprop_config to train_model which uses it for optimizer params
+        # train.py line 419: backprop_config=OmegaConf.to_container(cfg.backprop, resolve=True) if cfg.backprop.enabled else None
         backprop_cfg = None
         config_source = None
         
         # Try loaded config first (what was actually used during training)
+        # Config from WandB is an OmegaConf object, so we need to handle it properly
         if hasattr(config, "backprop"):
-            backprop_cfg = getattr(config, "backprop", None)
-            if backprop_cfg is not None:
-                config_source = "loaded WandB config"
+            backprop_cfg_raw = getattr(config, "backprop", None)
+            if backprop_cfg_raw is not None:
+                # Convert OmegaConf to dict (matches train.py line 419)
+                # This ensures we get the same structure as training
+                try:
+                    backprop_cfg = OmegaConf.to_container(backprop_cfg_raw, resolve=True)
+                    config_source = "loaded WandB config"
+                except Exception as e:
+                    log.warning(f"Could not convert backprop config from OmegaConf: {e}")
+                    # Fall back to direct access
+                    if isinstance(backprop_cfg_raw, dict):
+                        backprop_cfg = backprop_cfg_raw
+                    else:
+                        # OmegaConf object - convert manually
+                        backprop_cfg = {
+                            "epochs": getattr(backprop_cfg_raw, "epochs", 200),
+                            "learning_rate": getattr(backprop_cfg_raw, "learning_rate", 1.0),
+                            "optimizer": getattr(backprop_cfg_raw, "optimizer", "adam"),
+                            "weight_decay": getattr(backprop_cfg_raw, "weight_decay", 0.0),
+                            "beta1": getattr(backprop_cfg_raw, "beta1", 0.9),
+                            "beta2": getattr(backprop_cfg_raw, "beta2", 0.999),
+                        }
+                    config_source = "loaded WandB config (manual conversion)"
         
         # Fall back to local config.yaml
         if backprop_cfg is None:
@@ -182,7 +217,8 @@ def setup_circuit_like_gui(config, wiring_key):
                 backprop_cfg = {}
                 config_source = "defaults"
         
-        # Extract params (matches train_loop.py line 1385-1388)
+        # Extract params (matches train_loop.py line 1385-1402)
+        # train_loop.py uses: backprop_config.get("optimizer", "adam") etc.
         # Expected values from config.yaml:
         #   epochs: 200
         #   learning_rate: 1
@@ -190,21 +226,12 @@ def setup_circuit_like_gui(config, wiring_key):
         #   optimizer: "adamw"
         #   beta1: 0.8
         #   beta2: 0.8
-        if isinstance(backprop_cfg, dict):
-            preconfig_steps = int(backprop_cfg.get("epochs", 200))
-            preconfig_lr = float(backprop_cfg.get("learning_rate", 1.0))
-            preconfig_optimizer = backprop_cfg.get("optimizer", "adam")  # Default is "adam" in train_loop.py
-            preconfig_weight_decay = float(backprop_cfg.get("weight_decay", 0.0))  # Should be 0.1 from config.yaml
-            preconfig_beta1 = float(backprop_cfg.get("beta1", 0.9))  # Should be 0.8 from config.yaml
-            preconfig_beta2 = float(backprop_cfg.get("beta2", 0.999))  # Should be 0.8 from config.yaml
-        else:
-            # OmegaConf object
-            preconfig_steps = int(getattr(backprop_cfg, "epochs", 200))
-            preconfig_lr = float(getattr(backprop_cfg, "learning_rate", 1.0))
-            preconfig_optimizer = getattr(backprop_cfg, "optimizer", "adam")
-            preconfig_weight_decay = float(getattr(backprop_cfg, "weight_decay", 0.0))  # Should be 0.1 from config.yaml
-            preconfig_beta1 = float(getattr(backprop_cfg, "beta1", 0.9))
-            preconfig_beta2 = float(getattr(backprop_cfg, "beta2", 0.999))
+        preconfig_steps = int(backprop_cfg.get("epochs", 200))
+        preconfig_lr = float(backprop_cfg.get("learning_rate", 1.0))
+        preconfig_optimizer = backprop_cfg.get("optimizer", "adam")  # Default is "adam" in train_loop.py
+        preconfig_weight_decay = float(backprop_cfg.get("weight_decay", 0.0))  # Should be 0.1 from config.yaml
+        preconfig_beta1 = float(backprop_cfg.get("beta1", 0.9))  # Should be 0.8 from config.yaml
+        preconfig_beta2 = float(backprop_cfg.get("beta2", 0.999))  # Should be 0.8 from config.yaml
         
         log.info(f"Preconfig params from {config_source} (matching train_loop.py):")
         log.info(f"  steps={preconfig_steps}, lr={preconfig_lr}, optimizer={preconfig_optimizer}")
@@ -225,21 +252,54 @@ def setup_circuit_like_gui(config, wiring_key):
             beta2=preconfig_beta2,
         )
         log.info(f"Preconfigured circuit with {preconfig_steps} steps")
+        
+        # Compute initial loss after preconfiguration
+        initial_loss, initial_aux = get_loss_from_wires_logits(
+            logits, wires, x_data, y_data, loss_type
+        )
+        initial_hard_loss, _, _, initial_accuracy, initial_hard_accuracy, _, _ = initial_aux
+        log.info(
+            f"Preconfigured circuit metrics: loss={float(initial_loss):.6f}, "
+            f"hard_loss={float(initial_hard_loss):.4f}, "
+            f"accuracy={float(initial_accuracy):.4f}, "
+            f"hard_accuracy={float(initial_hard_accuracy):.4f}"
+        )
+        
+        # Warn if preconfiguration didn't achieve perfect accuracy (training shows 1.0000)
+        if initial_hard_accuracy < 0.99999999:
+            log.warning(
+                f"⚠️  Preconfigured circuit hard_accuracy ({initial_hard_accuracy:.4f}) is below perfect (1.0000). "
+                f"This may indicate:"
+            )
+            log.warning(
+                f"   1. Preconfig parameters don't match training (steps={preconfig_steps}, lr={preconfig_lr}, "
+                f"optimizer={preconfig_optimizer}, weight_decay={preconfig_weight_decay}, "
+                f"beta1={preconfig_beta1}, beta2={preconfig_beta2})"
+            )
+            log.warning(
+                f"   2. Preconfig needs more steps to converge (currently {preconfig_steps})"
+            )
+            log.warning(
+                f"   3. Different wiring seed (test_seed={test_seed})"
+            )
+            log.warning(
+                f"   4. Numerical precision differences"
+            )
     else:
         log.info("Growth mode: generating random circuit...")
         wires, logits = gen_circuit(wiring_key, layer_sizes, arity=arity)
-    
-    # Compute initial loss
-    initial_loss, initial_aux = get_loss_from_wires_logits(
-        logits, wires, x_data, y_data, loss_type
-    )
-    initial_hard_loss, _, _, initial_accuracy, initial_hard_accuracy, _, _ = initial_aux
-    log.info(
-        f"Initial circuit: loss={float(initial_loss):.6f}, "
-        f"hard_loss={float(initial_hard_loss):.4f}, "
-        f"accuracy={float(initial_accuracy):.4f}, "
-        f"hard_accuracy={float(initial_hard_accuracy):.4f}"
-    )
+        
+        # Compute initial loss
+        initial_loss, initial_aux = get_loss_from_wires_logits(
+            logits, wires, x_data, y_data, loss_type
+        )
+        initial_hard_loss, _, _, initial_accuracy, initial_hard_accuracy, _, _ = initial_aux
+        log.info(
+            f"Initial circuit: loss={float(initial_loss):.6f}, "
+            f"hard_loss={float(initial_hard_loss):.4f}, "
+            f"accuracy={float(initial_accuracy):.4f}, "
+            f"hard_accuracy={float(initial_hard_accuracy):.4f}"
+        )
     
     return wires, logits, layer_sizes, x_data, y_data, task_name
 
@@ -418,6 +478,133 @@ def print_evaluation_results(step_metrics, initial_accuracy=None, initial_hard_a
     log.info("\n" + "="*80)
 
 
+def plot_stepwise_accuracy(
+    step_metrics,
+    initial_hard_accuracy=None,
+    output_dir="results",
+    run_id="test",
+    damage_start_offset=0,
+    greedy_injection_recover_steps=10,
+):
+    """
+    Plot step-wise hard accuracy throughout multi-injection damage evaluation.
+    
+    Args:
+        step_metrics: Dictionary with step-wise metrics from evaluation
+        initial_hard_accuracy: Initial hard accuracy (for reference line)
+        output_dir: Directory to save the plot
+        run_id: Run ID for filename
+        damage_start_offset: Offset before first damage injection
+        greedy_injection_recover_steps: Steps between damage injections
+    """
+    steps = step_metrics["step"]
+    hard_accuracies = step_metrics["hard_accuracy"]
+    soft_accuracies = step_metrics.get("soft_accuracy", [])
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    # Plot hard accuracy (primary metric)
+    ax.plot(steps, hard_accuracies, 'b-', linewidth=2, label='Hard Accuracy', marker='o', markersize=3)
+    
+    # Plot soft accuracy if available (lighter, secondary)
+    if soft_accuracies and len(soft_accuracies) == len(steps):
+        ax.plot(steps, soft_accuracies, 'b--', linewidth=1, alpha=0.5, label='Soft Accuracy', marker='s', markersize=2)
+    
+    # Add initial accuracy reference line
+    if initial_hard_accuracy is not None:
+        ax.axhline(
+            y=initial_hard_accuracy,
+            color='g',
+            linestyle=':',
+            linewidth=1.5,
+            alpha=0.7,
+            label=f'Initial Hard Accuracy ({initial_hard_accuracy:.4f})'
+        )
+    
+    # Mark damage injection points
+    # Damage starts at: damage_start_offset + 1
+    # Then every: greedy_injection_recover_steps + 1 steps
+    if damage_start_offset >= 0 and greedy_injection_recover_steps > 0:
+        damage_steps = []
+        first_damage_step = damage_start_offset + 1
+        if first_damage_step <= steps[-1]:
+            damage_steps.append(first_damage_step)
+            next_damage = first_damage_step + greedy_injection_recover_steps + 1
+            while next_damage <= steps[-1]:
+                damage_steps.append(next_damage)
+                next_damage += greedy_injection_recover_steps + 1
+        
+        if damage_steps:
+            # Mark damage injection points
+            # Find closest step index for each damage step
+            for i, damage_step in enumerate(damage_steps):
+                # Find the closest step index
+                step_idx = min(range(len(steps)), key=lambda j: abs(steps[j] - damage_step))
+                closest_step = steps[step_idx]
+                
+                # Only mark if we're reasonably close (within 2 steps)
+                if abs(closest_step - damage_step) <= 2:
+                    ax.axvline(
+                        x=closest_step,
+                        color='r',
+                        linestyle='--',
+                        linewidth=1,
+                        alpha=0.5,
+                        label='Damage Injection' if i == 0 else ''
+                    )
+                    # Add annotation
+                    ax.annotate(
+                        f'Damage #{i+1}',
+                        xy=(closest_step, hard_accuracies[step_idx]),
+                        xytext=(5, 10),
+                        textcoords='offset points',
+                        fontsize=8,
+                        color='red',
+                        alpha=0.7,
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7, edgecolor='red', linewidth=0.5)
+                    )
+    
+    # Formatting
+    ax.set_xlabel('Step', fontsize=12)
+    ax.set_ylabel('Accuracy', fontsize=12)
+    ax.set_title('Step-wise Hard Accuracy During Multi-Injection Damage Evaluation', fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='best', fontsize=10)
+    ax.set_ylim([0, 1.1])  # Slightly above 1.0 to show perfect accuracy clearly
+    
+    # Add statistics text box
+    if len(hard_accuracies) > 0:
+        initial_acc = hard_accuracies[0]
+        final_acc = hard_accuracies[-1]
+        drift = final_acc - initial_acc
+        stats_text = f'Initial: {initial_acc:.4f}\nFinal: {final_acc:.4f}\nDrift: {drift:+.4f}'
+        ax.text(
+            0.02, 0.98, stats_text,
+            transform=ax.transAxes,
+            fontsize=9,
+            verticalalignment='top',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+        )
+    
+    plt.tight_layout()
+    
+    # Save plot
+    output_path = os.path.join(output_dir, f"stepwise_accuracy_{run_id}.png")
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    log.info(f"Saved step-wise accuracy plot to: {output_path}")
+    
+    # Also save as PDF for better quality
+    output_path_pdf = os.path.join(output_dir, f"stepwise_accuracy_{run_id}.pdf")
+    plt.savefig(output_path_pdf, bbox_inches='tight')
+    log.info(f"Saved step-wise accuracy plot (PDF) to: {output_path_pdf}")
+    
+    plt.close()
+
+
 def main():
     """Main function to run the comparison test."""
     log.info("="*80)
@@ -470,6 +657,26 @@ def main():
         step_metrics,
         initial_accuracy=float(initial_accuracy),
         initial_hard_accuracy=float(initial_hard_accuracy),
+    )
+    
+    # Step 4.5: Plot step-wise accuracy
+    log.info("\n[Step 4.5] Generating step-wise accuracy plot...")
+    
+    # Extract damage parameters for plotting
+    eval_cfg = getattr(config, "eval", None) if hasattr(config, "eval") else None
+    knockout_eval = getattr(eval_cfg, "knockout_eval", None) if eval_cfg and hasattr(eval_cfg, "knockout_eval") else None
+    pool_cfg = getattr(config, "pool", None) if hasattr(config, "pool") else None
+    
+    damage_start_offset = int(getattr(knockout_eval, "damage_start_offset", 0) if knockout_eval and hasattr(knockout_eval, "damage_start_offset") else 0)
+    greedy_injection_recover_steps = int(getattr(knockout_eval, "greedy_injection_recover_steps", 10) if knockout_eval and hasattr(knockout_eval, "greedy_injection_recover_steps") else 10)
+    
+    plot_stepwise_accuracy(
+        step_metrics=step_metrics,
+        initial_hard_accuracy=float(initial_hard_accuracy),
+        output_dir="results",
+        run_id=run_id,
+        damage_start_offset=damage_start_offset,
+        greedy_injection_recover_steps=greedy_injection_recover_steps,
     )
     
     # Step 5: Summary and interpretation

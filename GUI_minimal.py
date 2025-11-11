@@ -19,6 +19,7 @@ import jax.numpy as jp
 import numpy as np
 import optax
 from flax import nnx
+from omegaconf import OmegaConf
 
 # Import model components
 from imgui_bundle import (
@@ -364,6 +365,66 @@ class CircuitOptimizationDemo:
         # Initialize activations now that everything is set up
         self.initialize_activations()
 
+    # DEBUG: (Actually flagged as TEMPFIX, there is probably a less bloaty fox for this)
+    def _extract_backprop_config_from_loaded_config(self, config):
+        """
+        Extract backprop config from loaded WandB config (matches test script approach).
+        
+        Args:
+            config: Loaded config object (OmegaConf or dict)
+            
+        Returns:
+            Dictionary with backprop config parameters, or None if not found
+        """
+        backprop_cfg = None
+        config_source = None
+        
+        # Try loaded config first (what was actually used during training)
+        # Config from WandB is an OmegaConf object, so we need to handle it properly
+        if hasattr(config, "backprop"):
+            backprop_cfg_raw = getattr(config, "backprop", None)
+            if backprop_cfg_raw is not None:
+                # Convert OmegaConf to dict (matches train.py line 419)
+                # This ensures we get the same structure as training
+                try:
+                    backprop_cfg = OmegaConf.to_container(backprop_cfg_raw, resolve=True)
+                    config_source = "loaded WandB config"
+                except Exception as e:
+                    print(f"Warning: Could not convert backprop config from OmegaConf: {e}")
+                    # Fall back to direct access
+                    if isinstance(backprop_cfg_raw, dict):
+                        backprop_cfg = backprop_cfg_raw
+                    else:
+                        # OmegaConf object - convert manually
+                        backprop_cfg = {
+                            "epochs": getattr(backprop_cfg_raw, "epochs", 200),
+                            "learning_rate": getattr(backprop_cfg_raw, "learning_rate", 1.0),
+                            "optimizer": getattr(backprop_cfg_raw, "optimizer", "adam"),
+                            "weight_decay": getattr(backprop_cfg_raw, "weight_decay", 0.0),
+                            "beta1": getattr(backprop_cfg_raw, "beta1", 0.9),
+                            "beta2": getattr(backprop_cfg_raw, "beta2", 0.999),
+                        }
+                    config_source = "loaded WandB config (manual conversion)"
+        
+        # Fall back to local config.yaml
+        if backprop_cfg is None:
+            try:
+                with open("configs/config.yaml", "r") as f:
+                    local_cfg = yaml.safe_load(f)
+                backprop_cfg = local_cfg.get("backprop", {})
+                config_source = "local config.yaml"
+            except Exception as e:
+                print(f"Warning: Could not load preconfig params from local config.yaml: {e}")
+                backprop_cfg = {}
+                config_source = "defaults"
+        
+        if backprop_cfg:
+            print(f"Extracted preconfig params from {config_source}:")
+            print(f"  steps={backprop_cfg.get('epochs', 200)}, lr={backprop_cfg.get('learning_rate', 1.0)}, optimizer={backprop_cfg.get('optimizer', 'adam')}")
+            print(f"  weight_decay={backprop_cfg.get('weight_decay', 0.0)}, beta1={backprop_cfg.get('beta1', 0.9)}, beta2={backprop_cfg.get('beta2', 0.999)}")
+        
+        return backprop_cfg, config_source
+
     def _load_training_config_defaults(self):
         """Load defaults from training config.yaml and apply to GUI state."""
         try:
@@ -437,6 +498,12 @@ class CircuitOptimizationDemo:
             else:
                 x_data, y_data = self.input_x, self.y0
 
+            # DEBUG: (Actually flagged as TEMPFIX, there is probably a less bloaty fox for this)
+            # Log preconfig params being used (matches test script)
+            print(f"Preconfiguring circuit with params (matching train_loop.py):")
+            print(f"  steps={self.preconfig_steps}, lr={self.preconfig_lr}, optimizer={self.preconfig_optimizer}")
+            print(f"  weight_decay={self.preconfig_weight_decay}, beta1={self.preconfig_beta1}, beta2={self.preconfig_beta2}")
+            
             self.wires, self.logits = preconfigure_circuit_logits(
                 wiring_key=self.wiring_key,
                 layer_sizes=self.layer_sizes,
@@ -451,6 +518,23 @@ class CircuitOptimizationDemo:
                 beta1=self.preconfig_beta1,
                 beta2=self.preconfig_beta2,
             )
+            
+            
+            # DEBUG: (Actually flagged as TEMPFIX, there is probably a less bloaty fox for this)
+            # Log preconfigured circuit metrics (matches test script)
+            try:
+                initial_loss, initial_aux = get_loss_from_wires_logits(
+                    self.logits, self.wires, x_data, y_data, self.loss_type
+                )
+                initial_hard_loss, _, _, initial_accuracy, initial_hard_accuracy, _, _ = initial_aux
+                print(f"Preconfigured circuit metrics: loss={float(initial_loss):.6f}, hard_loss={float(initial_hard_loss):.4f}, accuracy={float(initial_accuracy):.4f}, hard_accuracy={float(initial_hard_accuracy):.4f}")
+                
+                # Warn if preconfiguration didn't achieve perfect accuracy (training shows 1.0000)
+                if initial_hard_accuracy < 0.99999999:
+                    print(f"⚠️  Warning: Preconfigured circuit hard_accuracy ({initial_hard_accuracy:.4f}) is below perfect (1.0000).")
+                    print(f"   This may indicate preconfig parameters don't match training.")
+            except Exception as e:
+                print(f"Warning: Could not compute preconfigured circuit metrics: {e}")
         else:
             # Use simple circuit generation for non-repair modes
             self.wires, self.logits = gen_circuit(
@@ -861,6 +945,19 @@ class CircuitOptimizationDemo:
                     self.default_damage_prob = getattr(loaded_config.pool, "damage_prob", self.default_damage_prob)
                     if hasattr(loaded_config.pool, "greedy_ordered_indices"):
                         self.greedy_ordered_indices = list(getattr(loaded_config.pool, "greedy_ordered_indices"))
+                
+                # DEBUG: (Actually flagged as TEMPFIX, there is probably a less bloaty fox for this)
+                # Extract and update preconfig params from loaded WandB config (matches test script)
+                # This ensures we use the exact same preconfig params that were used during training
+                backprop_cfg, config_source = self._extract_backprop_config_from_loaded_config(loaded_config)
+                if backprop_cfg:
+                    self.preconfig_steps = int(backprop_cfg.get("epochs", self.preconfig_steps))
+                    self.preconfig_lr = float(backprop_cfg.get("learning_rate", self.preconfig_lr))
+                    self.preconfig_optimizer = backprop_cfg.get("optimizer", self.preconfig_optimizer)
+                    self.preconfig_weight_decay = float(backprop_cfg.get("weight_decay", self.preconfig_weight_decay))
+                    self.preconfig_beta1 = float(backprop_cfg.get("beta1", self.preconfig_beta1))
+                    self.preconfig_beta2 = float(backprop_cfg.get("beta2", self.preconfig_beta2))
+                    print(f"Updated preconfig params from {config_source} to match training")
             except Exception as align_e:
                 print(f"Warning: Could not fully align GUI from loaded config: {align_e}")
 
