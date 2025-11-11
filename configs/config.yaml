@@ -64,7 +64,7 @@ pool:
   size: 1024
   reset_fraction: 0.15
   reset_interval: 128
-  reset_strategy: "combined"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
+  reset_strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
 
   # Sample-based damage (applied post-step, independent of resets)
@@ -102,7 +102,7 @@ eval:
   
   # Knockout evaluation
   knockout_eval:
-    enabled: false  # Disabled for zero-damage training - will use no-damage evaluation instead
+    enabled: true  # Disabled for zero-damage training - will use no-damage evaluation instead
     damage_prob: ${pool.damage_prob}
     # Unified damage control system
     damage_mode: ${pool.damage_mode}      # Pattern type: "greedy", "greedy_vocabulary", "shotgun", "strip"
