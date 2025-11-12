@@ -1387,6 +1387,23 @@ def train_model(
         pre_wd = backprop_config.get("weight_decay", 0.0) if backprop_config else 0.0
         pre_b1 = backprop_config.get("beta1", 0.9) if backprop_config else 0.9
         pre_b2 = backprop_config.get("beta2", 0.999) if backprop_config else 0.999
+        
+        # DEBUG: Print full debug info matching GUI and test script format
+        wiring_seed = int(wiring_fixed_key[1]) if len(wiring_fixed_key) >= 2 else int(wiring_fixed_key[0])
+        log.info(f"Preconfiguring circuit with params (matching train_loop.py):")
+        log.info(f"  wiring_seed={wiring_seed} (from wiring_fixed_key)")
+        log.info(f"  wiring_key={wiring_fixed_key}")  # DEBUG: Show actual key value
+        log.info(f"  layer_sizes={layer_sizes}")
+        log.info(f"  arity={arity}, loss_type={loss_type}")
+        log.info(f"  steps={preconfig_steps}, lr={preconfig_lr}, optimizer={pre_opt}")
+        log.info(f"  weight_decay={pre_wd}, beta1={pre_b1}, beta2={pre_b2}")
+        log.info(f"  x_data shape={x_data.shape}, y_data shape={y_data.shape}")  # DEBUG: Show data shapes
+        # DEBUG: Verify data matches (convert JAX arrays to numpy for hashing)
+        x_data_np = np.array(x_data) if hasattr(x_data, '__array__') else x_data
+        y_data_np = np.array(y_data) if hasattr(y_data, '__array__') else y_data
+        log.info(f"  x_data hash={hash(x_data_np.tobytes())}, y_data hash={hash(y_data_np.tobytes())}")  # DEBUG: Verify data matches
+        log.info(f"  x_data first 5 values={x_data_np[:5] if len(x_data_np.shape) == 1 else x_data_np[:5, 0]}, y_data first 5 values={y_data_np[:5] if len(y_data_np.shape) == 1 else y_data_np[:5, 0]}")  # DEBUG: Sample values
+        
         base_wires_preconfig, base_logits_preconfig = preconfigure_circuit_logits(
             wiring_key=wiring_fixed_key,
             layer_sizes=layer_sizes,
@@ -1401,6 +1418,13 @@ def train_model(
             beta1=pre_b1,
             beta2=pre_b2,
         )
+        
+        # DEBUG: Log logits statistics after preconfiguration
+        logits_stats = []
+        for i, logit_layer in enumerate(base_logits_preconfig):
+            logit_np = np.array(logit_layer) if hasattr(logit_layer, '__array__') else logit_layer
+            logits_stats.append(f"layer_{i}: mean={logit_np.mean():.6f}, std={logit_np.std():.6f}, min={logit_np.min():.6f}, max={logit_np.max():.6f}")
+        log.info(f"  Post-preconfig logits stats: {'; '.join(logits_stats)}")
         
         # Log preconfigured circuit metrics
         preconfig_loss, preconfig_aux = get_loss_from_wires_logits(

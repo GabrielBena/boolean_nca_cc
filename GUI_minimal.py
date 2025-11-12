@@ -502,10 +502,18 @@ class CircuitOptimizationDemo:
             # Log preconfig params being used (matches test script)
             print(f"Preconfiguring circuit with params (matching train_loop.py):")
             print(f"  wiring_seed={self.wiring_seed} (from config test_seed)")
+            print(f"  wiring_key={self.wiring_key}")  # DEBUG: Show actual key value
             print(f"  layer_sizes={self.layer_sizes}")
             print(f"  arity={self.arity}, loss_type={self.loss_type}")
             print(f"  steps={self.preconfig_steps}, lr={self.preconfig_lr}, optimizer={self.preconfig_optimizer}")
             print(f"  weight_decay={self.preconfig_weight_decay}, beta1={self.preconfig_beta1}, beta2={self.preconfig_beta2}")
+            print(f"  task_name={task_name}, case_n={self.case_n}")  # DEBUG: Show task details
+            print(f"  x_data shape={x_data.shape}, y_data shape={y_data.shape}")  # DEBUG: Show data shapes
+            # DEBUG: Verify data matches (convert JAX arrays to numpy for hashing)
+            x_data_np = np.array(x_data) if hasattr(x_data, '__array__') else x_data
+            y_data_np = np.array(y_data) if hasattr(y_data, '__array__') else y_data
+            print(f"  x_data hash={hash(x_data_np.tobytes())}, y_data hash={hash(y_data_np.tobytes())}")  # DEBUG: Verify data matches
+            print(f"  x_data first 5 values={x_data_np[:5] if len(x_data_np.shape) == 1 else x_data_np[:5, 0]}, y_data first 5 values={y_data_np[:5] if len(y_data_np.shape) == 1 else y_data_np[:5, 0]}")  # DEBUG: Sample values
             
             self.wires, self.logits = preconfigure_circuit_logits(
                 wiring_key=self.wiring_key,
@@ -522,6 +530,12 @@ class CircuitOptimizationDemo:
                 beta2=self.preconfig_beta2,
             )
             
+            # DEBUG: Log logits statistics after preconfiguration
+            logits_stats = []
+            for i, logit_layer in enumerate(self.logits):
+                logit_np = np.array(logit_layer) if hasattr(logit_layer, '__array__') else logit_layer
+                logits_stats.append(f"layer_{i}: mean={logit_np.mean():.6f}, std={logit_np.std():.6f}, min={logit_np.min():.6f}, max={logit_np.max():.6f}")
+            print(f"  Post-preconfig logits stats: {'; '.join(logits_stats)}")
             
             # DEBUG: (Actually flagged as TEMPFIX, there is probably a less bloaty fox for this)
             # Log preconfigured circuit metrics (matches test script)
