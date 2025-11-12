@@ -173,6 +173,7 @@ class CircuitSelfAttention(nnx.Module):
         mlp_dim: int | None = None,
         mlp_dim_multiplier: int = 2,
         dropout_rate: float = 0.0,
+        use_attention_mask: bool = True,
         *,
         rngs: nnx.Rngs,
         type: str = "self_attention",
@@ -192,6 +193,7 @@ class CircuitSelfAttention(nnx.Module):
             mlp_dim: Dimension of feed-forward network in attention blocks
             mlp_dim_multiplier: Multiplier for mlp_dim (default 2 for efficient transformer pattern)
             dropout_rate: Dropout rate
+            use_attention_mask: Whether to use self-attention masks based on the circuit wiring.
             rngs: Random number generators
             type: Type of model
             zero_init: Whether to initialize weights to zero
@@ -206,7 +208,7 @@ class CircuitSelfAttention(nnx.Module):
         self.dropout_rate = dropout_rate
         self.num_heads = num_heads
         self.deterministic = True
-
+        self.use_attention_mask = use_attention_mask
         if (
             mlp_dim is None
         ):  # default to mlp_dim_multiplier * attention_dim (efficient transformer pattern)
@@ -295,6 +297,9 @@ class CircuitSelfAttention(nnx.Module):
             Boolean attention mask of shape [batch_size, 1, seq_len, seq_len]
         """
         # Create a mask where edges exist in the graph
+        if not self.use_attention_mask:
+            return jp.ones((n_node, n_node), dtype=jp.bool_)
+
         mask = jp.zeros((n_node, n_node), dtype=jp.bool_)
 
         if len(senders) > 0:
@@ -457,6 +462,8 @@ def run_self_attention_scan_with_loss(
     y_data: jp.ndarray,
     loss_type: str,
     layer_sizes: tuple[tuple[int, int], ...],
+    data_fraction: float = 1.0,
+    scan_key: jax.random.PRNGKey = None,
 ) -> tuple[jraph.GraphsTuple, list[jraph.GraphsTuple], jp.ndarray, list]:
     """
     Run the self-attention model for multiple steps with loss computation and graph updating at each step.
@@ -487,6 +494,20 @@ def run_self_attention_scan_with_loss(
     attention_mask = model._create_attention_mask(graph.senders, graph.receivers, model.n_node)
     # ---------------------------------------------
 
+    # Select a random fraction of the data
+    if data_fraction < 1.0:
+        random_indices = jax.random.randint(
+            key=scan_key,
+            shape=(int(x_data.shape[0] * data_fraction),),
+            minval=0,
+            maxval=x_data.shape[0],
+        )
+        x_batch = x_data[random_indices]
+        y_batch = y_data[random_indices]
+    else:
+        x_batch = x_data
+        y_batch = y_data
+
     def attention_step_with_loss(carry, _):
         current_graph = carry
 
@@ -498,8 +519,8 @@ def run_self_attention_scan_with_loss(
             model_updated_graph,
             logits_original_shapes,
             wires,
-            x_data,
-            y_data,
+            x_batch,
+            y_batch,
             loss_type,
             layer_sizes,
         )
