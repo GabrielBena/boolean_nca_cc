@@ -241,20 +241,35 @@ def setup_circuit_like_gui(config, wiring_key, preconfigured_state_file=None):
             log.info("LOADING PRECONFIGURED STATE FROM FILE")
             log.info("="*80)
             
-            # Infer wires file from logits file (replace 'logits' with 'wires' in filename)
-            if "logits" in preconfigured_state_file:
-                wires_file = preconfigured_state_file.replace("logits", "wires")
-            else:
-                # Try to find wires file in same directory
-                logits_dir = os.path.dirname(preconfigured_state_file)
-                logits_basename = os.path.basename(preconfigured_state_file)
-                # Extract timestamp or identifier - replace "preconfigured_logits" with "wires"
+            # Infer wires file from logits file
+            # Try multiple naming patterns:
+            # 1. Replace "logits" with "wires" (e.g., preconfigured_logits_*.npz -> preconfigured_wires_*.npz)
+            # 2. Replace "preconfigured_logits" with "wires" (e.g., preconfigured_logits_*.npz -> wires_*.npz)
+            logits_dir = os.path.dirname(preconfigured_state_file)
+            logits_basename = os.path.basename(preconfigured_state_file)
+            
+            # Try pattern 1: replace "logits" with "wires"
+            wires_file = os.path.join(logits_dir, logits_basename.replace("logits", "wires"))
+            
+            # If that doesn't exist, try pattern 2: replace "preconfigured_logits" with "wires"
+            if not os.path.exists(wires_file):
                 wires_file = os.path.join(logits_dir, logits_basename.replace("preconfigured_logits", "wires"))
+            
+            # If still not found, try just "wires" + same suffix (for files like wires_20251112_linux.npz)
+            if not os.path.exists(wires_file):
+                # Extract suffix after "preconfigured_logits_" or "logits_"
+                if "preconfigured_logits_" in logits_basename:
+                    suffix = logits_basename.split("preconfigured_logits_", 1)[1]
+                    wires_file = os.path.join(logits_dir, f"wires_{suffix}")
+                elif "logits_" in logits_basename:
+                    suffix = logits_basename.split("logits_", 1)[1]
+                    wires_file = os.path.join(logits_dir, f"wires_{suffix}")
             
             if not os.path.exists(wires_file):
                 raise FileNotFoundError(
                     f"Wires file not found: {wires_file}\n"
-                    f"Expected wires file based on logits file: {preconfigured_state_file}"
+                    f"Tried multiple patterns based on logits file: {preconfigured_state_file}\n"
+                    f"Please ensure wires file exists in the same directory."
                 )
             
             wires, logits = load_preconfigured_state_from_file(preconfigured_state_file, wires_file)

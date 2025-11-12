@@ -227,30 +227,70 @@ The GUI still shows preconfiguration issues despite fixes:
     - **Action**: Test preconfiguration with `optimizer="sgd"`
     - **Expected**: Simpler optimizer might be more deterministic across platforms
 
+### Quick Fix: Load Preconfigured State from File
+
+**Status**: ✅ **IMPLEMENTED - WORKAROUND SOLUTION**
+
+**Solution**: Instead of fixing the cross-platform task data generation issue, we can load the exact preconfigured circuit state (logits and wires) from the Linux machine that achieved perfect accuracy.
+
+**Implementation**:
+1. ✅ **Test Script**: Added `--preconfigured-state` argument to `test_gui_vs_eval_conditions.py`
+   - Loads logits and wires from NPZ files
+   - Automatically infers wires file from logits file path
+   - Verifies loaded state and computes metrics
+   - **Usage**: `python test_gui_vs_eval_conditions.py --preconfigured-state preconfigured_circuits/preconfigured_logits_20251112_linux.npz`
+
+2. ✅ **GUI**: Added "Load Preconfigured State" button in `GUI_minimal.py`
+   - Simple button in "Circuit Architecture" section
+   - Hardcoded to load from `preconfigured_circuits/preconfigured_logits_20251112_linux.npz` and `preconfigured_circuits/wires_20251112_linux.npz`
+   - Updates circuit state, reinitializes optimization, and updates task
+   - Logs metrics after loading
+
+**Files Required**:
+- `preconfigured_circuits/preconfigured_logits_20251112_linux.npz` - Contains logits with keys `layer_0`, `layer_1`, etc.
+- `preconfigured_circuits/wires_20251112_linux.npz` - Contains wires with keys `layer_0`, `layer_1`, etc.
+
+**Benefits**:
+- ✅ Bypasses cross-platform task data generation issue completely
+- ✅ Achieves perfect accuracy (1.0000) on Mac by using Linux preconfigured state
+- ✅ Simple to use - just click a button
+- ✅ No need to fix underlying platform differences (for now)
+
+**Limitations**:
+- ⚠️ Requires preconfigured state files from Linux machine
+- ⚠️ Circuit architecture must match (layer sizes, arity, etc.)
+- ⚠️ Workaround solution - doesn't fix root cause
+
+**Next Steps** (Long-term fix):
+- Still need to investigate and fix platform-specific task data generation
+- This workaround allows continued development while root cause is being fixed
+
 ### Implementation Order
 
 **Immediate Actions** (Do First):
 1. ✅ **DONE**: Added comprehensive logging to capture task data, logits, and platform info
-2. 🔴 **NEXT**: Investigate `binary_multiply()` task generation for platform differences
-3. 🔴 **NEXT**: Add explicit dtype casting in task generation
-4. 🔴 **NEXT**: Compare task data NPZ files directly to identify differences
+2. ✅ **DONE**: Implemented quick fix - load preconfigured state from file (workaround)
+3. 🔴 **NEXT**: Investigate `binary_multiply()` task generation for platform differences
+4. 🔴 **NEXT**: Add explicit dtype casting in task generation
+5. 🔴 **NEXT**: Compare task data NPZ files directly to identify differences
 
 **Secondary Actions** (After task data fix):
-5. Verify task data hashes match after fix
-6. Compare preconfigured logits after fix
-7. Test with identical task data loaded from file
+6. Verify task data hashes match after fix
+7. Compare preconfigured logits after fix
+8. Test with identical task data loaded from file
 
 **Tertiary Actions** (If issue persists):
-8. Test with same JAX version on both platforms
-9. Test optimizer numerical precision differences
-10. Investigate backend-specific behavior
+9. Test with same JAX version on both platforms
+10. Test optimizer numerical precision differences
+11. Investigate backend-specific behavior
 
 ### Success Criteria
 
-- [ ] Task data hashes match exactly between Linux and Mac
-- [ ] Preconfigured logits match (or are very close) between platforms
-- [ ] Preconfigured accuracy is 1.0000 on both platforms
-- [ ] Preconfigured loss is < 1e-4 on both platforms
+- [x] ✅ **WORKAROUND**: Load preconfigured state from file works (achieves perfect accuracy on Mac)
+- [ ] Task data hashes match exactly between Linux and Mac (root cause fix)
+- [ ] Preconfigured logits match (or are very close) between platforms (root cause fix)
+- [ ] Preconfigured accuracy is 1.0000 on both platforms (root cause fix)
+- [ ] Preconfigured loss is < 1e-4 on both platforms (root cause fix)
 
 ---
 
@@ -740,7 +780,8 @@ When running zero-damage training, the checkpoint system needs to be configured 
   - ✅ **ROOT CAUSE IDENTIFIED**: Task data hashes differ between Linux and Mac
   - ✅ **EVIDENCE**: Linux task data hash `7986871413244859397` vs Mac `-7306255711788133966`
   - ✅ **EVIDENCE**: All other parameters match (seeds, optimizer, layer sizes, etc.)
-  - 🔴 **NEXT**: Investigate `binary_multiply()` task generation for platform differences
-  - 🔴 **NEXT**: Add explicit dtype casting to ensure cross-platform determinism
-  - 🔴 **NEXT**: Compare task data NPZ files directly to identify exact differences
+  - ✅ **WORKAROUND IMPLEMENTED**: Load preconfigured state from file (achieves perfect accuracy on Mac)
+  - 🔴 **NEXT**: Investigate `binary_multiply()` task generation for platform differences (root cause fix)
+  - 🔴 **NEXT**: Add explicit dtype casting to ensure cross-platform determinism (root cause fix)
+  - 🔴 **NEXT**: Compare task data NPZ files directly to identify exact differences (root cause fix)
 

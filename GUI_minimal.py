@@ -267,6 +267,8 @@ class CircuitOptimizationDemo:
             )
         self.task_text = "Hello Neural CA"  # Shorter text works better with performance mode
         self.noise_p = 0.5
+        # Flag to skip preconfiguration when loading preconfigured state
+        self._skip_preconfig = False
         # Initialize circuit using shared functions (may preconfigure in repair mode)
         self.initialize_circuit()
 
@@ -476,6 +478,48 @@ class CircuitOptimizationDemo:
         except Exception as e:
             print(f"Warning: Could not load training config defaults: {e}")
 
+    def load_preconfigured_state_from_file(self, logits_file: str, wires_file: str):
+        """
+        Load preconfigured circuit state (logits and wires) from NPZ files.
+        
+        Args:
+            logits_file: Path to NPZ file containing preconfigured logits (keys: layer_0, layer_1, ...)
+            wires_file: Path to NPZ file containing wires (keys: layer_0, layer_1, ...)
+            
+        Returns:
+            Tuple of (wires, logits) as lists of JAX arrays, or None if loading fails
+        """
+        try:
+            print(f"Loading preconfigured state from files:")
+            print(f"  Logits: {logits_file}")
+            print(f"  Wires: {wires_file}")
+            
+            # Load logits
+            logits_data = np.load(logits_file)
+            logits = []
+            i = 0
+            while f"layer_{i}" in logits_data:
+                logits.append(jp.array(logits_data[f"layer_{i}"]))
+                print(f"  Loaded logits layer_{i}: shape={logits_data[f'layer_{i}'].shape}, dtype={logits_data[f'layer_{i}'].dtype}")
+                i += 1
+            
+            # Load wires
+            wires_data = np.load(wires_file)
+            wires = []
+            i = 0
+            while f"layer_{i}" in wires_data:
+                wires.append(jp.array(wires_data[f"layer_{i}"]))
+                print(f"  Loaded wires layer_{i}: shape={wires_data[f'layer_{i}'].shape}, dtype={wires_data[f'layer_{i}'].dtype}")
+                i += 1
+            
+            print(f"Successfully loaded {len(logits)} logit layers and {len(wires)} wire layers")
+            return wires, logits
+        except Exception as e:
+            print(f"Error loading preconfigured state: {e}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
+            return None, None
+
     def initialize_circuit(self):
         """Initialize circuit using shared infrastructure"""
         # Generate layer sizes using shared function
@@ -484,7 +528,8 @@ class CircuitOptimizationDemo:
         ))
 
         # Use preconfigure_circuit_logits in repair mode (matches training), otherwise gen_circuit
-        if self.training_mode == "repair" and self.wiring_mode == "fixed":
+        # Skip preconfiguration if flag is set (e.g., when loading preconfigured state)
+        if self.training_mode == "repair" and self.wiring_mode == "fixed" and not self._skip_preconfig:
             # Always generate fresh task data for preconfiguration to ensure it matches current task settings
             # (matches test script approach - always generates fresh task data)
             task_name = self.available_tasks[self.task_idx]
@@ -727,7 +772,12 @@ class CircuitOptimizationDemo:
 
         elif method_name == "Self-Attention":
             # Try to load pre-trained frozen model
-            if self.try_load_wandb_model():
+            # Check if model is already loaded - if so, skip loading and just initialize generator
+            if self.frozen_model is not None:
+                print(f"Model already loaded, skipping WandB load")
+                # Initialize the generator for step-by-step evaluation
+                self.initialize_model_generator()
+            elif self.try_load_wandb_model(skip_circuit_regeneration=False):
                 print(f"Loaded frozen {method_name} model from WandB")
                 if self.loaded_run_id:
                     print(f"  WandB Run ID: {self.loaded_run_id}")
@@ -807,8 +857,13 @@ class CircuitOptimizationDemo:
         for i in range(len(gate_masks)):
             self.gate_mask[i] = np.array(self.gate_mask[i] * gate_masks[i])
 
-    def try_load_wandb_model(self):
-        """Try to load frozen model from WandB"""
+    def try_load_wandb_model(self, skip_circuit_regeneration=False):
+        """Try to load frozen model from WandB
+        
+        Args:
+            skip_circuit_regeneration: If True, skip regenerating circuit after loading model.
+                                       Useful when circuit state is already set (e.g., from preconfigured state).
+        """
         try:
             method_name = self.optimization_methods[self.optimization_method_idx]
             model_type = "self_attention"
@@ -1018,10 +1073,12 @@ class CircuitOptimizationDemo:
                 self.model_use_globals = True  # Always True for self-attention models
 
             # After aligning parameters, regenerate circuit to ensure parity with training config
-            try:
-                self.regenerate_circuit(reset_logs=True)
-            except Exception as regen_e:
-                print(f"Warning: Could not regenerate circuit after loading config: {regen_e}")
+            # Skip if skip_circuit_regeneration is True (e.g., when loading preconfigured state)
+            if not skip_circuit_regeneration:
+                try:
+                    self.regenerate_circuit(reset_logs=True)
+                except Exception as regen_e:
+                    print(f"Warning: Could not regenerate circuit after loading config: {regen_e}")
 
             # DEBUG BLOCK: Extract and store scale parameters from loaded model
             if self.frozen_model is not None:
@@ -2009,6 +2066,88 @@ class CircuitOptimizationDemo:
 
             if imgui.button("Regenerate Circuit"):
                 self.regenerate_circuit()
+
+            # Load preconfigured circuit state
+            imgui.separator_text("Preconfigured Circuit")
+            if imgui.button("Load Preconfigured State"):
+                # Try to load from preconfigured_circuits folder
+                import os
+                logits_file = "preconfigured_circuits/preconfigured_logits_20251112_linux.npz"
+                wires_file = "preconfigured_circuits/wires_20251112_linux.npz"
+                
+                if os.path.exists(logits_file) and os.path.exists(wires_file):
+                    wires, logits = self.load_preconfigured_state_from_file(logits_file, wires_file)
+                    if wires is not None and logits is not None:
+                        # Verify shapes match expected layer sizes
+                        expected_logits_count = len(self.layer_sizes) - 1
+                        if len(logits) == expected_logits_count and len(wires) == expected_logits_count:
+                            # Set flag to skip preconfiguration when initializing optimization method
+                            self._skip_preconfig = True
+                            
+                            self.wires = wires
+                            self.logits = logits
+                            self.logits0 = [l.copy() for l in self.logits]
+                            
+                            # Reset gate masks for new circuit structure
+                            self.reset_gate_mask()
+                            
+                            # Update task first to ensure we have current task data
+                            self.update_task(reset_logs=True)
+                            
+                            # Compute and log loss immediately after loading (before generator init)
+                            try:
+                                initial_loss, initial_aux = get_loss_from_wires_logits(
+                                    self.logits, self.wires, self.input_x, self.y0, self.loss_type
+                                )
+                                initial_hard_loss, _, _, initial_accuracy, initial_hard_accuracy, _, _ = initial_aux
+                                print(f"✓ Loaded preconfigured circuit metrics: loss={float(initial_loss):.6f}, hard_loss={float(initial_hard_loss):.4f}, accuracy={float(initial_accuracy):.4f}, hard_accuracy={float(initial_hard_accuracy):.4f}")
+                            except Exception as e:
+                                print(f"⚠️  Warning: Could not compute loaded circuit metrics: {e}")
+                            
+                            # Reinitialize optimization method AFTER loss computation
+                            # Pass skip_circuit_regeneration=True to prevent model loading from regenerating circuit
+                            # (This will initialize generator with the new state without triggering preconfiguration)
+                            if self.optimization_methods[self.optimization_method_idx] == "Self-Attention":
+                                # If model is not loaded, load it but skip circuit regeneration
+                                if self.frozen_model is None:
+                                    if self.try_load_wandb_model(skip_circuit_regeneration=True):
+                                        print(f"Loaded frozen Self-Attention model from WandB")
+                                        if self.loaded_run_id:
+                                            print(f"  WandB Run ID: {self.loaded_run_id}")
+                                        self.logit_optimizer = None
+                                        self.logit_opt_state = None
+                                        # Initialize the generator for step-by-step evaluation
+                                        self.initialize_model_generator()
+                                    else:
+                                        print(f"⚠️  Warning: Could not load model, falling back to Backprop")
+                                        self.optimization_method_idx = 0
+                                        self.initialize_optimization_method()
+                                        # Clear flag since we're not using preconfigured state anymore
+                                        self._skip_preconfig = False
+                                        print("✓ Successfully loaded preconfigured circuit state")
+                                else:
+                                    # Model already loaded, just initialize generator
+                                    self.initialize_model_generator()
+                            else:
+                                # For backprop, just reinitialize normally
+                                self.initialize_optimization_method()
+                            
+                            # Clear the flag after initialization
+                            self._skip_preconfig = False
+                            
+                            print("✓ Successfully loaded preconfigured circuit state")
+                        else:
+                            print(f"⚠️  Warning: Loaded circuit has {len(logits)} logit layers and {len(wires)} wire layers, expected {expected_logits_count}")
+                            # Clear flag on error
+                            self._skip_preconfig = False
+                    else:
+                        print("✗ Failed to load preconfigured state")
+                        # Clear flag on error
+                        self._skip_preconfig = False
+                else:
+                    print(f"✗ Preconfigured circuit files not found:")
+                    print(f"  Expected: {logits_file}")
+                    print(f"  Expected: {wires_file}")
 
             # Wiring configuration
             imgui.separator_text("Wiring")
