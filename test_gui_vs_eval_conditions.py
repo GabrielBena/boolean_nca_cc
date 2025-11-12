@@ -22,6 +22,9 @@ import numpy as np
 from omegaconf import OmegaConf
 import matplotlib.pyplot as plt
 import os
+import platform
+import json
+from datetime import datetime
 
 from boolean_nca_cc import generate_layer_sizes
 from boolean_nca_cc.circuits.model import gen_circuit
@@ -38,11 +41,33 @@ from boolean_nca_cc.training.evaluation import (
 )
 from boolean_nca_cc.training.preconfigure import preconfigure_circuit_logits
 
-# Configure logging
-logging.basicConfig(level=logging.DEBUG, format="%(name)s - %(levelname)s - %(message)s")
+# Configure logging to both console and file
+log_dir = "outputs"
+os.makedirs(log_dir, exist_ok=True)
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+log_file = os.path.join(log_dir, f"preconfig_debug_{timestamp}.log")
+
+# Create root logger
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.DEBUG)
+root_logger.handlers.clear()
+
+# File handler for detailed debug logs
+file_handler = logging.FileHandler(log_file, mode='w')
+file_handler.setLevel(logging.DEBUG)
+file_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+file_handler.setFormatter(file_formatter)
+root_logger.addHandler(file_handler)
+
+# Console handler for INFO and above
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_formatter = logging.Formatter("%(name)s - %(levelname)s - %(message)s")
+console_handler.setFormatter(console_formatter)
+root_logger.addHandler(console_handler)
+
 log = logging.getLogger(__name__)
-# Enable DEBUG for preconfigure module
-logging.getLogger("boolean_nca_cc.training.preconfigure").setLevel(logging.DEBUG)
+log.info(f"Detailed debug logs will be written to: {log_file}")
 
 
 def load_model_like_gui(run_id: str = "vayt4820"):
@@ -239,14 +264,58 @@ def setup_circuit_like_gui(config, wiring_key):
         log.info(f"  steps={preconfig_steps}, lr={preconfig_lr}, optimizer={preconfig_optimizer}")
         log.info(f"  weight_decay={preconfig_weight_decay}, beta1={preconfig_beta1}, beta2={preconfig_beta2}")
         
-        # DEBUG: Platform and JAX backend info
-        import platform
-        log.info(f"DEBUG Platform info:")
-        log.info(f"  platform={platform.platform()}")
-        log.info(f"  python_version={platform.python_version()}")
-        log.info(f"  jax_backend={jax.devices()[0].platform if jax.devices() else 'unknown'}")
-        log.info(f"  jax_version={jax.__version__ if hasattr(jax, '__version__') else 'unknown'}")
-        log.info(f"  jax_default_dtype={jax.config.jax_enable_x64 if hasattr(jax.config, 'jax_enable_x64') else 'unknown'}")
+        # DEBUG: Log platform and environment info BEFORE preconfiguration
+        log.debug("="*80)
+        log.debug("PLATFORM AND ENVIRONMENT INFO")
+        log.debug("="*80)
+        log.debug(f"Platform: {platform.platform()}")
+        log.debug(f"Python version: {platform.python_version()}")
+        log.debug(f"Machine: {platform.machine()}")
+        log.debug(f"Processor: {platform.processor()}")
+        try:
+            log.debug(f"JAX version: {jax.__version__}")
+            log.debug(f"JAX backend: {jax.devices()[0].platform if jax.devices() else 'unknown'}")
+            log.debug(f"JAX devices: {[str(d) for d in jax.devices()]}")
+            log.debug(f"JAX default backend: {jax.default_backend()}")
+            log.debug(f"JAX x64 enabled: {jax.config.jax_enable_x64}")
+        except Exception as e:
+            log.debug(f"Error getting JAX info: {e}")
+        log.debug("="*80)
+        
+        # DEBUG: Log task data details BEFORE preconfiguration
+        log.debug("="*80)
+        log.debug("TASK DATA DETAILS (BEFORE PRECONFIG)")
+        log.debug("="*80)
+        x_data_np = np.array(x_data) if hasattr(x_data, '__array__') else x_data
+        y_data_np = np.array(y_data) if hasattr(y_data, '__array__') else y_data
+        log.debug(f"x_data shape: {x_data_np.shape}, dtype: {x_data_np.dtype}")
+        log.debug(f"y_data shape: {y_data_np.shape}, dtype: {y_data_np.dtype}")
+        log.debug(f"x_data hash: {hash(x_data_np.tobytes())}")
+        log.debug(f"y_data hash: {hash(y_data_np.tobytes())}")
+        log.debug(f"x_data first 10 values (first column): {x_data_np[:10, 0].tolist()}")
+        log.debug(f"y_data first 10 values (first column): {y_data_np[:10, 0].tolist()}")
+        log.debug(f"x_data sum: {float(x_data_np.sum())}, mean: {float(x_data_np.mean())}, std: {float(x_data_np.std())}")
+        log.debug(f"y_data sum: {float(y_data_np.sum())}, mean: {float(y_data_np.mean())}, std: {float(y_data_np.std())}")
+        log.debug(f"x_data min: {float(x_data_np.min())}, max: {float(x_data_np.max())}")
+        log.debug(f"y_data min: {float(y_data_np.min())}, max: {float(y_data_np.max())}")
+        # Save full arrays to file for comparison
+        data_file = os.path.join(log_dir, f"task_data_{timestamp}.npz")
+        np.savez(data_file, x_data=x_data_np, y_data=y_data_np)
+        log.debug(f"Full task data saved to: {data_file}")
+        log.debug("="*80)
+        
+        # DEBUG: Log preconfiguration parameters
+        log.debug("="*80)
+        log.debug("PRECONFIGURATION PARAMETERS")
+        log.debug("="*80)
+        log.debug(f"wiring_seed: {test_seed}")
+        log.debug(f"wiring_key: {wiring_key}")
+        log.debug(f"layer_sizes: {layer_sizes}")
+        log.debug(f"arity: {arity}, loss_type: {loss_type}")
+        log.debug(f"steps: {preconfig_steps}, lr: {preconfig_lr}, optimizer: {preconfig_optimizer}")
+        log.debug(f"weight_decay: {preconfig_weight_decay}, beta1: {preconfig_beta1}, beta2: {preconfig_beta2}")
+        log.debug(f"task_name: {task_name}, case_n: {case_n}")
+        log.debug("="*80)
         
         wires, logits = preconfigure_circuit_logits(
             wiring_key=wiring_key,
@@ -264,6 +333,39 @@ def setup_circuit_like_gui(config, wiring_key):
         )
         log.info(f"Preconfigured circuit with {preconfig_steps} steps")
         
+        # DEBUG: Log EXACT preconfigured logits to file
+        log.debug("="*80)
+        log.debug("PRECONFIGURED LOGITS (EXACT VALUES)")
+        log.debug("="*80)
+        logits_dict = {}
+        for i, logit_layer in enumerate(logits):
+            logit_np = np.array(logit_layer) if hasattr(logit_layer, '__array__') else logit_layer
+            logits_dict[f"layer_{i}"] = logit_np
+            log.debug(f"Layer {i} shape: {logit_np.shape}, dtype: {logit_np.dtype}")
+            log.debug(f"Layer {i} mean: {float(logit_np.mean()):.10f}, std: {float(logit_np.std()):.10f}")
+            log.debug(f"Layer {i} min: {float(logit_np.min()):.10f}, max: {float(logit_np.max()):.10f}")
+            log.debug(f"Layer {i} first 10 values (flattened): {logit_np.flatten()[:10].tolist()}")
+            log.debug(f"Layer {i} last 10 values (flattened): {logit_np.flatten()[-10:].tolist()}")
+        # Save full logits to file
+        logits_file = os.path.join(log_dir, f"preconfigured_logits_{timestamp}.npz")
+        np.savez(logits_file, **logits_dict)
+        log.debug(f"Full preconfigured logits saved to: {logits_file}")
+        log.debug("="*80)
+        
+        # DEBUG: Log wiring information
+        log.debug("="*80)
+        log.debug("WIRING INFORMATION")
+        log.debug("="*80)
+        for i, wire_layer in enumerate(wires):
+            wire_np = np.array(wire_layer) if hasattr(wire_layer, '__array__') else wire_layer
+            log.debug(f"Wires layer {i} shape: {wire_np.shape}, dtype: {wire_np.dtype}")
+            log.debug(f"Wires layer {i} first 10 values (flattened): {wire_np.flatten()[:10].tolist()}")
+        wires_file = os.path.join(log_dir, f"wires_{timestamp}.npz")
+        wires_dict = {f"layer_{i}": np.array(w) for i, w in enumerate(wires)}
+        np.savez(wires_file, **wires_dict)
+        log.debug(f"Full wires saved to: {wires_file}")
+        log.debug("="*80)
+        
         # Compute initial loss after preconfiguration
         initial_loss, initial_aux = get_loss_from_wires_logits(
             logits, wires, x_data, y_data, loss_type
@@ -276,30 +378,15 @@ def setup_circuit_like_gui(config, wiring_key):
             f"hard_accuracy={float(initial_hard_accuracy):.4f}"
         )
         
-        # DEBUG: Print full debug info AFTER preconfiguration (to avoid affecting JAX computation)
-        log.info(f"DEBUG Preconfiguration details:")
-        log.info(f"  wiring_seed={test_seed} (from config test_seed)")
-        log.info(f"  wiring_key={wiring_key}")
-        log.info(f"  layer_sizes={layer_sizes}")
-        log.info(f"  arity={arity}, loss_type={loss_type}")
-        log.info(f"  steps={preconfig_steps}, lr={preconfig_lr}, optimizer={preconfig_optimizer}")
-        log.info(f"  weight_decay={preconfig_weight_decay}, beta1={preconfig_beta1}, beta2={preconfig_beta2}")
-        log.info(f"  task_name={task_name}, case_n={case_n}")
-        log.info(f"  x_data shape={x_data.shape}, y_data shape={y_data.shape}")
-        log.info(f"  x_data dtype={x_data.dtype}, y_data dtype={y_data.dtype}")
-        # DEBUG: Verify data matches (convert JAX arrays to numpy for hashing - AFTER preconfig)
-        x_data_np = np.array(x_data) if hasattr(x_data, '__array__') else x_data
-        y_data_np = np.array(y_data) if hasattr(y_data, '__array__') else y_data
-        log.info(f"  x_data hash={hash(x_data_np.tobytes())}, y_data hash={hash(y_data_np.tobytes())}")
-        log.info(f"  x_data first 5 values={x_data_np[:5] if len(x_data_np.shape) == 1 else x_data_np[:5, 0]}, y_data first 5 values={y_data_np[:5] if len(y_data_np.shape) == 1 else y_data_np[:5, 0]}")
-        # DEBUG: Log logits statistics after preconfiguration
-        logits_stats = []
-        for i, logit_layer in enumerate(logits):
-            logit_np = np.array(logit_layer) if hasattr(logit_layer, '__array__') else logit_layer
-            logits_stats.append(f"layer_{i}: mean={logit_np.mean():.6f}, std={logit_np.std():.6f}, min={logit_np.min():.6f}, max={logit_np.max():.6f}")
-        log.info(f"  Post-preconfig logits stats: {'; '.join(logits_stats)}")
-        # DEBUG: Check initial circuit state before preconfiguration (if we can)
-        # This would require modifying preconfigure.py to log initial state, but for now just log what we have
+        # DEBUG: Log detailed metrics
+        log.debug("="*80)
+        log.debug("PRECONFIGURATION METRICS (DETAILED)")
+        log.debug("="*80)
+        log.debug(f"loss: {float(initial_loss):.15f}")
+        log.debug(f"hard_loss: {float(initial_hard_loss):.15f}")
+        log.debug(f"accuracy: {float(initial_accuracy):.15f}")
+        log.debug(f"hard_accuracy: {float(initial_hard_accuracy):.15f}")
+        log.debug("="*80)
         
         # Warn if preconfiguration didn't achieve perfect accuracy (training shows 1.0000)
         if initial_hard_accuracy < 0.99999999:
@@ -321,6 +408,61 @@ def setup_circuit_like_gui(config, wiring_key):
             log.warning(
                 f"   4. Numerical precision differences"
             )
+        
+        # DEBUG: Write summary JSON for easy comparison
+        summary = {
+            "platform": platform.platform(),
+            "python_version": platform.python_version(),
+            "machine": platform.machine(),
+            "processor": platform.processor(),
+            "jax_version": jax.__version__ if hasattr(jax, '__version__') else "unknown",
+            "jax_backend": str(jax.devices()[0].platform) if jax.devices() else "unknown",
+            "jax_x64_enabled": bool(jax.config.jax_enable_x64),
+            "test_seed": int(test_seed),
+            "wiring_key": str(wiring_key),
+            "layer_sizes": layer_sizes,
+            "arity": int(arity),
+            "loss_type": loss_type,
+            "task_name": task_name,
+            "case_n": int(case_n),
+            "preconfig_steps": int(preconfig_steps),
+            "preconfig_lr": float(preconfig_lr),
+            "preconfig_optimizer": preconfig_optimizer,
+            "preconfig_weight_decay": float(preconfig_weight_decay),
+            "preconfig_beta1": float(preconfig_beta1),
+            "preconfig_beta2": float(preconfig_beta2),
+            "x_data_shape": list(x_data_np.shape),
+            "x_data_dtype": str(x_data_np.dtype),
+            "x_data_hash": int(hash(x_data_np.tobytes())),
+            "y_data_shape": list(y_data_np.shape),
+            "y_data_dtype": str(y_data_np.dtype),
+            "y_data_hash": int(hash(y_data_np.tobytes())),
+            "logits_shapes": [list(np.array(l).shape) for l in logits],
+            "logits_dtypes": [str(np.array(l).dtype) for l in logits],
+            "logits_stats": [
+                {
+                    "layer": i,
+                    "mean": float(np.array(l).mean()),
+                    "std": float(np.array(l).std()),
+                    "min": float(np.array(l).min()),
+                    "max": float(np.array(l).max()),
+                }
+                for i, l in enumerate(logits)
+            ],
+            "wires_shapes": [list(np.array(w).shape) for w in wires],
+            "wires_dtypes": [str(np.array(w).dtype) for w in wires],
+            "initial_loss": float(initial_loss),
+            "initial_hard_loss": float(initial_hard_loss),
+            "initial_accuracy": float(initial_accuracy),
+            "initial_hard_accuracy": float(initial_hard_accuracy),
+            "data_file": data_file,
+            "logits_file": logits_file,
+            "wires_file": wires_file,
+        }
+        summary_file = os.path.join(log_dir, f"preconfig_summary_{timestamp}.json")
+        with open(summary_file, 'w') as f:
+            json.dump(summary, f, indent=2)
+        log.debug(f"Summary JSON saved to: {summary_file}")
     else:
         log.info("Growth mode: generating random circuit...")
         wires, logits = gen_circuit(wiring_key, layer_sizes, arity=arity)
