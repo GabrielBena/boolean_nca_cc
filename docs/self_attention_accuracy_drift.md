@@ -100,6 +100,160 @@ The GUI still shows preconfiguration issues despite fixes:
 
 ---
 
+## 🔍 CRITICAL DISCOVERY: Platform-Specific Task Data Generation
+
+**Status**: **ROOT CAUSE IDENTIFIED - ACTIVE FIX**
+
+### Cross-Platform Comparison Results
+
+**Linux (Perfect Accuracy)**:
+- Platform: Linux x86_64, JAX 0.6.1, GPU backend, Python 3.12.9
+- Task data hash: `x_data: 7986871413244859397, y_data: -4861175965302900886`
+- Preconfigured metrics: `loss=5.8e-05, hard_accuracy=1.0000` ✅
+
+**Mac (Imperfect Accuracy)**:
+- Platform: macOS ARM64, JAX 0.6.2, CPU backend, Python 3.13.5
+- Task data hash: `x_data: -7306255711788133966, y_data: 20476470868786979` 🔴
+- Preconfigured metrics: `loss=0.0266, hard_accuracy=0.9971` 🔴
+
+### Root Cause: Task Data Hash Mismatch
+
+**🔴 CRITICAL FINDING**: Task data hashes are **DIFFERENT** between platforms:
+- `x_data_hash`: Linux `7986871413244859397` vs Mac `-7306255711788133966` ❌
+- `y_data_hash`: Linux `-4861175965302900886` vs Mac `20476470868786979` ❌
+
+**Impact**: Different task data → Different preconfiguration results → Imperfect accuracy on Mac
+
+**All other parameters match**:
+- ✅ `test_seed`: 33 (both)
+- ✅ `wiring_key`: `[ 0 33]` (both)
+- ✅ `layer_sizes`: Identical
+- ✅ `preconfig_steps`: 200 (both)
+- ✅ `preconfig_lr`: 1.0 (both)
+- ✅ `preconfig_optimizer`: "adamw" (both)
+- ✅ `preconfig_weight_decay`: 0.1 (both)
+- ✅ `preconfig_beta1`: 0.8 (both)
+- ✅ `preconfig_beta2`: 0.8 (both)
+
+### Investigation Plan: Ordered Steps to Match Platforms
+
+**Priority 1: Fix Task Data Generation Determinism** 🔴 **CRITICAL**
+
+1. **Investigate `get_task_data()` for `binary_multiply` task**
+   - Check if task generation uses any platform-specific operations
+   - Verify `jp.arange()` behavior across platforms (x86_64 vs ARM64)
+   - Check if bitwise operations (`&`, `>>`) produce different results
+   - **Action**: Review `boolean_nca_cc/circuits/tasks.py` `binary_multiply()` function
+   - **Expected**: Task should be deterministic - `binary_multiply` uses `jp.arange(case_n)` and bitwise ops
+
+2. **Check `unpack()` function for platform differences**
+   - Verify `unpack()` function produces identical results across platforms
+   - Check if float32 conversion differs between x86_64 and ARM64
+   - **Action**: Review `unpack()` implementation in task generation
+   - **Expected**: Should be deterministic, but float32 precision might differ
+
+3. **Verify JAX array creation determinism**
+   - Check if `jp.arange()` produces identical arrays on different platforms
+   - Verify endianness doesn't affect array representation
+   - **Action**: Create test script to compare `jp.arange(256)` outputs
+   - **Expected**: Should match, but need to verify
+
+4. **Add explicit dtype casting to ensure consistency**
+   - Force `float32` dtype explicitly in task generation
+   - Ensure arrays are converted to numpy before hashing (for comparison)
+   - **Action**: Modify `binary_multiply()` to explicitly cast to `jp.float32`
+   - **Expected**: Should eliminate any dtype-related differences
+
+**Priority 2: Verify Task Data After Fix** 🟡 **HIGH**
+
+5. **Compare task data arrays directly**
+   - Load NPZ files from both platforms: `task_data_*.npz`
+   - Compare `x_data` and `y_data` element-by-element
+   - Identify which elements differ and by how much
+   - **Action**: Write comparison script to load and diff NPZ files
+   - **Expected**: After fix, hashes should match exactly
+
+6. **Verify task data matches training data**
+   - Compare task data from test script with training data generation
+   - Ensure same `case_n`, `input_bits`, `output_bits` parameters
+   - **Action**: Check `train_loop.py` task data generation matches test script
+   - **Expected**: Should match exactly
+
+**Priority 3: Investigate JAX Backend Differences** 🟡 **MEDIUM**
+
+7. **Compare JAX backend behavior**
+   - Linux uses GPU backend, Mac uses CPU backend
+   - Check if optimizer behavior differs between GPU and CPU
+   - Verify if numerical precision differs (both have `jax_x64_enabled: false`)
+   - **Action**: Test preconfiguration on Mac with GPU backend (if available)
+   - **Expected**: Backend shouldn't affect deterministic task generation, but might affect optimizer convergence
+
+8. **Compare JAX version differences**
+   - Linux: JAX 0.6.1, Mac: JAX 0.6.2
+   - Check if optimizer implementation changed between versions
+   - Verify if random number generation differs
+   - **Action**: Test with same JAX version on both platforms
+   - **Expected**: Minor version difference shouldn't affect task generation, but optimizer might differ
+
+**Priority 4: Verify Preconfiguration Convergence** 🟢 **LOW**
+
+9. **Compare preconfigured logits after task data fix**
+   - Load `preconfigured_logits_*.npz` files from both platforms
+   - Compare logits statistics (mean, std, min, max) - currently differ:
+     - Linux: std ~6.1-6.2, range ~±8.8
+     - Mac: std ~7.2-7.9, range ~±9.9
+   - **Action**: After task data matches, verify logits converge to same values
+   - **Expected**: Logits should match if task data matches and optimizer is deterministic
+
+10. **Test with identical task data (load from Linux)**
+    - Load Linux task data NPZ file on Mac
+    - Run preconfiguration with Linux task data
+    - Compare results
+    - **Action**: Modify test script to optionally load task data from file
+    - **Expected**: Should produce identical results if task data is the only difference
+
+**Priority 5: Optimizer Numerical Precision** 🟢 **LOW**
+
+11. **Investigate optimizer numerical differences**
+    - Check if AdamW optimizer produces different results on CPU vs GPU
+    - Verify if weight decay application differs
+    - Check if beta1/beta2 momentum accumulation differs
+    - **Action**: Compare optimizer state after each step
+    - **Expected**: Should be deterministic, but numerical precision might differ
+
+12. **Test with different optimizer settings**
+    - Try SGD optimizer (simpler, more deterministic)
+    - Compare results between platforms
+    - **Action**: Test preconfiguration with `optimizer="sgd"`
+    - **Expected**: Simpler optimizer might be more deterministic across platforms
+
+### Implementation Order
+
+**Immediate Actions** (Do First):
+1. ✅ **DONE**: Added comprehensive logging to capture task data, logits, and platform info
+2. 🔴 **NEXT**: Investigate `binary_multiply()` task generation for platform differences
+3. 🔴 **NEXT**: Add explicit dtype casting in task generation
+4. 🔴 **NEXT**: Compare task data NPZ files directly to identify differences
+
+**Secondary Actions** (After task data fix):
+5. Verify task data hashes match after fix
+6. Compare preconfigured logits after fix
+7. Test with identical task data loaded from file
+
+**Tertiary Actions** (If issue persists):
+8. Test with same JAX version on both platforms
+9. Test optimizer numerical precision differences
+10. Investigate backend-specific behavior
+
+### Success Criteria
+
+- [ ] Task data hashes match exactly between Linux and Mac
+- [ ] Preconfigured logits match (or are very close) between platforms
+- [ ] Preconfigured accuracy is 1.0000 on both platforms
+- [ ] Preconfigured loss is < 1e-4 on both platforms
+
+---
+
 **Critical Discovery: Multi-Inject Evaluation Loop Timing**
 
 **Investigation Finding**: The multi-inject evaluation loop does NOT run a warm-up period before applying damage. Damage is injected at step 1, immediately after the initial evaluation (step 0).
@@ -582,9 +736,11 @@ When running zero-damage training, the checkpoint system needs to be configured 
   - This suggests model IS capable of handling well-configured circuits
   - Test script confirms: Perfect preconfiguration → No drift
   - GUI's degradation is likely due to imperfect preconfiguration, not model behavior
-- 🔴 **Active Investigation**: Preconfiguration mismatch in GUI
-  - Need to identify why GUI preconfiguration doesn't achieve perfect accuracy
-  - Compare detailed logs between test script and GUI
-  - Verify all parameters match exactly (task data, layer sizes, random seeds)
-  - Investigate if GUI context affects preconfiguration determinism
+- 🔴 **Active Investigation**: Platform-specific task data generation mismatch
+  - ✅ **ROOT CAUSE IDENTIFIED**: Task data hashes differ between Linux and Mac
+  - ✅ **EVIDENCE**: Linux task data hash `7986871413244859397` vs Mac `-7306255711788133966`
+  - ✅ **EVIDENCE**: All other parameters match (seeds, optimizer, layer sizes, etc.)
+  - 🔴 **NEXT**: Investigate `binary_multiply()` task generation for platform differences
+  - 🔴 **NEXT**: Add explicit dtype casting to ensure cross-platform determinism
+  - 🔴 **NEXT**: Compare task data NPZ files directly to identify exact differences
 

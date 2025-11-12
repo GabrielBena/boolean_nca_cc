@@ -141,13 +141,53 @@ def load_model_like_gui(run_id: str = "vayt4820"):
     return model, loaded_config, loaded_dict
 
 
-def setup_circuit_like_gui(config, wiring_key):
+def load_preconfigured_state_from_file(logits_file: str, wires_file: str):
+    """
+    Load preconfigured circuit state (logits and wires) from NPZ files.
+    
+    Args:
+        logits_file: Path to NPZ file containing preconfigured logits (keys: layer_0, layer_1, ...)
+        wires_file: Path to NPZ file containing wires (keys: layer_0, layer_1, ...)
+        
+    Returns:
+        Tuple of (wires, logits) as lists of JAX arrays
+    """
+    log.info(f"Loading preconfigured state from files:")
+    log.info(f"  Logits: {logits_file}")
+    log.info(f"  Wires: {wires_file}")
+    
+    # Load logits
+    logits_data = np.load(logits_file)
+    logits = []
+    i = 0
+    while f"layer_{i}" in logits_data:
+        logits.append(jp.array(logits_data[f"layer_{i}"]))
+        log.info(f"  Loaded logits layer_{i}: shape={logits_data[f'layer_{i}'].shape}, dtype={logits_data[f'layer_{i}'].dtype}")
+        i += 1
+    
+    # Load wires
+    wires_data = np.load(wires_file)
+    wires = []
+    i = 0
+    while f"layer_{i}" in wires_data:
+        wires.append(jp.array(wires_data[f"layer_{i}"]))
+        log.info(f"  Loaded wires layer_{i}: shape={wires_data[f'layer_{i}'].shape}, dtype={wires_data[f'layer_{i}'].dtype}")
+        i += 1
+    
+    log.info(f"Successfully loaded {len(logits)} logit layers and {len(wires)} wire layers")
+    return wires, logits
+
+
+def setup_circuit_like_gui(config, wiring_key, preconfigured_state_file=None):
     """
     Set up circuit exactly like train.py does (not GUI, but training).
     
     Args:
         config: Loaded config object
         wiring_key: JAX random key for wiring generation (should use config.test_seed)
+        preconfigured_state_file: Optional path to NPZ file containing preconfigured state.
+                                  If provided, should be path to logits file (wires file will be inferred).
+                                  If None, runs preconfiguration normally.
         
     Returns:
         Tuple of (wires, logits, layer_sizes, x_data, y_data, task_name)
@@ -195,6 +235,57 @@ def setup_circuit_like_gui(config, wiring_key):
     
     # Preconfigure circuit if in repair mode (matches GUI)
     if training_mode == "repair":
+        # Option 1: Load preconfigured state from file (quick fix for cross-platform issues)
+        if preconfigured_state_file is not None:
+            log.info("="*80)
+            log.info("LOADING PRECONFIGURED STATE FROM FILE")
+            log.info("="*80)
+            
+            # Infer wires file from logits file (replace 'logits' with 'wires' in filename)
+            if "logits" in preconfigured_state_file:
+                wires_file = preconfigured_state_file.replace("logits", "wires")
+            else:
+                # Try to find wires file in same directory
+                logits_dir = os.path.dirname(preconfigured_state_file)
+                logits_basename = os.path.basename(preconfigured_state_file)
+                # Extract timestamp or identifier - replace "preconfigured_logits" with "wires"
+                wires_file = os.path.join(logits_dir, logits_basename.replace("preconfigured_logits", "wires"))
+            
+            if not os.path.exists(wires_file):
+                raise FileNotFoundError(
+                    f"Wires file not found: {wires_file}\n"
+                    f"Expected wires file based on logits file: {preconfigured_state_file}"
+                )
+            
+            wires, logits = load_preconfigured_state_from_file(preconfigured_state_file, wires_file)
+            
+            # Verify shapes match expected layer sizes
+            if len(logits) != len(layer_sizes) - 1:  # logits has one less layer than layer_sizes
+                log.warning(
+                    f"⚠️  Logits layers count ({len(logits)}) doesn't match expected ({len(layer_sizes) - 1}). "
+                    f"Proceeding anyway..."
+                )
+            if len(wires) != len(layer_sizes) - 1:
+                log.warning(
+                    f"⚠️  Wires layers count ({len(wires)}) doesn't match expected ({len(layer_sizes) - 1}). "
+                    f"Proceeding anyway..."
+                )
+            
+            # Compute initial loss after loading
+            initial_loss, initial_aux = get_loss_from_wires_logits(
+                logits, wires, x_data, y_data, loss_type
+            )
+            initial_hard_loss, _, _, initial_accuracy, initial_hard_accuracy, _, _ = initial_aux
+            log.info(
+                f"Loaded preconfigured circuit metrics: loss={float(initial_loss):.6f}, "
+                f"hard_loss={float(initial_hard_loss):.4f}, "
+                f"accuracy={float(initial_accuracy):.4f}, "
+                f"hard_accuracy={float(initial_hard_accuracy):.4f}"
+            )
+            
+            return wires, logits, layer_sizes, x_data, y_data, task_name
+        
+        # Option 2: Run preconfiguration normally
         log.info("Repair mode: preconfiguring circuit...")
         
         # Get preconfig params - prioritize loaded WandB config (what was actually used in training)
@@ -785,12 +876,31 @@ def plot_stepwise_accuracy(
 
 def main():
     """Main function to run the comparison test."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Test GUI vs Training Evaluation Conditions")
+    parser.add_argument(
+        "--preconfigured-state",
+        type=str,
+        default=None,
+        help="Path to preconfigured logits NPZ file (wires file will be inferred). "
+             "If provided, loads preconfigured state instead of running preconfiguration. "
+             "Useful for cross-platform compatibility (e.g., load state from Linux on Mac)."
+    )
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        default="vayt4820",
+        help="WandB run ID to load"
+    )
+    args = parser.parse_args()
+    
     log.info("="*80)
     log.info("GUI vs Training Evaluation Conditions Test")
     log.info("="*80)
     
     # Configuration
-    run_id = "vayt4820"
+    run_id = args.run_id
     eval_batch_size = 16  # Matches training eval batch size
     # Note: wiring_seed will be taken from loaded config's test_seed (matches train.py)
     
@@ -804,8 +914,12 @@ def main():
     test_seed = getattr(config, "test_seed", 42) if hasattr(config, "test_seed") else 42
     wiring_key = jax.random.PRNGKey(test_seed)
     log.info(f"Using test_seed={test_seed} for wiring (from loaded config)")
+    
+    if args.preconfigured_state:
+        log.info(f"Loading preconfigured state from: {args.preconfigured_state}")
+    
     wires, logits, layer_sizes, x_data, y_data, task_name = setup_circuit_like_gui(
-        config, wiring_key
+        config, wiring_key, preconfigured_state_file=args.preconfigured_state
     )
     
     # Step 3: Run training evaluation (multi-injection damage)
