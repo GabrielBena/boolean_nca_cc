@@ -39,8 +39,10 @@ from boolean_nca_cc.training.evaluation import (
 from boolean_nca_cc.training.preconfigure import preconfigure_circuit_logits
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format="%(name)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="%(name)s - %(levelname)s - %(message)s")
 log = logging.getLogger(__name__)
+# Enable DEBUG for preconfigure module
+logging.getLogger("boolean_nca_cc.training.preconfigure").setLevel(logging.DEBUG)
 
 
 def load_model_like_gui(run_id: str = "vayt4820"):
@@ -237,6 +239,15 @@ def setup_circuit_like_gui(config, wiring_key):
         log.info(f"  steps={preconfig_steps}, lr={preconfig_lr}, optimizer={preconfig_optimizer}")
         log.info(f"  weight_decay={preconfig_weight_decay}, beta1={preconfig_beta1}, beta2={preconfig_beta2}")
         
+        # DEBUG: Platform and JAX backend info
+        import platform
+        log.info(f"DEBUG Platform info:")
+        log.info(f"  platform={platform.platform()}")
+        log.info(f"  python_version={platform.python_version()}")
+        log.info(f"  jax_backend={jax.devices()[0].platform if jax.devices() else 'unknown'}")
+        log.info(f"  jax_version={jax.__version__ if hasattr(jax, '__version__') else 'unknown'}")
+        log.info(f"  jax_default_dtype={jax.config.jax_enable_x64 if hasattr(jax.config, 'jax_enable_x64') else 'unknown'}")
+        
         wires, logits = preconfigure_circuit_logits(
             wiring_key=wiring_key,
             layer_sizes=layer_sizes,
@@ -264,6 +275,31 @@ def setup_circuit_like_gui(config, wiring_key):
             f"accuracy={float(initial_accuracy):.4f}, "
             f"hard_accuracy={float(initial_hard_accuracy):.4f}"
         )
+        
+        # DEBUG: Print full debug info AFTER preconfiguration (to avoid affecting JAX computation)
+        log.info(f"DEBUG Preconfiguration details:")
+        log.info(f"  wiring_seed={test_seed} (from config test_seed)")
+        log.info(f"  wiring_key={wiring_key}")
+        log.info(f"  layer_sizes={layer_sizes}")
+        log.info(f"  arity={arity}, loss_type={loss_type}")
+        log.info(f"  steps={preconfig_steps}, lr={preconfig_lr}, optimizer={preconfig_optimizer}")
+        log.info(f"  weight_decay={preconfig_weight_decay}, beta1={preconfig_beta1}, beta2={preconfig_beta2}")
+        log.info(f"  task_name={task_name}, case_n={case_n}")
+        log.info(f"  x_data shape={x_data.shape}, y_data shape={y_data.shape}")
+        log.info(f"  x_data dtype={x_data.dtype}, y_data dtype={y_data.dtype}")
+        # DEBUG: Verify data matches (convert JAX arrays to numpy for hashing - AFTER preconfig)
+        x_data_np = np.array(x_data) if hasattr(x_data, '__array__') else x_data
+        y_data_np = np.array(y_data) if hasattr(y_data, '__array__') else y_data
+        log.info(f"  x_data hash={hash(x_data_np.tobytes())}, y_data hash={hash(y_data_np.tobytes())}")
+        log.info(f"  x_data first 5 values={x_data_np[:5] if len(x_data_np.shape) == 1 else x_data_np[:5, 0]}, y_data first 5 values={y_data_np[:5] if len(y_data_np.shape) == 1 else y_data_np[:5, 0]}")
+        # DEBUG: Log logits statistics after preconfiguration
+        logits_stats = []
+        for i, logit_layer in enumerate(logits):
+            logit_np = np.array(logit_layer) if hasattr(logit_layer, '__array__') else logit_layer
+            logits_stats.append(f"layer_{i}: mean={logit_np.mean():.6f}, std={logit_np.std():.6f}, min={logit_np.min():.6f}, max={logit_np.max():.6f}")
+        log.info(f"  Post-preconfig logits stats: {'; '.join(logits_stats)}")
+        # DEBUG: Check initial circuit state before preconfiguration (if we can)
+        # This would require modifying preconfigure.py to log initial state, but for now just log what we have
         
         # Warn if preconfiguration didn't achieve perfect accuracy (training shows 1.0000)
         if initial_hard_accuracy < 0.99999999:
