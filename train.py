@@ -8,12 +8,20 @@ when training boolean circuits, using either Graph Neural Networks or Self-Atten
 
 import os
 
+# === Optional CPU-only run ===
+# To run on CPU only, set the below environment variable before JAX import.
+# You can set this via an environment variable or command line argument:
+#   $ JAX_PLATFORM_NAME=cpu python train.py
+# Or uncomment the following line to force CPU from script:
+# os.environ["JAX_PLATFORM_NAME"] = "cpu"
+
 # Configure JAX/XLA memory allocation BEFORE importing JAX
 # Use "platform" allocator - slower but actually releases memory after pool resets
 # The default BFC allocator is faster but pools memory aggressively, causing OOM at pool resets
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
 os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
+
 
 import logging
 from functools import partial
@@ -582,6 +590,7 @@ def main(cfg: DictConfig) -> None:
     # Generate circuit layer sizes
     input_n, output_n = cfg.circuit.input_bits, cfg.circuit.output_bits
     arity = cfg.circuit.arity
+
     if cfg.circuit.layer_sizes is None:
         layer_sizes = generate_layer_sizes(
             input_n,
@@ -616,18 +625,50 @@ def main(cfg: DictConfig) -> None:
 
     # Get task data
     case_n = 1 << input_n
-    x, y0 = get_task_data(
+
+    if cfg.training.test_num is not None:
+        if isinstance(cfg.training.test_num, float):
+            assert cfg.training.test_num >= 0 and cfg.training.test_num <= 1, (
+                "test_num must be a float between 0 and 1, or an integer"
+            )
+            test_ratio = cfg.training.test_num
+        else:
+            assert isinstance(cfg.training.test_num, int), "test_num must be an integer"
+            assert cfg.training.test_num > 0 and cfg.training.test_num <= case_n, (
+                "test_num must be greater than 0 and less than the total number of cases"
+            )
+            test_ratio = cfg.training.test_num / case_n
+    else:
+        test_ratio = None
+
+    (x_train, y_train), (x_test, y_test), (x_total, y_total) = get_task_data(
         cfg.circuit.task,
         case_n,
         input_bits=input_n,
         output_bits=output_n,
         text=cfg.circuit.get("text", None),
+        train_test_split=test_ratio is not None,
+        test_ratio=test_ratio,
+        seed=cfg.seed,
     )
+
+    # Compute data fraction
+    data_fraction = (
+        min(cfg.training.data_per_batch / case_n, 1.0)
+        if cfg.training.data_per_batch is not None
+        else 1.0
+    )
+
+    log.info(f"Data Fraction: {data_fraction:.4f}")
+    if test_ratio is not None:
+        log.info(f"Test Ratio: {test_ratio:.4f} | Sizes = {x_train.shape[0]}, {x_test.shape[0]}")
 
     # Run backpropagation training for comparison if enabled
     bp_results = None
     if cfg.backprop.enabled:
-        bp_results = run_backpropagation_training(cfg, x, y0, loss_type=cfg.training.loss_type)
+        bp_results = run_backpropagation_training(
+            cfg, x_train, y_train, loss_type=cfg.training.loss_type
+        )
         plot_training_curves(bp_results, "Backpropagation", os.path.join(output_dir, "plots"))
 
     # Initialize model
@@ -698,8 +739,14 @@ def main(cfg: DictConfig) -> None:
         key=cfg.seed,
         init_model=model,
         # Data parameters
-        x_data=x,
-        y_data=y0,
+        x_train=x_train,
+        y_train=y_train,
+        x_test=x_test,
+        y_test=y_test,
+        x_total=x_total,
+        y_total=y_total,
+        data_fraction=data_fraction,
+        # Model architecture parameters
         layer_sizes=layer_sizes,
         circuit_hidden_dim=cfg.model.circuit_hidden_dim,
         arity=arity,
@@ -787,7 +834,9 @@ def main(cfg: DictConfig) -> None:
         training_initial_diversity=cfg.pool.initial_diversity,
         layer_sizes=layer_sizes,
         arity=cfg.circuit.arity,
-        eval_batch_size=cfg.eval.batch_size,
+        eval_batch_size=cfg.eval.batch_size
+        if cfg.eval.batch_size is not None
+        else cfg.training.meta_batch_size,
     )
 
     # Get track_metrics configuration
@@ -798,8 +847,8 @@ def main(cfg: DictConfig) -> None:
         model=model_results["model"],
         datasets=datasets,
         pool=model_results.get("pool", None),
-        x_data=x,
-        y_data=y0,
+        x_data=x_test,
+        y_data=y_test,
         input_n=input_n,
         arity=arity,
         circuit_hidden_dim=cfg.model.circuit_hidden_dim,

@@ -251,6 +251,8 @@ def run_unified_periodic_evaluation(
     optimizer=None,
     training_metrics: dict | None = None,
     track_metrics: list[str] | None = None,
+    x_plot: jp.ndarray | None = None,
+    y_plot: jp.ndarray | None = None,
 ) -> dict:
     """
     Run unified periodic evaluation with only IN-distribution and OUT-of-distribution testing.
@@ -393,8 +395,8 @@ def run_unified_periodic_evaluation(
                         model=model,
                         wires_batch=datasets.in_distribution_wires,
                         logits_batch=datasets.in_distribution_logits,
-                        x_data=x_data,
-                        y_data=y_data,
+                        x_data=x_plot if x_plot is not None else x_data,
+                        y_data=y_plot if y_plot is not None else y_data,
                         input_n=input_n,
                         arity=arity,
                         circuit_hidden_dim=circuit_hidden_dim,
@@ -429,8 +431,8 @@ def run_unified_periodic_evaluation(
                         model=model,
                         wires_batch=datasets.out_of_distribution_wires,
                         logits_batch=datasets.out_of_distribution_logits,
-                        x_data=x_data,
-                        y_data=y_data,
+                        x_data=x_plot if x_plot is not None else x_data,
+                        y_data=y_plot if y_plot is not None else y_data,
                         input_n=input_n,
                         arity=arity,
                         circuit_hidden_dim=circuit_hidden_dim,
@@ -448,9 +450,9 @@ def run_unified_periodic_evaluation(
                                 "eval_out/circuit_visualization": wandb_run.Image(
                                     viz_out["figure"]
                                 ),
-                                "eval_out/viz_accuracy": viz_out["accuracy"],
-                                "eval_out/viz_error_count": viz_out["error_count"],
-                                "eval_out/viz_final_loss": viz_out["final_loss"],
+                                # "eval_out/viz_accuracy": viz_out["accuracy"],
+                                # "eval_out/viz_error_count": viz_out["error_count"],
+                                # "eval_out/viz_final_loss": viz_out["final_loss"],
                             }
                         )
                         # Close the figure to free memory
@@ -622,10 +624,15 @@ def run_unified_periodic_evaluation(
 
 def train_model(
     # Data parameters
-    x_data: jp.ndarray,
-    y_data: jp.ndarray,
-    layer_sizes: list[tuple[int, int]],
+    x_train: jp.ndarray,
+    y_train: jp.ndarray,
+    x_test: jp.ndarray,
+    y_test: jp.ndarray,
+    x_total: jp.ndarray,
+    y_total: jp.ndarray,
+    data_fraction: float = 1.0,
     # Model architecture parameters
+    layer_sizes: list[tuple[int, int]] | None = None,
     arity: int = 2,
     circuit_hidden_dim: int = 16,
     # Training hyperparameters
@@ -681,7 +688,7 @@ def train_model(
     periodic_eval_interval: int = 1024,
     periodic_eval_test_seed: int = 42,
     periodic_eval_log_stepwise: bool = False,
-    periodic_eval_batch_size: int = 16,  # Batch size for random wiring evaluation
+    periodic_eval_batch_size: int = None,  # Batch size for random wiring evaluation
     periodic_eval_log_pool_scatter: bool = False,
     # Wandb parameters
     wandb_logging: bool = False,
@@ -702,8 +709,11 @@ def train_model(
 
     Args:
         layer_sizes: List of tuples (nodes, group_size) for each layer
-        x_data: Input data for training [batch, input_bits]
-        y_data: Target output data [batch, output_bits]
+        x_train: Input data for training [num_train, input_bits]
+        y_train: Target output data [num_train, output_bits]
+        x_test: Input data for testing [num_test, input_bits]
+        y_test: Target output data [num_test, output_bits]
+        data_fraction: Fraction of data to use for training
         arity: Number of inputs per gate
         circuit_hidden_dim: Dimension of hidden features
         message_passing: Whether to use message passing or only self-updates
@@ -744,7 +754,7 @@ def train_model(
         periodic_eval_interval: Interval for periodic evaluation
         periodic_eval_test_seed: Seed for periodic evaluation test circuit generation
         periodic_eval_log_stepwise: Whether to log step-by-step evaluation metrics
-        periodic_eval_batch_size: Batch size for random wiring evaluation
+        periodic_eval_batch_size: Batch size for random wiring evaluation (None means use meta_batch_size)
         wandb_logging: Whether to log metrics to wandb
         log_interval: Interval for logging metrics
         wandb_run_config: Configuration to pass to wandb
@@ -834,6 +844,7 @@ def train_model(
             "layer_sizes",
             "n_message_steps",
             "loss_type",
+            "data_fraction",
         ),
     )
     def pool_train_step(
@@ -851,6 +862,7 @@ def train_model(
         loss_type: str,
         loss_key: jax.random.PRNGKey,
         epoch: int,
+        data_fraction: float = 1.0,
     ):
         """
         Single training step using graphs from the pool.
@@ -905,6 +917,8 @@ def train_model(
             else:
                 raise ValueError(f"Unknown model type: {type(model)}")
 
+            loss_key, scan_key = jax.random.split(loss_key)
+
             # Run scan for all steps, computing loss and updating graph at each step
             final_graph, step_outputs = scan_fn(
                 model=model,
@@ -916,6 +930,8 @@ def train_model(
                 y_data=y_target,
                 loss_type=loss_type,
                 layer_sizes=layer_sizes,
+                data_fraction=data_fraction,
+                scan_key=scan_key,
             )
 
             loss_step = get_loss_step(loss_key)
@@ -1002,6 +1018,7 @@ def train_model(
             "layer_sizes",
             "n_message_steps",
             "loss_type",
+            "data_fraction",
         ),
     )
     def pool_train_step_chunk_only(
@@ -1016,6 +1033,7 @@ def train_model(
         loss_type: str,
         loss_key: jax.random.PRNGKey,
         epoch: int,
+        data_fraction: float = 1.0,
     ):
         """
         JIT-compiled loss and gradient computation for a single chunk.
@@ -1039,6 +1057,7 @@ def train_model(
         def loss_fn_scan(model, graph, logits, wires, loss_key):
             # Store original shapes for reconstruction
             logits_original_shapes = [logit.shape for logit in logits]
+            loss_key, scan_key = jax.random.split(loss_key)
 
             # Determine which scan function to use based on model type
             if isinstance(model, CircuitGNN):
@@ -1065,6 +1084,8 @@ def train_model(
                 y_data=y_target,
                 loss_type=loss_type,
                 layer_sizes=layer_sizes,
+                data_fraction=data_fraction,
+                scan_key=scan_key,
             )
 
             loss_step = get_loss_step(loss_key)
@@ -1155,6 +1176,7 @@ def train_model(
         loss_key: jax.random.PRNGKey,
         epoch: int,
         chunk_size: int,
+        data_fraction: float = 1.0,
     ):
         """
         Sequential batch processing with gradient accumulation.
@@ -1209,6 +1231,7 @@ def train_model(
                 loss_type=loss_type,
                 loss_key=chunk_loss_keys[chunk_idx],
                 epoch=epoch,
+                data_fraction=data_fraction,
             )
 
             # Accumulate gradients (weighted by chunk size for proper averaging)
@@ -1290,7 +1313,9 @@ def train_model(
             training_initial_diversity=initial_diversity,
             layer_sizes=layer_sizes,
             arity=arity,
-            eval_batch_size=periodic_eval_batch_size,
+            eval_batch_size=periodic_eval_batch_size
+            if periodic_eval_batch_size is not None
+            else meta_batch_size,
         )
 
         log.info(eval_datasets.get_summary())
@@ -1324,41 +1349,47 @@ def train_model(
                     loss,
                     (aux, circuit_pool, loss_steps),
                 ) = pool_train_step_sequential(
-                    model,
-                    optimizer,
-                    circuit_pool,
-                    idxs,
-                    graphs,
-                    wires,
-                    logits,
-                    x_data,
-                    y_data,
-                    tuple(layer_sizes),  # Convert list to tuple for JAX static arguments
-                    n_message_steps,
+                    model=model,
+                    optimizer=optimizer,
+                    pool=circuit_pool,
+                    idxs=idxs,
+                    graphs=graphs,
+                    wires=wires,
+                    logits=logits,
+                    x=x_train,
+                    y_target=y_train,
+                    layer_sizes=tuple(
+                        layer_sizes
+                    ),  # Convert list to tuple for JAX static arguments
+                    n_message_steps=n_message_steps,
                     loss_type=loss_type,
                     loss_key=loss_key,
                     epoch=epoch,
                     chunk_size=effective_batch_chunk_size,
+                    data_fraction=data_fraction,
                 )
             else:
                 (
                     loss,
                     (aux, circuit_pool, loss_steps),
                 ) = pool_train_step(
-                    model,
-                    optimizer,
-                    circuit_pool,
-                    idxs,
-                    graphs,
-                    wires,
-                    logits,
-                    x_data,
-                    y_data,
-                    tuple(layer_sizes),  # Convert list to tuple for JAX static arguments
-                    n_message_steps,
+                    model=model,
+                    optimizer=optimizer,
+                    pool=circuit_pool,
+                    idxs=idxs,
+                    graphs=graphs,
+                    wires=wires,
+                    logits=logits,
+                    x=x_train,
+                    y_target=y_train,
+                    layer_sizes=tuple(
+                        layer_sizes
+                    ),  # Convert list to tuple for JAX static arguments
+                    n_message_steps=n_message_steps,
                     loss_type=loss_type,
                     loss_key=loss_key,
                     epoch=epoch,
+                    data_fraction=data_fraction,
                 )
 
             *_, hard_loss, _, _, accuracy, hard_accuracy, _, _ = aux
@@ -1529,8 +1560,8 @@ def train_model(
                     model=model,
                     datasets=current_datasets,
                     pool=circuit_pool,
-                    x_data=x_data,
-                    y_data=y_data,
+                    x_data=x_test,
+                    y_data=y_test,
                     input_n=input_n,
                     arity=arity,
                     circuit_hidden_dim=circuit_hidden_dim,
@@ -1548,6 +1579,8 @@ def train_model(
                     optimizer=optimizer,
                     training_metrics=training_metrics,
                     track_metrics=track_metrics,
+                    x_plot=x_total[:256],
+                    y_plot=y_total[:256],
                 )
                 # Extract final metrics for best model tracking (use IN-distribution metrics)
                 current_eval_metrics = eval_results.get("final_metrics_in", None)

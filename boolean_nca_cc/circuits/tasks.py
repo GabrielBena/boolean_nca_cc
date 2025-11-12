@@ -125,7 +125,13 @@ def text_task(case_n, input_bits=8, output_bits=8, text=None):
         y0: Binary text pattern (case_n, output_bits)
     """
     # Auto-select text based on aspect ratio if not provided
+
+    print(
+        f"Text task: case_n={case_n}, input_bits={input_bits}, output_bits={output_bits}, text={text}"
+    )
+
     if text is None:
+        print("No text provided, auto-selecting based on aspect ratio")
         # Create a temporary image to test text fitting
         temp_im = PIL.Image.new("L", (case_n, output_bits))
         temp_draw = PIL.ImageDraw.Draw(temp_im)
@@ -135,7 +141,7 @@ def text_task(case_n, input_bits=8, output_bits=8, text=None):
             "Hello Neural CA! Self-Organizing Circuits are Real!",
             "Hello Neural CA! Self-Organizing!",
             "Neural CA Circuits!",
-            "Neural CA",
+            "Hello NCAs!",
             "NCA",
             "N",
         ]
@@ -154,15 +160,21 @@ def text_task(case_n, input_bits=8, output_bits=8, text=None):
             text_right = bbox[2]
             text_bottom = bbox[3]
 
+            fits = [
+                text_left >= 0,
+                text_top >= 0,
+                text_right <= case_n,
+                text_bottom <= output_bits,
+            ]
+
             # Check if text fits with some margin
-            if (
-                text_left >= 0
-                and text_top >= 0
-                and text_right <= case_n
-                and text_bottom <= output_bits
-            ):
+            if all(fits):
                 text = candidate_text
                 break
+
+            else:
+                print(f"Text {candidate_text} does not fit, trying next: {fits}")
+                # explain why it does not fit
 
     # Create input patterns (sequential integers)
     x = jp.arange(case_n)
@@ -183,6 +195,13 @@ def text_task(case_n, input_bits=8, output_bits=8, text=None):
     # Convert to binary array and transpose to match expected shape
     text_array = np.array(im) > 100  # Threshold for binary conversion
     y0 = jp.float32(text_array.T)  # Transpose so shape is (case_n, output_bits)
+
+    assert input_x.shape == (case_n, input_bits), (
+        f"input_x.shape={input_x.shape} != (case_n, input_bits)=({case_n}, {input_bits})"
+    )
+    assert y0.shape == (case_n, output_bits), (
+        f"y0.shape={y0.shape} != (case_n, output_bits)=({case_n}, {output_bits})"
+    )
 
     return input_x, y0
 
@@ -261,8 +280,9 @@ def get_task_data(task_name, case_n, train_test_split=False, test_ratio=0.2, see
     # Generate full dataset
     x, y0 = TASKS[task_name](case_n, **task_specific_kwargs)
 
-    if not train_test_split:
-        return x, y0
+    # No train/test split for text task (pattern based)
+    if not train_test_split or task_name == "text":
+        return (x, y0), (x, y0), (x, y0)
 
     # Perform train/test split
     if seed is not None:
