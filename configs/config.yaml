@@ -3,6 +3,7 @@
 # Default parameters for experiment
 defaults:
   - model: self_attention  # Default model (gnn or self_attention)
+  - circuit: add
   - _self_  # For self-overrides
 
 # Random seed for reproducibility
@@ -22,17 +23,6 @@ wandb:
   tags: ["boolean-circuit", "nca", "meta-learning"]
   group: null
 
-# Circuit configuration
-circuit:
-  task: "add"
-  input_bits: 8
-  output_bits: 8
-  arity: 4
-  num_layers: 3
-  width_factor: 2
-  layer_sizes: null  # Auto-generate if null 
-  circuit_hidden_dim: 32
-  text: "Hello NCAs!"
 
 # Graph configuration
 graph:
@@ -45,17 +35,22 @@ training:
   wiring_mode: "random"  # Options: "fixed", "genetic", or "random"
   initial_diversity: 256
   # INNER LOOP
-  n_message_steps: 40  # Number of message passing steps per training iteration
+  n_message_steps: 50  # Number of message passing steps per training iteration
   # LOSS TYPE
   loss_type: "l4"  # Options: "l4", "l2", or "bce"
+  # DATA FRACTION
+  data_per_batch: 64  # Number of data points per batch (null means use all data)
+  # RANDOM LOSS STEP
   random_loss_step: false  # Use random message passing step for loss computation
-  use_beta_loss_step: true  # Use beta distribution for random loss step (varies from early to late steps through training)
+  use_beta_loss_step: false  # Use beta distribution for random loss step (varies from early to late steps through training)
+  # TRAIN/TEST SPLIT
+  test_num: 256  # Fraction/absolute number of data to use for testing (from all input combinations)
   # BATCH SIZE
-  meta_batch_size: 64
-  batch_chunk_size: null  # Sequential batch processing chunk size (null means use meta_batch_size)
+  meta_batch_size: 256 
+  batch_chunk_size: 64  # Sequential batch processing chunk size (null means use meta_batch_size)
   # OPTIMIZATION
   learning_rate: 1e-3
-  weight_decay: 1e-5
+  weight_decay: 1e-3
   # LEARNING RATE SCHEDULER
   lr_scheduler: "linear_warmup"  # Options: "constant", "exponential", "cosine", "linear_warmup"
   lr_scheduler_params:
@@ -65,14 +60,14 @@ training:
     alpha: 1e-1 # final lr = 1% of initial lr
   # NUMBER OF EPOCHS
   epochs: null
-  epochs_power_of_2: 16 # 2^n
+  epochs_power_of_2: 15 # 2^n
   # USE SCAN
   use_scan: true
 
 # Pool configuration for meta-learning
 pool:
   size: 4096
-  reset_fraction: 0.25
+  reset_fraction: 0.5
   reset_interval: null
   reset_strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
@@ -127,7 +122,7 @@ eval:
   inner_steps: 100  # Number of message passing steps for inner loop evaluation
   # Periodic evaluation during training
   log_stepwise: false  # Whether to log detailed step-by-step metrics to wandb
-  batch_size: 128  # Batch size for random wiring evaluation
+  batch_size: null  # Batch size for random wiring evaluation
   log_pool_scatter: true
   periodic:
     enabled: true  # Whether to run periodic evaluation during training
