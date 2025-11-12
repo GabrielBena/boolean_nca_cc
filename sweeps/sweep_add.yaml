@@ -1,0 +1,11 @@
+# Define parameter sweeps
+defaults:
+  - override hydra/launcher: basic
+
+sweep:
+  grid:  # parameters to combine in all possible ways
+    training.meta_batch_size: [64, 128, 256, 512]
+    training.learning_rate: [1e-3, 5e-4, 1e-4]
+
+    # Constant parameters (for reference)
+    training.batch_chunk_size: [64]

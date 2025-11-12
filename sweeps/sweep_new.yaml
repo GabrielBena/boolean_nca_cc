@@ -1,0 +1,13 @@
+# Define parameter sweeps
+defaults:
+  - override hydra/launcher: basic
+
+sweep:
+  grid:  # parameters to combine in all possible ways
+    training.learning_rate: [5e-4, 1e-3]
+    training.loss_type: [l4, bce]
+    training.n_message_steps: [5, 10, 20]
+    circuit: [identity, reverse, add, binary_multiply, text]
+
+complete:
+  sweep_20251110_212023

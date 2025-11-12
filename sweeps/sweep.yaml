@@ -15,3 +15,4 @@ sweep:
     - group2:
         training.n_message_steps: [5, 10, 25, 50]
         training.batch_chunk_size: [512, 256, 128, 64]
+        
