@@ -146,6 +146,8 @@ def evaluate_model_stepwise_generator(
     bidirectional_edges: bool = True,
     layer_sizes: List[Tuple[int, int]] = None,
     layer_neighbors: bool = False,
+    knockout_pattern: Optional[jp.ndarray] = None,
+    reset_step_counter_on_init: bool = False,
 ) -> Generator[StepResult, None, None]:
     """
     Generator that yields step-by-step evaluation results for GNN model optimization.
@@ -166,6 +168,11 @@ def evaluate_model_stepwise_generator(
         max_steps: Maximum number of steps to run (None for infinite)
         loss_type: Loss function to use
         bidirectional_edges: Whether to use bidirectional edges
+        layer_sizes: List of (nodes, group_size) tuples for each layer
+        layer_neighbors: Whether to allow attention between adjacent nodes within layers
+        knockout_pattern: Optional knockout pattern to pass to model for damage injection
+        reset_step_counter_on_init: If True, reset step counter to 0 at initialization
+                                   (enables reversible mode activation on first step)
 
     Yields:
         StepResult: Results from each step including loss, accuracy, predictions, and updated logits
@@ -201,6 +208,8 @@ def evaluate_model_stepwise_generator(
 
     # Initialize graph globals with [loss, update_steps] exactly like training
     current_update_steps = 0
+    if reset_step_counter_on_init:
+        current_update_steps = 0  # Force reset to 0 for reversible mode
     graph = graph._replace(
         globals=jp.array([initial_loss, current_update_steps], dtype=jp.float32)
     )
@@ -247,6 +256,7 @@ def evaluate_model_stepwise_generator(
         if isinstance(model, CircuitSelfAttention):
             updated_graph = model(
                 graph,
+                knockout_pattern=knockout_pattern,  # Pass pattern to model
                 layer_neighbors=layer_neighbors,
                 layer_sizes=layer_sizes,
             )

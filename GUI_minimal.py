@@ -326,6 +326,7 @@ class CircuitOptimizationDemo:
         self._viz_damage_mask = []  # Per-layer masks (1.0=active, 0.0=damaged) for visualization only
         self._viz_flash_ticks = 0  # Counter for single-tick red flash (0 = no flash)
         self.damage_bias = -10.0  # Negative bias value for damaged gates
+        self._current_knockout_pattern = None  # Current knockout pattern for damage injection
 
         # DEBUG: Scale parameter values (for re_zero_update models)
         self.model_logit_scale = None
@@ -815,7 +816,7 @@ class CircuitOptimizationDemo:
             self.model_generator = evaluate_model_stepwise_generator(
                 model=self.frozen_model,
                 wires=self.wires,
-                logits=self.logits,
+                logits=self.logits,  # Current logits (NOT damaged, NOT logits0)
                 x_data=self.input_x,
                 y_data=self.y0,
                 input_n=self.input_n,
@@ -826,6 +827,8 @@ class CircuitOptimizationDemo:
                 bidirectional_edges=True,
                 layer_sizes=self.layer_sizes,
                 layer_neighbors=False,  # Match training default (can be enhanced to read from config)
+                knockout_pattern=getattr(self, '_current_knockout_pattern', None),  # Pass pattern to generator
+                reset_step_counter_on_init=(getattr(self, '_current_knockout_pattern', None) is not None),  # Reset if pattern exists
             )
 
             # Get the initial state (step 0)
@@ -1366,14 +1369,15 @@ class CircuitOptimizationDemo:
 
     def _apply_gate_damage_perturbation(self, damage_prob: int | None = None, bias: float | None = None):
         """
-        Apply GAMMA RAYS damage perturbation by baking knockout pattern into logits.
+        Apply GAMMA RAYS damage perturbation by passing knockout pattern to model.
         
-        Implements reversible damage: damage is baked into current logits (reversible by model healing),
-        with visualization-only mask for single-tick red flash.
+        Implements reversible damage: pattern is passed to model (not baked into logits),
+        enabling proper reversible mode activation and recovery behavior that matches
+        the evaluation loop. Visualization mask provides single-tick red flash.
         
         Args:
             damage_prob: Number of gates to knock out (default uses training config)
-            bias: Negative bias value for knocked-out gates (default uses self.damage_bias)
+            bias: Negative bias value for knocked-out gates (default uses self.damage_bias, not used in pattern-based mode)
         """
         try:
             # Use training-configured defaults when not provided
@@ -1397,49 +1401,35 @@ class CircuitOptimizationDemo:
                 self.greedy_ordered_indices if self.greedy_ordered_indices is not None else DEFAULT_GREEDY_ORDERED_INDICES,
             )
 
+            # Store pattern for generator (aligns with evaluation loop)
+            self._current_knockout_pattern = pattern
+
             # 2) Build per-layer masks; set self._viz_damage_mask for the upcoming visualization flash
             layer_gate_masks = create_gate_mask_from_knockout_pattern(pattern, layer_sizes_list)
             # Store visualization mask (1.0=active, 0.0=damaged) - for visualization only
             self._viz_damage_mask = [m.astype(np.float32) for m in layer_gate_masks]
-            
-            # 3) Bake damage into current logits (reversible)
-            # Start from logits0 to ensure we don't accumulate damage
-            damaged_logits = [l.copy() for l in self.logits0]
-            # Iterate over hidden layers only (skip input layer 0 and output layer -1)
-            for li in range(1, len(layer_sizes_list) - 1):  # skip input(0) and output(-1)
-                logits_idx = li - 1  # logits[0] corresponds to layer 1, etc.
-                if logits_idx < len(damaged_logits) and li < len(layer_gate_masks):
-                    # Reshape mask to match logits shape
-                    gate_n, group_size = layer_sizes_list[li]
-                    group_n = gate_n // group_size
-                    mask_reshaped = np.array(layer_gate_masks[li]).reshape(group_n, group_size)
-                    # Apply damage bias where mask is 0.0 (damaged)
-                    damaged_logits[logits_idx] = np.where(
-                        mask_reshaped[..., None] == 0.0, 
-                        bias, 
-                        damaged_logits[logits_idx]
-                    )
-            self.logits = damaged_logits
 
-            # 4) Initialize viz flash: self._viz_flash_ticks = 1
+            # 3) Initialize viz flash: self._viz_flash_ticks = 1
             self._viz_flash_ticks = 3
 
-            # 5) Re-init generator state from CURRENT logits
+            # 4) Re-init generator state from CURRENT logits (NOT damaged, NOT logits0)
             # Note: We preserve step_i and log history to maintain plot continuity
             # The plot will continue from the current position, showing the damage injection
             # as a continuation of the existing curve
             # (step_i and log arrays are NOT reset - history is preserved)
             
             # Re-init generator so the very next logged tick reflects damage
+            # Pattern will be passed to generator, which passes it to model
             self.model_generator = None
             self.last_step_result = None
-            self.initialize_model_generator()  # Rebuild state from CURRENT logits
+            self.initialize_model_generator()  # Rebuild state from CURRENT logits with pattern
             
             # Initialize activations
             self.initialize_activations()
 
-            print(f"Applied GAMMA RAYS damage: {damage_prob} gates knocked out with bias {bias}")
-            print(f"  - Visualization flash enabled for 1 tick")
+            print(f"Applied GAMMA RAYS damage: {damage_prob} gates knocked out (pattern-based)")
+            print(f"  - Pattern stored, will be passed to model for reversible mode activation")
+            print(f"  - Visualization flash enabled for 3 ticks")
 
         except Exception as e:
             print(f"Error applying gate damage perturbation: {e}")
@@ -1458,6 +1448,7 @@ class CircuitOptimizationDemo:
         # Clear reversible damage visualization state
         self._viz_damage_mask = []
         self._viz_flash_ticks = 0
+        self._current_knockout_pattern = None
 
         # Reset the model generator when circuit is reset
         self.model_generator = None

@@ -245,6 +245,11 @@ The GUI still shows preconfiguration issues despite fixes:
    - Hardcoded to load from `preconfigured_circuits/preconfigured_logits_20251112_linux.npz` and `preconfigured_circuits/wires_20251112_linux.npz`
    - Updates circuit state, reinitializes optimization, and updates task
    - Logs metrics after loading
+   - ✅ **FIXED**: Disentangled from automatic preconfiguration - loading preconfigured state no longer triggers automatic preconfiguration that overwrites the loaded state
+     - Added `_skip_preconfig` flag to prevent preconfiguration when loading preconfigured state
+     - Modified `try_load_wandb_model()` to accept `skip_circuit_regeneration` parameter
+     - Model loading and circuit loading are now independent features
+     - Can load model once, then load different preconfigured circuit states without triggering preconfiguration
 
 **Files Required**:
 - `preconfigured_circuits/preconfigured_logits_20251112_linux.npz` - Contains logits with keys `layer_0`, `layer_1`, etc.
@@ -260,6 +265,18 @@ The GUI still shows preconfiguration issues despite fixes:
 - ⚠️ Requires preconfigured state files from Linux machine
 - ⚠️ Circuit architecture must match (layer sizes, arity, etc.)
 - ⚠️ Workaround solution - doesn't fix root cause
+
+**Implementation Details**:
+- ✅ **Fixed Order of Operations Issue**: Previously, clicking "Load Preconfigured State" would:
+  1. Load preconfigured state from file
+  2. Call `initialize_optimization_method()` which triggered `try_load_wandb_model()`
+  3. `try_load_wandb_model()` called `regenerate_circuit()` which called `initialize_circuit()`
+  4. `initialize_circuit()` ran preconfiguration, overwriting the loaded preconfigured state
+- ✅ **Solution**: 
+  - Added `_skip_preconfig` flag checked in `initialize_circuit()` to skip preconfiguration when loading preconfigured state
+  - Modified `try_load_wandb_model()` to accept `skip_circuit_regeneration` parameter to prevent circuit regeneration when model is loaded
+  - Updated button handler to set flag, load state, handle model loading independently, then clear flag
+  - Model can now remain loaded while loading different circuit states without triggering preconfiguration
 
 **Next Steps** (Long-term fix):
 - Still need to investigate and fix platform-specific task data generation

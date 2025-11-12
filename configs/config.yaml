@@ -75,7 +75,7 @@ pool:
   damage_combined_weights: [0.5, 0.5]
   damage_mode: "greedy_vocabulary"  # Options: "shotgun" (random), "strip" (localized), "greedy" (rolling window), or "greedy_vocabulary" (vocabulary sampling)
   # Number of gates to knock out when generating fresh patterns (ignored if vocabulary is used)
-  damage_prob: 5
+  damage_prob: 20
   # Damage-specific vocabulary size (decoupled from legacy persistent_knockout)
   damage_knockout_diversity: 64
   
