@@ -26,6 +26,7 @@ def build_graph(
     faulty_logit_value: float = -10.0,
     gate_knockout_mask: jp.ndarray | None = None,
     perturbation_mask: jp.ndarray | None = None,
+    positional_encoding_max_val: float = 10000.0,
 ) -> jraph.GraphsTuple:
     """
     Construct a jraph.GraphsTuple representation of a boolean circuit, including input nodes.
@@ -51,6 +52,8 @@ def build_graph(
                            OR layered gate mask as list/tuple of arrays, one per layer with shape (gate_n,)
         perturbation_mask: Optional mask for gates with recoverable perturbations that can still receive updates.
                           Same format as gate_knockout_mask. Perturbed gates have mask value 1.0.
+        positional_encoding_max_val: Maximum value for positional encoding frequency calculation.
+                                    Default 10000.0 provides scale-free encodings for circuit generalization.
 
     Returns:
         A jraph.GraphsTuple representing the circuit
@@ -92,15 +95,16 @@ def build_graph(
     current_global_node_idx = 0
     layer_start_indices = []  # Store the start index of each layer
     pe_dim = circuit_hidden_dim  # Dimension for positional encodings
-    max_layers = len(logits) + 1  # +1 for the input layer
 
     # --- Input Layer Nodes ---
     layer_start_indices.append(current_global_node_idx)
     input_layer_indices = jp.arange(input_n)
     input_layer_pe = get_positional_encoding(
-        jp.zeros(input_n, dtype=jp.int32), pe_dim, max_val=max_layers
+        jp.zeros(input_n, dtype=jp.int32), pe_dim, max_val=positional_encoding_max_val
     )
-    input_intra_layer_pe = get_positional_encoding(input_layer_indices, pe_dim, max_val=input_n + 1)
+    input_intra_layer_pe = get_positional_encoding(
+        input_layer_indices, pe_dim, max_val=positional_encoding_max_val
+    )
 
     # Input layer masks (always active for inputs)
     input_knockout_mask = (
@@ -184,10 +188,12 @@ def build_graph(
 
         # Add Positional Encodings
         layer_indices_pe = jp.full(num_gates_in_layer, layer_idx_graph, dtype=jp.int32)
-        layer_pe = get_positional_encoding(layer_indices_pe, pe_dim, max_val=max_layers)
+        layer_pe = get_positional_encoding(
+            layer_indices_pe, pe_dim, max_val=positional_encoding_max_val
+        )
         intra_layer_indices = jp.arange(num_gates_in_layer, dtype=jp.int32)
         intra_layer_pe = get_positional_encoding(
-            intra_layer_indices, pe_dim, max_val=num_gates_in_layer + 1
+            intra_layer_indices, pe_dim, max_val=positional_encoding_max_val
         )
         layer_nodes["layer_pe"] = layer_pe
         layer_nodes["intra_layer_pe"] = intra_layer_pe
