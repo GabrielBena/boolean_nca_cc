@@ -18,10 +18,10 @@ parameters:
   #     - 32
   #     - 64
   #     - 128
-  training.layer_neighbors:
-    values:
-      - true
-      - false
+  # training.layer_neighbors:
+  #   values:
+  #     - true
+  #     - false
 
   # # Damage and recovery parameters
   # pool.damage_pool_fraction:
@@ -53,16 +53,11 @@ parameters:
   #     - 1e-4
   #     - 5e-4
 
-  # pool.damage_prob:
-  #   values:
-      # - 1
-      # # - 2
-      # - 3
-      # - 4
-      # - 15
-      # - 5
-      # # - 6
-      # - 10
+  pool.damage_prob:
+    values:
+      - 10
+      - 15
+      - 20
 
   # pool.damage_mode:
   #   values:
