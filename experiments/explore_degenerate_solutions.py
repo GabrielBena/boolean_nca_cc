@@ -14,11 +14,12 @@ import argparse
 import hashlib
 import logging
 from pathlib import Path
-from typing import List, Tuple, Dict, Set
+from typing import List, Tuple, Dict, Set, Optional
 import numpy as np
 import jax
 import jax.numpy as jp
 import optax
+from collections import deque
 
 from boolean_nca_cc.circuits.model import run_circuit
 from boolean_nca_cc.circuits.train import compute_accuracy, TrainState, train_step, loss_f_l4, loss_f_bce
@@ -199,6 +200,44 @@ def load_preconfigured_circuit(
         return wires, logits, layer_sizes
 
 
+def _perturb_and_recover_single(
+    initial_logits: List[jp.ndarray],
+    knockout_pattern: jp.ndarray,
+    opt: optax.GradientTransformation,
+    wires: List[jp.ndarray],
+    x_data: jp.ndarray,
+    y_data: jp.ndarray,
+    layer_sizes: List[Tuple[int, int]],
+    epochs: int,
+    loss_type: str,
+    reversible_bias: float,
+) -> Optional[Dict]:
+    """
+    Helper function to perturb and recover a single circuit.
+    
+    Returns:
+        Dictionary with recovery results, or None if error occurred
+    """
+    try:
+        result = _train_single_knockout_pattern(
+            initial_logits=initial_logits,
+            knockout_pattern=knockout_pattern,
+            opt=opt,
+            wires=wires,
+            x_data=x_data,
+            y_data=y_data,
+            loss_type=loss_type,
+            layer_sizes=layer_sizes,
+            epochs=epochs,
+            damage_behavior="reversible",
+            reversible_bias=reversible_bias,
+        )
+        return result
+    except Exception as e:
+        log.debug(f"Error during perturbation-recovery: {e}")
+        return None
+
+
 def explore_degenerate_solutions(
     root_wires: List[jp.ndarray],
     root_logits: List[jp.ndarray],
@@ -206,7 +245,7 @@ def explore_degenerate_solutions(
     y_data: jp.ndarray,
     layer_sizes: List[Tuple[int, int]],
     num_perturbations: int = 100,
-    damage_prob: float = 20.0,
+    damage_prob: float = 5.0,
     greedy_indices: List[int] = None,
     epochs: int = 200,
     learning_rate: float = 1.0,
@@ -217,9 +256,19 @@ def explore_degenerate_solutions(
     loss_type: str = "l4",
     functional_threshold: float = 1.0,
     reversible_bias: float = -10.0,
+    exploration_strategy: str = "hybrid",
+    bfs_depth: int = 2,
+    bfs_perturbations_per_level: int = 100,
+    random_walk_iterations: int = 500,
+    random_walk_seed: int = 12345,
 ) -> Dict:
     """
-    Explore degenerate solutions by perturbing and recovering circuits.
+    Explore degenerate solutions using hybrid BFS + Random Walk strategy.
+    
+    Strategy options:
+    - "hybrid": BFS phase (depth 1-2) followed by Random Walk (recommended for UMAP)
+    - "bfs": Breadth-first search only
+    - "random_walk": Random walk only
     
     Args:
         root_wires: Root circuit wiring
@@ -227,7 +276,7 @@ def explore_degenerate_solutions(
         x_data: Input data
         y_data: Target output data
         layer_sizes: Circuit layer sizes
-        num_perturbations: Number of perturbation patterns to try
+        num_perturbations: Number of perturbation patterns to try (legacy, used if strategy="single_root")
         damage_prob: Number of gates to damage per perturbation
         greedy_indices: Ordered list of greedy gate indices (defaults to DEFAULT_GREEDY_ORDERED_INDICES)
         epochs: Number of recovery epochs
@@ -239,9 +288,19 @@ def explore_degenerate_solutions(
         loss_type: Loss type for recovery
         functional_threshold: Minimum accuracy to consider circuit functional (default: 1.0)
         reversible_bias: Bias value for reversible damage mode
+        exploration_strategy: Strategy to use ("hybrid", "bfs", "random_walk", or "single_root")
+        bfs_depth: Maximum depth for BFS phase (default: 2)
+        bfs_perturbations_per_level: Number of perturbations to try per BFS level (default: 100)
+        random_walk_iterations: Number of random walk iterations (default: 500)
+        random_walk_seed: Random seed for random walk phase
         
     Returns:
-        Dictionary with exploration results
+        Dictionary with exploration results including:
+        - unique_solutions: Dict[hash -> logits] of unique circuits
+        - exploration_results: List of all perturbation-recovery results
+        - exploration_graph: Dict[source_hash -> List[(target_hash, pattern_idx, metadata)]]
+        - edges: List of all edges (source_hash, target_hash, pattern_idx, metadata)
+        - summary: Statistics about exploration
     """
     if greedy_indices is None:
         greedy_indices = DEFAULT_GREEDY_ORDERED_INDICES
@@ -249,8 +308,8 @@ def explore_degenerate_solutions(
     log.info("=" * 80)
     log.info("Exploring Degenerate Circuit Solutions")
     log.info("=" * 80)
+    log.info(f"Exploration strategy: {exploration_strategy}")
     log.info(f"Root circuit hash: {hash_circuit_logits(root_logits)}")
-    log.info(f"Number of perturbations: {num_perturbations}")
     log.info(f"Damage per perturbation: {damage_prob} gates")
     log.info(f"Recovery epochs: {epochs}")
     log.info(f"Learning rate: {learning_rate}")
@@ -258,18 +317,6 @@ def explore_degenerate_solutions(
     log.info(f"Weight decay: {weight_decay}")
     log.info(f"Beta1: {beta1}, Beta2: {beta2}")
     log.info(f"Functional threshold: {functional_threshold}")
-    
-    # Generate vocabulary of perturbation patterns using greedy indices
-    rng = jax.random.PRNGKey(42)
-    knockout_vocabulary = create_knockout_vocabulary(
-        rng=rng,
-        vocabulary_size=num_perturbations,
-        layer_sizes=layer_sizes,
-        damage_prob=damage_prob,
-        damage_mode="greedy_vocabulary",
-        ordered_indices=greedy_indices,
-    )
-    log.info(f"Generated {len(knockout_vocabulary)} perturbation patterns")
     
     # Setup optimizer for recovery (matching config.yaml backprop settings)
     if optimizer == "adamw":
@@ -282,39 +329,214 @@ def explore_degenerate_solutions(
     else:
         opt = optax.adam(learning_rate, b1=beta1, b2=beta2)
     
-    # Track unique solutions
+    # Track unique solutions (for diversity analysis)
     unique_solutions: Dict[str, List[jp.ndarray]] = {}  # hash -> logits
     root_hash = hash_circuit_logits(root_logits)
     unique_solutions[root_hash] = root_logits
+    
+    # Track exploration graph structure (allows cycles and revisits)
+    exploration_graph: Dict[str, List[Tuple[str, int, Dict]]] = {}  # source_hash -> [(target_hash, pattern_idx, metadata)]
+    edges: List[Tuple[str, str, int, Dict]] = []  # (source_hash, target_hash, pattern_idx, metadata)
     
     # Track exploration results
     exploration_results = []
     successful_recoveries = 0
     functional_recoveries = 0
+    total_perturbations = 0
     
-    # Process each perturbation pattern
-    for pattern_idx, knockout_pattern in enumerate(knockout_vocabulary):
-        log.info(f"\nProcessing perturbation {pattern_idx + 1}/{num_perturbations}")
+    # Generate large vocabulary for random sampling
+    vocab_rng = jax.random.PRNGKey(42)
+    vocab_size = max(num_perturbations, bfs_perturbations_per_level * bfs_depth, random_walk_iterations)
+    knockout_vocabulary = create_knockout_vocabulary(
+        rng=vocab_rng,
+        vocabulary_size=vocab_size,
+        layer_sizes=layer_sizes,
+        damage_prob=damage_prob,
+        damage_mode="greedy_vocabulary",
+        ordered_indices=greedy_indices,
+    )
+    log.info(f"Generated vocabulary of {len(knockout_vocabulary)} perturbation patterns")
+    
+    # Track discovered circuits for random walk (list of (hash, logits) tuples)
+    discovered_circuits: List[Tuple[str, List[jp.ndarray]]] = [(root_hash, root_logits)]
+    
+    # ============================================================================
+    # PHASE 1: BFS Exploration (if strategy is "hybrid" or "bfs")
+    # ============================================================================
+    if exploration_strategy in ["hybrid", "bfs"]:
+        log.info("\n" + "=" * 80)
+        log.info("PHASE 1: Breadth-First Search")
+        log.info("=" * 80)
         
-        # Apply perturbation and recover
-        try:
-            result = _train_single_knockout_pattern(
-                initial_logits=root_logits,
+        # BFS queue: (circuit_hash, circuit_logits, depth)
+        queue = deque([(root_hash, root_logits, 0)])
+        visited_at_depth: Dict[int, Set[str]] = {}  # Track visited circuits per depth
+        
+        while queue:
+            circuit_hash, circuit_logits, depth = queue.popleft()
+            
+            if depth >= bfs_depth:
+                continue
+            
+            # Track visited circuits at this depth
+            if depth not in visited_at_depth:
+                visited_at_depth[depth] = set()
+            if circuit_hash in visited_at_depth[depth]:
+                continue
+            visited_at_depth[depth].add(circuit_hash)
+            
+            log.info(f"\nBFS Depth {depth}: Exploring from circuit {circuit_hash[:16]}...")
+            log.info(f"  Discovered circuits so far: {len(unique_solutions)}")
+            
+            # Sample perturbations for this level
+            level_rng = jax.random.PRNGKey(42 + depth)
+            num_patterns = min(bfs_perturbations_per_level, len(knockout_vocabulary))
+            pattern_indices = jax.random.choice(
+                level_rng, len(knockout_vocabulary), shape=(num_patterns,), replace=False
+            )
+            
+            new_circuits_at_depth = []
+            
+            for pattern_idx in pattern_indices:
+                knockout_pattern = knockout_vocabulary[pattern_idx]
+                total_perturbations += 1
+                
+                result = _perturb_and_recover_single(
+                    initial_logits=circuit_logits,
+                    knockout_pattern=knockout_pattern,
+                    opt=opt,
+                    wires=root_wires,
+                    x_data=x_data,
+                    y_data=y_data,
+                    layer_sizes=layer_sizes,
+                    epochs=epochs,
+                    loss_type=loss_type,
+                    reversible_bias=reversible_bias,
+                )
+                
+                if result is None:
+                    continue
+                
+                recovered_logits = result["params"]
+                final_accuracy = float(result["final_hard_accuracy"])
+                successful_recoveries += 1
+                
+                # Check if functional
+                is_func = is_functional(
+                    recovered_logits, root_wires, x_data, y_data, functional_threshold
+                )
+                
+                # Check uniqueness
+                recovered_hash = hash_circuit_logits(recovered_logits)
+                is_unique = recovered_hash not in unique_solutions
+                
+                # Track edge in exploration graph (allows cycles)
+                edge_metadata = {
+                    "depth": depth,
+                    "phase": "bfs",
+                    "is_cycle": (recovered_hash == circuit_hash),
+                    "is_revisit": (recovered_hash in unique_solutions),
+                    "final_accuracy": final_accuracy,
+                    "is_functional": is_func,
+                }
+                edges.append((circuit_hash, recovered_hash, int(pattern_idx), edge_metadata))
+                
+                if circuit_hash not in exploration_graph:
+                    exploration_graph[circuit_hash] = []
+                exploration_graph[circuit_hash].append((recovered_hash, int(pattern_idx), edge_metadata))
+                
+                if is_func:
+                    functional_recoveries += 1
+                    
+                    # Add to unique solutions
+                    if is_unique:
+                        unique_solutions[recovered_hash] = recovered_logits
+                        discovered_circuits.append((recovered_hash, recovered_logits))
+                        new_circuits_at_depth.append(recovered_hash)
+                        log.info(
+                            f"  ✓ Unique functional solution! Hash: {recovered_hash[:16]}..., "
+                            f"Accuracy: {final_accuracy:.4f}"
+                        )
+                    else:
+                        log.info(
+                            f"  → Recovered to known solution (hash: {recovered_hash[:16]}...), "
+                            f"Accuracy: {final_accuracy:.4f}"
+                        )
+                    
+                    # Add to queue for next depth (if not already visited at that depth)
+                    if depth + 1 < bfs_depth:
+                        next_depth_visited = visited_at_depth.get(depth + 1, set())
+                        if recovered_hash not in next_depth_visited:
+                            queue.append((recovered_hash, recovered_logits, depth + 1))
+                else:
+                    log.debug(
+                        f"  ✗ Recovery failed (accuracy: {final_accuracy:.4f} < {functional_threshold})"
+                    )
+                
+                exploration_results.append({
+                    "pattern_idx": int(pattern_idx),
+                    "source_hash": circuit_hash,
+                    "recovered_hash": recovered_hash,
+                    "final_accuracy": final_accuracy,
+                    "is_functional": is_func,
+                    "is_unique": is_func and is_unique,
+                    "depth": depth,
+                    "phase": "bfs",
+                })
+            
+            log.info(f"  New unique circuits at depth {depth}: {len(new_circuits_at_depth)}")
+        
+        log.info(f"\nBFS Phase Complete:")
+        log.info(f"  Total perturbations: {total_perturbations}")
+        log.info(f"  Unique solutions discovered: {len(unique_solutions)}")
+    
+    # ============================================================================
+    # PHASE 2: Random Walk Exploration (if strategy is "hybrid" or "random_walk")
+    # ============================================================================
+    if exploration_strategy in ["hybrid", "random_walk"]:
+        log.info("\n" + "=" * 80)
+        log.info("PHASE 2: Random Walk")
+        log.info("=" * 80)
+        log.info(f"Starting random walk with {len(discovered_circuits)} discovered circuits")
+        log.info(f"Random walk iterations: {random_walk_iterations}")
+        
+        rw_rng = jax.random.PRNGKey(random_walk_seed)
+        
+        for iteration in range(random_walk_iterations):
+            if iteration % 50 == 0:
+                log.info(f"\nRandom Walk iteration {iteration + 1}/{random_walk_iterations}")
+                log.info(f"  Discovered circuits: {len(unique_solutions)}")
+            
+            # Randomly select a circuit to perturb
+            rw_rng, choice_key = jax.random.split(rw_rng)
+            circuit_idx = int(jax.random.choice(choice_key, len(discovered_circuits)))
+            circuit_hash, circuit_logits = discovered_circuits[circuit_idx]
+            
+            # Randomly select a perturbation pattern
+            rw_rng, pattern_key = jax.random.split(rw_rng)
+            pattern_idx = int(jax.random.choice(pattern_key, len(knockout_vocabulary)))
+            knockout_pattern = knockout_vocabulary[pattern_idx]
+            
+            total_perturbations += 1
+            
+            result = _perturb_and_recover_single(
+                initial_logits=circuit_logits,
                 knockout_pattern=knockout_pattern,
                 opt=opt,
                 wires=root_wires,
                 x_data=x_data,
                 y_data=y_data,
-                loss_type=loss_type,
                 layer_sizes=layer_sizes,
                 epochs=epochs,
-                damage_behavior="reversible",
+                loss_type=loss_type,
                 reversible_bias=reversible_bias,
             )
             
+            if result is None:
+                continue
+            
             recovered_logits = result["params"]
             final_accuracy = float(result["final_hard_accuracy"])
-            
             successful_recoveries += 1
             
             # Check if functional
@@ -326,68 +548,161 @@ def explore_degenerate_solutions(
             recovered_hash = hash_circuit_logits(recovered_logits)
             is_unique = recovered_hash not in unique_solutions
             
+            # Track edge in exploration graph (allows cycles)
+            edge_metadata = {
+                "phase": "random_walk",
+                "iteration": iteration,
+                "is_cycle": (recovered_hash == circuit_hash),
+                "is_revisit": (recovered_hash in unique_solutions),
+                "final_accuracy": final_accuracy,
+                "is_functional": is_func,
+            }
+            edges.append((circuit_hash, recovered_hash, pattern_idx, edge_metadata))
+            
+            if circuit_hash not in exploration_graph:
+                exploration_graph[circuit_hash] = []
+            exploration_graph[circuit_hash].append((recovered_hash, pattern_idx, edge_metadata))
+            
             if is_func:
                 functional_recoveries += 1
                 
                 if is_unique:
                     unique_solutions[recovered_hash] = recovered_logits
+                    discovered_circuits.append((recovered_hash, recovered_logits))
+                    if (iteration + 1) % 10 == 0:
+                        log.info(
+                            f"  ✓ New unique solution! Hash: {recovered_hash[:16]}..., "
+                            f"Accuracy: {final_accuracy:.4f}"
+                        )
+                
+                exploration_results.append({
+                    "pattern_idx": pattern_idx,
+                    "source_hash": circuit_hash,
+                    "recovered_hash": recovered_hash,
+                    "final_accuracy": final_accuracy,
+                    "is_functional": is_func,
+                    "is_unique": is_func and is_unique,
+                    "phase": "random_walk",
+                    "iteration": iteration,
+                })
+            else:
+                exploration_results.append({
+                    "pattern_idx": pattern_idx,
+                    "source_hash": circuit_hash,
+                    "recovered_hash": None,
+                    "final_accuracy": final_accuracy,
+                    "is_functional": False,
+                    "is_unique": False,
+                    "phase": "random_walk",
+                    "iteration": iteration,
+                })
+        
+        log.info(f"\nRandom Walk Phase Complete:")
+        log.info(f"  Total perturbations: {total_perturbations}")
+        log.info(f"  Unique solutions discovered: {len(unique_solutions)}")
+    
+    # ============================================================================
+    # Legacy: Single-root exploration (if strategy is "single_root")
+    # ============================================================================
+    if exploration_strategy == "single_root":
+        log.info("\n" + "=" * 80)
+        log.info("Legacy Single-Root Exploration")
+        log.info("=" * 80)
+        
+        for pattern_idx, knockout_pattern in enumerate(knockout_vocabulary[:num_perturbations]):
+            log.info(f"\nProcessing perturbation {pattern_idx + 1}/{num_perturbations}")
+            total_perturbations += 1
+            
+            result = _perturb_and_recover_single(
+                initial_logits=root_logits,
+                knockout_pattern=knockout_pattern,
+                opt=opt,
+                wires=root_wires,
+                x_data=x_data,
+                y_data=y_data,
+                layer_sizes=layer_sizes,
+                epochs=epochs,
+                loss_type=loss_type,
+                reversible_bias=reversible_bias,
+            )
+            
+            if result is None:
+                exploration_results.append({
+                    "pattern_idx": pattern_idx,
+                    "source_hash": root_hash,
+                    "recovered_hash": None,
+                    "final_accuracy": 0.0,
+                    "is_functional": False,
+                    "is_unique": False,
+                    "phase": "single_root",
+                })
+                continue
+            
+            recovered_logits = result["params"]
+            final_accuracy = float(result["final_hard_accuracy"])
+            successful_recoveries += 1
+            
+            is_func = is_functional(
+                recovered_logits, root_wires, x_data, y_data, functional_threshold
+            )
+            recovered_hash = hash_circuit_logits(recovered_logits)
+            is_unique = recovered_hash not in unique_solutions
+            
+            if is_func:
+                functional_recoveries += 1
+                if is_unique:
+                    unique_solutions[recovered_hash] = recovered_logits
                     log.info(
-                        f"  ✓ Unique functional solution discovered! "
-                        f"Hash: {recovered_hash[:16]}..., Accuracy: {final_accuracy:.4f}"
+                        f"  ✓ Unique functional solution! Hash: {recovered_hash[:16]}..., "
+                        f"Accuracy: {final_accuracy:.4f}"
                     )
                 else:
                     log.info(
                         f"  → Recovered to known solution (hash: {recovered_hash[:16]}...), "
                         f"Accuracy: {final_accuracy:.4f}"
                     )
-            else:
-                log.info(
-                    f"  ✗ Recovery failed to reach functional threshold "
-                    f"(accuracy: {final_accuracy:.4f} < {functional_threshold})"
-                )
             
             exploration_results.append({
                 "pattern_idx": pattern_idx,
+                "source_hash": root_hash,
                 "recovered_hash": recovered_hash,
                 "final_accuracy": final_accuracy,
                 "is_functional": is_func,
                 "is_unique": is_func and is_unique,
-            })
-            
-        except Exception as e:
-            log.error(f"  ✗ Error during perturbation {pattern_idx + 1}: {e}")
-            exploration_results.append({
-                "pattern_idx": pattern_idx,
-                "recovered_hash": None,
-                "final_accuracy": 0.0,
-                "is_functional": False,
-                "is_unique": False,
-                "error": str(e),
+                "phase": "single_root",
             })
     
-    # Summary statistics
+    # ============================================================================
+    # Summary Statistics
+    # ============================================================================
     num_unique_solutions = len(unique_solutions)
-    perturbation_efficiency = num_unique_solutions / num_perturbations if num_perturbations > 0 else 0.0
+    perturbation_efficiency = num_unique_solutions / total_perturbations if total_perturbations > 0 else 0.0
     
     log.info("\n" + "=" * 80)
     log.info("Exploration Summary")
     log.info("=" * 80)
-    log.info(f"Total perturbations: {num_perturbations}")
+    log.info(f"Strategy: {exploration_strategy}")
+    log.info(f"Total perturbations: {total_perturbations}")
     log.info(f"Successful recoveries: {successful_recoveries}")
     log.info(f"Functional recoveries: {functional_recoveries}")
     log.info(f"Unique solutions discovered: {num_unique_solutions}")
     log.info(f"Perturbation efficiency: {perturbation_efficiency:.4f} (unique/total)")
+    log.info(f"Exploration graph edges: {len(edges)}")
+    log.info(f"Exploration graph nodes: {len(exploration_graph)}")
     log.info("=" * 80)
     
     return {
         "unique_solutions": unique_solutions,
         "exploration_results": exploration_results,
+        "exploration_graph": exploration_graph,
+        "edges": edges,
         "summary": {
-            "total_perturbations": num_perturbations,
+            "total_perturbations": total_perturbations,
             "successful_recoveries": successful_recoveries,
             "functional_recoveries": functional_recoveries,
             "unique_solutions": num_unique_solutions,
             "perturbation_efficiency": perturbation_efficiency,
+            "strategy": exploration_strategy,
         },
         "root_hash": root_hash,
     }
@@ -441,7 +756,7 @@ def main():
     parser.add_argument(
         "--damage-prob",
         type=float,
-        default=20.0,
+        default=5.0,
         help="Number of gates to damage per perturbation (default: 20.0, matching config.yaml)",
     )
     parser.add_argument(
@@ -492,6 +807,39 @@ def main():
         type=float,
         default=1.0,
         help="Minimum accuracy to consider circuit functional (default: 1.0)",
+    )
+    parser.add_argument(
+        "--exploration-strategy",
+        type=str,
+        default="hybrid",
+        choices=["hybrid", "bfs", "random_walk", "single_root"],
+        help="Exploration strategy: 'hybrid' (BFS + Random Walk, recommended for UMAP), "
+             "'bfs' (breadth-first only), 'random_walk' (random walk only), "
+             "or 'single_root' (legacy: all perturbations from root) (default: hybrid)",
+    )
+    parser.add_argument(
+        "--bfs-depth",
+        type=int,
+        default=2,
+        help="Maximum depth for BFS phase (default: 2)",
+    )
+    parser.add_argument(
+        "--bfs-perturbations-per-level",
+        type=int,
+        default=100,
+        help="Number of perturbations to try per BFS level (default: 100)",
+    )
+    parser.add_argument(
+        "--random-walk-iterations",
+        type=int,
+        default=500,
+        help="Number of random walk iterations (default: 500)",
+    )
+    parser.add_argument(
+        "--random-walk-seed",
+        type=int,
+        default=12345,
+        help="Random seed for random walk phase (default: 12345)",
     )
     
     args = parser.parse_args()
@@ -566,6 +914,11 @@ def main():
         beta1=args.beta1,
         beta2=args.beta2,
         functional_threshold=args.functional_threshold,
+        exploration_strategy=args.exploration_strategy,
+        bfs_depth=args.bfs_depth,
+        bfs_perturbations_per_level=args.bfs_perturbations_per_level,
+        random_walk_iterations=args.random_walk_iterations,
+        random_walk_seed=args.random_walk_seed,
     )
     
     # Print final summary
