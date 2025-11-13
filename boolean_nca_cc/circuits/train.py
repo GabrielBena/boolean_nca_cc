@@ -176,6 +176,43 @@ def create_gate_mask_from_knockout_pattern(knockout_pattern, layer_sizes):
     return gate_masks
 
 
+def apply_reversible_bias_to_logits(logits, knockout_pattern, layer_sizes, bias=-10.0):
+    """
+    Apply one-shot bias to damaged gate logits for reversible damage mode.
+    
+    This zeros LUT outputs (via sigmoid of biased logits) while allowing recovery
+    through normal gradient updates, analogous to self-attention reversible mode.
+    
+    Args:
+        logits: List of logit tensors for each layer
+        knockout_pattern: 1D boolean array where True = knocked out, False = active
+        layer_sizes: List of (total_gates, group_size) for each layer
+        bias: Bias value to apply to damaged gates (default -10.0, zeros sigmoid output)
+        
+    Returns:
+        List of logit tensors with bias applied to damaged gates
+    """
+    biased_logits = []
+    current_idx = 0
+    
+    for layer_idx, (total_gates, group_size) in enumerate(layer_sizes):
+        layer_end = current_idx + total_gates
+        
+        # Extract the knockout pattern for this layer
+        layer_knockout = knockout_pattern[current_idx:layer_end]
+        layer_logits = logits[layer_idx]
+        
+        # Apply bias where True (knocked out)
+        # Expand layer_knockout to match logit dimensions: [total_gates] -> [total_gates, 1]
+        bias_mask = layer_knockout[:, None] * bias
+        biased_layer = layer_logits + bias_mask
+        
+        biased_logits.append(biased_layer)
+        current_idx = layer_end
+    
+    return biased_logits
+
+
 
 # Function dispatcher for loss computation (deprecated - use loss functions directly)
 def loss_f(logits, wires, x, y0, loss_type="l4", gate_mask=None):
@@ -213,7 +250,8 @@ def update_params(grad, opt_state, opt, logits):
 
 
 def train_step(state, opt, wires, x, y0, loss_type="l4", do_train=True, 
-               knockout_pattern=None, layer_sizes=None):
+               knockout_pattern=None, layer_sizes=None, damage_behavior="permanent",
+               reversible_bias=-10.0, step_count=0):
     """
     Unified training step that handles both masked and unmasked training.
 
@@ -227,15 +265,22 @@ def train_step(state, opt, wires, x, y0, loss_type="l4", do_train=True,
         do_train: Whether to perform training or just evaluation
         knockout_pattern: Optional knockout pattern (if None, no masking)
         layer_sizes: Required if knockout_pattern is provided
+        damage_behavior: "permanent" (use gate_mask) or "reversible" (use logit bias)
+        reversible_bias: Bias value for reversible mode (default -10.0)
+        step_count: Current training step (for reversible mode one-shot bias)
 
     Returns:
         Tuple of (loss_value, aux_dict, new_state) with updated parameters
     """
     logits, opt_state = state
 
-    # Create gate_mask if knockout_pattern is provided
+    # Apply reversible bias on first step only (one-shot injection)
+    if damage_behavior == "reversible" and knockout_pattern is not None and step_count == 0:
+        logits = apply_reversible_bias_to_logits(logits, knockout_pattern, layer_sizes, reversible_bias)
+
+    # Create gate_mask only for permanent mode
     gate_mask = None
-    if knockout_pattern is not None:
+    if knockout_pattern is not None and damage_behavior == "permanent":
         gate_mask = create_gate_mask_from_knockout_pattern(knockout_pattern, layer_sizes)
 
     if do_train:

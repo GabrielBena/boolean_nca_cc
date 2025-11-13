@@ -31,6 +31,8 @@ def _train_single_knockout_pattern(
     loss_type,
     layer_sizes,
     epochs,
+    damage_behavior="reversible",
+    reversible_bias=-10.0,
 ):
     """
     Train a single knockout pattern. This function is designed to be vectorized with jax.vmap.
@@ -45,6 +47,8 @@ def _train_single_knockout_pattern(
         loss_type: Loss function type
         layer_sizes: Circuit layer sizes
         epochs: Number of training epochs
+        damage_behavior: "permanent" (use gate_mask) or "reversible" (use logit bias)
+        reversible_bias: Bias value for reversible mode (default -10.0)
         
     Returns:
         Dictionary with training results for this pattern
@@ -63,6 +67,8 @@ def _train_single_knockout_pattern(
         do_train=True,
         knockout_pattern=knockout_pattern,
         layer_sizes=layer_sizes,
+        damage_behavior=damage_behavior,
+        reversible_bias=reversible_bias,
     )
     
     # Training loop - collect metrics as JAX arrays
@@ -72,7 +78,7 @@ def _train_single_knockout_pattern(
     hard_accuracies = jp.zeros(epochs)
     
     for i in range(epochs):
-        loss, aux_metrics, new_state = _train_step_fn(state=state)
+        loss, aux_metrics, new_state = _train_step_fn(state=state, step_count=i)
         state = new_state
         
         losses = losses.at[i].set(loss)
@@ -80,11 +86,13 @@ def _train_single_knockout_pattern(
         accuracies = accuracies.at[i].set(aux_metrics["accuracy"])
         hard_accuracies = hard_accuracies.at[i].set(aux_metrics["hard_accuracy"])
     
-    # Final evaluation
+    # Final evaluation - use gate_mask only for permanent mode
     loss_fn = loss_f_l4 if loss_type == "l4" else loss_f_bce
+    gate_mask = None
+    if damage_behavior == "permanent":
+        gate_mask = create_gate_mask_from_knockout_pattern(knockout_pattern, layer_sizes)
     final_loss, final_aux_metrics = loss_fn(
-        state.params, wires, x_data, y_data, 
-        gate_mask=create_gate_mask_from_knockout_pattern(knockout_pattern, layer_sizes)
+        state.params, wires, x_data, y_data, gate_mask=gate_mask
     )
     
     return {
@@ -107,7 +115,9 @@ def _run_backpropagation_training_with_knockouts(
     loss_type, 
     knockout_patterns,
     parallel: bool = True,
-    batch_size: Optional[int] = None
+    batch_size: Optional[int] = None,
+    damage_behavior: str = "reversible",
+    reversible_bias: float = -10.0,
 ):
     """
     Run backpropagation training for each knockout pattern in the vocabulary.
@@ -120,6 +130,8 @@ def _run_backpropagation_training_with_knockouts(
         knockout_patterns: Array of knockout patterns
         parallel: Whether to use parallel training (default: True)
         batch_size: Batch size for parallel training (default: all patterns at once)
+        damage_behavior: "permanent" (use gate_mask) or "reversible" (use logit bias)
+        reversible_bias: Bias value for reversible mode (default -10.0)
     """
     # Generate circuit
     key = jax.random.PRNGKey(cfg.test_seed)
@@ -155,6 +167,8 @@ def _run_backpropagation_training_with_knockouts(
                 loss_type=loss_type,
                 layer_sizes=cfg.circuit.layer_sizes,
                 epochs=cfg.backprop.epochs,
+                damage_behavior=damage_behavior,
+                reversible_bias=reversible_bias,
             ),
             in_axes=(None, 0)  # initial_logits is shared, knockout_patterns are batched
         )
@@ -221,11 +235,13 @@ def _run_backpropagation_training_with_knockouts(
                 do_train=True,
                 knockout_pattern=knockout_pattern,
                 layer_sizes=cfg.circuit.layer_sizes,
+                damage_behavior=damage_behavior,
+                reversible_bias=reversible_bias,
             )
 
             pbar = tqdm(range(cfg.backprop.epochs), desc=f"BP pattern {pattern_idx + 1}")
             for i in pbar:
-                loss, aux_metrics, new_state = _train_step_fn(state=state)
+                loss, aux_metrics, new_state = _train_step_fn(state=state, step_count=i)
                 state = new_state
 
                 accuracy = float(aux_metrics["accuracy"])
@@ -252,11 +268,13 @@ def _run_backpropagation_training_with_knockouts(
                     hard_loss=hard_loss,
                 )
 
-            # Final evaluation for this pattern
+            # Final evaluation for this pattern - use gate_mask only for permanent mode
             loss_fn = loss_f_l4 if loss_type == "l4" else loss_f_bce
+            gate_mask = None
+            if damage_behavior == "permanent":
+                gate_mask = create_gate_mask_from_knockout_pattern(knockout_pattern, cfg.circuit.layer_sizes)
             final_loss, final_aux_metrics = loss_fn(
-                state.params, wires, x_data, y_data, 
-                gate_mask=create_gate_mask_from_knockout_pattern(knockout_pattern, cfg.circuit.layer_sizes)
+                state.params, wires, x_data, y_data, gate_mask=gate_mask
             )
             final_accuracy = float(final_aux_metrics["accuracy"])
             final_hard_accuracy = float(final_aux_metrics["hard_accuracy"])
