@@ -20,6 +20,9 @@ import jax
 import jax.numpy as jp
 import optax
 from collections import deque
+import pickle
+import json
+from datetime import datetime
 
 from boolean_nca_cc.circuits.model import run_circuit
 from boolean_nca_cc.circuits.train import compute_accuracy, TrainState, train_step, loss_f_l4, loss_f_bce
@@ -79,6 +82,245 @@ def is_functional(
     pred = run_circuit(logits, wires, x_data, hard=True)[-1]
     accuracy = float(compute_accuracy(pred, y_data))
     return accuracy >= threshold
+
+
+def save_exploration_results(
+    results: Dict,
+    output_dir: Path,
+    wires: List[jp.ndarray],
+    layer_sizes: List[Tuple[int, int]],
+    task_name: str,
+    exploration_config: Dict,
+) -> None:
+    """
+    Save exploration results to disk for later loading and visualization.
+    
+    Saves:
+    - solutions.npz: All unique solution logits (solution_{idx}_layer_{layer_idx})
+    - metadata.pkl: All metadata (hashes, exploration results, graph structure, summary)
+    - wires.npz: Circuit wiring (needed for functional testing)
+    - config.json: Exploration configuration (human-readable)
+    
+    Args:
+        results: Results dictionary from explore_degenerate_solutions
+        output_dir: Directory to save results
+        wires: Circuit wiring (needed for functional testing)
+        layer_sizes: Circuit layer sizes
+        task_name: Task name
+        exploration_config: Configuration used for exploration
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    log.info(f"\nSaving exploration results to: {output_dir}")
+    
+    # Save unique solutions logits
+    solutions_file = output_dir / "solutions.npz"
+    solutions_dict = {}
+    hash_to_idx = {}
+    
+    for idx, (circuit_hash, logits) in enumerate(results["unique_solutions"].items()):
+        hash_to_idx[circuit_hash] = idx
+        for layer_idx, logit_layer in enumerate(logits):
+            # Convert JAX array to numpy for saving
+            logit_np = np.array(logit_layer)
+            solutions_dict[f"solution_{idx}_layer_{layer_idx}"] = logit_np
+    
+    np.savez(solutions_file, **solutions_dict)
+    log.info(f"  Saved {len(results['unique_solutions'])} unique solutions to {solutions_file}")
+    
+    # Save wires
+    wires_file = output_dir / "wires.npz"
+    wires_dict = {}
+    for layer_idx, wire_layer in enumerate(wires):
+        wire_np = np.array(wire_layer)
+        wires_dict[f"layer_{layer_idx}"] = wire_np
+    np.savez(wires_file, **wires_dict)
+    log.info(f"  Saved wires to {wires_file}")
+    
+    # Prepare metadata (convert non-serializable objects)
+    metadata = {
+        "unique_solutions": {
+            "hashes": list(results["unique_solutions"].keys()),
+            "hash_to_idx": hash_to_idx,
+            "num_solutions": len(results["unique_solutions"]),
+        },
+        "exploration_results": results["exploration_results"],
+        "summary": results["summary"],
+        "root_hash": results["root_hash"],
+        "layer_sizes": layer_sizes,
+        "task_name": task_name,
+        "exploration_config": exploration_config,
+        "timestamp": datetime.now().isoformat(),
+    }
+    
+    # Save exploration graph (simplified - convert tuples to lists for JSON compatibility)
+    # We'll save a simplified version that's JSON-serializable
+    exploration_graph_simple = {}
+    for source_hash, edges_list in results["exploration_graph"].items():
+        exploration_graph_simple[source_hash] = [
+            {
+                "target_hash": target_hash,
+                "pattern_idx": pattern_idx,
+                "metadata": metadata_dict,
+            }
+            for target_hash, pattern_idx, metadata_dict in edges_list
+        ]
+    metadata["exploration_graph"] = exploration_graph_simple
+    
+    # Save edges (simplified)
+    edges_simple = [
+        {
+            "source_hash": source_hash,
+            "target_hash": target_hash,
+            "pattern_idx": pattern_idx,
+            "metadata": metadata_dict,
+        }
+        for source_hash, target_hash, pattern_idx, metadata_dict in results["edges"]
+    ]
+    metadata["edges"] = edges_simple
+    
+    # Save metadata as pickle (preserves all Python objects)
+    metadata_file = output_dir / "metadata.pkl"
+    with open(metadata_file, "wb") as f:
+        pickle.dump(metadata, f)
+    log.info(f"  Saved metadata to {metadata_file}")
+    
+    # Save config as JSON (human-readable)
+    config_file = output_dir / "config.json"
+    config_json = {
+        "task_name": task_name,
+        "layer_sizes": layer_sizes,
+        "exploration_config": exploration_config,
+        "summary": {
+            k: v for k, v in results["summary"].items() if isinstance(v, (int, float, str, bool))
+        },
+        "num_unique_solutions": len(results["unique_solutions"]),
+        "timestamp": metadata["timestamp"],
+    }
+    with open(config_file, "w") as f:
+        json.dump(config_json, f, indent=2)
+    log.info(f"  Saved config to {config_file}")
+    
+    log.info(f"\nExploration results saved successfully!")
+    log.info(f"  Solutions: {solutions_file}")
+    log.info(f"  Wires: {wires_file}")
+    log.info(f"  Metadata: {metadata_file}")
+    log.info(f"  Config: {config_file}")
+
+
+def load_exploration_results(output_dir: Path) -> Dict:
+    """
+    Load exploration results from disk.
+    
+    Args:
+        output_dir: Directory containing saved exploration results
+        
+    Returns:
+        Dictionary with:
+        - unique_solutions: Dict[hash -> List[jp.ndarray]] of circuit logits
+        - wires: List[jp.ndarray] of circuit wiring
+        - exploration_results: List of exploration results
+        - exploration_graph: Graph structure
+        - edges: List of edges
+        - summary: Summary statistics
+        - metadata: Full metadata dictionary
+        - config: Configuration dictionary
+        - layer_sizes: Circuit layer sizes
+        - task_name: Task name
+    
+    Example:
+        ```python
+        from experiments.explore_degenerate_solutions import load_exploration_results
+        from pathlib import Path
+        
+        # Load results
+        results = load_exploration_results(Path("exploration_results/exploration_20240101_120000"))
+        
+        # Access unique solutions for UMAP
+        unique_solutions = results["unique_solutions"]
+        for circuit_hash, logits in unique_solutions.items():
+            # Flatten logits for UMAP
+            flat_logits = jp.concatenate([l.flatten() for l in logits])
+            # ... use flat_logits for UMAP embedding
+        ```
+    """
+    output_dir = Path(output_dir)
+    
+    log.info(f"Loading exploration results from: {output_dir}")
+    
+    # Load solutions
+    solutions_file = output_dir / "solutions.npz"
+    solutions_data = np.load(solutions_file)
+    
+    # Reconstruct unique_solutions dictionary
+    unique_solutions = {}
+    metadata_file = output_dir / "metadata.pkl"
+    with open(metadata_file, "rb") as f:
+        metadata = pickle.load(f)
+    
+    hash_to_idx = metadata["unique_solutions"]["hash_to_idx"]
+    idx_to_hash = {idx: hash_val for hash_val, idx in hash_to_idx.items()}
+    
+    # Find maximum solution index
+    max_idx = max(hash_to_idx.values()) if hash_to_idx else -1
+    
+    for idx in range(max_idx + 1):
+        if idx not in idx_to_hash:
+            continue
+        
+        circuit_hash = idx_to_hash[idx]
+        logits = []
+        layer_idx = 0
+        while f"solution_{idx}_layer_{layer_idx}" in solutions_data:
+            logit_array = jp.array(solutions_data[f"solution_{idx}_layer_{layer_idx}"])
+            logits.append(logit_array)
+            layer_idx += 1
+        
+        if logits:
+            unique_solutions[circuit_hash] = logits
+    
+    log.info(f"  Loaded {len(unique_solutions)} unique solutions")
+    
+    # Load wires
+    wires_file = output_dir / "wires.npz"
+    wires_data = np.load(wires_file)
+    wires = []
+    layer_idx = 0
+    while f"layer_{layer_idx}" in wires_data:
+        wire_array = jp.array(wires_data[f"layer_{layer_idx}"])
+        wires.append(wire_array)
+        layer_idx += 1
+    
+    log.info(f"  Loaded {len(wires)} wire layers")
+    
+    # Reconstruct exploration graph
+    exploration_graph = {}
+    for source_hash, edges_list in metadata["exploration_graph"].items():
+        exploration_graph[source_hash] = [
+            (edge["target_hash"], edge["pattern_idx"], edge["metadata"])
+            for edge in edges_list
+        ]
+    
+    # Reconstruct edges
+    edges = [
+        (edge["source_hash"], edge["target_hash"], edge["pattern_idx"], edge["metadata"])
+        for edge in metadata["edges"]
+    ]
+    
+    return {
+        "unique_solutions": unique_solutions,
+        "wires": wires,
+        "exploration_results": metadata["exploration_results"],
+        "exploration_graph": exploration_graph,
+        "edges": edges,
+        "summary": metadata["summary"],
+        "root_hash": metadata["root_hash"],
+        "metadata": metadata,
+        "config": metadata.get("exploration_config", {}),
+        "layer_sizes": metadata["layer_sizes"],
+        "task_name": metadata["task_name"],
+    }
 
 
 def infer_layer_sizes_from_logits(logits: List[jp.ndarray], input_n: int) -> List[Tuple[int, int]]:
@@ -841,6 +1083,17 @@ def main():
         default=12345,
         help="Random seed for random walk phase (default: 12345)",
     )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Directory to save exploration results (default: ./exploration_results/{timestamp})",
+    )
+    parser.add_argument(
+        "--no-save-results",
+        action="store_true",
+        help="Don't save exploration results to disk (default: save results)",
+    )
     
     args = parser.parse_args()
     
@@ -921,6 +1174,42 @@ def main():
         random_walk_seed=args.random_walk_seed,
     )
     
+    # Save results by default (unless --no-save-results is specified)
+    save_results = not args.no_save_results
+    if save_results:
+        if args.output_dir is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_dir = workspace_root / "exploration_results" / f"exploration_{timestamp}"
+        else:
+            output_dir = Path(args.output_dir)
+        
+        exploration_config = {
+            "exploration_strategy": args.exploration_strategy,
+            "bfs_depth": args.bfs_depth,
+            "bfs_perturbations_per_level": args.bfs_perturbations_per_level,
+            "random_walk_iterations": args.random_walk_iterations,
+            "random_walk_seed": args.random_walk_seed,
+            "damage_prob": args.damage_prob,
+            "epochs": args.epochs,
+            "learning_rate": args.learning_rate,
+            "optimizer": args.optimizer,
+            "weight_decay": args.weight_decay,
+            "beta1": args.beta1,
+            "beta2": args.beta2,
+            "functional_threshold": args.functional_threshold,
+            "input_bits": args.input_bits,
+            "output_bits": args.output_bits,
+        }
+        
+        save_exploration_results(
+            results=results,
+            output_dir=output_dir,
+            wires=wires,
+            layer_sizes=layer_sizes,
+            task_name=args.task,
+            exploration_config=exploration_config,
+        )
+    
     # Print final summary
     summary = results["summary"]
     print("\n" + "=" * 80)
@@ -929,6 +1218,8 @@ def main():
     print(f"Unique solutions discovered: {summary['unique_solutions']}")
     print(f"Perturbation efficiency: {summary['perturbation_efficiency']:.4f}")
     print(f"Functional recovery rate: {summary['functional_recoveries'] / summary['total_perturbations']:.4f}")
+    if save_results:
+        print(f"Results saved to: {output_dir}")
     print("=" * 80)
 
 

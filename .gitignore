@@ -1,5 +1,6 @@
 wandb/
 outputs/
+exploration_results/
 checkpoints/
 saves/ 
 *.ini 

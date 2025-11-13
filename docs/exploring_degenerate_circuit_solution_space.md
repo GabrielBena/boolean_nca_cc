@@ -508,11 +508,21 @@ Root → Pattern 4 → Circuit D → Pattern 5 → Circuit E → ...
 - **t-SNE/UMAP**: Embed circuits in 2D by logit similarity
   - **Input**: Unique solutions set only (one point per unique circuit)
   - **Color by**: Depth, cluster, recovery time, revisit frequency, cycle participation
-- **Animate**: Show exploration progression over time
-- **Separate views**:
-  - **Diversity view**: UMAP of unique solutions (no duplicates)
-  - **Trajectory view**: Graph visualization showing full exploration paths (with cycles)
-- **Future enhancement**: Trajectory-overlaid UMAP (see Future Directions) - overlay exploration graph edges and cycles directly onto UMAP embeddings to combine diversity and dynamics in a single visualization
+  - **Animate**: Show exploration progression over time
+  - **Separate views**:
+    - **Diversity view**: UMAP of unique solutions (no duplicates)
+    - **Trajectory view**: Graph visualization showing full exploration paths (with cycles)
+  - **Future enhancement**: Trajectory-overlaid UMAP (see Future Directions) - overlay exploration graph edges and cycles directly onto UMAP embeddings to combine diversity and dynamics in a single visualization
+
+**Implementation Plan** (Next Script):
+- Load exploration results using `load_exploration_results()`
+- Extract logits from `unique_solutions` dictionary
+- Flatten logits into feature vectors for UMAP
+- **Depth Coloring**: Color points by minimum perturbation distance from root
+  - **Color gradient**: Continuous gradient from root (e.g., blue) to distant solutions (e.g., red)
+  - **Discretized gradient**: Discrete color bands for each depth level (depth 0 = root, depth 1, depth 2, etc.)
+  - **Implementation**: Compute shortest path from root to each solution using exploration graph, or use BFS depth metadata
+  - **Visual benefit**: Reveals solution space structure - shows how solutions cluster by perturbation distance from root
 
 #### 3. **Trajectory Plots**
 
@@ -567,6 +577,65 @@ def detect_cycles(exploration_graph):
     return cycles
 ```
 
+## Implementation Status
+
+### Current Implementation (`experiments/explore_degenerate_solutions.py`)
+
+**Status**: ✅ **Implemented**
+
+The exploration script implements a **hybrid BFS + Random Walk strategy** optimized for UMAP visualization:
+
+#### Features
+
+1. **Multiple Exploration Strategies**:
+   - `hybrid` (default): BFS phase (depth 1-2) followed by Random Walk
+   - `bfs`: Breadth-first search only
+   - `random_walk`: Random walk only
+   - `single_root`: Legacy mode (all perturbations from root)
+
+2. **BFS Phase**:
+   - Explores immediate neighborhood of root circuit
+   - Configurable depth (default: 2)
+   - Configurable perturbations per level (default: 100)
+   - Tracks circuits by depth to avoid revisiting
+
+3. **Random Walk Phase**:
+   - Randomly samples from discovered circuits
+   - Randomly selects perturbation patterns
+   - Configurable iterations (default: 500)
+   - Maximizes diversity for UMAP visualization
+
+4. **Exploration Graph Tracking**:
+   - `exploration_graph`: Adjacency structure (allows cycles)
+   - `edges`: List of all edges with metadata
+   - Tracks cycles, revisits, and convergence patterns
+   - Supports future cycle analysis and visualization
+
+5. **Save/Load Functionality**:
+   - Saves results to disk automatically (default: `exploration_results/exploration_{timestamp}/`)
+   - Files saved:
+     - `solutions.npz`: All unique solution logits
+     - `metadata.pkl`: Complete metadata (hashes, graph, results)
+     - `wires.npz`: Circuit wiring (for functional testing)
+     - `config.json`: Human-readable configuration
+   - `load_exploration_results()` function for loading in separate visualization scripts
+
+#### Usage
+
+```bash
+# Run hybrid exploration (recommended for UMAP)
+python experiments/explore_degenerate_solutions.py \
+    --exploration-strategy hybrid \
+    --bfs-depth 2 \
+    --bfs-perturbations-per-level 100 \
+    --random-walk-iterations 500 \
+    --output-dir ./my_exploration_results
+
+# Load results in separate script
+from experiments.explore_degenerate_solutions import load_exploration_results
+results = load_exploration_results(Path("./my_exploration_results"))
+```
+
 ## Practical Workflow
 
 ### Phase 1: Initial Exploration (Random Walk)
@@ -582,7 +651,7 @@ def detect_cycles(exploration_graph):
 
 **Expected Output**: ~600 unique circuits from 1000 perturbations (example from user)
 
-**Implementation**: Use `evaluate_model_stepwise_batched` for self-attention (with `damage_behavior="reversible"`), `_run_backpropagation_training_with_knockouts` for backprop (with `damage_behavior="reversible"` or `"permanent"`).
+**Implementation**: ✅ **Implemented** - Use `explore_degenerate_solutions()` with `exploration_strategy="random_walk"` or `"hybrid"`. Uses `_train_single_knockout_pattern` for backprop recovery (with `damage_behavior="reversible"`).
 
 ### Phase 2: Systematic Mapping (BFS)
 
@@ -596,7 +665,7 @@ def detect_cycles(exploration_graph):
 
 **Expected Output**: Complete graph of solutions within 2-3 perturbations
 
-**Implementation**: Maintain discovered set, queue circuits by depth, use recovery generators.
+**Implementation**: ✅ **Implemented** - Use `explore_degenerate_solutions()` with `exploration_strategy="bfs"` or `"hybrid"`. BFS phase maintains discovered set, queues circuits by depth, tracks exploration graph structure.
 
 ### Phase 3: Deep Exploration (DFS)
 
@@ -623,7 +692,105 @@ def detect_cycles(exploration_graph):
 4. Visualize solution space topology
 5. Characterize robustness and diversity
 
-## Example Implementation Sketch
+## Example Usage
+
+### Running Exploration
+
+```python
+from experiments.explore_degenerate_solutions import (
+    explore_degenerate_solutions,
+    load_exploration_results,
+    load_preconfigured_circuit,
+)
+from boolean_nca_cc.circuits.tasks import get_task_data
+from pathlib import Path
+import jax
+
+# Load preconfigured circuit
+wires, logits, layer_sizes = load_preconfigured_circuit(
+    logits_file="preconfigured_circuits/preconfigured_logits.npz",
+    wires_file="preconfigured_circuits/wires.npz",
+)
+
+# Get task data
+x_data, y_data = get_task_data("binary_multiply", case_n=256, input_bits=8, output_bits=8)
+
+# Run hybrid exploration
+results = explore_degenerate_solutions(
+    root_wires=wires,
+    root_logits=logits,
+    x_data=x_data,
+    y_data=y_data,
+    layer_sizes=layer_sizes,
+    exploration_strategy="hybrid",
+    bfs_depth=2,
+    bfs_perturbations_per_level=100,
+    random_walk_iterations=500,
+    damage_prob=5.0,
+    epochs=200,
+)
+
+# Results are automatically saved to exploration_results/exploration_{timestamp}/
+# Or load previously saved results:
+results = load_exploration_results(Path("exploration_results/exploration_20240101_120000"))
+```
+
+### Loading Results for UMAP Visualization
+
+```python
+from experiments.explore_degenerate_solutions import load_exploration_results
+from pathlib import Path
+import jax.numpy as jp
+import numpy as np
+
+# Load saved exploration results
+results = load_exploration_results(Path("exploration_results/exploration_20240101_120000"))
+
+# Extract logits for UMAP
+unique_solutions = results["unique_solutions"]
+feature_vectors = []
+circuit_hashes = []
+depths = []  # For depth coloring
+
+# Compute shortest path distances from root (for depth coloring)
+root_hash = results["root_hash"]
+exploration_graph = results["exploration_graph"]
+
+# BFS to compute distances from root
+from collections import deque
+distances = {root_hash: 0}
+queue = deque([root_hash])
+while queue:
+    current = queue.popleft()
+    for target_hash, _, metadata in exploration_graph.get(current, []):
+        if target_hash not in distances:
+            distances[target_hash] = distances[current] + 1
+            queue.append(target_hash)
+
+# Flatten logits into feature vectors
+for circuit_hash, logits in unique_solutions.items():
+    flat_logits = jp.concatenate([l.flatten() for l in logits])
+    feature_vectors.append(np.array(flat_logits))
+    circuit_hashes.append(circuit_hash)
+    depths.append(distances.get(circuit_hash, float('inf')))  # Use inf for unreachable circuits
+
+feature_matrix = np.array(feature_vectors)
+
+# Now ready for UMAP with depth coloring
+import umap
+import matplotlib.pyplot as plt
+
+reducer = umap.UMAP()
+embedding = reducer.fit_transform(feature_matrix)
+
+# Plot with depth coloring (continuous gradient)
+plt.scatter(embedding[:, 0], embedding[:, 1], c=depths, cmap='viridis', alpha=0.6)
+plt.colorbar(label='Distance from root')
+plt.title('UMAP of Circuit Solutions (colored by depth from root)')
+plt.show()
+```
+
+## Example Implementation Sketch (Legacy - for reference)
 
 ```python
 from boolean_nca_cc.training.pool.structural_perturbation import (
@@ -793,3 +960,28 @@ Exploring degenerate circuit solution spaces requires systematic graph traversal
 
 The key insight is that reversible damage perturbations create a natural exploration mechanism: each perturbation-recovery sequence is an edge in the solution space graph, and systematic traversal reveals the topology of functionally equivalent circuit configurations. The codebase provides robust infrastructure for both perturbation generation (`structural_perturbation.py`) and recovery mechanisms (self-attention and backprop, both supporting reversible and permanent damage modes), enabling comprehensive exploration of degenerate solution spaces.
 
+## Current Implementation Summary
+
+**Status**: ✅ **Core exploration implemented**
+
+The `experiments/explore_degenerate_solutions.py` script implements:
+
+1. **Hybrid BFS + Random Walk strategy** (recommended for UMAP visualization)
+2. **Exploration graph tracking** (allows cycles, tracks all edges)
+3. **Save/load functionality** (separates exploration from visualization)
+4. **Multiple exploration strategies** (hybrid, BFS, random_walk, single_root)
+
+**Next Steps**:
+- ✅ Exploration script: **Complete**
+- 🔄 UMAP visualization script: **In progress** (load results, compute embeddings, color by depth from root)
+- ⏳ Cycle analysis: **Planned**
+- ⏳ Trajectory visualization: **Planned**
+
+
+
+RUN TEMPLATE
+python experiments/explore_degenerate_solutions.py \
+    --exploration-strategy hybrid \
+    --bfs-depth 2 \
+    --bfs-perturbations-per-level 3 \
+    --random-walk-iterations 15 
