@@ -13,6 +13,7 @@ This is a minimal skeleton - no visualizations or advanced analysis yet.
 import argparse
 import hashlib
 import logging
+from pathlib import Path
 from typing import List, Tuple, Dict, Set
 import numpy as np
 import jax
@@ -20,7 +21,8 @@ import jax.numpy as jp
 import optax
 
 from boolean_nca_cc.circuits.model import run_circuit
-from boolean_nca_cc.circuits.train import compute_accuracy, TrainState, train_step
+from boolean_nca_cc.circuits.train import compute_accuracy, TrainState, train_step, loss_f_l4, loss_f_bce
+from boolean_nca_cc.circuits.train import apply_reversible_bias_to_logits
 from boolean_nca_cc.circuits.tasks import get_task_data
 from boolean_nca_cc.training.preconfigure import preconfigure_circuit_logits
 from boolean_nca_cc.training.pool.structural_perturbation import (
@@ -78,6 +80,25 @@ def is_functional(
     return accuracy >= threshold
 
 
+def infer_layer_sizes_from_logits(logits: List[jp.ndarray], input_n: int) -> List[Tuple[int, int]]:
+    """
+    Infer layer_sizes from loaded logits structure.
+    
+    Args:
+        logits: List of logit arrays, each with shape (groups, group_size, 2^arity)
+        input_n: Number of input nodes
+        
+    Returns:
+        List of (total_gates, group_size) tuples for each layer
+    """
+    layer_sizes = [(input_n, 1)]  # Input layer
+    for logit_layer in logits:
+        groups, group_size = logit_layer.shape[:2]
+        total_gates = groups * group_size
+        layer_sizes.append((total_gates, group_size))
+    return layer_sizes
+
+
 def load_preconfigured_circuit(
     logits_file: str = None,
     wires_file: str = None,
@@ -93,7 +114,7 @@ def load_preconfigured_circuit(
     preconfig_weight_decay: float = 1e-1,
     preconfig_beta1: float = 0.8,
     preconfig_beta2: float = 0.8,
-) -> Tuple[List[jp.ndarray], List[jp.ndarray]]:
+) -> Tuple[List[jp.ndarray], List[jp.ndarray], List[Tuple[int, int]]]:
     """
     Load or generate a preconfigured circuit.
     
@@ -134,7 +155,23 @@ def load_preconfigured_circuit(
             i += 1
         
         log.info(f"Loaded {len(logits)} logit layers and {len(wires)} wire layers")
-        return wires, logits
+        
+        # Infer actual layer_sizes from loaded logits
+        # Use input_n from provided layer_sizes if available, otherwise infer from wires or use default
+        if layer_sizes is not None and len(layer_sizes) > 0:
+            input_n = layer_sizes[0][0]
+        elif len(wires) > 0:
+            # Try to infer from first wire layer - wires[0] has shape (arity, num_output_gates)
+            # The number of unique input connections can be inferred, but it's complex
+            # For now, use a reasonable default based on the task
+            input_n = 8  # Default fallback
+            log.warning(f"Could not infer input_n from layer_sizes, using default: {input_n}")
+        else:
+            input_n = 8
+        
+        inferred_layer_sizes = infer_layer_sizes_from_logits(logits, input_n)
+        log.info(f"Inferred layer_sizes from loaded logits: {inferred_layer_sizes}")
+        return wires, logits, inferred_layer_sizes
     else:
         log.info("Generating new preconfigured circuit")
         if wiring_key is None:
@@ -159,7 +196,7 @@ def load_preconfigured_circuit(
             beta2=preconfig_beta2,
         )
         log.info(f"Generated preconfigured circuit with {len(logits)} layers")
-        return wires, logits
+        return wires, logits, layer_sizes
 
 
 def explore_degenerate_solutions(
@@ -360,17 +397,22 @@ def main():
     parser = argparse.ArgumentParser(
         description="Explore degenerate circuit solution spaces"
     )
+    # Default paths to preconfigured circuits (relative to workspace root)
+    workspace_root = Path(__file__).parent.parent
+    default_logits_file = workspace_root / "preconfigured_circuits" / "preconfigured_logits_20251112_linux.npz"
+    default_wires_file = workspace_root / "preconfigured_circuits" / "wires_20251112_linux.npz"
+    
     parser.add_argument(
         "--logits-file",
         type=str,
-        default=None,
-        help="Path to preconfigured logits NPZ file",
+        default=str(default_logits_file) if default_logits_file.exists() else None,
+        help=f"Path to preconfigured logits NPZ file (default: {default_logits_file})",
     )
     parser.add_argument(
         "--wires-file",
         type=str,
-        default=None,
-        help="Path to preconfigured wires NPZ file",
+        default=str(default_wires_file) if default_wires_file.exists() else None,
+        help=f"Path to preconfigured wires NPZ file (default: {default_wires_file})",
     )
     parser.add_argument(
         "--task",
@@ -393,7 +435,7 @@ def main():
     parser.add_argument(
         "--num-perturbations",
         type=int,
-        default=100,
+        default=10,
         help="Number of perturbation patterns to try (default: 100)",
     )
     parser.add_argument(
@@ -474,7 +516,7 @@ def main():
     
     # Load or generate preconfigured circuit (using same optimizer settings as recovery)
     wiring_key = jax.random.PRNGKey(args.wiring_seed)
-    wires, logits = load_preconfigured_circuit(
+    wires, logits, actual_layer_sizes = load_preconfigured_circuit(
         logits_file=args.logits_file,
         wires_file=args.wires_file,
         wiring_key=wiring_key,
@@ -489,6 +531,11 @@ def main():
         preconfig_beta1=args.beta1,
         preconfig_beta2=args.beta2,
     )
+    
+    # Use actual layer_sizes from loaded circuit (may differ from generated ones)
+    if args.logits_file is not None and args.wires_file is not None:
+        log.info(f"Using layer_sizes inferred from loaded circuit: {actual_layer_sizes}")
+        layer_sizes = actual_layer_sizes
     
     # Verify root circuit is functional
     root_accuracy = float(

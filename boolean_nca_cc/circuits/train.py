@@ -184,27 +184,54 @@ def apply_reversible_bias_to_logits(logits, knockout_pattern, layer_sizes, bias=
     through normal gradient updates, analogous to self-attention reversible mode.
     
     Args:
-        logits: List of logit tensors for each layer
+        logits: List of logit tensors for each GATE layer (excludes input layer),
+                each with shape (groups, group_size, 2^arity)
+                Note: logits include output layer, but we skip it for consistency
         knockout_pattern: 1D boolean array where True = knocked out, False = active
-        layer_sizes: List of (total_gates, group_size) for each layer
+                         Includes input layer at the start, but output layer is never True
+        layer_sizes: List of (total_gates, group_size) for each layer (includes input layer)
         bias: Bias value to apply to damaged gates (default -10.0, zeros sigmoid output)
         
     Returns:
         List of logit tensors with bias applied to damaged gates
     """
     biased_logits = []
-    current_idx = 0
     
-    for layer_idx, (total_gates, group_size) in enumerate(layer_sizes):
+    # Skip input layer (layer_sizes[0]) - knockout pattern includes it but logits don't
+    current_idx = layer_sizes[0][0]  # Start after input layer
+    
+    # Identify output layer index (last layer in layer_sizes)
+    output_layer_idx = len(layer_sizes) - 1
+    
+    # Iterate over gate layers only (logits correspond to layer_sizes[1:])
+    # Skip output layer for consistency with knockout pattern generation
+    for logit_layer_idx, (total_gates, group_size) in enumerate(layer_sizes[1:]):
+        # Skip output layer - never apply bias to output nodes
+        layer_idx_in_sizes = logit_layer_idx + 1  # +1 because we skipped input layer
+        if layer_idx_in_sizes == output_layer_idx:
+            # Output layer: pass through unchanged (knockout pattern never has True for outputs)
+            biased_logits.append(logits[logit_layer_idx])
+            current_idx += total_gates
+            continue
+        
         layer_end = current_idx + total_gates
         
-        # Extract the knockout pattern for this layer
+        # Extract the knockout pattern for this gate layer (flat: [total_gates])
         layer_knockout = knockout_pattern[current_idx:layer_end]
-        layer_logits = logits[layer_idx]
+        layer_logits = logits[logit_layer_idx]
+        
+        # Logits are grouped: shape is (groups, group_size, 2^arity)
+        # where groups = total_gates // group_size
+        groups = total_gates // group_size
+        
+        # Reshape knockout pattern to match grouped structure: (total_gates,) -> (groups, group_size)
+        layer_knockout_grouped = layer_knockout.reshape(groups, group_size)
+        
+        # Expand to match logit dimensions: (groups, group_size) -> (groups, group_size, 1)
+        # This broadcasts with (groups, group_size, 2^arity)
+        bias_mask = layer_knockout_grouped[:, :, None] * bias
         
         # Apply bias where True (knocked out)
-        # Expand layer_knockout to match logit dimensions: [total_gates] -> [total_gates, 1]
-        bias_mask = layer_knockout[:, None] * bias
         biased_layer = layer_logits + bias_mask
         
         biased_logits.append(biased_layer)
