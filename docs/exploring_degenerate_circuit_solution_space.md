@@ -524,6 +524,77 @@ Root → Pattern 4 → Circuit D → Pattern 5 → Circuit E → ...
   - **Implementation**: Compute shortest path from root to each solution using exploration graph, or use BFS depth metadata
   - **Visual benefit**: Reveals solution space structure - shows how solutions cluster by perturbation distance from root
 
+#### 2.1. **Dual Connectivity Visualization: Proximity vs. Trajectory**
+
+**Key Insight**: UMAP's connectivity plotting and our exploration graph represent fundamentally different types of connectivity, and comparing them reveals important insights about the solution space structure.
+
+**Two Types of Connectivity**:
+
+1. **UMAP Connectivity (Proximity-Based)**:
+   - Based on **k-nearest neighbors** in logit feature space
+   - Reflects **similarity** in circuit configurations (LUT logit values)
+   - Computed by UMAP during embedding: `umap.plot.connectivity()` shows UMAP's internal k-NN graph
+   - **What it captures**: Circuits that are similar in their internal representation
+   - **Edge meaning**: "These circuits have similar logit configurations"
+
+2. **Exploration Graph Connectivity (Trajectory-Based)**:
+   - Based on **actual perturbation-recovery sequences** during exploration
+   - Reflects **reachability** via the exploration process
+   - Captured in `results["exploration_graph"]` and `results["edges"]`
+   - **What it captures**: Circuits that were actually reached via perturbation-recovery paths
+   - **Edge meaning**: "This circuit was reached by perturbing that circuit and recovering"
+
+**Why This Comparison Matters**:
+
+The correspondence (or lack thereof) between these two connectivity types reveals important properties:
+
+- **Proximity ≠ Reachability**: Circuits that are similar in logit space may not be reachable via perturbations (e.g., separated by high-energy barriers in the optimization landscape)
+- **Reachability ≠ Proximity**: Circuits reachable via perturbations may be quite different in logit space (e.g., different basins of attraction that are connected via exploration paths)
+- **Convergence Patterns**: Multiple perturbation trajectories converging to similar solutions (high trajectory connectivity) vs. solutions that are naturally similar (high proximity connectivity)
+- **Exploration Efficiency**: Whether exploration finds diverse solutions (low trajectory-proximity correlation) or clusters around similar configurations (high correlation)
+- **Solution Space Topology**: Reveals whether the solution space is "smooth" (proximity ≈ reachability) or "rugged" (proximity ≠ reachability)
+
+**Visualization Strategy**:
+
+1. **Side-by-side comparison**:
+   - Left: UMAP embedding with UMAP's k-NN connectivity (`umap.plot.connectivity()`)
+   - Right: Same UMAP embedding with exploration graph edges overlaid
+   - Compare edge density, clustering patterns, and structural differences
+
+2. **Overlaid visualization**:
+   - UMAP embedding as base
+   - UMAP connectivity edges: Light gray, thin lines
+   - Exploration graph edges: Colored by phase (BFS=blue, Random Walk=green), thicker lines
+   - Highlight edges that exist in both graphs (strong correspondence)
+   - Highlight edges that exist in only one graph (divergence)
+
+3. **Edge overlap analysis**:
+   - Compute intersection: edges that exist in both UMAP k-NN graph and exploration graph
+   - Compute divergence: edges unique to each graph type
+   - Visualize overlap ratio per node (how many neighbors are shared vs. unique)
+   - Identify "bridge" circuits: high trajectory connectivity but low proximity connectivity (or vice versa)
+
+4. **Path length comparison**:
+   - Graph distance in exploration graph (trajectory distance)
+   - Euclidean distance in UMAP embedding (proximity distance)
+   - Compare: Do short trajectory paths correspond to short embedding distances?
+   - Identify cases where trajectory paths are long but embedding distance is short (or vice versa)
+
+**Implementation Notes**:
+
+- UMAP's `umap.plot.connectivity()` uses UMAP's internal graph (not customizable)
+- To overlay exploration graph edges, manually draw edges between UMAP embedding coordinates
+- Map circuit hashes to embedding indices to connect exploration graph edges to UMAP points
+- Use different visual styles (color, thickness, opacity) to distinguish connectivity types
+- Consider edge bundling for exploration graph edges to reduce visual clutter (similar to `umap.plot.connectivity(edge_bundling='hammer')`)
+
+**Research Questions**:
+
+- How correlated are proximity and trajectory connectivity?
+- Do exploration paths follow "natural" similarity gradients, or do they traverse dissimilar regions?
+- Are there "shortcuts" in trajectory space that don't exist in proximity space (or vice versa)?
+- How do cycles in the exploration graph relate to proximity clusters in UMAP?
+
 #### 3. **Trajectory Plots**
 
 - **Perturbation chains**: Show sequences of circuits discovered
@@ -935,7 +1006,15 @@ class CircuitExplorer:
 
 ### Enhanced Visualization
 
-1. **Trajectory-overlaid UMAP**: Overlay exploration graph trajectories (edges, cycles, paths) onto UMAP embeddings
+1. **Dual Connectivity Visualization**: Compare proximity-based (UMAP k-NN) vs. trajectory-based (exploration graph) connectivity
+   - **Side-by-side comparison**: UMAP connectivity vs. exploration graph edges on same embedding
+   - **Overlaid visualization**: Both connectivity types on single plot with different visual styles
+   - **Edge overlap analysis**: Identify edges shared vs. unique to each connectivity type
+   - **Path length comparison**: Compare graph distance (trajectory) vs. embedding distance (proximity)
+   - **Research insights**: Understand when proximity ≠ reachability, identify "bridge" circuits, analyze solution space topology
+   - See section 2.1 "Dual Connectivity Visualization: Proximity vs. Trajectory" for detailed discussion
+
+2. **Trajectory-overlaid UMAP**: Overlay exploration graph trajectories (edges, cycles, paths) onto UMAP embeddings
    - **Diversity + Dynamics**: Combine unique solutions (UMAP points) with exploration trajectories (edges/arrows)
    - **Cycle visualization**: Highlight cycles directly in UMAP space (e.g., curved arrows showing A → B → A)
    - **Path highlighting**: Show perturbation-recovery paths as directed edges between UMAP points
