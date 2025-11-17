@@ -46,10 +46,10 @@ training:
   # TRAIN/TEST SPLIT
   test_num: 256  # Fraction/absolute number of data to use for testing (from all input combinations)
   # BATCH SIZE
-  meta_batch_size: 256 
+  meta_batch_size: 64 
   batch_chunk_size: 64  # Sequential batch processing chunk size (null means use meta_batch_size)
   # OPTIMIZATION
-  learning_rate: 1e-3
+  learning_rate: 4e-4
   weight_decay: 1e-3
   # LEARNING RATE SCHEDULER
   lr_scheduler: "linear_warmup"  # Options: "constant", "exponential", "cosine", "linear_warmup"
@@ -60,14 +60,14 @@ training:
     alpha: 1e-1 # final lr = 1% of initial lr
   # NUMBER OF EPOCHS
   epochs: null
-  epochs_power_of_2: 15 # 2^n
+  epochs_power_of_2: 17 # 2^n
   # USE SCAN
   use_scan: true
 
 # Pool configuration for meta-learning
 pool:
   size: 4096
-  reset_fraction: 0.5
+  reset_fraction: 0.25
   reset_interval: null
   reset_strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy

@@ -653,8 +653,9 @@ def main(cfg: DictConfig) -> None:
     )
 
     # Compute data fraction
+    n_train = x_train.shape[0]
     data_fraction = (
-        min(cfg.training.data_per_batch / case_n, 1.0)
+        min(cfg.training.data_per_batch / n_train, 1.0)
         if cfg.training.data_per_batch is not None
         else 1.0
     )
