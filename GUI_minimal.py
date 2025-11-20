@@ -1804,6 +1804,18 @@ class CircuitOptimizationDemo:
             plot_type = self.plot_types[self.plot_type_idx]
             plot_title = f"Circuit Optimization Progress - {plot_type}"
 
+            # Set frame background to white for the plot area
+            imgui.push_style_color(int(imgui.Col_.frame_bg), imgui.ImVec4(1.0, 1.0, 1.0, 1.0))  # White background
+            imgui.push_style_color(int(imgui.Col_.window_bg), imgui.ImVec4(1.0, 1.0, 1.0, 1.0))  # White background
+            imgui.push_style_color(int(imgui.Col_.text), imgui.ImVec4(0.0, 0.0, 0.0, 1.0))  # Black text for labels/ticks
+            imgui.push_style_color(int(imgui.Col_.popup_bg), imgui.ImVec4(1.0, 1.0, 1.0, 1.0))  # White background for legend/popups
+            imgui.push_style_color(int(imgui.Col_.child_bg), imgui.ImVec4(1.0, 1.0, 1.0, 1.0))  # White background for child elements (legend)
+            
+            # Note: ImPlot colors are controlled through ImGui style colors
+            # The plot background should inherit from frame_bg/window_bg which we set to white above
+            # Text color is set to black above for labels/ticks
+            # Legend background uses popup_bg/child_bg which we set to white above
+            
             if implot.begin_plot(plot_title, (-1, 200)):
                 implot.setup_legend(implot.Location_.north_east.value)
 
@@ -1876,6 +1888,11 @@ class CircuitOptimizationDemo:
                     imgui.end_popup()
 
                 implot.end_plot()
+                imgui.pop_style_color()  # Restore child_bg
+                imgui.pop_style_color()  # Restore popup_bg
+                imgui.pop_style_color()  # Restore text
+                imgui.pop_style_color()  # Restore window_bg
+                imgui.pop_style_color()  # Restore frame_bg
 
             # Input visualization
             # Set separator text color to dark gray
