@@ -1685,7 +1685,9 @@ class CircuitOptimizationDemo:
             p1 = (p0[0] + disp_w, p0[1] + disp_h)
 
             # Background
-            dl.add_rect_filled(p0, p1, 0xFF333333, 4.0)
+            # Original: 0xFF333333 (dark gray)
+            # Test: 0xFFEBEBEB (very light gray)
+            dl.add_rect_filled(p0, p1, 0xFFFFFFFF, 4.0)
 
             if self.use_simple_viz:
                 # Simple line visualization
@@ -1791,6 +1793,12 @@ class CircuitOptimizationDemo:
 
             # Main content area
             imgui.begin_child("main", (-300, 0))
+            # Manually draw background for child window
+            # Original would be ImGui default background
+            dl = imgui.get_window_draw_list()
+            p_min = imgui.get_window_pos()
+            p_max = (p_min[0] + imgui.get_window_width(), p_min[1] + imgui.get_window_height())
+            dl.add_rect_filled(p_min, p_max, 0xFFFFFFFF, 0.0)  # White background
 
             # Optimization progress plot
             plot_type = self.plot_types[self.plot_type_idx]
@@ -1870,25 +1878,39 @@ class CircuitOptimizationDemo:
                 implot.end_plot()
 
             # Input visualization
+            # Set separator text color to dark gray
+            imgui.push_style_color(int(imgui.Col_.text), imgui.ImVec4(0.3, 0.3, 0.3, 1.0))  # Dark gray
             imgui.separator_text("Inputs")
+            imgui.pop_style_color()
             self.draw_lut("inputs", self.inputs_img, self.input_texture)
 
             # Circuit visualization
+            imgui.push_style_color(int(imgui.Col_.text), imgui.ImVec4(0.3, 0.3, 0.3, 1.0))  # Dark gray
             imgui.separator_text("Circuit")
+            imgui.pop_style_color()
             H = imgui.get_content_region_avail().y - 400  # Leave room for outputs below
             self.draw_circuit(H=max(H, 300))  # Minimum height of 300
 
             # Output vs Ground Truth
+            imgui.push_style_color(int(imgui.Col_.text), imgui.ImVec4(0.3, 0.3, 0.3, 1.0))  # Dark gray
             imgui.separator_text("Current Output")
+            imgui.pop_style_color()
             self.draw_lut("outputs", self.outputs_img, self.output_texture)
 
+            imgui.push_style_color(int(imgui.Col_.text), imgui.ImVec4(0.3, 0.3, 0.3, 1.0))  # Dark gray
             imgui.separator_text("Expected Output")
+            imgui.pop_style_color()
             self.draw_lut("ground_truth", self.ground_truth_img, self.ground_truth_texture)
             imgui.end_child()
             imgui.same_line()
 
             # Control panel
             imgui.begin_child("controls")
+            # Manually draw background for child window
+            dl = imgui.get_window_draw_list()
+            p_min = imgui.get_window_pos()
+            p_max = (p_min[0] + imgui.get_window_width(), p_min[1] + imgui.get_window_height())
+            dl.add_rect_filled(p_min, p_max, 0xFFFFFFFF, 0.0)  # White background
 
             if imgui.button("Python REPL"):
                 IPython.embed()
