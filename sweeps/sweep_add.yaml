@@ -4,8 +4,8 @@ defaults:
 
 sweep:
   grid:  # parameters to combine in all possible ways
-    training.meta_batch_size: [64, 128, 256, 512]
-    training.learning_rate: [1e-3, 5e-4, 1e-4]
+    training.meta_batch_size: [196, 392, 784]
+    training.learning_rate: [5e-4, 1e-4, 1e-3]
 
     # Constant parameters (for reference)
-    training.batch_chunk_size: [64]
+    training.batch_chunk_size: [196]

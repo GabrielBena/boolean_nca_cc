@@ -1,0 +1,4 @@
+defaults:
+  - _large
+
+task: "binary_multiply"

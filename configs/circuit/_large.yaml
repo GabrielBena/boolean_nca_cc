@@ -2,10 +2,10 @@ defaults:
   - _self_
 
 
-input_bits: 10
-output_bits: 10
+input_bits: 14
+output_bits: 14
 arity: 4
-num_layers: 3
+num_layers: 4
 width_factor: 2
 layer_sizes: null  # Auto-generate if null 
 circuit_hidden_dim: 32
