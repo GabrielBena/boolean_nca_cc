@@ -6,6 +6,6 @@ sweep:
   grid:  # parameters to combine in all possible ways
     model.type: [gnn, self_attention]
     training.loss_type: [bce]
-    training.learning_rate: [1e-4, 3e-4]
+    training.learning_rate: [3e-4, 1e-4]
     training.n_message_steps: [50]
     circuit: [add, binary_multiply, text]
