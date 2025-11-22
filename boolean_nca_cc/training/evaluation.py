@@ -42,7 +42,13 @@ class StepResult(NamedTuple):
 
 
 # Function to run a circuit and calculate loss
-def get_loss_from_wires_logits(logits, wires, x, y_target, loss_type: str):
+def get_loss_from_wires_logits(
+    logits,
+    wires,
+    x,
+    y_target,
+    loss_type: str,
+):
     # Run circuit and calculate loss
     acts = run_circuit(logits, wires, x)
     pred = acts[-1]
@@ -114,7 +120,13 @@ def get_loss_and_update_graph(
     current_logits = extract_logits_from_graph(graph, logits_original_shapes)
 
     # Compute loss and auxiliary data
-    loss, aux = get_loss_from_wires_logits(current_logits, wires, x_data, y_data, loss_type)
+    loss, aux = get_loss_from_wires_logits(
+        logits=current_logits,
+        wires=wires,
+        x=x_data,
+        y_target=y_data,
+        loss_type=loss_type,
+    )
 
     # Extract residuals from aux for updating loss feature
     *_, res, _ = aux

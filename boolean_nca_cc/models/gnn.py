@@ -56,12 +56,12 @@ class CircuitGNN(nnx.Module):
         self.arity = arity
         self.message_passing = message_passing
         self.circuit_hidden_dim = circuit_hidden_dim
-        self.mlp_dim = mlp_dim
+        self.mlp_dim = mlp_dim if mlp_dim is not None else circuit_hidden_dim * 2
         self.mlp_n_layers = mlp_n_layers
 
         # Create the node and edge update modules
         self.node_update = NodeUpdateModule(
-            node_mlp_features=[mlp_dim] * mlp_n_layers,
+            node_mlp_features=[self.mlp_dim] * mlp_n_layers,
             circuit_hidden_dim=circuit_hidden_dim,
             arity=arity,
             message_passing=message_passing,
@@ -71,7 +71,7 @@ class CircuitGNN(nnx.Module):
         )
 
         self.edge_update = EdgeUpdateModule(
-            edge_mlp_features=[mlp_dim] * mlp_n_layers,
+            edge_mlp_features=[self.mlp_dim] * mlp_n_layers,
             circuit_hidden_dim=circuit_hidden_dim,
             arity=arity,
             rngs=rngs,
@@ -172,7 +172,9 @@ def run_gnn_scan_with_loss(
     x_data: jp.ndarray,
     y_data: jp.ndarray,
     loss_type: str,
-    layer_sizes: tuple[tuple[int, int]],
+    layer_sizes: tuple[tuple[int, int], ...],
+    data_fraction: float = 1.0,
+    scan_key: jax.random.PRNGKey = None,
 ) -> tuple[jraph.GraphsTuple, list[jraph.GraphsTuple], jp.ndarray, list]:
     """
     Run the GNN for multiple steps with loss computation and graph updating at each step.
@@ -181,7 +183,7 @@ def run_gnn_scan_with_loss(
     allowing for efficient computation of all steps and later indexing of a random step.
 
     Args:
-        gnn: The CircuitGNN model to apply
+        model: The CircuitGNN model to apply
         graph: Initial graph state
         num_steps: Number of steps to run
         logits_original_shapes: Original shapes of logits for reconstruction
@@ -190,6 +192,8 @@ def run_gnn_scan_with_loss(
         y_data: Target output data
         loss_type: Type of loss function to use
         layer_sizes: List of (nodes, group_size) tuples for each layer
+        data_fraction: Fraction of data to use for loss computation (default: 1.0)
+        scan_key: Random key for data sampling (required if data_fraction < 1.0)
 
     Returns:
         final_graph: The graph after all steps
@@ -198,6 +202,20 @@ def run_gnn_scan_with_loss(
         all_aux: List of auxiliary data from each step
     """
     from boolean_nca_cc.training.evaluation import get_loss_and_update_graph
+
+    # Select a random fraction of the data
+    if data_fraction < 1.0:
+        random_indices = jax.random.randint(
+            key=scan_key,
+            shape=(int(x_data.shape[0] * data_fraction),),
+            minval=0,
+            maxval=x_data.shape[0],
+        )
+        x_batch = x_data[random_indices]
+        y_batch = y_data[random_indices]
+    else:
+        x_batch = x_data
+        y_batch = y_data
 
     def gnn_step_with_loss(carry, _):
         current_graph = carry
@@ -210,8 +228,8 @@ def run_gnn_scan_with_loss(
             model_updated_graph,
             logits_original_shapes,
             wires,
-            x_data,
-            y_data,
+            x_batch,
+            y_batch,
             loss_type,
             layer_sizes,
         )
