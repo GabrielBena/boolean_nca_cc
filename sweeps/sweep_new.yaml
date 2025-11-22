@@ -4,7 +4,7 @@ defaults:
 
 sweep:
   grid:  # parameters to combine in all possible ways
-    model.type: [gnn, self_attention]
+    model: [gnn, self_attention]
     training.loss_type: [bce]
     training.learning_rate: [3e-4, 1e-4]
     training.n_message_steps: [50]
