@@ -13,6 +13,7 @@ This is a minimal skeleton - no visualizations or advanced analysis yet.
 import argparse
 import hashlib
 import logging
+import random
 from pathlib import Path
 from typing import List, Tuple, Dict, Set, Optional
 import numpy as np
@@ -480,6 +481,346 @@ def _perturb_and_recover_single(
         return None
 
 
+def parse_phase_specification(phase_str: str) -> List[Tuple[str, int, int, str, Optional[int]]]:
+    """
+    Parse phase specification string into list of phase tuples.
+    
+    Format: "type:depth:perturbations:start_from[:max_nodes],..."
+    - type: "bfs" or "dfs"
+    - depth: maximum depth for this phase
+    - perturbations: number of perturbations per node
+    - start_from: "root", "frontier", "all", or "frontier:N" (N = max nodes to sample)
+    - max_nodes: Optional, only used when start_from="frontier:N"
+    
+    Examples:
+        "bfs:2:100:root,dfs:5:1:frontier"  # e1: BFS then DFS from all frontier nodes
+        "dfs:50:1:root,bfs:2:100:frontier:1"  # e2: DFS then BFS from 1 random frontier node
+        "bfs:2:100:root,dfs:50:1:frontier,bfs:2:100:frontier,dfs:50:1:frontier:1"  # e3: complex pattern
+    
+    Args:
+        phase_str: Phase specification string
+        
+    Returns:
+        List of (phase_type, depth_limit, perturbations_per_node, start_from, max_frontier_nodes) tuples
+        max_frontier_nodes is None if not specified or if start_from != "frontier"
+    """
+    phases = []
+    for phase_part in phase_str.split(','):
+        parts = phase_part.strip().split(':')
+        if len(parts) < 4 or len(parts) > 5:
+            raise ValueError(
+                f"Invalid phase format: {phase_part}. "
+                f"Expected 'type:depth:perturbations:start_from[:max_nodes]'"
+            )
+        
+        phase_type, depth_str, perturbations_str, start_from = parts[:4]
+        max_frontier_nodes = None
+        
+        # Parse frontier:N format
+        # Handle two formats:
+        # 1. "bfs:2:100:frontier:1" (5 parts, parts[3]="frontier", parts[4]="1")
+        # 2. "bfs:2:100:frontier:1" where start_from could be "frontier:1" if there are only 4 parts
+        if start_from.startswith("frontier"):
+            if len(parts) == 5 and parts[3] == "frontier":
+                # Format 1: Separate field "frontier:1" -> parts[3]="frontier", parts[4]="1"
+                try:
+                    max_frontier_nodes = int(parts[4])
+                except ValueError:
+                    raise ValueError(f"Invalid frontier max_nodes: {parts[4]}. Must be an integer")
+            elif ":" in start_from:
+                # Format 2: Combined "frontier:1" in start_from field
+                frontier_match = start_from.split(":", 1)
+                if len(frontier_match) == 2 and frontier_match[0] == "frontier":
+                    start_from = "frontier"
+                    try:
+                        max_frontier_nodes = int(frontier_match[1])
+                    except ValueError:
+                        raise ValueError(f"Invalid frontier max_nodes: {frontier_match[1]}. Must be an integer")
+                else:
+                    raise ValueError(f"Invalid frontier format: {start_from}")
+            # else: start_from is just "frontier", max_frontier_nodes stays None
+        
+        if phase_type not in ["bfs", "dfs"]:
+            raise ValueError(f"Invalid phase type: {phase_type}. Must be 'bfs' or 'dfs'")
+        if start_from not in ["root", "frontier", "all"]:
+            raise ValueError(
+                f"Invalid start_from: {start_from}. Must be 'root', 'frontier', or 'all'"
+            )
+        
+        phases.append((phase_type, int(depth_str), int(perturbations_str), start_from, max_frontier_nodes))
+    return phases
+
+
+def _execute_bfs_phase(
+    start_nodes: List[Tuple[str, List[jp.ndarray]]],
+    depth_limit: int,
+    perturbations_per_node: int,
+    base_depth: int,
+    circuit_depths: Dict[str, int],
+    unique_solutions: Dict[str, List[jp.ndarray]],
+    discovered_circuits: List[Tuple[str, List[jp.ndarray]]],
+    exploration_graph: Dict[str, List[Tuple[str, int, Dict]]],
+    edges: List[Tuple[str, str, int, Dict]],
+    exploration_results: List[Dict],
+    knockout_vocabulary: List[jp.ndarray],
+    opt: optax.GradientTransformation,
+    wires: List[jp.ndarray],
+    x_data: jp.ndarray,
+    y_data: jp.ndarray,
+    layer_sizes: List[Tuple[int, int]],
+    epochs: int,
+    loss_type: str,
+    reversible_bias: float,
+    functional_threshold: float,
+    phase_name: str,
+) -> Tuple[int, int]:
+    """
+    Execute a BFS phase starting from given nodes.
+    
+    Returns:
+        Tuple of (total_perturbations, functional_recoveries)
+    """
+    total_perturbations = 0
+    functional_recoveries = 0
+    
+    # BFS queue: (circuit_hash, circuit_logits, depth)
+    queue = deque([(hash_val, logits, base_depth) for hash_val, logits in start_nodes])
+    visited_at_depth: Dict[int, Set[str]] = {}
+    
+    while queue:
+        circuit_hash, circuit_logits, depth = queue.popleft()
+        
+        if depth >= base_depth + depth_limit:
+            continue
+        
+        # Track visited circuits at this depth
+        if depth not in visited_at_depth:
+            visited_at_depth[depth] = set()
+        if circuit_hash in visited_at_depth[depth]:
+            continue
+        visited_at_depth[depth].add(circuit_hash)
+        
+        log.info(
+            f"\n{phase_name} Depth {depth}: Exploring from circuit {circuit_hash[:16]}... "
+            f"(Discovered: {len(unique_solutions)})"
+        )
+        
+        # Sample perturbations for this node
+        level_rng = jax.random.PRNGKey(42 + depth)
+        num_patterns = min(perturbations_per_node, len(knockout_vocabulary))
+        pattern_indices = jax.random.choice(
+            level_rng, len(knockout_vocabulary), shape=(num_patterns,), replace=False
+        )
+        
+        for pattern_idx in pattern_indices:
+            knockout_pattern = knockout_vocabulary[pattern_idx]
+            total_perturbations += 1
+            
+            result = _perturb_and_recover_single(
+                initial_logits=circuit_logits,
+                knockout_pattern=knockout_pattern,
+                opt=opt,
+                wires=wires,
+                x_data=x_data,
+                y_data=y_data,
+                layer_sizes=layer_sizes,
+                epochs=epochs,
+                loss_type=loss_type,
+                reversible_bias=reversible_bias,
+            )
+            
+            if result is None:
+                continue
+            
+            recovered_logits = result["params"]
+            final_accuracy = float(result["final_hard_accuracy"])
+            
+            # Check if functional
+            is_func = is_functional(
+                recovered_logits, wires, x_data, y_data, functional_threshold
+            )
+            
+            # Check uniqueness
+            recovered_hash = hash_circuit_logits(recovered_logits)
+            is_unique = recovered_hash not in unique_solutions
+            
+            # Track edge in exploration graph
+            edge_metadata = {
+                "depth": depth,
+                "phase": phase_name,
+                "is_cycle": (recovered_hash == circuit_hash),
+                "is_revisit": (recovered_hash in unique_solutions),
+                "final_accuracy": final_accuracy,
+                "is_functional": is_func,
+            }
+            edges.append((circuit_hash, recovered_hash, int(pattern_idx), edge_metadata))
+            
+            if circuit_hash not in exploration_graph:
+                exploration_graph[circuit_hash] = []
+            exploration_graph[circuit_hash].append((recovered_hash, int(pattern_idx), edge_metadata))
+            
+            if is_func:
+                functional_recoveries += 1
+                
+                # Add to unique solutions
+                if is_unique:
+                    unique_solutions[recovered_hash] = recovered_logits
+                    discovered_circuits.append((recovered_hash, recovered_logits))
+                    circuit_depths[recovered_hash] = depth + 1
+                
+                # Add to queue for next depth
+                if depth + 1 < base_depth + depth_limit:
+                    next_depth_visited = visited_at_depth.get(depth + 1, set())
+                    if recovered_hash not in next_depth_visited:
+                        queue.append((recovered_hash, recovered_logits, depth + 1))
+            
+            exploration_results.append({
+                "pattern_idx": int(pattern_idx),
+                "source_hash": circuit_hash,
+                "recovered_hash": recovered_hash,
+                "final_accuracy": final_accuracy,
+                "is_functional": is_func,
+                "is_unique": is_func and is_unique,
+                "depth": depth,
+                "phase": phase_name,
+            })
+    
+    return total_perturbations, functional_recoveries
+
+
+def _execute_dfs_phase(
+    start_nodes: List[Tuple[str, List[jp.ndarray]]],
+    depth_limit: int,
+    perturbations_per_node: int,
+    base_depth: int,
+    circuit_depths: Dict[str, int],
+    unique_solutions: Dict[str, List[jp.ndarray]],
+    discovered_circuits: List[Tuple[str, List[jp.ndarray]]],
+    exploration_graph: Dict[str, List[Tuple[str, int, Dict]]],
+    edges: List[Tuple[str, str, int, Dict]],
+    exploration_results: List[Dict],
+    knockout_vocabulary: List[jp.ndarray],
+    opt: optax.GradientTransformation,
+    wires: List[jp.ndarray],
+    x_data: jp.ndarray,
+    y_data: jp.ndarray,
+    layer_sizes: List[Tuple[int, int]],
+    epochs: int,
+    loss_type: str,
+    reversible_bias: float,
+    functional_threshold: float,
+    phase_name: str,
+) -> Tuple[int, int]:
+    """
+    Execute a DFS phase starting from given nodes.
+    
+    Returns:
+        Tuple of (total_perturbations, functional_recoveries)
+    """
+    total_perturbations = 0
+    functional_recoveries = 0
+    
+    # DFS stack: (circuit_hash, circuit_logits, depth)
+    stack = [(hash_val, logits, base_depth) for hash_val, logits in start_nodes]
+    visited_dfs: Set[str] = set()
+    
+    while stack:
+        circuit_hash, circuit_logits, depth = stack.pop()
+        
+        if depth >= base_depth + depth_limit:
+            continue
+        if circuit_hash in visited_dfs:
+            continue
+        visited_dfs.add(circuit_hash)
+        
+        log.info(
+            f"\n{phase_name} Depth {depth}: Exploring from circuit {circuit_hash[:16]}... "
+            f"(Discovered: {len(unique_solutions)})"
+        )
+        
+        # Sample perturbations for this node
+        level_rng = jax.random.PRNGKey(42 + depth)
+        num_patterns = min(perturbations_per_node, len(knockout_vocabulary))
+        pattern_indices = jax.random.choice(
+            level_rng, len(knockout_vocabulary), shape=(num_patterns,), replace=False
+        )
+        
+        # Process perturbations in reverse order so we explore first one first (LIFO)
+        for pattern_idx in reversed(pattern_indices):
+            knockout_pattern = knockout_vocabulary[pattern_idx]
+            total_perturbations += 1
+            
+            result = _perturb_and_recover_single(
+                initial_logits=circuit_logits,
+                knockout_pattern=knockout_pattern,
+                opt=opt,
+                wires=wires,
+                x_data=x_data,
+                y_data=y_data,
+                layer_sizes=layer_sizes,
+                epochs=epochs,
+                loss_type=loss_type,
+                reversible_bias=reversible_bias,
+            )
+            
+            if result is None:
+                continue
+            
+            recovered_logits = result["params"]
+            final_accuracy = float(result["final_hard_accuracy"])
+            
+            # Check if functional
+            is_func = is_functional(
+                recovered_logits, wires, x_data, y_data, functional_threshold
+            )
+            
+            # Check uniqueness
+            recovered_hash = hash_circuit_logits(recovered_logits)
+            is_unique = recovered_hash not in unique_solutions
+            
+            # Track edge in exploration graph
+            edge_metadata = {
+                "depth": depth,
+                "phase": phase_name,
+                "is_cycle": (recovered_hash == circuit_hash),
+                "is_revisit": (recovered_hash in unique_solutions),
+                "final_accuracy": final_accuracy,
+                "is_functional": is_func,
+            }
+            edges.append((circuit_hash, recovered_hash, int(pattern_idx), edge_metadata))
+            
+            if circuit_hash not in exploration_graph:
+                exploration_graph[circuit_hash] = []
+            exploration_graph[circuit_hash].append((recovered_hash, int(pattern_idx), edge_metadata))
+            
+            if is_func:
+                functional_recoveries += 1
+                
+                # Add to unique solutions
+                if is_unique:
+                    unique_solutions[recovered_hash] = recovered_logits
+                    discovered_circuits.append((recovered_hash, recovered_logits))
+                    circuit_depths[recovered_hash] = depth + 1
+                
+                # Add to stack for next depth (DFS: push to continue exploring)
+                if depth + 1 < base_depth + depth_limit:
+                    if recovered_hash not in visited_dfs:
+                        stack.append((recovered_hash, recovered_logits, depth + 1))
+            
+            exploration_results.append({
+                "pattern_idx": int(pattern_idx),
+                "source_hash": circuit_hash,
+                "recovered_hash": recovered_hash,
+                "final_accuracy": final_accuracy,
+                "is_functional": is_func,
+                "is_unique": is_func and is_unique,
+                "depth": depth,
+                "phase": phase_name,
+            })
+    
+    return total_perturbations, functional_recoveries
+
+
 def explore_degenerate_solutions(
     root_wires: List[jp.ndarray],
     root_logits: List[jp.ndarray],
@@ -503,11 +844,22 @@ def explore_degenerate_solutions(
     bfs_perturbations_per_level: int = 100,
     random_walk_iterations: int = 500,
     random_walk_seed: int = 12345,
+    phases: Optional[List[Tuple[str, int, int, str, Optional[int]]]] = None,
 ) -> Dict:
     """
-    Explore degenerate solutions using hybrid BFS + Random Walk strategy.
+    Explore degenerate solutions using flexible phase-based or legacy strategies.
     
     Strategy options:
+    - "phases": Phase-based exploration (most flexible)
+        - Use `phases` parameter to specify exploration pattern
+        - Format: List of (phase_type, depth_limit, perturbations_per_node, start_from, max_frontier_nodes)
+        - phase_type: "bfs" or "dfs"
+        - start_from: "root", "frontier", or "all"
+        - max_frontier_nodes: Optional int, limits random sampling when start_from="frontier"
+        - Examples:
+          * e1 (BFS→DFS): [("bfs", 2, 100, "root", None), ("dfs", 5, 1, "frontier", None)]
+          * e2 (DFS→BFS→DFS): [("dfs", 50, 1, "root", None), ("bfs", 2, 100, "frontier", None), ("dfs", 50, 1, "frontier", 1)]
+          * e3 (alternating): [("dfs", K1, 1, "root", None), ("bfs", D1, N1, "frontier", None), ...]
     - "hybrid": BFS phase (depth 1-2) followed by Random Walk (recommended for UMAP)
     - "bfs": Breadth-first search only
     - "random_walk": Random walk only
@@ -588,7 +940,14 @@ def explore_degenerate_solutions(
     
     # Generate large vocabulary for random sampling
     vocab_rng = jax.random.PRNGKey(42)
+    # Calculate vocabulary size needed
     vocab_size = max(num_perturbations, bfs_perturbations_per_level * bfs_depth, random_walk_iterations)
+    # For phase-based exploration, estimate vocabulary size from phases
+    if exploration_strategy == "phases" and phases is not None:
+        max_perturbations = max(
+            perturbations_per_node for _, _, perturbations_per_node, _, _ in phases
+        )
+        vocab_size = max(vocab_size, max_perturbations * 2)  # Add some buffer
     knockout_vocabulary = create_knockout_vocabulary(
         rng=vocab_rng,
         vocabulary_size=vocab_size,
@@ -602,10 +961,156 @@ def explore_degenerate_solutions(
     # Track discovered circuits for random walk (list of (hash, logits) tuples)
     discovered_circuits: List[Tuple[str, List[jp.ndarray]]] = [(root_hash, root_logits)]
     
+    # Track circuit depths for phase-based exploration
+    circuit_depths: Dict[str, int] = {root_hash: 0}
+    
+    # ============================================================================
+    # Phase-Based Exploration (if strategy is "phases")
+    # ============================================================================
+    if exploration_strategy == "phases":
+        if phases is None:
+            raise ValueError("phases parameter required when exploration_strategy='phases'")
+        
+        log.info("\n" + "=" * 80)
+        log.info("Phase-Based Exploration")
+        log.info("=" * 80)
+        log.info(f"Number of phases: {len(phases)}")
+        for phase_idx, phase_tuple in enumerate(phases):
+            phase_type, depth_limit, perturbations_per_node, start_from, max_frontier_nodes = phase_tuple
+            frontier_info = f", max_frontier_nodes={max_frontier_nodes}" if max_frontier_nodes is not None else ""
+            log.info(
+                f"  Phase {phase_idx + 1}: {phase_type.upper()} "
+                f"(depth={depth_limit}, perturbations={perturbations_per_node}, start_from={start_from}{frontier_info})"
+            )
+        
+        current_max_depth = 0
+        
+        for phase_idx, phase_tuple in enumerate(phases):
+            phase_type, depth_limit, perturbations_per_node, start_from, max_frontier_nodes = phase_tuple
+            phase_name = f"Phase{phase_idx + 1}_{phase_type.upper()}"
+            
+            log.info("\n" + "=" * 80)
+            log.info(f"{phase_name}: {phase_type.upper()} (depth_limit={depth_limit}, "
+                    f"perturbations_per_node={perturbations_per_node}, start_from={start_from})")
+            log.info("=" * 80)
+            
+            # Determine starting nodes
+            if start_from == "root":
+                start_nodes = [(root_hash, root_logits)]
+                base_depth = 0
+            elif start_from == "frontier":
+                if phase_idx == 0:
+                    # First phase: start from root
+                    start_nodes = [(root_hash, root_logits)]
+                    base_depth = 0
+                else:
+                    # Find nodes at maximum depth from previous phases
+                    max_depth = max(circuit_depths.values())
+                    frontier_nodes = [
+                        (h, logits) for h, logits in discovered_circuits
+                        if circuit_depths.get(h, 0) == max_depth
+                    ]
+                    
+                    # Sample if max_frontier_nodes is specified
+                    if max_frontier_nodes is not None and max_frontier_nodes < len(frontier_nodes):
+                        # Randomly sample frontier nodes (using phase_idx for reproducibility)
+                        random.seed(42 + phase_idx)  # Reproducible sampling per phase
+                        start_nodes = random.sample(
+                            frontier_nodes, 
+                            min(max_frontier_nodes, len(frontier_nodes))
+                        )
+                        log.info(
+                            f"  Randomly sampled {len(start_nodes)} from {len(frontier_nodes)} "
+                            f"frontier nodes at depth {max_depth}"
+                        )
+                    else:
+                        start_nodes = frontier_nodes
+                        log.info(f"  Starting from {len(start_nodes)} frontier nodes at depth {max_depth}")
+                    
+                    base_depth = max_depth
+            elif start_from == "all":
+                start_nodes = discovered_circuits
+                base_depth = min(circuit_depths.values()) if circuit_depths else 0
+                log.info(f"  Starting from {len(start_nodes)} discovered circuits")
+            else:
+                raise ValueError(f"Invalid start_from: {start_from}")
+            
+            if not start_nodes:
+                log.warning(f"  No starting nodes for {phase_name}, skipping")
+                continue
+            
+            # Execute phase
+            if phase_type == "bfs":
+                phase_perturbations, phase_functional = _execute_bfs_phase(
+                    start_nodes=start_nodes,
+                    depth_limit=depth_limit,
+                    perturbations_per_node=perturbations_per_node,
+                    base_depth=base_depth,
+                    circuit_depths=circuit_depths,
+                    unique_solutions=unique_solutions,
+                    discovered_circuits=discovered_circuits,
+                    exploration_graph=exploration_graph,
+                    edges=edges,
+                    exploration_results=exploration_results,
+                    knockout_vocabulary=knockout_vocabulary,
+                    opt=opt,
+                    wires=root_wires,
+                    x_data=x_data,
+                    y_data=y_data,
+                    layer_sizes=layer_sizes,
+                    epochs=epochs,
+                    loss_type=loss_type,
+                    reversible_bias=reversible_bias,
+                    functional_threshold=functional_threshold,
+                    phase_name=phase_name,
+                )
+            elif phase_type == "dfs":
+                phase_perturbations, phase_functional = _execute_dfs_phase(
+                    start_nodes=start_nodes,
+                    depth_limit=depth_limit,
+                    perturbations_per_node=perturbations_per_node,
+                    base_depth=base_depth,
+                    circuit_depths=circuit_depths,
+                    unique_solutions=unique_solutions,
+                    discovered_circuits=discovered_circuits,
+                    exploration_graph=exploration_graph,
+                    edges=edges,
+                    exploration_results=exploration_results,
+                    knockout_vocabulary=knockout_vocabulary,
+                    opt=opt,
+                    wires=root_wires,
+                    x_data=x_data,
+                    y_data=y_data,
+                    layer_sizes=layer_sizes,
+                    epochs=epochs,
+                    loss_type=loss_type,
+                    reversible_bias=reversible_bias,
+                    functional_threshold=functional_threshold,
+                    phase_name=phase_name,
+                )
+            else:
+                raise ValueError(f"Invalid phase_type: {phase_type}")
+            
+            total_perturbations += phase_perturbations
+            functional_recoveries += phase_functional
+            successful_recoveries += phase_perturbations  # Approximate (some may fail)
+            
+            current_max_depth = max(circuit_depths.values())
+            
+            log.info(f"\n{phase_name} Complete:")
+            log.info(f"  Perturbations: {phase_perturbations}")
+            log.info(f"  Functional recoveries: {phase_functional}")
+            log.info(f"  Unique solutions: {len(unique_solutions)}")
+            log.info(f"  Max depth reached: {current_max_depth}")
+        
+        log.info("\n" + "=" * 80)
+        log.info("Phase-Based Exploration Complete")
+        log.info("=" * 80)
+    
     # ============================================================================
     # PHASE 1: BFS Exploration (if strategy is "hybrid" or "bfs")
     # ============================================================================
-    if exploration_strategy in ["hybrid", "bfs"]:
+    elif exploration_strategy in ["hybrid", "bfs"]:
         log.info("\n" + "=" * 80)
         log.info("PHASE 1: Breadth-First Search")
         log.info("=" * 80)
@@ -1054,10 +1559,22 @@ def main():
         "--exploration-strategy",
         type=str,
         default="hybrid",
-        choices=["hybrid", "bfs", "random_walk", "single_root"],
+        choices=["hybrid", "bfs", "random_walk", "single_root", "phases"],
         help="Exploration strategy: 'hybrid' (BFS + Random Walk, recommended for UMAP), "
              "'bfs' (breadth-first only), 'random_walk' (random walk only), "
-             "or 'single_root' (legacy: all perturbations from root) (default: hybrid)",
+             "'single_root' (legacy: all perturbations from root), "
+             "or 'phases' (flexible phase-based exploration, requires --phases) (default: hybrid)",
+    )
+    parser.add_argument(
+        "--phases",
+        type=str,
+        default=None,
+        help="Phase specification for phase-based exploration. "
+             "Format: 'type:depth:perturbations:start_from[:max_nodes],...' "
+             "Example: 'bfs:2:100:root,dfs:5:1:frontier' "
+             "(BFS depth 2 with 100 perturbations from root, then DFS depth 5 with 1 perturbation from all frontier nodes). "
+             "Use 'frontier:N' to randomly sample N frontier nodes: 'dfs:50:1:frontier:1' "
+             "(DFS depth 50 from 1 randomly selected frontier node)",
     )
     parser.add_argument(
         "--bfs-depth",
@@ -1151,6 +1668,14 @@ def main():
             f"({args.functional_threshold})"
         )
     
+    # Parse phases if provided
+    phases = None
+    if args.exploration_strategy == "phases":
+        if args.phases is None:
+            raise ValueError("--phases required when --exploration-strategy=phases")
+        phases = parse_phase_specification(args.phases)
+        log.info(f"Parsed {len(phases)} phases from specification")
+    
     # Run exploration
     results = explore_degenerate_solutions(
         root_wires=wires,
@@ -1172,6 +1697,7 @@ def main():
         bfs_perturbations_per_level=args.bfs_perturbations_per_level,
         random_walk_iterations=args.random_walk_iterations,
         random_walk_seed=args.random_walk_seed,
+        phases=phases,
     )
     
     # Save results by default (unless --no-save-results is specified)
@@ -1200,6 +1726,18 @@ def main():
             "input_bits": args.input_bits,
             "output_bits": args.output_bits,
         }
+        if args.exploration_strategy == "phases" and phases is not None:
+            exploration_config["phases"] = [
+                {
+                    "phase_type": phase_type,
+                    "depth_limit": depth_limit,
+                    "perturbations_per_node": perturbations_per_node,
+                    "start_from": start_from,
+                    "max_frontier_nodes": max_frontier_nodes,
+                }
+                for phase_type, depth_limit, perturbations_per_node, start_from, max_frontier_nodes in phases
+            ]
+            exploration_config["phases_string"] = args.phases
         
         save_exploration_results(
             results=results,
