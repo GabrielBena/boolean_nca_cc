@@ -976,7 +976,22 @@ def get_metric_value(
             "accuracy": "eval_ko_in/final_accuracy",
             "hard_accuracy": "eval_ko_in/final_hard_accuracy",
         }
-        return eval_metrics[eval_key_map[metric_name]]
+        # Fallback to no-damage metrics if knockout metrics don't exist (e.g., when knockout_eval.enabled=false)
+        eval_no_damage_key_map = {
+            "loss": "eval_no_damage/final_loss",
+            "hard_loss": "eval_no_damage/final_hard_loss",
+            "accuracy": "eval_no_damage/final_accuracy",
+            "hard_accuracy": "eval_no_damage/final_hard_accuracy",
+        }
+        primary_key = eval_key_map[metric_name]
+        fallback_key = eval_no_damage_key_map[metric_name]
+        
+        if primary_key in eval_metrics:
+            return eval_metrics[primary_key]
+        elif fallback_key in eval_metrics:
+            return eval_metrics[fallback_key]
+        else:
+            raise KeyError(f"Neither {primary_key} nor {fallback_key} found in evaluation metrics")
     elif metric_source == "eval_no_damage":
         if eval_metrics is None:
             raise ValueError("No-damage evaluation metrics not available for eval_no_damage source")

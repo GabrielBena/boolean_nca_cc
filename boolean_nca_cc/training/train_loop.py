@@ -94,7 +94,8 @@ def _init_wandb(wandb_logging: bool, wandb_run_config: dict | None = None) -> An
             wandb.define_metric("eval_ko_in/*", step_metric="eval_ko_in/epoch")
             wandb.define_metric("eval_ko_out/*", step_metric="eval_ko_out/epoch")
             wandb.define_metric("eval_no_damage/*", step_metric="eval_no_damage/epoch")
-            wandb.define_metric("eval_no_damage_steps/*", step_metric="eval_no_damage_steps/epoch")
+            # eval_no_damage_steps/* intentionally has no metric definition (like eval_ko_in_steps/*)
+            # This ensures WandB uses its default step counter, giving each log call its own x-axis position
             wandb.define_metric("model/*", step_metric="training/epoch")
             wandb.define_metric("scheduler/*", step_metric="training/epoch")
 

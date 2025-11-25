@@ -36,7 +36,7 @@ circuit:
 # Training parameters
 training:
   # TRAINING MODE
-  training_mode: "repair"  # Options: "growth" (nops -> configured) or "repair" (configured -> damaged -> recovery)
+  training_mode: "growth"  # Options: "growth" (nops -> configured) or "repair" (configured -> damaged -> recovery)
   # INNER LOOP
   n_message_steps: 5  # Number of message passing steps per training iteration
   # MESSAGE PASSING GRAPH AUGMENTATION
@@ -68,16 +68,16 @@ pool:
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
 
   # Sample-based damage (applied post-step, independent of resets)
-  damage_pool_enabled: true  # Enabled to test uniform damage strategy
+  damage_pool_enabled: false  # Enabled to test uniform damage strategy
   damage_pool_interval: 128
   damage_pool_fraction: 0.15
   damage_strategy: "loss_biased"  # Changed from "loss_biased" to test if uniform damage prevents drift
   damage_combined_weights: [0.5, 0.5]
   damage_mode: "greedy_vocabulary"  # Options: "shotgun" (random), "strip" (localized), "greedy" (rolling window), or "greedy_vocabulary" (vocabulary sampling)
   # Number of gates to knock out when generating fresh patterns (ignored if vocabulary is used)
-  damage_prob: 20
+  damage_prob: 5
   # Damage-specific vocabulary size (decoupled from legacy persistent_knockout)
-  damage_knockout_diversity: 64
+  damage_knockout_diversity: 256
   
   # Unified damage control system
   damage_injection_mode: "multi"  # "single" (static) or "multi" (periodic)
@@ -102,7 +102,7 @@ eval:
   
   # Knockout evaluation
   knockout_eval:
-    enabled: true  # Disabled for zero-damage training - will use no-damage evaluation instead
+    enabled: ${pool.damage_pool_enabled}  # Disabled for zero-damage training - will use no-damage evaluation instead
     damage_prob: ${pool.damage_prob}
     # Unified damage control system
     damage_mode: ${pool.damage_mode}      # Pattern type: "greedy", "greedy_vocabulary", "shotgun", "strip"

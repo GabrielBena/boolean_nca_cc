@@ -35,6 +35,8 @@ from boolean_nca_cc.training.pool.structural_perturbation import (
     DEFAULT_GREEDY_ORDERED_INDICES,
 )
 from boolean_nca_cc.training.backprop import _train_single_knockout_pattern
+from boolean_nca_cc.training.evaluation import evaluate_model_stepwise_generator
+from boolean_nca_cc.models.self_attention import CircuitSelfAttention
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -65,7 +67,7 @@ def is_functional(
     wires: List[jp.ndarray],
     x_data: jp.ndarray,
     y_data: jp.ndarray,
-    threshold: float = 1,
+    threshold: float = 0.999,
 ) -> bool:
     """
     Check if circuit implements target function with sufficient accuracy.
@@ -446,36 +448,145 @@ def load_preconfigured_circuit(
 def _perturb_and_recover_single(
     initial_logits: List[jp.ndarray],
     knockout_pattern: jp.ndarray,
-    opt: optax.GradientTransformation,
     wires: List[jp.ndarray],
     x_data: jp.ndarray,
     y_data: jp.ndarray,
     layer_sizes: List[Tuple[int, int]],
-    epochs: int,
     loss_type: str,
-    reversible_bias: float,
+    functional_threshold: float,
+    # Backprop parameters
+    opt: Optional[optax.GradientTransformation] = None,
+    epochs: int = 200,
+    reversible_bias: float = -10.0,
+    # Self-attention parameters
+    recovery_mode: str = "backprop",
+    model: Optional[CircuitSelfAttention] = None,
+    input_n: int = None,
+    circuit_hidden_dim: int = 16,
+    arity: int = 2,
+    max_steps: int = 15,
+    damage_behavior: str = "reversible",
 ) -> Optional[Dict]:
     """
     Helper function to perturb and recover a single circuit.
     
+    Supports two recovery modes:
+    - "backprop": Uses gradient descent with optax optimizer
+    - "self_attention": Uses iterative message passing with early stopping based on hard_accuracy
+    
+    Args:
+        initial_logits: Initial circuit logits
+        knockout_pattern: Boolean array indicating damaged gates
+        wires: Circuit wiring
+        x_data: Input data
+        y_data: Target output data
+        layer_sizes: Circuit layer sizes
+        loss_type: Loss function type
+        functional_threshold: Minimum accuracy to consider functional
+        opt: Optimizer (required for backprop mode)
+        epochs: Number of training epochs (backprop mode)
+        reversible_bias: Bias value for reversible damage (backprop mode)
+        recovery_mode: "backprop" or "self_attention"
+        model: CircuitSelfAttention model (required for self_attention mode)
+        input_n: Number of input nodes (required for self_attention mode)
+        circuit_hidden_dim: Hidden dimension for graph (self_attention mode)
+        arity: Gate arity (self_attention mode)
+        max_steps: Maximum message passing steps (self_attention mode)
+        damage_behavior: "reversible" or "permanent" (self_attention mode)
+    
     Returns:
-        Dictionary with recovery results, or None if error occurred
+        Dictionary with recovery results:
+        - params: Recovered logits
+        - final_hard_accuracy: Final accuracy achieved
+        - steps_taken: Number of steps taken (for self_attention mode)
+        or None if error occurred
     """
     try:
-        result = _train_single_knockout_pattern(
-            initial_logits=initial_logits,
-            knockout_pattern=knockout_pattern,
-            opt=opt,
-            wires=wires,
-            x_data=x_data,
-            y_data=y_data,
-            loss_type=loss_type,
-            layer_sizes=layer_sizes,
-            epochs=epochs,
-            damage_behavior="reversible",
-            reversible_bias=reversible_bias,
-        )
-        return result
+        if recovery_mode == "backprop":
+            if opt is None:
+                raise ValueError("opt parameter required for backprop recovery mode")
+            result = _train_single_knockout_pattern(
+                initial_logits=initial_logits,
+                knockout_pattern=knockout_pattern,
+                opt=opt,
+                wires=wires,
+                x_data=x_data,
+                y_data=y_data,
+                loss_type=loss_type,
+                layer_sizes=layer_sizes,
+                epochs=epochs,
+                damage_behavior="reversible",
+                reversible_bias=reversible_bias,
+            )
+            return result
+        
+        elif recovery_mode == "self_attention":
+            if model is None:
+                raise ValueError("model parameter required for self_attention recovery mode")
+            if input_n is None:
+                # Infer from layer_sizes
+                input_n = layer_sizes[0][0] if layer_sizes else 8
+            
+            # Create generator with knockout pattern
+            generator = evaluate_model_stepwise_generator(
+                model=model,
+                wires=wires,
+                logits=initial_logits,
+                x_data=x_data,
+                y_data=y_data,
+                input_n=input_n,
+                arity=arity,
+                circuit_hidden_dim=circuit_hidden_dim,
+                max_steps=max_steps,
+                loss_type=loss_type,
+                bidirectional_edges=True,
+                layer_sizes=layer_sizes,
+                layer_neighbors=False,
+                knockout_pattern=knockout_pattern,
+                reset_step_counter_on_init=True,  # Reset to enable reversible mode on first step
+            )
+            
+            # Consume initial state (step 0)
+            initial_result = next(generator)
+            
+            # Iterate through steps, checking hard_accuracy at each step
+            final_result = initial_result
+            steps_taken = 0
+            
+            for step_result in generator:
+                steps_taken += 1
+                final_result = step_result
+                
+                # Check if we've reached functional threshold
+                if final_result.hard_accuracy >= functional_threshold:
+                    log.debug(
+                        f"Early stopping at step {steps_taken}: "
+                        f"hard_accuracy={final_result.hard_accuracy:.4f} >= {functional_threshold}"
+                    )
+                    break
+            
+            # Extract logits from final graph state
+            from boolean_nca_cc.training.evaluation import get_loss_and_update_graph
+            logits_original_shapes = [logit.shape for logit in initial_logits]
+            _, _, recovered_logits, _ = get_loss_and_update_graph(
+                final_result.graph,
+                logits_original_shapes,
+                wires,
+                x_data,
+                y_data,
+                loss_type,
+                layer_sizes,
+            )
+            
+            return {
+                "params": recovered_logits,
+                "final_hard_accuracy": final_result.hard_accuracy,
+                "steps_taken": steps_taken,
+            }
+        
+        else:
+            raise ValueError(f"Unknown recovery_mode: {recovery_mode}")
+    
     except Exception as e:
         log.debug(f"Error during perturbation-recovery: {e}")
         return None
@@ -563,16 +674,24 @@ def _execute_bfs_phase(
     edges: List[Tuple[str, str, int, Dict]],
     exploration_results: List[Dict],
     knockout_vocabulary: List[jp.ndarray],
-    opt: optax.GradientTransformation,
     wires: List[jp.ndarray],
     x_data: jp.ndarray,
     y_data: jp.ndarray,
     layer_sizes: List[Tuple[int, int]],
-    epochs: int,
     loss_type: str,
-    reversible_bias: float,
     functional_threshold: float,
     phase_name: str,
+    # Recovery parameters
+    recovery_mode: str = "backprop",
+    opt: Optional[optax.GradientTransformation] = None,
+    epochs: int = 200,
+    reversible_bias: float = -10.0,
+    model: Optional[CircuitSelfAttention] = None,
+    input_n: int = None,
+    circuit_hidden_dim: int = 16,
+    arity: int = 2,
+    max_steps: int = 15,
+    damage_behavior: str = "reversible",
 ) -> Tuple[int, int]:
     """
     Execute a BFS phase starting from given nodes.
@@ -619,14 +738,22 @@ def _execute_bfs_phase(
             result = _perturb_and_recover_single(
                 initial_logits=circuit_logits,
                 knockout_pattern=knockout_pattern,
-                opt=opt,
                 wires=wires,
                 x_data=x_data,
                 y_data=y_data,
                 layer_sizes=layer_sizes,
-                epochs=epochs,
                 loss_type=loss_type,
+                functional_threshold=functional_threshold,
+                recovery_mode=recovery_mode,
+                opt=opt,
+                epochs=epochs,
                 reversible_bias=reversible_bias,
+                model=model,
+                input_n=input_n,
+                circuit_hidden_dim=circuit_hidden_dim,
+                arity=arity,
+                max_steps=max_steps,
+                damage_behavior=damage_behavior,
             )
             
             if result is None:
@@ -700,19 +827,33 @@ def _execute_dfs_phase(
     edges: List[Tuple[str, str, int, Dict]],
     exploration_results: List[Dict],
     knockout_vocabulary: List[jp.ndarray],
-    opt: optax.GradientTransformation,
     wires: List[jp.ndarray],
     x_data: jp.ndarray,
     y_data: jp.ndarray,
     layer_sizes: List[Tuple[int, int]],
-    epochs: int,
     loss_type: str,
-    reversible_bias: float,
     functional_threshold: float,
     phase_name: str,
+    # Recovery parameters
+    recovery_mode: str = "backprop",
+    opt: Optional[optax.GradientTransformation] = None,
+    epochs: int = 200,
+    reversible_bias: float = -10.0,
+    model: Optional[CircuitSelfAttention] = None,
+    input_n: int = None,
+    circuit_hidden_dim: int = 16,
+    arity: int = 2,
+    max_steps: int = 15,
+    damage_behavior: str = "reversible",
+    max_retry_attempts: int = 0,
 ) -> Tuple[int, int]:
     """
     Execute a DFS phase starting from given nodes.
+    
+    Args:
+        max_retry_attempts: When perturbations_per_node==1 and a perturbation fails,
+            retry up to this many times with different patterns before giving up.
+            Default 0 (no retries).
     
     Returns:
         Tuple of (total_perturbations, functional_recoveries)
@@ -745,6 +886,9 @@ def _execute_dfs_phase(
             level_rng, len(knockout_vocabulary), shape=(num_patterns,), replace=False
         )
         
+        # Track if we got a successful functional recovery (for retry logic)
+        successful_recovery = None
+        
         # Process perturbations in reverse order so we explore first one first (LIFO)
         for pattern_idx in reversed(pattern_indices):
             knockout_pattern = knockout_vocabulary[pattern_idx]
@@ -753,14 +897,22 @@ def _execute_dfs_phase(
             result = _perturb_and_recover_single(
                 initial_logits=circuit_logits,
                 knockout_pattern=knockout_pattern,
-                opt=opt,
                 wires=wires,
                 x_data=x_data,
                 y_data=y_data,
                 layer_sizes=layer_sizes,
-                epochs=epochs,
                 loss_type=loss_type,
+                functional_threshold=functional_threshold,
+                recovery_mode=recovery_mode,
+                opt=opt,
+                epochs=epochs,
                 reversible_bias=reversible_bias,
+                model=model,
+                input_n=input_n,
+                circuit_hidden_dim=circuit_hidden_dim,
+                arity=arity,
+                max_steps=max_steps,
+                damage_behavior=damage_behavior,
             )
             
             if result is None:
@@ -795,6 +947,7 @@ def _execute_dfs_phase(
             
             if is_func:
                 functional_recoveries += 1
+                successful_recovery = (recovered_hash, recovered_logits)
                 
                 # Add to unique solutions
                 if is_unique:
@@ -802,10 +955,9 @@ def _execute_dfs_phase(
                     discovered_circuits.append((recovered_hash, recovered_logits))
                     circuit_depths[recovered_hash] = depth + 1
                 
-                # Add to stack for next depth (DFS: push to continue exploring)
-                if depth + 1 < base_depth + depth_limit:
-                    if recovered_hash not in visited_dfs:
-                        stack.append((recovered_hash, recovered_logits, depth + 1))
+                # For single perturbation mode, break early after first success
+                if perturbations_per_node == 1:
+                    break
             
             exploration_results.append({
                 "pattern_idx": int(pattern_idx),
@@ -817,6 +969,105 @@ def _execute_dfs_phase(
                 "depth": depth,
                 "phase": phase_name,
             })
+        
+        # Retry logic: if perturbations_per_node==1 and we didn't get a functional recovery
+        if perturbations_per_node == 1 and successful_recovery is None and max_retry_attempts > 0:
+            # Sample additional patterns for retry (exclude already tried patterns)
+            retry_rng = jax.random.PRNGKey(42 + depth + 1000)  # Different seed for retries
+            tried_patterns = set(int(idx) for idx in pattern_indices)
+            remaining_patterns = [i for i in range(len(knockout_vocabulary)) if i not in tried_patterns]
+            
+            if remaining_patterns:
+                num_retries = min(max_retry_attempts, len(remaining_patterns))
+                retry_indices = jax.random.choice(
+                    retry_rng, len(remaining_patterns), shape=(num_retries,), replace=False
+                )
+                retry_pattern_indices = [remaining_patterns[int(idx)] for idx in retry_indices]
+                
+                for retry_idx, pattern_idx in enumerate(retry_pattern_indices):
+                    knockout_pattern = knockout_vocabulary[pattern_idx]
+                    total_perturbations += 1
+                    
+                    result = _perturb_and_recover_single(
+                        initial_logits=circuit_logits,
+                        knockout_pattern=knockout_pattern,
+                        wires=wires,
+                        x_data=x_data,
+                        y_data=y_data,
+                        layer_sizes=layer_sizes,
+                        loss_type=loss_type,
+                        functional_threshold=functional_threshold,
+                        recovery_mode=recovery_mode,
+                        opt=opt,
+                        epochs=epochs,
+                        reversible_bias=reversible_bias,
+                        model=model,
+                        input_n=input_n,
+                        circuit_hidden_dim=circuit_hidden_dim,
+                        arity=arity,
+                        max_steps=max_steps,
+                        damage_behavior=damage_behavior,
+                    )
+                    
+                    if result is None:
+                        continue
+                    
+                    recovered_logits = result["params"]
+                    final_accuracy = float(result["final_hard_accuracy"])
+                    
+                    is_func = is_functional(
+                        recovered_logits, wires, x_data, y_data, functional_threshold
+                    )
+                    recovered_hash = hash_circuit_logits(recovered_logits)
+                    is_unique = recovered_hash not in unique_solutions
+                    
+                    edge_metadata = {
+                        "depth": depth,
+                        "phase": phase_name,
+                        "is_cycle": (recovered_hash == circuit_hash),
+                        "is_revisit": (recovered_hash in unique_solutions),
+                        "final_accuracy": final_accuracy,
+                        "is_functional": is_func,
+                        "is_retry": True,
+                        "retry_attempt": retry_idx + 1,
+                    }
+                    edges.append((circuit_hash, recovered_hash, int(pattern_idx), edge_metadata))
+                    
+                    if circuit_hash not in exploration_graph:
+                        exploration_graph[circuit_hash] = []
+                    exploration_graph[circuit_hash].append((recovered_hash, int(pattern_idx), edge_metadata))
+                    
+                    exploration_results.append({
+                        "pattern_idx": int(pattern_idx),
+                        "source_hash": circuit_hash,
+                        "recovered_hash": recovered_hash,
+                        "final_accuracy": final_accuracy,
+                        "is_functional": is_func,
+                        "is_unique": is_func and is_unique,
+                        "depth": depth,
+                        "phase": phase_name,
+                        "is_retry": True,
+                        "retry_attempt": retry_idx + 1,
+                    })
+                    
+                    if is_func:
+                        functional_recoveries += 1
+                        successful_recovery = (recovered_hash, recovered_logits)
+                        
+                        if is_unique:
+                            unique_solutions[recovered_hash] = recovered_logits
+                            discovered_circuits.append((recovered_hash, recovered_logits))
+                            circuit_depths[recovered_hash] = depth + 1
+                        
+                        # Stop retrying once we get a successful recovery
+                        break
+        
+        # Add to stack for next depth only if we got a successful functional recovery
+        if successful_recovery is not None:
+            recovered_hash, recovered_logits = successful_recovery
+            if depth + 1 < base_depth + depth_limit:
+                if recovered_hash not in visited_dfs:
+                    stack.append((recovered_hash, recovered_logits, depth + 1))
     
     return total_perturbations, functional_recoveries
 
@@ -828,7 +1079,7 @@ def explore_degenerate_solutions(
     y_data: jp.ndarray,
     layer_sizes: List[Tuple[int, int]],
     num_perturbations: int = 100,
-    damage_prob: float = 5.0,
+    damage_prob: float = 20.0,
     greedy_indices: List[int] = None,
     epochs: int = 200,
     learning_rate: float = 1.0,
@@ -837,14 +1088,23 @@ def explore_degenerate_solutions(
     beta1: float = 0.8,
     beta2: float = 0.8,
     loss_type: str = "l4",
-    functional_threshold: float = 1.0,
+    functional_threshold: float = 0.999,
     reversible_bias: float = -10.0,
-    exploration_strategy: str = "hybrid",
+    exploration_strategy: str = "phases",
     bfs_depth: int = 2,
     bfs_perturbations_per_level: int = 100,
     random_walk_iterations: int = 500,
     random_walk_seed: int = 12345,
     phases: Optional[List[Tuple[str, int, int, str, Optional[int]]]] = None,
+    # Self-attention recovery parameters
+    recovery_mode: str = "backprop",
+    model: Optional[CircuitSelfAttention] = None,
+    input_n: Optional[int] = None,
+    circuit_hidden_dim: int = 64,
+    arity: int = 4,
+    max_steps: int = 15,
+    damage_behavior: str = "reversible",
+    max_retry_attempts: int = 0,
 ) -> Dict:
     """
     Explore degenerate solutions using flexible phase-based or legacy strategies.
@@ -864,6 +1124,10 @@ def explore_degenerate_solutions(
     - "bfs": Breadth-first search only
     - "random_walk": Random walk only
     
+    Recovery modes:
+    - "backprop": Uses gradient descent with optax optimizer (default)
+    - "self_attention": Uses iterative message passing with early stopping based on hard_accuracy
+    
     Args:
         root_wires: Root circuit wiring
         root_logits: Root circuit logits
@@ -873,20 +1137,30 @@ def explore_degenerate_solutions(
         num_perturbations: Number of perturbation patterns to try (legacy, used if strategy="single_root")
         damage_prob: Number of gates to damage per perturbation
         greedy_indices: Ordered list of greedy gate indices (defaults to DEFAULT_GREEDY_ORDERED_INDICES)
-        epochs: Number of recovery epochs
+        epochs: Number of recovery epochs (backprop mode)
         learning_rate: Learning rate for recovery (default: 1.0, matching config.yaml)
         optimizer: Optimizer type ("adamw" or "adam", default: "adamw")
         weight_decay: Weight decay for optimizer (default: 1e-1)
         beta1: Beta1 parameter for optimizer (default: 0.8)
         beta2: Beta2 parameter for optimizer (default: 0.8)
         loss_type: Loss type for recovery
-        functional_threshold: Minimum accuracy to consider circuit functional (default: 1.0)
-        reversible_bias: Bias value for reversible damage mode
+        functional_threshold: Minimum accuracy to consider circuit functional (default: 0.999)
+        reversible_bias: Bias value for reversible damage mode (backprop mode)
         exploration_strategy: Strategy to use ("hybrid", "bfs", "random_walk", or "single_root")
         bfs_depth: Maximum depth for BFS phase (default: 2)
         bfs_perturbations_per_level: Number of perturbations to try per BFS level (default: 100)
         random_walk_iterations: Number of random walk iterations (default: 500)
         random_walk_seed: Random seed for random walk phase
+        recovery_mode: Recovery mode ("backprop" or "self_attention", default: "backprop")
+        model: CircuitSelfAttention model (required for self_attention mode)
+        input_n: Number of input nodes (inferred from layer_sizes if not provided)
+        circuit_hidden_dim: Hidden dimension for graph (self_attention mode, default: 16)
+        arity: Gate arity (self_attention mode, default: 2)
+        max_steps: Maximum message passing steps (self_attention mode, default: 15)
+        damage_behavior: Damage behavior ("reversible" or "permanent", self_attention mode, default: "reversible")
+        max_retry_attempts: When DFS perturbations_per_node==1 and a perturbation fails,
+            retry up to this many times with different patterns before giving up.
+            Default 0 (no retries).
         
     Returns:
         Dictionary with exploration results including:
@@ -899,29 +1173,47 @@ def explore_degenerate_solutions(
     if greedy_indices is None:
         greedy_indices = DEFAULT_GREEDY_ORDERED_INDICES
     
+    # Infer input_n from layer_sizes if not provided
+    if input_n is None:
+        input_n = layer_sizes[0][0] if layer_sizes else 8
+    
     log.info("=" * 80)
     log.info("Exploring Degenerate Circuit Solutions")
     log.info("=" * 80)
     log.info(f"Exploration strategy: {exploration_strategy}")
+    log.info(f"Recovery mode: {recovery_mode}")
     log.info(f"Root circuit hash: {hash_circuit_logits(root_logits)}")
     log.info(f"Damage per perturbation: {damage_prob} gates")
-    log.info(f"Recovery epochs: {epochs}")
-    log.info(f"Learning rate: {learning_rate}")
-    log.info(f"Optimizer: {optimizer}")
-    log.info(f"Weight decay: {weight_decay}")
-    log.info(f"Beta1: {beta1}, Beta2: {beta2}")
     log.info(f"Functional threshold: {functional_threshold}")
     
-    # Setup optimizer for recovery (matching config.yaml backprop settings)
-    if optimizer == "adamw":
-        opt = optax.adamw(
-            learning_rate,
-            b1=beta1,
-            b2=beta2,
-            weight_decay=weight_decay,
-        )
+    if recovery_mode == "backprop":
+        log.info(f"Recovery epochs: {epochs}")
+        log.info(f"Learning rate: {learning_rate}")
+        log.info(f"Optimizer: {optimizer}")
+        log.info(f"Weight decay: {weight_decay}")
+        log.info(f"Beta1: {beta1}, Beta2: {beta2}")
+        # Setup optimizer for recovery (matching config.yaml backprop settings)
+        if optimizer == "adamw":
+            opt = optax.adamw(
+                learning_rate,
+                b1=beta1,
+                b2=beta2,
+                weight_decay=weight_decay,
+            )
+        else:
+            opt = optax.adam(learning_rate, b1=beta1, b2=beta2)
+    elif recovery_mode == "self_attention":
+        if model is None:
+            raise ValueError("model parameter required when recovery_mode='self_attention'")
+        log.info(f"Self-attention recovery:")
+        log.info(f"  Max steps: {max_steps}")
+        log.info(f"  Circuit hidden dim: {circuit_hidden_dim}")
+        log.info(f"  Arity: {arity}")
+        log.info(f"  Input n: {input_n}")
+        log.info(f"  Damage behavior: {damage_behavior}")
+        opt = None  # Not used for self-attention
     else:
-        opt = optax.adam(learning_rate, b1=beta1, b2=beta2)
+        raise ValueError(f"Unknown recovery_mode: {recovery_mode}")
     
     # Track unique solutions (for diversity analysis)
     unique_solutions: Dict[str, List[jp.ndarray]] = {}  # hash -> logits
@@ -1053,16 +1345,23 @@ def explore_degenerate_solutions(
                     edges=edges,
                     exploration_results=exploration_results,
                     knockout_vocabulary=knockout_vocabulary,
-                    opt=opt,
                     wires=root_wires,
                     x_data=x_data,
                     y_data=y_data,
                     layer_sizes=layer_sizes,
-                    epochs=epochs,
                     loss_type=loss_type,
-                    reversible_bias=reversible_bias,
                     functional_threshold=functional_threshold,
                     phase_name=phase_name,
+                    recovery_mode=recovery_mode,
+                    opt=opt,
+                    epochs=epochs,
+                    reversible_bias=reversible_bias,
+                    model=model,
+                    input_n=input_n,
+                    circuit_hidden_dim=circuit_hidden_dim,
+                    arity=arity,
+                    max_steps=max_steps,
+                    damage_behavior=damage_behavior,
                 )
             elif phase_type == "dfs":
                 phase_perturbations, phase_functional = _execute_dfs_phase(
@@ -1077,16 +1376,24 @@ def explore_degenerate_solutions(
                     edges=edges,
                     exploration_results=exploration_results,
                     knockout_vocabulary=knockout_vocabulary,
-                    opt=opt,
                     wires=root_wires,
                     x_data=x_data,
                     y_data=y_data,
                     layer_sizes=layer_sizes,
-                    epochs=epochs,
                     loss_type=loss_type,
-                    reversible_bias=reversible_bias,
                     functional_threshold=functional_threshold,
                     phase_name=phase_name,
+                    recovery_mode=recovery_mode,
+                    opt=opt,
+                    epochs=epochs,
+                    reversible_bias=reversible_bias,
+                    model=model,
+                    input_n=input_n,
+                    circuit_hidden_dim=circuit_hidden_dim,
+                    arity=arity,
+                    max_steps=max_steps,
+                    damage_behavior=damage_behavior,
+                    max_retry_attempts=max_retry_attempts,
                 )
             else:
                 raise ValueError(f"Invalid phase_type: {phase_type}")
@@ -1151,14 +1458,22 @@ def explore_degenerate_solutions(
                 result = _perturb_and_recover_single(
                     initial_logits=circuit_logits,
                     knockout_pattern=knockout_pattern,
-                    opt=opt,
                     wires=root_wires,
                     x_data=x_data,
                     y_data=y_data,
                     layer_sizes=layer_sizes,
-                    epochs=epochs,
                     loss_type=loss_type,
+                    functional_threshold=functional_threshold,
+                    recovery_mode=recovery_mode,
+                    opt=opt,
+                    epochs=epochs,
                     reversible_bias=reversible_bias,
+                    model=model,
+                    input_n=input_n,
+                    circuit_hidden_dim=circuit_hidden_dim,
+                    arity=arity,
+                    max_steps=max_steps,
+                    damage_behavior=damage_behavior,
                 )
                 
                 if result is None:
@@ -1269,14 +1584,22 @@ def explore_degenerate_solutions(
             result = _perturb_and_recover_single(
                 initial_logits=circuit_logits,
                 knockout_pattern=knockout_pattern,
-                opt=opt,
                 wires=root_wires,
                 x_data=x_data,
                 y_data=y_data,
                 layer_sizes=layer_sizes,
-                epochs=epochs,
                 loss_type=loss_type,
+                functional_threshold=functional_threshold,
+                recovery_mode=recovery_mode,
+                opt=opt,
+                epochs=epochs,
                 reversible_bias=reversible_bias,
+                model=model,
+                input_n=input_n,
+                circuit_hidden_dim=circuit_hidden_dim,
+                arity=arity,
+                max_steps=max_steps,
+                damage_behavior=damage_behavior,
             )
             
             if result is None:
@@ -1363,14 +1686,22 @@ def explore_degenerate_solutions(
             result = _perturb_and_recover_single(
                 initial_logits=root_logits,
                 knockout_pattern=knockout_pattern,
-                opt=opt,
                 wires=root_wires,
                 x_data=x_data,
                 y_data=y_data,
                 layer_sizes=layer_sizes,
-                epochs=epochs,
                 loss_type=loss_type,
+                functional_threshold=functional_threshold,
+                recovery_mode=recovery_mode,
+                opt=opt,
+                epochs=epochs,
                 reversible_bias=reversible_bias,
+                model=model,
+                input_n=input_n,
+                circuit_hidden_dim=circuit_hidden_dim,
+                arity=arity,
+                max_steps=max_steps,
+                damage_behavior=damage_behavior,
             )
             
             if result is None:
@@ -1497,13 +1828,13 @@ def main():
     parser.add_argument(
         "--num-perturbations",
         type=int,
-        default=10,
+        default=20,
         help="Number of perturbation patterns to try (default: 100)",
     )
     parser.add_argument(
         "--damage-prob",
         type=float,
-        default=5.0,
+        default=20.0,
         help="Number of gates to damage per perturbation (default: 20.0, matching config.yaml)",
     )
     parser.add_argument(
@@ -1546,32 +1877,85 @@ def main():
     parser.add_argument(
         "--wiring-seed",
         type=int,
-        default=42,
-        help="Random seed for wiring generation (default: 42)",
+        default=33,
+        help="Random seed for wiring generation (default: 33, matching config.yaml test_seed)",
     )
     parser.add_argument(
         "--functional-threshold",
         type=float,
-        default=1.0,
-        help="Minimum accuracy to consider circuit functional (default: 1.0)",
+        default=0.999,
+        help="Minimum accuracy to consider circuit functional (default: 0.999)",
+    )
+    parser.add_argument(
+        "--recovery-mode",
+        type=str,
+        default="backprop",
+        choices=["backprop", "self_attention"],
+        help="Recovery mode: 'backprop' (gradient descent) or 'self_attention' (iterative message passing) (default: backprop)",
+    )
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default=None,
+        help="Path to trained CircuitSelfAttention model checkpoint file, or WandB run ID (e.g., 'yaw4da84'). "
+             "If not provided and recovery_mode='self_attention', defaults to WandB run 'yaw4da84'.",
+    )
+    parser.add_argument(
+        "--circuit-hidden-dim",
+        type=int,
+        default=64,
+        help="Hidden dimension for circuit graph (self_attention mode, default: 64, matching config.yaml)",
+    )
+    parser.add_argument(
+        "--arity",
+        type=int,
+        default=4,
+        help="Gate arity (self_attention mode, default: 4, matching config.yaml)",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=15,
+        help="Maximum message passing steps for self-attention recovery (default: 15)",
+    )
+    parser.add_argument(
+        "--damage-behavior",
+        type=str,
+        default="reversible",
+        choices=["reversible", "permanent"],
+        help="Damage behavior for self-attention recovery (default: reversible, matching config.yaml)",
+    )
+    parser.add_argument(
+        "--reversible-bias",
+        type=float,
+        default=-10.0,
+        help="Bias value for reversible damage mode (default: -10.0, matching config.yaml)",
+    )
+    parser.add_argument(
+        "--loss-type",
+        type=str,
+        default="l4",
+        choices=["l4", "l2", "bce"],
+        help="Loss function type (default: l4, matching config.yaml)",
     )
     parser.add_argument(
         "--exploration-strategy",
         type=str,
-        default="hybrid",
+        default="phases",
         choices=["hybrid", "bfs", "random_walk", "single_root", "phases"],
         help="Exploration strategy: 'hybrid' (BFS + Random Walk, recommended for UMAP), "
              "'bfs' (breadth-first only), 'random_walk' (random walk only), "
              "'single_root' (legacy: all perturbations from root), "
-             "or 'phases' (flexible phase-based exploration, requires --phases) (default: hybrid)",
+             "or 'phases' (flexible phase-based exploration, requires --phases) (default: phases)",
     )
     parser.add_argument(
         "--phases",
         type=str,
-        default=None,
+        default="dfs:20:1:root",
         help="Phase specification for phase-based exploration. "
              "Format: 'type:depth:perturbations:start_from[:max_nodes],...' "
-             "Example: 'bfs:2:100:root,dfs:5:1:frontier' "
+             "Example: 'dfs:20:1:root' (default: simple 20-step DFS from root) "
+             "or 'bfs:2:100:root,dfs:5:1:frontier' "
              "(BFS depth 2 with 100 perturbations from root, then DFS depth 5 with 1 perturbation from all frontier nodes). "
              "Use 'frontier:N' to randomly sample N frontier nodes: 'dfs:50:1:frontier:1' "
              "(DFS depth 50 from 1 randomly selected frontier node)",
@@ -1611,6 +1995,12 @@ def main():
         action="store_true",
         help="Don't save exploration results to disk (default: save results)",
     )
+    parser.add_argument(
+        "--max-retry-attempts",
+        type=int,
+        default=0,
+        help="When DFS perturbations_per_node=1 and a perturbation fails, retry up to this many times with different patterns (default: 0, no retries)",
+    )
     
     args = parser.parse_args()
     
@@ -1627,7 +2017,7 @@ def main():
     
     layer_sizes = list(
         generate_layer_sizes(
-            args.input_bits, args.output_bits, arity=2, layer_n=3
+            args.input_bits, args.output_bits, arity=args.arity, layer_n=3
         )
     )
     log.info(f"Layer sizes: {layer_sizes}")
@@ -1639,10 +2029,10 @@ def main():
         wires_file=args.wires_file,
         wiring_key=wiring_key,
         layer_sizes=layer_sizes,
-        arity=2,
+        arity=args.arity,
         x_data=x_data,
         y_data=y_data,
-        loss_type="l4",
+        loss_type=args.loss_type,
         preconfig_lr=args.learning_rate,
         preconfig_optimizer=args.optimizer,
         preconfig_weight_decay=args.weight_decay,
@@ -1655,26 +2045,156 @@ def main():
         log.info(f"Using layer_sizes inferred from loaded circuit: {actual_layer_sizes}")
         layer_sizes = actual_layer_sizes
     
-    # Verify root circuit is functional
-    root_accuracy = float(
-        compute_accuracy(
-            run_circuit(logits, wires, x_data, hard=True)[-1], y_data
-        )
+    # Assess root circuit: compute loss and hard accuracy
+    from boolean_nca_cc.training.evaluation import get_loss_from_wires_logits
+    
+    root_loss, root_aux = get_loss_from_wires_logits(
+        logits, wires, x_data, y_data, loss_type=args.loss_type
     )
-    log.info(f"Root circuit accuracy: {root_accuracy:.4f}")
-    if root_accuracy < args.functional_threshold:
+    root_hard_loss, _, _, root_accuracy, root_hard_accuracy, _, _ = root_aux
+    
+    log.info("=" * 80)
+    log.info("Root Circuit Assessment")
+    log.info("=" * 80)
+    log.info(f"Loss: {float(root_loss):.6f}")
+    log.info(f"Hard Loss: {float(root_hard_loss):.6f}")
+    log.info(f"Accuracy: {float(root_accuracy):.4f}")
+    log.info(f"Hard Accuracy: {float(root_hard_accuracy):.4f}")
+    log.info(f"Functional Threshold: {args.functional_threshold}")
+    
+    if root_hard_accuracy < args.functional_threshold:
         log.warning(
-            f"Root circuit accuracy ({root_accuracy:.4f}) is below functional threshold "
+            f"⚠️  Root circuit hard accuracy ({root_hard_accuracy:.4f}) is below functional threshold "
             f"({args.functional_threshold})"
         )
+        log.warning("  This may indicate preconfiguration issues or circuit loading problems.")
+    else:
+        log.info("✓ Root circuit meets functional threshold")
+    log.info("=" * 80)
     
     # Parse phases if provided
     phases = None
     if args.exploration_strategy == "phases":
+        # Default to simple 20-step DFS if not specified
         if args.phases is None:
-            raise ValueError("--phases required when --exploration-strategy=phases")
+            args.phases = "dfs:20:1:root"
+            log.info("Using default phase specification: dfs:20:1:root (20-step DFS from root)")
         phases = parse_phase_specification(args.phases)
         log.info(f"Parsed {len(phases)} phases from specification")
+    
+    # Load model if using self-attention recovery
+    model = None
+    if args.recovery_mode == "self_attention":
+        # Default to WandB run ID if not provided
+        model_path_or_run_id = args.model_path if args.model_path is not None else "yaw4da84"
+        
+        log.info(f"Loading self-attention model from: {model_path_or_run_id}")
+        try:
+            from flax import nnx
+            
+            # Check if it's a file path or WandB run ID
+            is_file_path = Path(model_path_or_run_id).exists() or model_path_or_run_id.endswith(('.pkl', '.npz', '.ckpt'))
+            
+            if is_file_path:
+                # Load from local file
+                from boolean_nca_cc.training.checkpointing import load_checkpoint_with_compatibility
+                
+                log.info(f"Loading model from local file: {model_path_or_run_id}")
+                loaded_dict = load_checkpoint_with_compatibility(model_path_or_run_id)
+                
+                # Create model instance with defaults (we need config for proper initialization)
+                input_n = args.input_bits
+                total_nodes = sum(size[0] for size in layer_sizes)
+                
+                model_key = jax.random.PRNGKey(42)
+                model = CircuitSelfAttention(
+                    n_node=total_nodes,
+                    circuit_hidden_dim=args.circuit_hidden_dim,
+                    arity=args.arity,
+                    rngs=nnx.Rngs(params=model_key),
+                    damage_behavior=args.damage_behavior,
+                )
+                
+                # Update model with loaded state
+                if "model" in loaded_dict:
+                    nnx.update(model, loaded_dict["model"])
+                    log.info("Model loaded successfully from file")
+                else:
+                    log.warning("No 'model' key in checkpoint, using initialized model")
+            else:
+                # Load from WandB
+                from boolean_nca_cc.training.checkpointing import (
+                    load_config_from_wandb,
+                    load_model_from_config_and_checkpoint,
+                )
+                from boolean_nca_cc.circuits.tasks import TASKS
+                
+                log.info(f"Loading model from WandB run ID: {model_path_or_run_id}")
+                
+                # Set up filters based on circuit configuration (matching GUI_minimal.py)
+                task_name = args.task
+                filters = {
+                    "config.circuit.input_bits": args.input_bits,
+                    "config.circuit.output_bits": args.output_bits,
+                    "config.circuit.arity": args.arity,
+                    "config.model.type": "self_attention",
+                    "config.circuit.task": task_name if task_name in TASKS else "binary_multiply",
+                    "config.training.training_mode": "repair",
+                    "config.pool.damage_mode": "greedy_vocabulary",
+                    "config.pool.damage_injection_mode": "multi",
+                }
+                
+                # Load config and checkpoint from WandB
+                # If run_id is provided, use it directly (ignore filters)
+                loaded_config, checkpoint_path, run_id = load_config_from_wandb(
+                    run_id=model_path_or_run_id,
+                    filters=None,  # Don't use filters when run_id is specified
+                    project="boolean-nca-cc",
+                    entity="marcello-barylli-growai",
+                    download_dir="saves",
+                    filename="latest_checkpoint",
+                    select_by_best_metric=False,
+                    run_from_last=1,
+                    use_cache=True,
+                )
+                
+                log.info(f"Loaded config from WandB run: {run_id}")
+                log.info(f"Checkpoint path: {checkpoint_path}")
+                
+                # Load model from config and checkpoint
+                model, loaded_dict = load_model_from_config_and_checkpoint(
+                    config=loaded_config,
+                    checkpoint_path=checkpoint_path,
+                    run_id=run_id,
+                )
+                
+                log.info("Model loaded successfully from WandB")
+                
+                # Extract circuit_hidden_dim from loaded config if available
+                if hasattr(loaded_config, "model") and hasattr(loaded_config.model, "hidden_dim"):
+                    extracted_hidden_dim = loaded_config.model.hidden_dim
+                    if args.circuit_hidden_dim != extracted_hidden_dim:
+                        log.info(
+                            f"Updating circuit_hidden_dim from {args.circuit_hidden_dim} "
+                            f"to {extracted_hidden_dim} (from loaded config)"
+                        )
+                        args.circuit_hidden_dim = extracted_hidden_dim
+                elif hasattr(loaded_config, "circuit") and hasattr(
+                    loaded_config.circuit, "circuit_hidden_dim"
+                ):
+                    extracted_hidden_dim = loaded_config.circuit.circuit_hidden_dim
+                    if args.circuit_hidden_dim != extracted_hidden_dim:
+                        log.info(
+                            f"Updating circuit_hidden_dim from {args.circuit_hidden_dim} "
+                            f"to {extracted_hidden_dim} (from loaded config)"
+                        )
+                        args.circuit_hidden_dim = extracted_hidden_dim
+        
+        except Exception as e:
+            log.error(f"Error loading model: {e}")
+            import traceback
+            log.error(f"Traceback: {traceback.format_exc()}")
+            raise
     
     # Run exploration
     results = explore_degenerate_solutions(
@@ -1691,13 +2211,23 @@ def main():
         weight_decay=args.weight_decay,
         beta1=args.beta1,
         beta2=args.beta2,
+        loss_type=args.loss_type,
         functional_threshold=args.functional_threshold,
+        reversible_bias=args.reversible_bias,
         exploration_strategy=args.exploration_strategy,
         bfs_depth=args.bfs_depth,
         bfs_perturbations_per_level=args.bfs_perturbations_per_level,
         random_walk_iterations=args.random_walk_iterations,
         random_walk_seed=args.random_walk_seed,
         phases=phases,
+        recovery_mode=args.recovery_mode,
+        model=model,
+        input_n=args.input_bits,
+        circuit_hidden_dim=args.circuit_hidden_dim,
+        arity=args.arity,
+        max_steps=args.max_steps,
+        damage_behavior=args.damage_behavior,
+        max_retry_attempts=args.max_retry_attempts,
     )
     
     # Save results by default (unless --no-save-results is specified)

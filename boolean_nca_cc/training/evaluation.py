@@ -243,12 +243,6 @@ def evaluate_model_stepwise_generator(
         current_update_steps = 0
         if graph.globals is not None and graph.globals.shape[-1] > 1:
             current_update_steps = graph.globals[..., 1]
-        
-        # Debug: Log graph state before model call
-        before_loss = float(graph.globals[0]) if graph.globals is not None else 0.0
-        before_steps = float(current_update_steps)
-        if step <= 5 or step % 50 == 0:  # Log first 5 steps and every 50th step
-            print(f"[Generator Step {step}] Before model call: globals=[loss={before_loss:.6f}, update_steps={before_steps:.0f}]")
 
         # Apply one step of model processing (EXACTLY like training inner loop)
         # Note: training does multiple steps in a batch, but we do one at a time for live demo
@@ -290,12 +284,6 @@ def evaluate_model_stepwise_generator(
         updated_graph = updated_graph._replace(
             globals=jp.array([loss, current_update_steps + 1], dtype=jp.float32)
         )
-
-        # Debug: Log graph state after update
-        after_loss = float(updated_graph.globals[0]) if updated_graph.globals is not None else 0.0
-        after_steps = float(updated_graph.globals[1]) if updated_graph.globals is not None and updated_graph.globals.shape[-1] > 1 else 0.0
-        if step <= 5 or step % 50 == 0:  # Log first 5 steps and every 50th step
-            print(f"[Generator Step {step}] After update: globals=[loss={after_loss:.6f}, update_steps={after_steps:.0f}], accuracy={accuracy:.4f}, hard_accuracy={hard_accuracy:.4f}")
 
         # Update the graph variable for next iteration
         graph = updated_graph
