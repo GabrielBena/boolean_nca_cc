@@ -3,7 +3,7 @@
 # Default parameters for experiment
 defaults:
   - model: self_attention  # Default model (gnn or self_attention)
-  - circuit: text
+  - circuit: text_small
   - _self_  # For self-overrides
 
 # Random seed for reproducibility
@@ -35,7 +35,7 @@ training:
   wiring_mode: "random"  # Options: "fixed", "genetic", or "random"
   initial_diversity: 256
   # INNER LOOP
-  n_message_steps: 50  # Number of message passing steps per training iteration
+  n_message_steps: 25  # Number of message passing steps per training iteration
   # LOSS TYPE
   loss_type: "bce"  # Options: "l4", "l2", or "bce"
   # DATA FRACTION
@@ -46,23 +46,27 @@ training:
   # TRAIN/TEST SPLIT
   test_num: 256  # Fraction/absolute number of data to use for testing (from all input combinations)
   # BATCH SIZE
-  meta_batch_size: 96 
+  meta_batch_size: 256 
   batch_chunk_size: null  # Sequential batch processing chunk size (null means use meta_batch_size)
   # OPTIMIZATION
-  learning_rate: 3e-4
-  weight_decay: 1e-3
+  learning_rate: 5e-4
+  weight_decay: 1e-4
   # LEARNING RATE SCHEDULER
   lr_scheduler: "linear_warmup"  # Options: "constant", "exponential", "cosine", "linear_warmup"
   lr_scheduler_params:
     warmup_steps_factor: 50
     lr_warmup_start: 1e-6
     exponent: 1
-    alpha: 1e-1 # final lr = 1% of initial lr
+    alpha: 1e-1 # final lr = 10% of initial lr
   # NUMBER OF EPOCHS
   epochs: null
-  epochs_power_of_2: 19 # 2^n
+  epochs_power_of_2: 16 # 2^n
   # USE SCAN
   use_scan: true
+  # GRADIENT CHECKPOINTING (remat)
+  # Trades compute for memory by recomputing model activations during backward pass
+  # Useful when n_message_steps is high or batch size is large and you're running out of memory
+  gradient_checkpointing: true
 
 # Pool configuration for meta-learning
 pool:

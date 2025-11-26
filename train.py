@@ -633,11 +633,15 @@ def main(cfg: DictConfig) -> None:
             )
             test_ratio = cfg.training.test_num
         else:
-            assert isinstance(cfg.training.test_num, int), "test_num must be an integer"
-            assert cfg.training.test_num > 0 and cfg.training.test_num <= case_n, (
+            assert isinstance(cfg.training.test_num, int), "test_num must be a float or an integer"
+            assert cfg.training.test_num > 0, (
                 "test_num must be greater than 0 and less than the total number of cases"
             )
-            test_ratio = cfg.training.test_num / case_n
+            if cfg.training.test_num > case_n:
+                log.warning(f"test_num is greater than the total number of cases, setting test_ratio to 1")
+                test_ratio = 1
+            else:
+                test_ratio = cfg.training.test_num / case_n
     else:
         test_ratio = None
 
@@ -757,6 +761,7 @@ def main(cfg: DictConfig) -> None:
         epochs=cfg.training.epochs or 2**cfg.training.epochs_power_of_2,
         n_message_steps=cfg.training.n_message_steps,
         use_scan=cfg.training.use_scan,
+        gradient_checkpointing=cfg.training.gradient_checkpointing,
         # Loss parameters
         loss_type=cfg.training.loss_type,
         random_loss_step=cfg.training.random_loss_step,

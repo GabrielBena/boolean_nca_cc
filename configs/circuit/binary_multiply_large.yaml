@@ -1,4 +1,7 @@
 defaults:
   - _large
 
+input_bits: 14
+output_bits: 14
+num_layers: 4
 task: "binary_multiply"

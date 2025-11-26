@@ -175,6 +175,7 @@ def run_gnn_scan_with_loss(
     layer_sizes: tuple[tuple[int, int], ...],
     data_fraction: float = 1.0,
     scan_key: jax.random.PRNGKey = None,
+    gradient_checkpointing: bool = False,
 ) -> tuple[jraph.GraphsTuple, list[jraph.GraphsTuple], jp.ndarray, list]:
     """
     Run the GNN for multiple steps with loss computation and graph updating at each step.
@@ -194,6 +195,8 @@ def run_gnn_scan_with_loss(
         layer_sizes: List of (nodes, group_size) tuples for each layer
         data_fraction: Fraction of data to use for loss computation (default: 1.0)
         scan_key: Random key for data sampling (required if data_fraction < 1.0)
+        gradient_checkpointing: If True, recompute model activations during backward pass
+            to save memory. Trades compute for memory - useful when num_steps is high.
 
     Returns:
         final_graph: The graph after all steps
@@ -217,11 +220,19 @@ def run_gnn_scan_with_loss(
         x_batch = x_data
         y_batch = y_data
 
+    # Optionally wrap model call with gradient checkpointing (remat)
+    # This recomputes model activations during backward pass to save memory
+    # We use nnx.remat instead of jax.checkpoint to properly handle NNX modules
+    if gradient_checkpointing:
+        model_fn = nnx.remat(lambda g: model(g))
+    else:
+        model_fn = model
+
     def gnn_step_with_loss(carry, _):
         current_graph = carry
 
-        # Apply GNN
-        model_updated_graph = model(current_graph)
+        # Apply GNN (potentially checkpointed)
+        model_updated_graph = model_fn(current_graph)
 
         # Compute loss and update graph
         updated_graph, loss, current_logits, aux = get_loss_and_update_graph(

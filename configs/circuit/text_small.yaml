@@ -1,0 +1,10 @@
+defaults:
+  - _base
+
+
+input_bits: 6
+output_bits: 8
+task: "text"
+text: "NCA Circuits!"
+# text: "==|||===|||=="
+# text: "Hello Neural CA! Self-Organizing Circuits are Real!"
