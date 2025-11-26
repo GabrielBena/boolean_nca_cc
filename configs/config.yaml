@@ -33,11 +33,18 @@ graph:
 training:
   # WIRING MODE : "random" or "fixed"
   wiring_mode: "random"  # Options: "fixed", "genetic", or "random"
-  initial_diversity: 256
+  initial_diversity: 1
   # INNER LOOP
-  n_message_steps: 25  # Number of message passing steps per training iteration
-  # LOSS TYPE
-  loss_type: "bce"  # Options: "l4", "l2", or "bce"
+  n_message_steps: 10  # Number of message passing steps per training iteration
+  # LOSS TYPE - Options:
+  # "l2", "l4": L-norm losses
+  # "bce": Standard binary cross-entropy
+  # "bce_w{W}": Weighted BCE (e.g., "bce_w2" = pos_weight=2.0, helps prevent all-zeros collapse)
+  # "focal": Focal loss (alpha=0.75, gamma=2.0) - down-weights easy examples
+  # "focal_a{A}_g{G}": Custom focal (e.g., "focal_a0.8_g3")
+  # "asym": Asymmetric loss (gamma_pos=0, gamma_neg=4) - specifically prevents all-zeros
+  # "asym_p{P}_n{N}": Custom asymmetric (e.g., "asym_p0_n5")
+  loss_type: "bce_w3"
   # DATA FRACTION
   data_per_batch: 64  # Number of data points per batch (null means use all data)
   # RANDOM LOSS STEP
@@ -126,8 +133,10 @@ eval:
   inner_steps: 100  # Number of message passing steps for inner loop evaluation
   # Periodic evaluation during training
   log_stepwise: false  # Whether to log detailed step-by-step metrics to wandb
-  batch_size: null  # Batch size for random wiring evaluation
+  batch_size_in: null  # Batch size for IN-distribution evaluation (None means use initial_diversity)
+  batch_size_out: null  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
   log_pool_scatter: true
+  do_ood_evaluation: null # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
   periodic:
     enabled: true  # Whether to run periodic evaluation during training
     interval: 1024  # Evaluate every N epochs

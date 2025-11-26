@@ -142,9 +142,9 @@ def res2loss(res, power=4):
 
 
 @jax.jit
-def binary_cross_entropy(y_pred, y_true):
+def binary_cross_entropy(y_pred, y_true, pos_weight: float = 1.0):
     """
-    Compute binary cross-entropy loss.
+    Compute binary cross-entropy loss with optional positive class weighting.
 
     This loss function is often more appropriate for binary classification tasks
     and can provide better gradients when outputs are interpreted as probabilities.
@@ -152,18 +152,78 @@ def binary_cross_entropy(y_pred, y_true):
     Args:
         y_pred: Predicted outputs (probabilities in [0,1])
         y_true: Target outputs (typically 0 or 1)
+        pos_weight: Weight for positive class (1s). Set >1 to penalize false negatives
+                    more heavily, which helps prevent collapse to all-zeros predictions.
 
     Returns:
         Loss value (scalar)
     """
-    # Using JAX's built-in logistic loss which is optimized and numerically stable
-    # For binary classification, this is equivalent to binary cross-entropy
-    return jp.sum(
-        optax.sigmoid_binary_cross_entropy(
-            logits=jp.log(jp.clip(y_pred, 1e-7, 1.0) / jp.clip(1.0 - y_pred, 1e-7, 1.0)),
-            labels=y_true,
-        )
-    )
+    eps = 1e-7
+    y_pred = jp.clip(y_pred, eps, 1.0 - eps)
+    
+    # Standard BCE: -[y*log(p) + (1-y)*log(1-p)]
+    # Weighted BCE: -[pos_weight*y*log(p) + (1-y)*log(1-p)]
+    bce = -(pos_weight * y_true * jp.log(y_pred) + (1.0 - y_true) * jp.log(1.0 - y_pred))
+    return jp.sum(bce)
+
+
+@jax.jit
+def focal_loss(y_pred, y_true, alpha: float = 0.75, gamma: float = 2.0):
+    """
+    Compute focal loss to handle class imbalance and prevent all-zeros collapse.
+    
+    Focal loss down-weights easy examples (confident predictions) and focuses
+    training on hard examples. This prevents the model from just predicting
+    all zeros when that's the "easy" solution.
+    
+    FL(p) = -alpha * (1-p)^gamma * y * log(p) - (1-alpha) * p^gamma * (1-y) * log(1-p)
+    
+    Args:
+        y_pred: Predicted outputs (probabilities in [0,1])
+        y_true: Target outputs (typically 0 or 1)
+        alpha: Weighting factor for positive class (default 0.75 = more weight on 1s)
+        gamma: Focusing parameter - higher values focus more on hard examples (default 2.0)
+    
+    Returns:
+        Loss value (scalar)
+    """
+    eps = 1e-7
+    y_pred = jp.clip(y_pred, eps, 1.0 - eps)
+    
+    # Focal loss components
+    # For y=1: -alpha * (1-p)^gamma * log(p)
+    # For y=0: -(1-alpha) * p^gamma * log(1-p)
+    pos_loss = -alpha * jp.power(1.0 - y_pred, gamma) * y_true * jp.log(y_pred)
+    neg_loss = -(1.0 - alpha) * jp.power(y_pred, gamma) * (1.0 - y_true) * jp.log(1.0 - y_pred)
+    
+    return jp.sum(pos_loss + neg_loss)
+
+
+@jax.jit
+def asymmetric_loss(y_pred, y_true, gamma_pos: float = 0.0, gamma_neg: float = 4.0):
+    """
+    Compute asymmetric loss - specifically designed to prevent all-zeros collapse.
+    
+    Uses different focusing parameters for positive and negative samples.
+    Higher gamma_neg down-weights easy negative predictions more aggressively.
+    
+    Args:
+        y_pred: Predicted outputs (probabilities in [0,1])
+        y_true: Target outputs (typically 0 or 1)
+        gamma_pos: Focusing param for positives (0 = no focusing, behaves like BCE)
+        gamma_neg: Focusing param for negatives (4 = heavily down-weight easy negatives)
+    
+    Returns:
+        Loss value (scalar)
+    """
+    eps = 1e-7
+    y_pred = jp.clip(y_pred, eps, 1.0 - eps)
+    
+    # Asymmetric focusing
+    pos_loss = -jp.power(1.0 - y_pred, gamma_pos) * y_true * jp.log(y_pred)
+    neg_loss = -jp.power(y_pred, gamma_neg) * (1.0 - y_true) * jp.log(1.0 - y_pred)
+    
+    return jp.sum(pos_loss + neg_loss)
 
 
 @jax.jit
@@ -190,19 +250,131 @@ def compute_accuracy(y_pred, y_true):
     return accuracy
 
 
-# Define loss functions for both types (L4 and BCE)
-def loss_f_l4(logits, wires, x, y0, gate_mask=None):
-    """L4 loss function variant (for JIT compilation)"""
+def parse_loss_type(loss_type: str):
+    """
+    Parse loss type string and return (loss_fn, loss_kwargs).
+    
+    Supported formats:
+        - "l2", "l4": L-norm losses
+        - "bce": Standard binary cross-entropy
+        - "bce_w{W}": Weighted BCE (e.g., "bce_w2" = pos_weight=2.0)
+        - "focal": Focal loss (alpha=0.75, gamma=2.0)
+        - "focal_a{A}_g{G}": Custom focal (e.g., "focal_a0.8_g3")
+        - "asym": Asymmetric loss (gamma_pos=0, gamma_neg=4)
+        - "asym_p{P}_n{N}": Custom asymmetric (e.g., "asym_p0_n5")
+    
+    Returns:
+        Tuple of (loss_name, kwargs) where loss_name is one of 
+        "l", "bce", "focal", "asym" and kwargs contains the parameters.
+    """
+    if loss_type == "bce":
+        return "bce", {"pos_weight": 1.0}
+    elif loss_type.startswith("bce_w"):
+        pos_weight = float(loss_type.split("_w")[1])
+        return "bce", {"pos_weight": pos_weight}
+    elif loss_type == "focal":
+        return "focal", {"alpha": 0.75, "gamma": 2.0}
+    elif loss_type.startswith("focal_"):
+        parts = loss_type.replace("focal_", "").split("_")
+        alpha, gamma = 0.75, 2.0
+        for part in parts:
+            if part.startswith("a"):
+                alpha = float(part[1:])
+            elif part.startswith("g"):
+                gamma = float(part[1:])
+        return "focal", {"alpha": alpha, "gamma": gamma}
+    elif loss_type == "asym":
+        return "asym", {"gamma_pos": 0.0, "gamma_neg": 4.0}
+    elif loss_type.startswith("asym_"):
+        parts = loss_type.replace("asym_", "").split("_")
+        gamma_pos, gamma_neg = 0.0, 4.0
+        for part in parts:
+            if part.startswith("p"):
+                gamma_pos = float(part[1:])
+            elif part.startswith("n"):
+                gamma_neg = float(part[1:])
+        return "asym", {"gamma_pos": gamma_pos, "gamma_neg": gamma_neg}
+    elif loss_type.startswith("l"):
+        assert len(loss_type) == 2, "Loss type must be of the form 'lX'"
+        power = int(loss_type[-1])
+        return "l", {"power": power}
+    else:
+        raise ValueError(f"Unknown loss_type: {loss_type}")
+
+
+def compute_loss_from_predictions(pred, pred_hard, y_target, loss_type: str):
+    """
+    Unified loss computation from predictions.
+    
+    This is the single source of truth for loss computation, used by both
+    backprop training (train.py) and GNN evaluation (evaluation.py).
+    
+    Args:
+        pred: Soft predictions (probabilities)
+        pred_hard: Hard predictions (rounded to 0/1)
+        y_target: Target values
+        loss_type: Loss type string (see parse_loss_type for formats)
+    
+    Returns:
+        Tuple of (loss, hard_loss, res, hard_res, accuracy, hard_accuracy)
+    """
+    # Always compute residuals
+    res = pred - y_target
+    hard_res = pred_hard - y_target
+    
+    # Parse loss type
+    loss_name, kwargs = parse_loss_type(loss_type)
+    
+    # Compute losses
+    if loss_name == "bce":
+        loss = binary_cross_entropy(pred, y_target, **kwargs)
+        hard_loss = binary_cross_entropy(pred_hard, y_target, **kwargs)
+    elif loss_name == "focal":
+        loss = focal_loss(pred, y_target, **kwargs)
+        hard_loss = focal_loss(pred_hard, y_target, **kwargs)
+    elif loss_name == "asym":
+        loss = asymmetric_loss(pred, y_target, **kwargs)
+        hard_loss = asymmetric_loss(pred_hard, y_target, **kwargs)
+    elif loss_name == "l":
+        loss = res2loss(res, **kwargs)
+        hard_loss = res2loss(hard_res, **kwargs)
+    else:
+        raise ValueError(f"Unknown loss_name: {loss_name}")
+    
+    # Compute accuracies
+    accuracy = compute_accuracy(pred, y_target)
+    hard_accuracy = compute_accuracy(pred_hard, y_target)
+    
+    return loss, hard_loss, res, hard_res, accuracy, hard_accuracy
+
+
+def loss_f(logits, wires, x, y0, loss_type="l4", gate_mask=None):
+    """
+    Compute loss for a circuit given input and target output.
+    
+    Supports all loss types: l2, l4, bce, bce_w*, focal, focal_*, asym, asym_*.
+
+    Args:
+        logits: List of logits for each layer
+        wires: List of wire connection patterns
+        x: Input tensor
+        y0: Target output tensor
+        loss_type: Type of loss (see parse_loss_type for all options)
+        gate_mask: Optional gate mask for circuit pruning
+
+    Returns:
+        Tuple of (loss_value, auxiliary_dict) where auxiliary_dict contains
+        intermediate activations and accuracy
+    """
     act = run_circuit(logits, wires, x, gate_mask=gate_mask)
     hard_act = run_circuit(logits, wires, x, gate_mask=gate_mask, hard=True)
     y = act[-1]
     hard_y = hard_act[-1]
-    res = y - y0
-    hard_res = hard_y - y0
-    loss = res2loss(res)
-    hard_loss = res2loss(hard_res)
-    accuracy = compute_accuracy(y, y0)
-    hard_accuracy = compute_accuracy(hard_y, y0)
+    
+    loss, hard_loss, res, hard_res, accuracy, hard_accuracy = compute_loss_from_predictions(
+        y, hard_y, y0, loss_type
+    )
+    
     return loss, {
         "act": act,
         "accuracy": accuracy,
@@ -213,51 +385,40 @@ def loss_f_l4(logits, wires, x, y0, gate_mask=None):
     }
 
 
+# Legacy functions for backward compatibility
+def loss_f_l4(logits, wires, x, y0, gate_mask=None):
+    """L4 loss function (backward compatible alias)."""
+    return loss_f(logits, wires, x, y0, loss_type="l4", gate_mask=gate_mask)
+
+
 def loss_f_bce(logits, wires, x, y0, gate_mask=None):
-    """BCE loss function variant (for JIT compilation)"""
-    act = run_circuit(logits, wires, x, gate_mask=gate_mask)
-    hard_act = run_circuit(logits, wires, x, gate_mask=gate_mask, hard=True)
-    y = act[-1]
-    hard_y = hard_act[-1]
-    loss = binary_cross_entropy(y, y0)
-    hard_loss = binary_cross_entropy(hard_y, y0)
-    accuracy = compute_accuracy(y, y0)
-    hard_accuracy = compute_accuracy(hard_y, y0)
-    return loss, {
-        "act": act,
-        "accuracy": accuracy,
-        "hard_loss": hard_loss,
-        "hard_accuracy": hard_accuracy,
-        "res": y - y0,
-        "hard_res": hard_y - y0,
-    }
+    """BCE loss function (backward compatible alias)."""
+    return loss_f(logits, wires, x, y0, loss_type="bce", gate_mask=gate_mask)
 
 
-# Pre-compile gradient functions for both loss types
+def loss_f_bce_w2(logits, wires, x, y0, gate_mask=None):
+    """Weighted BCE with pos_weight=2."""
+    return loss_f(logits, wires, x, y0, loss_type="bce_w2", gate_mask=gate_mask)
+
+
+def loss_f_bce_w3(logits, wires, x, y0, gate_mask=None):
+    """Weighted BCE with pos_weight=3."""
+    return loss_f(logits, wires, x, y0, loss_type="bce_w3", gate_mask=gate_mask)
+
+
+# Pre-compile gradient functions for common loss types
 grad_loss_f_l4 = jax.jit(jax.value_and_grad(loss_f_l4, has_aux=True))
 grad_loss_f_bce = jax.jit(jax.value_and_grad(loss_f_bce, has_aux=True))
+grad_loss_f_bce_w2 = jax.jit(jax.value_and_grad(loss_f_bce_w2, has_aux=True))
+grad_loss_f_bce_w3 = jax.jit(jax.value_and_grad(loss_f_bce_w3, has_aux=True))
 
-
-# Function dispatcher for loss computation (not used in training loop)
-def loss_f(logits, wires, x, y0, loss_type="l4", gate_mask=None):
-    """
-    Compute loss for a circuit given input and target output.
-
-    Args:
-        logits: List of logits for each layer
-        wires: List of wire connection patterns
-        x: Input tensor
-        y0: Target output tensor
-        loss_type: Type of loss to use ('l4' for L4 norm or 'bce' for binary cross-entropy)
-
-    Returns:
-        Tuple of (loss_value, auxiliary_dict) where auxiliary_dict contains
-        intermediate activations and accuracy
-    """
-    if loss_type == "bce":
-        return loss_f_bce(logits, wires, x, y0, gate_mask=gate_mask)
-    else:  # Default to L4 norm
-        return loss_f_l4(logits, wires, x, y0, gate_mask=gate_mask)
+# Generic gradient function (will be JIT-compiled per loss_type)
+def grad_loss_f(logits, wires, x, y0, loss_type="l4", gate_mask=None):
+    """Generic gradient function that works with any loss type."""
+    return jax.value_and_grad(
+        lambda lg: loss_f(lg, wires, x, y0, loss_type=loss_type, gate_mask=gate_mask),
+        has_aux=True
+    )(logits)
 
 
 # Define a named tuple for training state to improve code clarity
@@ -357,7 +518,7 @@ def train_step(
         wires: Wiring configuration for the circuit
         x: Training input batch
         y0: Training target output batch
-        loss_type: Type of loss to use ('l4' or 'bce')
+        loss_type: Type of loss (see parse_loss_type for all options)
         do_train: Whether to perform parameter updates (default True)
         gate_mask: Optional gate mask for circuit pruning
         x_test: Optional test input batch
@@ -373,13 +534,27 @@ def train_step(
 
     # Training step
     if do_train:
-        if loss_type == "bce":
+        # Use pre-compiled gradients for common cases, generic for others
+        if loss_type == "l4":
+            (train_loss, train_aux), grad = grad_loss_f_l4(
+                logits, wires, x, y0, gate_mask=gate_mask
+            )
+        elif loss_type == "bce":
             (train_loss, train_aux), grad = grad_loss_f_bce(
                 logits, wires, x, y0, gate_mask=gate_mask
             )
-        else:  # Default to L4 norm
-            (train_loss, train_aux), grad = grad_loss_f_l4(
+        elif loss_type == "bce_w2":
+            (train_loss, train_aux), grad = grad_loss_f_bce_w2(
                 logits, wires, x, y0, gate_mask=gate_mask
+            )
+        elif loss_type == "bce_w3":
+            (train_loss, train_aux), grad = grad_loss_f_bce_w3(
+                logits, wires, x, y0, gate_mask=gate_mask
+            )
+        else:
+            # Generic gradient for all other loss types
+            (train_loss, train_aux), grad = grad_loss_f(
+                logits, wires, x, y0, loss_type=loss_type, gate_mask=gate_mask
             )
 
         # Update parameters (without JIT since optimizer is a function)

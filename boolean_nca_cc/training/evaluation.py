@@ -14,9 +14,8 @@ from tqdm.auto import tqdm
 
 from boolean_nca_cc.circuits.model import run_circuit
 from boolean_nca_cc.circuits.train import (
-    binary_cross_entropy,
     compute_accuracy,
-    res2loss,
+    compute_loss_from_predictions,
 )
 from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention
 from boolean_nca_cc.utils import (
@@ -49,31 +48,22 @@ def get_loss_from_wires_logits(
     y_target,
     loss_type: str,
 ):
-    # Run circuit and calculate loss
+    """
+    Run circuit and calculate loss.
+    
+    Uses the unified compute_loss_from_predictions from circuits.train.
+    See parse_loss_type() for all supported loss_type values.
+    """
+    # Run circuit
     acts = run_circuit(logits, wires, x)
     pred = acts[-1]
     acts_hard = run_circuit(logits, wires, x, hard=True)
     pred_hard = acts_hard[-1]
 
-    # Always compute residuals (loss-agnostic error signals)
-    res = pred - y_target  # Raw error signal for soft predictions
-    hard_res = pred_hard - y_target  # Raw error signal for hard predictions
-
-    # Compute losses based on the specific loss type
-    if loss_type == "bce":
-        loss = binary_cross_entropy(pred, y_target)
-        hard_loss = binary_cross_entropy(pred_hard, y_target)
-    elif loss_type.startswith("l"):
-        assert len(loss_type) == 2, "Loss type must be of the form 'lX'"
-        # Get power from loss_type
-        power = int(loss_type[-1])
-        loss = res2loss(res, power=power)
-        hard_loss = res2loss(hard_res, power=power)
-    else:
-        raise ValueError(f"Unknown loss_type: {loss_type}")
-
-    accuracy = compute_accuracy(pred, y_target)
-    hard_accuracy = compute_accuracy(pred_hard, y_target)
+    # Use unified loss computation
+    loss, hard_loss, res, hard_res, accuracy, hard_accuracy = compute_loss_from_predictions(
+        pred, pred_hard, y_target, loss_type
+    )
 
     return loss, (
         hard_loss,

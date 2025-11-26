@@ -689,7 +689,9 @@ def train_model(
     periodic_eval_interval: int = 1024,
     periodic_eval_test_seed: int = 42,
     periodic_eval_log_stepwise: bool = False,
-    periodic_eval_batch_size: int = None,  # Batch size for random wiring evaluation
+    periodic_eval_batch_size_in: int | None = None,  # Batch size for IN-distribution evaluation (None means use initial_diversity)
+    periodic_eval_batch_size_out: int | None = None,  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
+    periodic_eval_do_ood_evaluation: bool | None = None, # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
     periodic_eval_log_pool_scatter: bool = False,
     # Wandb parameters
     wandb_logging: bool = False,
@@ -755,7 +757,9 @@ def train_model(
         periodic_eval_interval: Interval for periodic evaluation
         periodic_eval_test_seed: Seed for periodic evaluation test circuit generation
         periodic_eval_log_stepwise: Whether to log step-by-step evaluation metrics
-        periodic_eval_batch_size: Batch size for random wiring evaluation (None means use meta_batch_size)
+        periodic_eval_batch_size_in: Batch size for IN-distribution evaluation (None means use initial_diversity)
+        periodic_eval_batch_size_out: Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
+        periodic_eval_do_ood_evaluation: Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
         wandb_logging: Whether to log metrics to wandb
         log_interval: Interval for logging metrics
         wandb_run_config: Configuration to pass to wandb
@@ -839,7 +843,7 @@ def train_model(
         circuit_hidden_dim=circuit_hidden_dim,
         loss_value=0.0,  # Initial loss will be calculated properly in first step
         wiring_mode=wiring_mode,
-        initial_diversity=initial_diversity,
+        initial_diversity=initial_diversity if wiring_mode in ["fixed", "genetic"] else pool_size,
     )
 
     # =========================================================================
@@ -1248,9 +1252,9 @@ def train_model(
             training_initial_diversity=initial_diversity,
             layer_sizes=layer_sizes,
             arity=arity,
-            eval_batch_size=periodic_eval_batch_size
-            if periodic_eval_batch_size is not None
-            else meta_batch_size,
+            eval_batch_size_in=periodic_eval_batch_size_in if periodic_eval_batch_size_in is not None else initial_diversity,
+            eval_batch_size_out=periodic_eval_batch_size_out if periodic_eval_batch_size_out is not None else meta_batch_size,
+            do_ood_evaluation=periodic_eval_do_ood_evaluation if periodic_eval_do_ood_evaluation is not None else wiring_mode == "random",
         )
 
         log.info(eval_datasets.get_summary())
@@ -1363,7 +1367,7 @@ def train_model(
                         arity=arity,
                         circuit_hidden_dim=circuit_hidden_dim,
                         wiring_mode=wiring_mode,
-                        initial_diversity=initial_diversity,
+                        initial_diversity=initial_diversity if wiring_mode == "fixed" else pool_size,
                     )
 
                     # Reset a fraction of the pool and get avg steps of reset graphs

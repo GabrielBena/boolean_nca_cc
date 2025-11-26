@@ -38,7 +38,7 @@ import wandb
 from boolean_nca_cc import generate_layer_sizes
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.circuits.tasks import get_task_data
-from boolean_nca_cc.circuits.train import TrainState, loss_f_bce, loss_f_l4, train_step
+from boolean_nca_cc.circuits.train import TrainState, loss_f, train_step
 from boolean_nca_cc.training.checkpointing import save_checkpoint
 from boolean_nca_cc.training.eval_datasets import (
     create_unified_evaluation_datasets,
@@ -180,9 +180,8 @@ def run_backpropagation_training(cfg, x_data, y_data, loss_type="l4"):
             hard_loss=hard_loss,
         )
 
-    # Final evaluation (using the appropriate loss function directly for clarity)
-    loss_fn = loss_f_l4 if loss_type == "l4" else loss_f_bce
-    final_loss, final_aux_metrics = loss_fn(state.params, wires, x_data, y_data)
+    # Final evaluation (using the unified loss function)
+    final_loss, final_aux_metrics = loss_f(state.params, wires, x_data, y_data, loss_type=loss_type)
     final_accuracy = float(final_aux_metrics["accuracy"])
     final_hard_accuracy = float(final_aux_metrics["hard_accuracy"])
     final_hard_loss = float(final_aux_metrics["hard_loss"])
@@ -793,7 +792,9 @@ def main(cfg: DictConfig) -> None:
         periodic_eval_inner_steps=cfg.eval.inner_steps,
         periodic_eval_test_seed=cfg.test_seed,
         periodic_eval_log_stepwise=cfg.eval.log_stepwise,
-        periodic_eval_batch_size=cfg.eval.batch_size,
+        periodic_eval_batch_size_in=cfg.eval.batch_size_in,
+        periodic_eval_batch_size_out=cfg.eval.batch_size_out,
+        periodic_eval_do_ood_evaluation=cfg.eval.do_ood_evaluation,
         periodic_eval_log_pool_scatter=cfg.eval.log_pool_scatter,
         # WandB parameters
         wandb_logging=cfg.wandb.enabled,
@@ -840,8 +841,11 @@ def main(cfg: DictConfig) -> None:
         training_initial_diversity=cfg.pool.initial_diversity,
         layer_sizes=layer_sizes,
         arity=cfg.circuit.arity,
-        eval_batch_size=cfg.eval.batch_size
-        if cfg.eval.batch_size is not None
+        eval_batch_size_in=cfg.eval.batch_size_in
+        if cfg.eval.batch_size_in is not None
+        else cfg.training.initial_diversity,
+        eval_batch_size_out=cfg.eval.batch_size_out
+        if cfg.eval.batch_size_out is not None
         else cfg.training.meta_batch_size,
     )
 

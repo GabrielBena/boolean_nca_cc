@@ -80,7 +80,9 @@ def create_unified_evaluation_datasets(
     training_initial_diversity: int,
     layer_sizes: list[tuple[int, int]],
     arity: int,
-    eval_batch_size: int,
+    eval_batch_size_in: int,
+    eval_batch_size_out: int,
+    do_ood_evaluation: bool = True,
 ) -> UnifiedEvaluationDatasets:
     """
     Create unified evaluation datasets that properly match training patterns.
@@ -95,7 +97,9 @@ def create_unified_evaluation_datasets(
         training_initial_diversity: The initial diversity used in training
         layer_sizes: Circuit layer configuration
         arity: Number of inputs per gate
-        eval_batch_size: Number of circuits in each evaluation set
+        eval_batch_size_in: Number of circuits in each IN-distribution evaluation set
+        eval_batch_size_out: Number of circuits in each OUT-of-distribution evaluation set
+        do_ood_evaluation: Whether to create OUT-of-distribution evaluation circuits    
 
     Returns:
         UnifiedEvaluationDatasets object containing IN and OUT distribution circuits
@@ -117,7 +121,7 @@ def create_unified_evaluation_datasets(
                 rng=in_distribution_key,
                 layer_sizes=layer_sizes,
                 arity=arity,
-                batch_size=eval_batch_size,
+                batch_size=eval_batch_size_in,
                 wiring_mode=training_wiring_mode,
                 initial_diversity=training_initial_diversity,
             )
@@ -126,17 +130,20 @@ def create_unified_evaluation_datasets(
         in_distribution_wires, in_distribution_logits, in_actual_batch_size = (None, None, None)
 
     # 2. Create OUT-of-distribution circuits (always random)
-    log.info("Creating OUT-of-distribution evaluation circuits...")
-    out_distribution_wires, out_distribution_logits, out_actual_batch_size = (
-        _create_circuit_batch_with_pattern(
-            rng=out_of_distribution_key,
-            layer_sizes=layer_sizes,
-            arity=arity,
-            batch_size=eval_batch_size,
-            wiring_mode="random",  # Always random for OOD
-            initial_diversity=eval_batch_size,  # Full diversity for OOD
+    if do_ood_evaluation:
+        log.info("Creating OUT-of-distribution evaluation circuits...")
+        out_distribution_wires, out_distribution_logits, out_actual_batch_size = (
+            _create_circuit_batch_with_pattern(
+                rng=out_of_distribution_key,
+                layer_sizes=layer_sizes,
+                arity=arity,
+                batch_size=eval_batch_size_out,
+                wiring_mode="random",  # Always random for OOD
+                initial_diversity=eval_batch_size_out,  # Full diversity for OOD
+            )
         )
-    )
+    else:
+        out_distribution_wires, out_distribution_logits, out_actual_batch_size = (None, None, None)
 
     # Store training configuration for reference
     training_config = {
@@ -152,13 +159,12 @@ def create_unified_evaluation_datasets(
         in_distribution_logits=in_distribution_logits,
         out_of_distribution_wires=out_distribution_wires,
         out_of_distribution_logits=out_distribution_logits,
-        target_batch_size=eval_batch_size,
+        target_batch_size=max(eval_batch_size_in, eval_batch_size_out),
         in_actual_batch_size=in_actual_batch_size,
         out_actual_batch_size=out_actual_batch_size,
         training_config=training_config,
     )
 
-    log.info(datasets.get_summary())
     return datasets
 
 
@@ -184,7 +190,7 @@ def _create_circuit_batch_with_pattern(
         arity: Number of inputs per gate
         batch_size: Target batch size (may be exceeded to cover all unique wirings)
         wiring_mode: Wiring generation mode ("fixed", "random", "genetic")
-        initial_diversity: Number of unique wirings to start with
+        initial_diversity: Number of unique wirings to start with (only used for fixed and genetic modes)
 
     Returns:
         Tuple of (batch_wires, batch_logits, actual_batch_size) lists
