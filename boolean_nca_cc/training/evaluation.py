@@ -148,6 +148,7 @@ def evaluate_model_stepwise_generator(
     layer_neighbors: bool = False,
     knockout_pattern: Optional[jp.ndarray] = None,
     reset_step_counter_on_init: bool = False,
+    blind_mode: bool = False,
 ) -> Generator[StepResult, None, None]:
     """
     Generator that yields step-by-step evaluation results for GNN model optimization.
@@ -214,7 +215,11 @@ def evaluate_model_stepwise_generator(
         globals=jp.array([initial_loss, current_update_steps], dtype=jp.float32)
     )
 
-    graph = update_output_node_loss(graph, layer_sizes, initial_res.mean(axis=0))
+    initial_res_for_update = initial_res
+    if blind_mode:
+        initial_res_for_update = jp.zeros_like(initial_res)
+
+    graph = update_output_node_loss(graph, layer_sizes, initial_res_for_update.mean(axis=0))
 
     # Debug: Log initial graph globals
     initial_globals_loss = float(graph.globals[0]) if graph.globals is not None else 0.0
@@ -279,6 +284,12 @@ def evaluate_model_stepwise_generator(
             res,
             hard_res,
         ) = aux
+
+        if blind_mode:
+            # Overwrite the loss update performed by get_loss_and_update_graph
+            updated_graph = update_output_node_loss(
+                updated_graph, layer_sizes, jp.zeros_like(res).mean(axis=0)
+            )
 
         # Update with the computed loss and incremented update_steps (EXACTLY like training)
         updated_graph = updated_graph._replace(
@@ -424,6 +435,7 @@ def evaluate_model_stepwise_batched(
     damage_start_offset_seed: int = 42,  # Seed for random offset generation
     # Vocabulary-based evaluation parameters
     knockout_vocabulary: Optional[jp.ndarray] = None,  # If provided => seen (sample from vocab); else => unseen (fresh)
+    blind_mode: bool = False,  # If True, force loss feedback to zero (ablation study)
 ) -> Dict:
     """
     Evaluate GNN performance on a batch of circuits by running message passing steps
@@ -447,6 +459,9 @@ def evaluate_model_stepwise_batched(
         damage_mode: Pattern type for damage generation
         damage_injection_mode: "single" or "multi" damage per circuit
         max_damage_per_circuit: Maximum damage events per circuit
+        blind_mode: If True, zeroes out the loss signal fed back to the GNN.
+                    Used to test if the GNN generalizes structurally (Architect)
+                    or relies on test-time optimization (Technician).
 
     Returns:
         Dictionary with averaged metrics collected at each step.
@@ -558,6 +573,7 @@ def evaluate_model_stepwise_batched(
         damage_start_offset_random=damage_start_offset_random,
         damage_start_offset_seed=damage_start_offset_seed,
         knockout_vocabulary=knockout_vocabulary,
+        blind_mode=blind_mode,
     )
 
 def evaluate_circuits_in_chunks(
@@ -673,6 +689,7 @@ def _evaluate_with_loop(
     damage_start_offset_seed: int = 42,  # Seed for random offset generation
     # Vocabulary-based evaluation parameters
     knockout_vocabulary: Optional[jp.ndarray] = None,  # If provided => seen; else => unseen (fresh)
+    blind_mode: bool = False,
 ) -> Dict:
     """
     Evaluate using loop mode (original behavior).
@@ -866,8 +883,14 @@ def _evaluate_with_loop(
             _,
         ) = [aux_elem for aux_elem in current_aux]
 
+        # In blind mode, we zero out the residuals before updating the graph
+        # This prevents the GNN from seeing the error signal (test-time optimization ablation)
+        graph_update_res = current_res
+        if blind_mode:
+            graph_update_res = jp.zeros_like(current_res)
+
         # Update output node losses
-        updated_graphs = vmap_update_loss(updated_graphs, current_res)
+        updated_graphs = vmap_update_loss(updated_graphs, graph_update_res)
 
         # Update globals with new losses and incremented steps
         current_steps = updated_graphs.globals[:, 1] + 1
