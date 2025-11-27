@@ -43,27 +43,7 @@ Adding input combination splits enables:
 
 ## Proposed Changes
 
-### 1. Naming Convention Update
-
-**Knockout Patterns** (structural damage):
-- `eval_ko_pattern_seen`: Knockout patterns from training vocabulary
-- `eval_ko_pattern_unseen`: Fresh knockout patterns (same distribution)
-
-**Input Combinations** (functional inputs):
-- `eval_input_train`: Training input combinations (used during training)
-- `eval_input_test`: Test input combinations (held out during training)
-
-**Combined Evaluations**:
-- `eval_ko_pattern_seen_input_train`: Seen patterns + training inputs
-- `eval_ko_pattern_seen_input_test`: Seen patterns + test inputs
-- `eval_ko_pattern_unseen_input_train`: Unseen patterns + training inputs
-- `eval_ko_pattern_unseen_input_test`: Unseen patterns + test inputs
-
-**Backward Compatibility**:
-- Keep `eval_ko_in`/`eval_ko_out` as aliases for `eval_ko_pattern_seen`/`eval_ko_pattern_unseen`
-- Document that these refer to knockout patterns, not input combinations
-
-### 2. New Components
+### 1. New Components
 
 #### A. Data Splitting Utility (`boolean_nca_cc/circuits/data_split.py`)
 
@@ -127,12 +107,32 @@ eval:
 
 #### D. Evaluation Updates (`boolean_nca_cc/training/evaluation.py`)
 
-**Changes**:
+**Changes** (implemented in Phase 2):
 1. Update `run_knockout_periodic_evaluation()` to accept test input combinations
 2. Add evaluation metrics for input combination splits
-3. Update metric naming to reflect both dimensions
+3. Implement new naming convention to reflect both dimensions (see Naming Convention section below)
 
-**Evaluation Matrix**:
+### 2. Naming Convention Update (Implemented in Phase 2, Not Phase 1)
+
+**Knockout Patterns** (structural damage):
+- `eval_ko_pattern_seen`: Knockout patterns from training vocabulary
+- `eval_ko_pattern_unseen`: Fresh knockout patterns (same distribution)
+
+**Input Combinations** (functional inputs):
+- `eval_input_train`: Training input combinations (used during training)
+- `eval_input_test`: Test input combinations (held out during training)
+
+**Combined Evaluations**:
+- `eval_ko_pattern_seen_input_train`: Seen patterns + training inputs
+- `eval_ko_pattern_seen_input_test`: Seen patterns + test inputs
+- `eval_ko_pattern_unseen_input_train`: Unseen patterns + training inputs
+- `eval_ko_pattern_unseen_input_test`: Unseen patterns + test inputs
+
+**Backward Compatibility**:
+- Keep `eval_ko_in`/`eval_ko_out` as aliases for `eval_ko_pattern_seen`/`eval_ko_pattern_unseen`
+- Document that these refer to knockout patterns, not input combinations
+
+**Evaluation Matrix** (implemented in Phase 2):
 
 | Knockout Pattern | Input Combination | Metric Name |
 |-----------------|-------------------|-------------|
@@ -140,6 +140,8 @@ eval:
 | Seen (vocab) | Test | `eval_ko_pattern_seen_input_test` |
 | Unseen (fresh) | Train | `eval_ko_pattern_unseen_input_train` |
 | Unseen (fresh) | Test | `eval_ko_pattern_unseen_input_test` |
+
+**Note**: This naming convention update is implemented in Phase 2 when evaluation functions are updated. Phase 1 focuses on infrastructure only and preserves existing `eval_ko_in`/`eval_ko_out` naming.
 
 ### 3. Implementation Strategy
 
@@ -157,6 +159,7 @@ eval:
 3. **Update training loop signature**
    - Add optional parameters for input splitting
    - Default values preserve existing behavior
+   - **No naming convention changes** - keep existing `eval_ko_in`/`eval_ko_out` naming
 
 #### Phase 2: Integration (Opt-in Feature)
 
@@ -168,11 +171,16 @@ eval:
 2. **Update evaluation functions**
    - Accept test input combinations as optional parameters
    - Compute metrics for both train and test inputs
-   - Use new naming convention
 
-3. **Update metric logging**
-   - Log all four combinations (seen/unseen × train/test)
-   - Maintain backward compatibility with existing metrics
+3. **Implement naming convention update**
+   - Introduce new metric names: `eval_ko_pattern_seen`/`eval_ko_pattern_unseen` (replacing `eval_ko_in`/`eval_ko_out`)
+   - When input split enabled, use combined names: `eval_ko_pattern_seen_input_train`, `eval_ko_pattern_seen_input_test`, etc.
+   - Keep `eval_ko_in`/`eval_ko_out` as aliases for backward compatibility
+   - When input split disabled, continue using `eval_ko_in`/`eval_ko_out` only
+
+4. **Update metric logging**
+   - Log all four combinations (seen/unseen × train/test) when input split enabled
+   - Maintain backward compatibility with existing metrics (`eval_ko_in`/`eval_ko_out`)
 
 #### Phase 3: Documentation and Testing
 
@@ -257,8 +265,12 @@ run_knockout_periodic_evaluation():
 ### Default Behavior (No Changes)
 
 - `input_split_enabled: false` → Uses all data for training and evaluation
-- Existing metrics (`eval_ko_in`/`eval_ko_out`) continue to work
+- Existing metrics (`eval_ko_in`/`eval_ko_out`) continue to work throughout all phases
 - No breaking changes to function signatures (all new parameters optional)
+- **Phase 1**: No naming convention changes - keep `eval_ko_in`/`eval_ko_out` as-is
+- **Phase 2**: New naming convention introduced, with `eval_ko_in`/`eval_ko_out` as aliases for backward compatibility
+- Phase 1: No naming convention changes - existing names preserved
+- Phase 2: New naming convention added alongside existing names (backward compatible)
 
 ### Migration Path
 
@@ -336,7 +348,7 @@ eval:
 
 ### WandB Metrics
 
-New metrics logged:
+**When input splits are enabled** (Phase 2), new metrics will be logged:
 - `eval_ko_pattern_seen_input_train/final_hard_accuracy`
 - `eval_ko_pattern_seen_input_test/final_hard_accuracy`
 - `eval_ko_pattern_unseen_input_train/final_hard_accuracy`
@@ -346,6 +358,8 @@ Plus corresponding metrics for:
 - `final_loss`
 - `final_hard_loss`
 - `final_accuracy`
+
+**Backward compatibility**: Existing metrics (`eval_ko_in`/`eval_ko_out`) continue to work unchanged when splits are disabled.
 
 ### Metric Interpretation
 

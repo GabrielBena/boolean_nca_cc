@@ -26,8 +26,8 @@ wandb:
 # Circuit configuration
 circuit:
   task: "binary_multiply"
-  input_bits: 8
-  output_bits: 8
+  input_bits: 12
+  output_bits: 12
   arity: 4
   num_layers: 3
   layer_sizes: null  # Auto-generate if null 
@@ -100,6 +100,11 @@ eval:
   periodic_eval_log_stepwise: true
   periodic_eval_batch_size: ${pool.damage_knockout_diversity}  # Batch size for knockout evaluation (should match knockout_diversity)
   
+  # Input combination train/test split
+  input_split_enabled: true       # Enable train/test split on input combinations
+  input_train_fraction: 0.8       # Fraction of combinations for training (0.8 = 80% train, 20% test)
+  input_split_seed: ${test_seed}  # Seed for reproducible split
+  
   # Knockout evaluation
   knockout_eval:
     enabled: ${pool.damage_pool_enabled}  # Disabled for zero-damage training - will use no-damage evaluation instead
@@ -144,10 +149,10 @@ checkpoint:
 
 # Early stopping configuration
 early_stop:
-  enabled: true  # Enable early stopping based on accuracy threshold
+  enabled: false  # Enable early stopping based on accuracy threshold
   threshold: 1  # Accuracy threshold to trigger early stopping
   metric: "hard_accuracy"  # Metric to monitor: "loss", "hard_loss", "accuracy", "hard_accuracy"
-  source: "eval_ko_in"  # Source for early stopping metric: "training", "eval" (auto-fallback), "eval_ko_in", or "eval_no_damage"
+  source: "eval_no_damage"  # Source for early stopping metric: "training", "eval" (auto-fallback), "eval_ko_in", or "eval_no_damage"
   # "eval" will automatically use eval_no_damage when knockout_eval is disabled
   patience: 2  # Number of evaluations above threshold before stopping (since eval runs every 1024 epochs)
   min_epochs: 3072  # Minimum epochs before early stopping can trigger

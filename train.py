@@ -400,6 +400,10 @@ def main(cfg: DictConfig) -> None:
         periodic_eval_test_seed=cfg.eval.get("periodic_eval_test_seed", 42),
         periodic_eval_log_stepwise=cfg.eval.get("periodic_eval_log_stepwise", False),
         periodic_eval_batch_size=cfg.eval.get("periodic_eval_batch_size", 16),
+        # Input combination train/test split parameters
+        input_split_enabled=cfg.eval.get("input_split_enabled", False),
+        input_train_fraction=cfg.eval.get("input_train_fraction", 0.8),
+        input_split_seed=cfg.eval.get("input_split_seed", 42),
         # WandB parameters
         wandb_logging=cfg.wandb.enabled,
         log_interval=cfg.logging.log_interval,

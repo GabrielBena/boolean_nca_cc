@@ -15,7 +15,7 @@ import hashlib
 import logging
 import random
 from pathlib import Path
-from typing import List, Tuple, Dict, Set, Optional
+from typing import List, Tuple, Dict, Set, Optional, Callable
 import numpy as np
 import jax
 import jax.numpy as jp
@@ -846,6 +846,9 @@ def _execute_dfs_phase(
     max_steps: int = 15,
     damage_behavior: str = "reversible",
     max_retry_attempts: int = 0,
+    # Checkpoint callback
+    checkpoint_callback: Optional[Callable] = None,
+    root_hash: Optional[str] = None,
 ) -> Tuple[int, int]:
     """
     Execute a DFS phase starting from given nodes.
@@ -879,6 +882,19 @@ def _execute_dfs_phase(
             f"(Discovered: {len(unique_solutions)})"
         )
         
+        # Periodic checkpointing (every N solutions discovered)
+        if checkpoint_callback is not None and len(unique_solutions) > 0:
+            try:
+                checkpoint_callback(
+                    unique_solutions=unique_solutions,
+                    exploration_graph=exploration_graph,
+                    edges=edges,
+                    exploration_results=exploration_results,
+                    root_hash=root_hash,
+                )
+            except Exception as e:
+                log.warning(f"Error during checkpoint: {e}")
+        
         # Sample perturbations for this node
         level_rng = jax.random.PRNGKey(42 + depth)
         num_patterns = min(perturbations_per_node, len(knockout_vocabulary))
@@ -888,6 +904,8 @@ def _execute_dfs_phase(
         
         # Track if we got a successful functional recovery (for retry logic)
         successful_recovery = None
+        # Track all unique functional recoveries to add to stack
+        unique_functional_recoveries = []
         
         # Process perturbations in reverse order so we explore first one first (LIFO)
         for pattern_idx in reversed(pattern_indices):
@@ -954,6 +972,8 @@ def _execute_dfs_phase(
                     unique_solutions[recovered_hash] = recovered_logits
                     discovered_circuits.append((recovered_hash, recovered_logits))
                     circuit_depths[recovered_hash] = depth + 1
+                    # Track unique functional recoveries for DFS continuation
+                    unique_functional_recoveries.append((recovered_hash, recovered_logits))
                 
                 # For single perturbation mode, break early after first success
                 if perturbations_per_node == 1:
@@ -1058,12 +1078,22 @@ def _execute_dfs_phase(
                             unique_solutions[recovered_hash] = recovered_logits
                             discovered_circuits.append((recovered_hash, recovered_logits))
                             circuit_depths[recovered_hash] = depth + 1
+                            # Track unique functional recoveries for DFS continuation
+                            unique_functional_recoveries.append((recovered_hash, recovered_logits))
                         
                         # Stop retrying once we get a successful recovery
                         break
         
-        # Add to stack for next depth only if we got a successful functional recovery
-        if successful_recovery is not None:
+        # Add to stack for next depth: add all unique functional recoveries
+        # This allows DFS to continue even if some recoveries were revisits
+        if unique_functional_recoveries:
+            if depth + 1 < base_depth + depth_limit:
+                for recovered_hash, recovered_logits in unique_functional_recoveries:
+                    if recovered_hash not in visited_dfs:
+                        stack.append((recovered_hash, recovered_logits, depth + 1))
+        elif successful_recovery is not None:
+            # Fallback: if no unique recoveries but we have a functional recovery, use it
+            # (this handles the case where all recoveries were revisits but we still want to continue)
             recovered_hash, recovered_logits = successful_recovery
             if depth + 1 < base_depth + depth_limit:
                 if recovered_hash not in visited_dfs:
@@ -1105,6 +1135,11 @@ def explore_degenerate_solutions(
     max_steps: int = 15,
     damage_behavior: str = "reversible",
     max_retry_attempts: int = 0,
+    # Checkpoint parameters
+    output_dir: Optional[Path] = None,
+    checkpoint_interval: int = 1000,
+    task_name: str = "binary_multiply",
+    exploration_config: Optional[Dict] = None,
 ) -> Dict:
     """
     Explore degenerate solutions using flexible phase-based or legacy strategies.
@@ -1256,6 +1291,57 @@ def explore_degenerate_solutions(
     # Track circuit depths for phase-based exploration
     circuit_depths: Dict[str, int] = {root_hash: 0}
     
+    # Create checkpoint callback if output_dir is provided
+    checkpoint_callback = None
+    if output_dir is not None:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        def create_checkpoint_callback(interval, wires, layer_sizes, task_name, exploration_config):
+            last_checkpoint_count = [0]  # Use list to allow modification in closure
+            def callback(**kwargs):
+                current_count = len(kwargs.get("unique_solutions", {}))
+                if current_count - last_checkpoint_count[0] >= interval:
+                    # Build results dictionary in the same format as explore_degenerate_solutions returns
+                    exploration_results_list = kwargs.get("exploration_results", [])
+                    unique_solutions_dict = kwargs.get("unique_solutions", {})
+                    total_perturbations = len(exploration_results_list)
+                    functional_recoveries = sum(1 for r in exploration_results_list if r.get("is_functional", False))
+                    perturbation_efficiency = len(unique_solutions_dict) / total_perturbations if total_perturbations > 0 else 0.0
+                    
+                    results_dict = {
+                        "unique_solutions": unique_solutions_dict,
+                        "exploration_results": exploration_results_list,
+                        "exploration_graph": kwargs.get("exploration_graph", {}),
+                        "edges": kwargs.get("edges", []),
+                        "summary": {
+                            "total_perturbations": total_perturbations,
+                            "successful_recoveries": total_perturbations,  # Approximate (all perturbations that returned results)
+                            "functional_recoveries": functional_recoveries,
+                            "unique_solutions": len(unique_solutions_dict),
+                            "perturbation_efficiency": perturbation_efficiency,
+                            "strategy": exploration_config.get("exploration_strategy", "phases"),
+                        },
+                        "root_hash": kwargs.get("root_hash", root_hash),
+                    }
+                    # Use save_exploration_results to maintain same format
+                    save_exploration_results(
+                        results=results_dict,
+                        output_dir=output_dir,
+                        wires=wires,
+                        layer_sizes=layer_sizes,
+                        task_name=task_name,
+                        exploration_config=exploration_config or {},
+                    )
+                    last_checkpoint_count[0] = current_count
+                    log.info(f"Checkpoint saved: {current_count} solutions in {output_dir}")
+            return callback
+        
+        checkpoint_callback = create_checkpoint_callback(
+            checkpoint_interval, root_wires, layer_sizes, task_name, exploration_config or {}
+        )
+        log.info(f"Checkpointing enabled: {output_dir} (every {checkpoint_interval} solutions)")
+    
     # ============================================================================
     # Phase-Based Exploration (if strategy is "phases")
     # ============================================================================
@@ -1394,6 +1480,8 @@ def explore_degenerate_solutions(
                     max_steps=max_steps,
                     damage_behavior=damage_behavior,
                     max_retry_attempts=max_retry_attempts,
+                    checkpoint_callback=checkpoint_callback,
+                    root_hash=root_hash,
                 )
             else:
                 raise ValueError(f"Invalid phase_type: {phase_type}")
@@ -1786,6 +1874,50 @@ def explore_degenerate_solutions(
     }
 
 
+def generate_exploration_name(
+    exploration_strategy: str,
+    phases: Optional[List[Tuple[str, int, int, str, Optional[int]]]] = None,
+    phases_string: Optional[str] = None,
+) -> str:
+    """
+    Generate a descriptive name for the exploration run based on strategy and phases.
+    
+    Examples:
+        - "dfs:50:3:root" -> "DFS_50_3_ROOT"
+        - "bfs:2:100:root,dfs:5:1:frontier" -> "BFS_2_100_ROOT_DFS_5_1_FRONTIER"
+        - "hybrid" -> "HYBRID"
+    
+    Args:
+        exploration_strategy: Strategy name ("phases", "hybrid", "bfs", etc.)
+        phases: List of phase tuples (if available)
+        phases_string: Original phases string (if phases not parsed yet)
+        
+    Returns:
+        Descriptive name string
+    """
+    if exploration_strategy == "phases" and phases is not None:
+        # Generate name from phases
+        phase_parts = []
+        for phase_type, depth_limit, perturbations_per_node, start_from, max_frontier_nodes in phases:
+            phase_name = phase_type.upper()
+            start_name = start_from.upper()
+            if max_frontier_nodes is not None:
+                start_name = f"{start_name}_{max_frontier_nodes}"
+            phase_parts.append(f"{phase_name}_{depth_limit}_{perturbations_per_node}_{start_name}")
+        return "_".join(phase_parts)
+    elif exploration_strategy == "phases" and phases_string is not None:
+        # Parse phases_string to generate name
+        try:
+            parsed_phases = parse_phase_specification(phases_string)
+            return generate_exploration_name(exploration_strategy, parsed_phases, None)
+        except:
+            # Fallback to strategy name if parsing fails
+            return exploration_strategy.upper()
+    else:
+        # Use strategy name for non-phase strategies
+        return exploration_strategy.upper()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Explore degenerate circuit solution spaces"
@@ -1996,6 +2128,12 @@ def main():
         help="Don't save exploration results to disk (default: save results)",
     )
     parser.add_argument(
+        "--checkpoint-interval",
+        type=int,
+        default=1000,
+        help="Save checkpoint every N unique solutions discovered (default: 1000). Checkpoints overwrite the same output directory, so visualize_umap.py can always use the latest results.",
+    )
+    parser.add_argument(
         "--max-retry-attempts",
         type=int,
         default=0,
@@ -2196,6 +2334,54 @@ def main():
             log.error(f"Traceback: {traceback.format_exc()}")
             raise
     
+    # Prepare exploration config and output directory BEFORE running exploration
+    # (so checkpoints can be saved during exploration)
+    exploration_config = {
+        "exploration_strategy": args.exploration_strategy,
+        "bfs_depth": args.bfs_depth,
+        "bfs_perturbations_per_level": args.bfs_perturbations_per_level,
+        "random_walk_iterations": args.random_walk_iterations,
+        "random_walk_seed": args.random_walk_seed,
+        "damage_prob": args.damage_prob,
+        "epochs": args.epochs,
+        "learning_rate": args.learning_rate,
+        "optimizer": args.optimizer,
+        "weight_decay": args.weight_decay,
+        "beta1": args.beta1,
+        "beta2": args.beta2,
+        "functional_threshold": args.functional_threshold,
+        "input_bits": args.input_bits,
+        "output_bits": args.output_bits,
+    }
+    if args.exploration_strategy == "phases" and phases is not None:
+        exploration_config["phases"] = [
+            {
+                "phase_type": phase_type,
+                "depth_limit": depth_limit,
+                "perturbations_per_node": perturbations_per_node,
+                "start_from": start_from,
+                "max_frontier_nodes": max_frontier_nodes,
+            }
+            for phase_type, depth_limit, perturbations_per_node, start_from, max_frontier_nodes in phases
+        ]
+        exploration_config["phases_string"] = args.phases
+    
+    # Create output directory early (for checkpointing during exploration)
+    save_results = not args.no_save_results
+    output_dir = None
+    if save_results:
+        if args.output_dir is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            # Generate descriptive name from exploration strategy and phases
+            exploration_name = generate_exploration_name(
+                exploration_strategy=args.exploration_strategy,
+                phases=phases,
+                phases_string=args.phases if args.exploration_strategy == "phases" else None,
+            )
+            output_dir = workspace_root / "exploration_results" / f"{exploration_name}_{timestamp}"
+        else:
+            output_dir = Path(args.output_dir)
+    
     # Run exploration
     results = explore_degenerate_solutions(
         root_wires=wires,
@@ -2228,47 +2414,14 @@ def main():
         max_steps=args.max_steps,
         damage_behavior=args.damage_behavior,
         max_retry_attempts=args.max_retry_attempts,
+        output_dir=output_dir,
+        checkpoint_interval=args.checkpoint_interval,
+        task_name=args.task,
+        exploration_config=exploration_config,
     )
     
-    # Save results by default (unless --no-save-results is specified)
-    save_results = not args.no_save_results
+    # Final save (overwrites last checkpoint with final results)
     if save_results:
-        if args.output_dir is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_dir = workspace_root / "exploration_results" / f"exploration_{timestamp}"
-        else:
-            output_dir = Path(args.output_dir)
-        
-        exploration_config = {
-            "exploration_strategy": args.exploration_strategy,
-            "bfs_depth": args.bfs_depth,
-            "bfs_perturbations_per_level": args.bfs_perturbations_per_level,
-            "random_walk_iterations": args.random_walk_iterations,
-            "random_walk_seed": args.random_walk_seed,
-            "damage_prob": args.damage_prob,
-            "epochs": args.epochs,
-            "learning_rate": args.learning_rate,
-            "optimizer": args.optimizer,
-            "weight_decay": args.weight_decay,
-            "beta1": args.beta1,
-            "beta2": args.beta2,
-            "functional_threshold": args.functional_threshold,
-            "input_bits": args.input_bits,
-            "output_bits": args.output_bits,
-        }
-        if args.exploration_strategy == "phases" and phases is not None:
-            exploration_config["phases"] = [
-                {
-                    "phase_type": phase_type,
-                    "depth_limit": depth_limit,
-                    "perturbations_per_node": perturbations_per_node,
-                    "start_from": start_from,
-                    "max_frontier_nodes": max_frontier_nodes,
-                }
-                for phase_type, depth_limit, perturbations_per_node, start_from, max_frontier_nodes in phases
-            ]
-            exploration_config["phases_string"] = args.phases
-        
         save_exploration_results(
             results=results,
             output_dir=output_dir,
