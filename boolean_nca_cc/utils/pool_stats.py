@@ -1,5 +1,9 @@
 """
 Utility functions for analyzing pool statistics and update patterns.
+
+This module provides utilities for:
+1. Pool update statistics - understanding how circuits are sampled and updated
+2. Damage statistics - understanding gate knockout patterns during training
 """
 
 from dataclasses import dataclass
@@ -15,6 +19,20 @@ class PoolUpdateStats:
     update_rate_per_epoch: float
     expected_lifetime_epochs: float
     reset_frequency: float
+
+
+@dataclass
+class DamageStats:
+    """Statistics about gate damage patterns during training.
+
+    These statistics describe how gate knockouts are applied to circuits
+    during their lifetime in the pool.
+    """
+
+    expected_damages: float  # Expected number of damage events per circuit
+    damage_probability_per_interval: float  # Probability of being damaged each interval
+    expected_knockouts: float  # Expected total knocked-out gates per circuit
+    damage_frequency: float  # Damage events per epoch (across entire pool)
 
 
 def calculate_expected_pool_updates(
@@ -401,3 +419,176 @@ def suggest_pool_configurations(
                 continue  # Try next pool size or base config
 
     return suggestions
+
+
+# =============================================================================
+# Damage Statistics Functions
+# =============================================================================
+
+
+def calculate_expected_damages(
+    expected_updates: float,
+    damage_interval: int,
+    damage_fraction: float,
+    knockouts_per_event: int = 1,
+) -> DamageStats:
+    """
+    Calculate expected damage statistics for circuits in the pool.
+
+    The formula for expected damages per circuit is:
+        expected_damages = (expected_updates / damage_interval) * damage_fraction
+
+    This represents:
+    - Circuit lives for ~expected_updates epochs
+    - Damage events happen every damage_interval epochs
+    - Each damage event affects damage_fraction of the pool
+    - So each circuit has damage_fraction chance of being hit each event
+
+    Args:
+        expected_updates: Expected number of epochs before circuit reset
+                         (from pool configuration)
+        damage_interval: Number of epochs between damage events
+        damage_fraction: Fraction of pool damaged at each event
+        knockouts_per_event: Number of gates knocked out per damage event
+
+    Returns:
+        DamageStats object with detailed statistics
+
+    Raises:
+        ValueError: If parameters are invalid
+
+    Example:
+        >>> stats = calculate_expected_damages(
+        ...     expected_updates=100, damage_interval=50, damage_fraction=0.2, knockouts_per_event=1
+        ... )
+        >>> stats.expected_damages
+        0.4  # (100/50) * 0.2 = 0.4 damage events per circuit
+    """
+    # Validate inputs
+    if expected_updates <= 0:
+        raise ValueError("expected_updates must be positive")
+    if damage_interval <= 0:
+        raise ValueError("damage_interval must be positive")
+    if not (0 < damage_fraction <= 1):
+        raise ValueError("damage_fraction must be between 0 and 1 (exclusive/inclusive)")
+    if knockouts_per_event <= 0:
+        raise ValueError("knockouts_per_event must be positive")
+
+    # Number of damage events during circuit lifetime
+    damage_events_during_lifetime = expected_updates / damage_interval
+
+    # Expected damages for a single circuit
+    expected_damages = damage_events_during_lifetime * damage_fraction
+
+    # Expected total knockouts
+    expected_knockouts = expected_damages * knockouts_per_event
+
+    # Damage frequency (per epoch, across pool)
+    damage_frequency = damage_fraction / damage_interval
+
+    return DamageStats(
+        expected_damages=expected_damages,
+        damage_probability_per_interval=damage_fraction,
+        expected_knockouts=expected_knockouts,
+        damage_frequency=damage_frequency,
+    )
+
+
+def compute_damage_parameter(
+    target_expected_damages: float,
+    solve_for: str,
+    expected_updates: float | None = None,
+    damage_interval: int | None = None,
+    damage_fraction: float | None = None,
+) -> float:
+    """
+    Compute one damage parameter based on target expected damages.
+
+    This function solves the equation:
+        expected_damages = (expected_updates / damage_interval) * damage_fraction
+
+    Args:
+        target_expected_damages: Desired expected number of damage events per circuit
+        solve_for: Parameter to solve for ('damage_interval' or 'damage_fraction')
+        expected_updates: Expected updates per circuit (from pool config, required)
+        damage_interval: Epochs between damage events (required unless solving for this)
+        damage_fraction: Fraction of pool damaged each event (required unless solving for this)
+
+    Returns:
+        The computed value for the specified parameter
+
+    Raises:
+        ValueError: If required parameters are missing or invalid
+
+    Examples:
+        >>> # Find damage_interval for 2 expected damages
+        >>> interval = compute_damage_parameter(
+        ...     target_expected_damages=2.0,
+        ...     solve_for="damage_interval",
+        ...     expected_updates=100,
+        ...     damage_fraction=0.1,
+        ... )
+        >>> interval
+        5.0  # (100 * 0.1) / 2 = 5
+
+        >>> # Find damage_fraction for 3 expected damages
+        >>> fraction = compute_damage_parameter(
+        ...     target_expected_damages=3.0,
+        ...     solve_for="damage_fraction",
+        ...     expected_updates=100,
+        ...     damage_interval=10,
+        ... )
+        >>> fraction
+        0.3  # (3 * 10) / 100 = 0.3
+    """
+    # Validate target
+    if target_expected_damages <= 0:
+        raise ValueError("target_expected_damages must be positive")
+
+    # expected_updates is always required
+    if expected_updates is None:
+        raise ValueError(
+            "expected_updates is required (from pool configuration) to compute damage parameters"
+        )
+    if expected_updates <= 0:
+        raise ValueError("expected_updates must be positive")
+
+    if solve_for == "damage_interval":
+        if damage_fraction is None:
+            raise ValueError("damage_fraction is required when solving for damage_interval")
+        if not (0 < damage_fraction <= 1):
+            raise ValueError("damage_fraction must be between 0 and 1")
+
+        # damage_interval = (expected_updates × damage_fraction) / expected_damages
+        result = (expected_updates * damage_fraction) / target_expected_damages
+
+        if result <= 0:
+            raise ValueError(
+                f"Computed damage_interval ({result:.2f}) must be positive. "
+                f"Try increasing damage_fraction or expected_damages."
+            )
+
+        return result
+
+    elif solve_for == "damage_fraction":
+        if damage_interval is None:
+            raise ValueError("damage_interval is required when solving for damage_fraction")
+        if damage_interval <= 0:
+            raise ValueError("damage_interval must be positive")
+
+        # damage_fraction = (expected_damages × damage_interval) / expected_updates
+        result = (target_expected_damages * damage_interval) / expected_updates
+
+        if result <= 0 or result > 1:
+            raise ValueError(
+                f"Computed damage_fraction ({result:.4f}) is not in valid range (0, 1]. "
+                f"Try adjusting damage_interval or expected_damages."
+            )
+
+        return result
+
+    else:
+        raise ValueError(
+            f"Unknown parameter to solve for: {solve_for}. "
+            f"Must be one of: 'damage_interval', 'damage_fraction'"
+        )

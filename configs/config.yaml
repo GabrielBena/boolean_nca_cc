@@ -4,7 +4,7 @@
 defaults:
   - model: self_attention  # Default model (gnn or self_attention)
   - circuit: text_small
-  - loss: focal_asym  # Options: l2, l4, bce, bce_w3, focal, asym, focal_asym
+  - loss: bce_w2  # Options: l2, l4, bce, bce_w3, focal, asym, focal_asym
   - _self_  # For self-overrides
 
 # Random seed for reproducibility
@@ -34,10 +34,10 @@ graph:
 # Training parameters
 training:
   # WIRING MODE : "random" or "fixed"
-  wiring_mode: "random"  # Options: "fixed", "genetic", or "random"
+  wiring_mode: "fixed"  # Options: "fixed", "genetic", or "random"
   initial_diversity: 1
   # INNER LOOP
-  n_message_steps: 100  # Number of message passing steps per training iteration
+  n_message_steps: 20  # Number of message passing steps per training iteration
   # DATA FRACTION
   data_per_batch: 64  # Number of data points per batch (null means use all data)
   # RANDOM LOSS STEP
@@ -60,7 +60,7 @@ training:
     alpha: 1e-1 # final lr = 10% of initial lr
   # NUMBER OF EPOCHS
   epochs: null
-  epochs_power_of_2: 17 # 2^n
+  epochs_power_of_2: 14 # 2^n
   # USE SCAN
   use_scan: true
   # GRADIENT CHECKPOINTING (remat)
@@ -86,30 +86,29 @@ pool:
   n_swaps_per_layer: null # For genetic mutation number of swaps per layer
   initial_diversity: ${training.initial_diversity} # For genetic mutation number of initial wires
 
-  # Wire shuffling
-  wire_shuffling:
-    active: false
-    fraction: 0.125
-    interval: ${pool.reset_interval}
-    strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
+# Gate damage configuration for resilience testing
+# Simulates permanent structural damage to gates during ongoing optimization
+# Damaged gates have faulty logits and cannot receive model updates
+damage:
+  enabled: true  # Master switch for damage system
   
-  # Gate knockout
-  gate_knockout:
-    active: false
-    fraction: 0.1
-    interval: 64
-    strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
-    damage_prob: 0.05  # Probability of zeroing an entire LUT in selected circuits
-    combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined strategy
-
-  # Soft LUT damage
-  soft_lut_damage:
-    active: false
-    fraction: 0.01
-    interval: 64
-    strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
-    damage_prob: 0.1 # Probability of zeroing an entire LUT in selected circuits
-    combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined strategy
+  # Damage intensity - how many gates to knock out per damage event
+  knockouts_per_event: 2
+  
+  # Damage scheduling (similar to pool reset scheduling)
+  # Formula: expected_damages = (expected_updates / damage_interval) × damage_fraction
+  damage_interval: null  # Epochs between damage applications (can be auto-computed)
+  damage_fraction: 0.5   # Fraction of pool to damage each interval
+  
+  # Automatic computation target (like pool.expected_updates)
+  # If specified with one null parameter above, computes the missing one
+  expected_damages: 1.0  # Target average damages per circuit before reset
+  
+  # Behavior of damaged gates
+  faulty_logit_value: -10.0  # Large negative value → sigmoid outputs ~0
+  
+  # Protection against over-damaging circuits
+  max_damage_per_circuit: 5  # Max total knockouts per circuit (null = no limit)
 
 # Backpropagation baseline
 backprop:
@@ -131,7 +130,8 @@ eval:
   batch_size_out: null  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
   log_pool_scatter: true
   do_ood_evaluation: null # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
-
+  plot_stepwise: true # Whether to plot step-by-step metrics for each evaluation
+  apply_damage: true # Whether to apply damage during evaluation (if damage.enabled is true)
 
 # Early stopping based on accuracy
 stop_accuracy:

@@ -21,6 +21,7 @@ from boolean_nca_cc.circuits.model import run_circuit
 
 class LossConfig(NamedTuple):
     """Hashable loss configuration for JAX JIT compilation."""
+
     type: str  # "bce" or "l"
     alpha_pos: float = 1.0
     alpha_neg: float = 1.0
@@ -32,15 +33,16 @@ class LossConfig(NamedTuple):
     @classmethod
     def from_dict(cls, d: dict):
         """Create LossConfig from dict (e.g., from Hydra config)."""
+
         # Handle None values explicitly (Hydra may set missing keys to None)
         def get_float(key, default):
             val = d.get(key, default)
             return float(val) if val is not None else float(default)
-        
+
         def get_int(key, default):
             val = d.get(key, default)
             return int(val) if val is not None else int(default)
-        
+
         return cls(
             type=d.get("type") or "bce",
             alpha_pos=get_float("alpha_pos", 1.0),
@@ -50,7 +52,7 @@ class LossConfig(NamedTuple):
             power=get_int("power", 4),
             name=d.get("name") or "bce",
         )
-    
+
     def to_dict(self):
         """Convert to dict for compatibility."""
         return {
@@ -198,18 +200,18 @@ def generalized_bce(
 ):
     """
     Unified binary cross-entropy with class weighting and focal modulation.
-    
+
     L = -α_pos * (1-p)^γ_pos * y * log(p) - α_neg * p^γ_neg * (1-y) * log(1-p)
-    
+
     This generalizes BCE, weighted BCE, focal loss, and asymmetric loss:
-    
+
     | Loss Type              | α_pos | α_neg | γ_pos | γ_neg |
     |------------------------|-------|-------|-------|-------|
     | BCE                    | 1     | 1     | 0     | 0     |
     | Weighted BCE (w=3)     | 3     | 1     | 0     | 0     |
     | Focal (α=.75, γ=2)     | 0.75  | 0.25  | 2     | 2     |
     | Asymmetric (γ_neg=4)   | 1     | 1     | 0     | 4     |
-    
+
     Args:
         y_pred: Predicted outputs (probabilities in [0,1])
         y_true: Target outputs (typically 0 or 1)
@@ -217,16 +219,16 @@ def generalized_bce(
         alpha_neg: Weight for negative class (default 1.0)
         gamma_pos: Focusing param for positives (0 = no focusing)
         gamma_neg: Focusing param for negatives (0 = no focusing)
-    
+
     Returns:
         Loss value (scalar)
     """
     eps = 1e-7
     p = jp.clip(y_pred, eps, 1.0 - eps)
-    
+
     pos_loss = -alpha_pos * jp.power(1.0 - p, gamma_pos) * y_true * jp.log(p)
     neg_loss = -alpha_neg * jp.power(p, gamma_neg) * (1.0 - y_true) * jp.log(1.0 - p)
-    
+
     return jp.sum(pos_loss + neg_loss)
 
 
@@ -238,7 +240,9 @@ def binary_cross_entropy(y_pred, y_true, pos_weight: float = 1.0):
 
 def focal_loss(y_pred, y_true, alpha: float = 0.75, gamma: float = 2.0):
     """Focal loss (legacy alias). Use generalized_bce for full control."""
-    return generalized_bce(y_pred, y_true, alpha_pos=alpha, alpha_neg=1.0 - alpha, gamma_pos=gamma, gamma_neg=gamma)
+    return generalized_bce(
+        y_pred, y_true, alpha_pos=alpha, alpha_neg=1.0 - alpha, gamma_pos=gamma, gamma_neg=gamma
+    )
 
 
 def asymmetric_loss(y_pred, y_true, gamma_pos: float = 0.0, gamma_neg: float = 4.0):
@@ -273,17 +277,17 @@ def compute_accuracy(y_pred, y_true):
 def get_loss_params(loss_cfg):
     """
     Extract loss parameters from LossConfig or dict.
-    
+
     Args:
         loss_cfg: LossConfig NamedTuple or dict with keys: type, alpha_pos, alpha_neg, gamma_pos, gamma_neg, power
-    
+
     Returns:
         Tuple of (loss_type, kwargs) where loss_type is "gbce" or "l".
     """
     # Convert dict to LossConfig if needed
     if isinstance(loss_cfg, dict):
         loss_cfg = LossConfig.from_dict(loss_cfg)
-    
+
     if loss_cfg.type == "l":
         return "l", {"power": loss_cfg.power}
     else:
@@ -298,26 +302,26 @@ def get_loss_params(loss_cfg):
 def compute_loss_from_predictions(pred, pred_hard, y_target, loss_cfg):
     """
     Unified loss computation from predictions.
-    
+
     This is the single source of truth for loss computation, used by both
     backprop training (train.py) and GNN evaluation (evaluation.py).
-    
+
     Args:
         pred: Soft predictions (probabilities)
         pred_hard: Hard predictions (rounded to 0/1)
         y_target: Target values
         loss_cfg: LossConfig NamedTuple or dict with keys: type, alpha_pos, alpha_neg, gamma_pos, gamma_neg, power
-    
+
     Returns:
         Tuple of (loss, hard_loss, res, hard_res, accuracy, hard_accuracy)
     """
     # Always compute residuals
     res = pred - y_target
     hard_res = pred_hard - y_target
-    
+
     # Get loss params from config
     loss_type, kwargs = get_loss_params(loss_cfg)
-    
+
     # Compute losses
     if loss_type == "gbce":
         loss = generalized_bce(pred, y_target, **kwargs)
@@ -327,11 +331,11 @@ def compute_loss_from_predictions(pred, pred_hard, y_target, loss_cfg):
         hard_loss = res2loss(hard_res, **kwargs)
     else:
         raise ValueError(f"Unknown loss_type: {loss_type}")
-    
+
     # Compute accuracies
     accuracy = compute_accuracy(pred, y_target)
     hard_accuracy = compute_accuracy(pred_hard, y_target)
-    
+
     return loss, hard_loss, res, hard_res, accuracy, hard_accuracy
 
 
@@ -365,16 +369,16 @@ def loss_f(logits, wires, x, y0, loss_cfg=None, gate_mask=None):
         loss_cfg = LOSS_L4
     elif isinstance(loss_cfg, dict):
         loss_cfg = LossConfig.from_dict(loss_cfg)
-        
+
     act = run_circuit(logits, wires, x, gate_mask=gate_mask)
     hard_act = run_circuit(logits, wires, x, gate_mask=gate_mask, hard=True)
     y = act[-1]
     hard_y = hard_act[-1]
-    
+
     loss, hard_loss, res, hard_res, accuracy, hard_accuracy = compute_loss_from_predictions(
         y, hard_y, y0, loss_cfg
     )
-    
+
     return loss, {
         "act": act,
         "accuracy": accuracy,
@@ -412,14 +416,14 @@ grad_loss_f_bce = jax.jit(jax.value_and_grad(loss_f_bce, has_aux=True))
 grad_loss_f_bce_w2 = jax.jit(jax.value_and_grad(loss_f_bce_w2, has_aux=True))
 grad_loss_f_bce_w3 = jax.jit(jax.value_and_grad(loss_f_bce_w3, has_aux=True))
 
+
 # Generic gradient function
 def grad_loss_f(logits, wires, x, y0, loss_cfg=None, gate_mask=None):
     """Generic gradient function that works with any loss config."""
     if loss_cfg is None:
         loss_cfg = LOSS_L4
     return jax.value_and_grad(
-        lambda lg: loss_f(lg, wires, x, y0, loss_cfg=loss_cfg, gate_mask=gate_mask),
-        has_aux=True
+        lambda lg: loss_f(lg, wires, x, y0, loss_cfg=loss_cfg, gate_mask=gate_mask), has_aux=True
     )(logits)
 
 
@@ -522,7 +526,7 @@ def train_step(
         y0: Training target output batch
         loss_cfg: Loss config dict (default: LOSS_L4)
         do_train: Whether to perform parameter updates (default True)
-        gate_mask: Optional gate mask for circuit pruning
+        gate_mask: Optional gate mask for circuit damage
         x_test: Optional test input batch
         y_test: Optional test target output batch
 
@@ -536,7 +540,7 @@ def train_step(
         loss_cfg = LOSS_L4
     elif isinstance(loss_cfg, dict):
         loss_cfg = LossConfig.from_dict(loss_cfg)
-        
+
     logits, opt_state = state
 
     # Training step

@@ -52,7 +52,7 @@ def get_loss_from_wires_logits(
 ):
     """
     Run circuit and calculate loss.
-    
+
     Args:
         logits: Circuit logits
         wires: Wire connections
@@ -64,7 +64,7 @@ def get_loss_from_wires_logits(
         loss_cfg = LOSS_L4
     elif isinstance(loss_cfg, dict):
         loss_cfg = LossConfig.from_dict(loss_cfg)
-        
+
     # Run circuit
     acts = run_circuit(logits, wires, x)
     pred = acts[-1]
@@ -178,7 +178,7 @@ def evaluate_model_stepwise_generator(
     """
     if loss_cfg is None:
         loss_cfg = LOSS_L4
-        
+
     # Store original shapes for reconstruction (EXACTLY like training)
     logits_original_shapes = [logit.shape for logit in logits]
 
@@ -416,7 +416,7 @@ def evaluate_model_stepwise_batched(
     """
     if loss_cfg is None:
         loss_cfg = LOSS_L4
-        
+
     # Initialize metric storage - same structure as original
     step_metrics = {
         "step": [],

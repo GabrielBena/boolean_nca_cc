@@ -57,7 +57,9 @@ from boolean_nca_cc.utils.configured_graph_builder import (
     is_configured,
 )
 from boolean_nca_cc.utils.pool_stats import (
+    calculate_expected_damages,
     calculate_expected_pool_updates,
+    compute_damage_parameter,
     compute_pool_parameter,
 )
 
@@ -105,7 +107,7 @@ def run_backpropagation_training(cfg, x_data, y_data, loss_cfg=None):
     """
     if loss_cfg is None:
         loss_cfg = LOSS_L4
-        
+
     log.info("Running baseline backpropagation training")
 
     # Generate circuit
@@ -516,6 +518,153 @@ def process_pool_configuration(cfg):
     return cfg
 
 
+def process_damage_configuration(cfg):
+    """
+    Process damage configuration to automatically compute missing parameters.
+
+    Uses the formula:
+        expected_damages = (expected_updates / damage_interval) * damage_fraction
+
+    Where expected_updates comes from the pool configuration (must be processed first).
+
+    Args:
+        cfg: Configuration object with damage and pool settings.
+             Pool configuration must be processed first (pool.expected_updates resolved).
+
+    Returns:
+        Updated configuration with computed damage parameters
+
+    Raises:
+        ValueError: If configuration is invalid or underspecified
+    """
+    # Skip if damage is disabled
+    if not cfg.damage.enabled:
+        log.info("Damage system disabled (damage.enabled=false)")
+        return cfg
+
+    # Ensure pool configuration is processed (we need expected_updates)
+    expected_updates = cfg.pool.expected_updates
+    if expected_updates is None:
+        raise ValueError(
+            "Cannot process damage configuration: pool.expected_updates is not set. "
+            "Ensure pool configuration is processed first."
+        )
+
+    # Check if expected_damages is specified (triggers auto-computation)
+    if cfg.damage.expected_damages is None:
+        # No automatic computation - validate explicit configuration
+        if cfg.damage.damage_interval is None or cfg.damage.damage_fraction is None:
+            raise ValueError(
+                "Damage configuration incomplete: either set damage.expected_damages for "
+                "auto-computation, or explicitly set both damage_interval and damage_fraction"
+            )
+
+        # Calculate what the configuration yields
+        stats = calculate_expected_damages(
+            expected_updates=expected_updates,
+            damage_interval=cfg.damage.damage_interval,
+            damage_fraction=cfg.damage.damage_fraction,
+            knockouts_per_event=cfg.damage.knockouts_per_event,
+        )
+        log.info(
+            f"Using explicit damage configuration: "
+            f"{stats.expected_damages:.2f} expected damages per circuit, "
+            f"{stats.expected_knockouts:.2f} expected knockouts"
+        )
+        return cfg
+
+    # Determine which parameter to compute
+    damage_params = {
+        "damage_interval": cfg.damage.damage_interval,
+        "damage_fraction": cfg.damage.damage_fraction,
+    }
+
+    none_params = [key for key, value in damage_params.items() if value is None]
+
+    if len(none_params) == 0:
+        # All parameters specified - verify configuration
+        log.info(
+            f"Verifying damage configuration matches target: {cfg.damage.expected_damages} expected damages"
+        )
+        stats = calculate_expected_damages(
+            expected_updates=expected_updates,
+            damage_interval=cfg.damage.damage_interval,
+            damage_fraction=cfg.damage.damage_fraction,
+            knockouts_per_event=cfg.damage.knockouts_per_event,
+        )
+
+        if abs(stats.expected_damages - cfg.damage.expected_damages) > 0.1:
+            log.warning(
+                f"Damage configuration mismatch: Expected {cfg.damage.expected_damages:.2f} damages, "
+                f"but configuration yields {stats.expected_damages:.2f} damages"
+            )
+        else:
+            log.info(
+                f"Damage configuration verified: {stats.expected_damages:.2f} expected damages"
+            )
+
+        return cfg
+
+    elif len(none_params) == 1:
+        # Exactly one parameter to compute
+        param_to_solve = none_params[0]
+        log.info(
+            f"Computing damage.{param_to_solve} for target: {cfg.damage.expected_damages} expected damages"
+        )
+
+        # Prepare arguments
+        compute_kwargs = {
+            "expected_updates": expected_updates,
+        }
+        if cfg.damage.damage_interval is not None:
+            compute_kwargs["damage_interval"] = cfg.damage.damage_interval
+        if cfg.damage.damage_fraction is not None:
+            compute_kwargs["damage_fraction"] = cfg.damage.damage_fraction
+
+        try:
+            computed_value = compute_damage_parameter(
+                target_expected_damages=cfg.damage.expected_damages,
+                solve_for=param_to_solve,
+                **compute_kwargs,
+            )
+
+            # Update configuration with computed value
+            with open_dict(cfg):
+                if param_to_solve == "damage_interval":
+                    cfg.damage.damage_interval = int(max(1, round(computed_value)))
+                elif param_to_solve == "damage_fraction":
+                    cfg.damage.damage_fraction = float(computed_value)
+
+            log.info(f"Computed damage.{param_to_solve} = {computed_value:.4f}")
+
+            # Verify the computation
+            stats = calculate_expected_damages(
+                expected_updates=expected_updates,
+                damage_interval=cfg.damage.damage_interval,
+                damage_fraction=cfg.damage.damage_fraction,
+                knockouts_per_event=cfg.damage.knockouts_per_event,
+            )
+            log.info(
+                f"Verification: {stats.expected_damages:.2f} expected damages, "
+                f"{stats.expected_knockouts:.2f} expected knockouts per circuit"
+            )
+
+        except ValueError as e:
+            raise ValueError(
+                f"Cannot compute damage.{param_to_solve} for target "
+                f"{cfg.damage.expected_damages} damages: {e}"
+            )
+
+    else:
+        # Multiple parameters are None - underspecified
+        raise ValueError(
+            f"Damage configuration underspecified. Cannot compute multiple parameters: {none_params}. "
+            f"Set damage.expected_damages and provide either damage_interval or damage_fraction."
+        )
+
+    return cfg
+
+
 @hydra.main(version_base=None, config_path="configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     """
@@ -529,6 +678,9 @@ def main(cfg: DictConfig) -> None:
 
     # Process pool configuration for automatic parameter computation
     cfg = process_pool_configuration(cfg)
+
+    # Process damage configuration (requires pool config to be processed first)
+    cfg = process_damage_configuration(cfg)
 
     # Configure global build_graph function with settings from config
     log.info(
@@ -565,6 +717,26 @@ def main(cfg: DictConfig) -> None:
     log.info(f"  Selection Probability: {stats.selection_probability:.4f}")
     log.info(f"  Expected Lifetime: {stats.expected_lifetime_epochs:.1f} epochs")
 
+    # Log damage configuration if enabled
+    if cfg.damage.enabled:
+        damage_stats = calculate_expected_damages(
+            expected_updates=stats.expected_updates,
+            damage_interval=cfg.damage.damage_interval,
+            damage_fraction=cfg.damage.damage_fraction,
+            knockouts_per_event=cfg.damage.knockouts_per_event,
+        )
+        log.info("Final Damage Configuration:")
+        log.info(f"  Damage Enabled: {cfg.damage.enabled}")
+        log.info(f"  Knockouts per Event: {cfg.damage.knockouts_per_event}")
+        log.info(f"  Damage Interval: {cfg.damage.damage_interval} epochs")
+        log.info(f"  Damage Fraction: {cfg.damage.damage_fraction:.4f}")
+        log.info(f"  Expected Damages per Circuit: {damage_stats.expected_damages:.2f}")
+        log.info(f"  Expected Total Knockouts: {damage_stats.expected_knockouts:.2f}")
+        if cfg.damage.max_damage_per_circuit is not None:
+            log.info(f"  Max Damage per Circuit: {cfg.damage.max_damage_per_circuit}")
+    else:
+        log.info("Damage Configuration: DISABLED")
+
     # Set random seed
     rng = jax.random.PRNGKey(cfg.seed)
 
@@ -585,7 +757,7 @@ def main(cfg: DictConfig) -> None:
             dir=output_dir,
             config=OmegaConf.to_container(cfg, resolve=True),
             group=cfg.wandb.group,
-            reinit="finish_previous"
+            reinit="finish_previous",
         )
         wandb_run = wandb.run
 
@@ -642,7 +814,9 @@ def main(cfg: DictConfig) -> None:
                 "test_num must be greater than 0 and less than the total number of cases"
             )
             if cfg.training.test_num > case_n:
-                log.warning(f"test_num is greater than the total number of cases, setting test_ratio to 1")
+                log.warning(
+                    f"test_num is greater than the total number of cases, setting test_ratio to 1"
+                )
                 test_ratio = 1
             else:
                 test_ratio = cfg.training.test_num / case_n
@@ -815,6 +989,13 @@ def main(cfg: DictConfig) -> None:
         # Best model tracking parameters
         save_best=cfg.checkpoint.save_best,
         track_metrics=track_metrics,
+        # Damage parameters for resilience testing
+        damage_enabled=cfg.damage.enabled,
+        damage_interval=cfg.damage.damage_interval,
+        damage_fraction=cfg.damage.damage_fraction,
+        knockouts_per_event=cfg.damage.knockouts_per_event,
+        max_damage_per_circuit=cfg.damage.max_damage_per_circuit,
+        faulty_logit_value=cfg.damage.faulty_logit_value,
     )
 
     # Save final model if checkpointing is enabled
@@ -835,8 +1016,6 @@ def main(cfg: DictConfig) -> None:
             checkpoint_dir,
             filename="final_model.pkl",
         )
-
-
 
     # Get track_metrics configuration
     track_metrics = extract_track_metrics_config(cfg)
@@ -859,6 +1038,7 @@ def main(cfg: DictConfig) -> None:
             eval_batch_size_out=cfg.eval.batch_size_out
             if cfg.eval.batch_size_out is not None
             else cfg.training.meta_batch_size,
+            do_ood_evaluation=cfg.eval.do_ood_evaluation,
         )
         eval_results = run_unified_periodic_evaluation(
             model=model_results["model"],

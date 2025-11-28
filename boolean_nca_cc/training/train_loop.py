@@ -17,6 +17,7 @@ from flax import nnx
 from tqdm.auto import tqdm
 
 import wandb
+from boolean_nca_cc.circuits.train import LOSS_L4, LossConfig
 from boolean_nca_cc.circuits.viz import create_wandb_visualization
 from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention
 from boolean_nca_cc.training.checkpointing import (
@@ -30,7 +31,6 @@ from boolean_nca_cc.training.eval_datasets import (
     create_unified_evaluation_datasets,
     evaluate_circuits_in_chunks,
 )
-from boolean_nca_cc.circuits.train import LOSS_L4, LossConfig
 from boolean_nca_cc.training.evaluation import (
     evaluate_model_stepwise_batched,
     get_loss_and_update_graph,
@@ -86,21 +86,6 @@ def _log_to_wandb(wandb_run, metrics_dict: dict, epoch: int, log_interval: int =
         log.warning(f"Error logging to wandb: {e}")
 
 
-# Removed _setup_checkpoint_dir - now in checkpointing.py
-
-
-# Removed _save_periodic_checkpoint - now in checkpointing.py
-
-
-# Removed _save_best_checkpoint - now in checkpointing.py
-
-
-# Removed _save_stable_state - now in checkpointing.py
-
-
-# Removed _check_early_stopping - now in checkpointing.py
-
-
 def _log_final_wandb_metrics(wandb_run, results: dict, epochs: int) -> None:
     """Log final metrics and plots to wandb."""
     if wandb_run is None:
@@ -121,9 +106,6 @@ def _log_final_wandb_metrics(wandb_run, results: dict, epochs: int) -> None:
 
     except Exception as e:
         log.warning(f"Error logging final metrics to wandb: {e}")
-
-
-# Removed _get_metric_value - now in checkpointing.py
 
 
 def _log_pool_scatter(pool, epoch, wandb_run):
@@ -690,9 +672,12 @@ def train_model(
     periodic_eval_interval: int = 1024,
     periodic_eval_test_seed: int = 42,
     periodic_eval_log_stepwise: bool = False,
-    periodic_eval_batch_size_in: int | None = None,  # Batch size for IN-distribution evaluation (None means use initial_diversity)
-    periodic_eval_batch_size_out: int | None = None,  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
-    periodic_eval_do_ood_evaluation: bool | None = None, # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
+    periodic_eval_batch_size_in: int
+    | None = None,  # Batch size for IN-distribution evaluation (None means use initial_diversity)
+    periodic_eval_batch_size_out: int
+    | None = None,  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
+    periodic_eval_do_ood_evaluation: bool
+    | None = None,  # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
     periodic_eval_log_pool_scatter: bool = False,
     # Wandb parameters
     wandb_logging: bool = False,
@@ -707,6 +692,13 @@ def train_model(
     stop_accuracy_min_epochs: int = 100,
     # Best model tracking parameters
     track_metrics: list[str] | None = None,
+    # Damage parameters for resilience testing
+    damage_enabled: bool = False,
+    damage_interval: int | None = None,  # Epochs between damage applications
+    damage_fraction: float = 0.1,  # Fraction of pool to damage each interval
+    knockouts_per_event: int = 1,  # Gates to knock out per damage event
+    max_damage_per_circuit: int | None = None,  # Max knockouts per circuit
+    faulty_logit_value: float = -10.0,  # Value for knocked-out gate logits
 ):
     """
     Train a GNN to optimize boolean circuit parameters.
@@ -773,6 +765,12 @@ def train_model(
         track_metrics: List of specific metrics to track and save best models for (e.g.,
                       ["eval_in_hard_accuracy", "eval_out_hard_accuracy"]). If None,
                       tracks all available metrics during evaluation.
+        damage_enabled: Whether to enable gate damage during training
+        damage_interval: Epochs between damage applications
+        damage_fraction: Fraction of pool to damage each interval
+        knockouts_per_event: Number of gates to knock out per damage event
+        max_damage_per_circuit: Maximum knockouts per circuit (None = no limit)
+        faulty_logit_value: Value for knocked-out gate logits (large negative)
     Returns:
         Dictionary with trained GNN model and training metrics
     """
@@ -781,7 +779,7 @@ def train_model(
         loss_cfg = LOSS_L4
     elif isinstance(loss_cfg, dict):
         loss_cfg = LossConfig.from_dict(loss_cfg)
-        
+
     # Initialize random key
     rng = jax.random.PRNGKey(key)
 
@@ -1153,9 +1151,9 @@ def train_model(
             actual_chunk_size = end_idx - start_idx
 
             # Extract chunk data
-            chunk_graphs = jax.tree.map(lambda x: x[start_idx:end_idx], graphs) 
-            chunk_wires = jax.tree.map(lambda x: x[start_idx:end_idx], wires) 
-            chunk_logits = jax.tree.map(lambda x: x[start_idx:end_idx], logits) 
+            chunk_graphs = jax.tree.map(lambda x: x[start_idx:end_idx], graphs)
+            chunk_wires = jax.tree.map(lambda x: x[start_idx:end_idx], wires)
+            chunk_logits = jax.tree.map(lambda x: x[start_idx:end_idx], logits)
 
             # Process chunk using JIT-compiled core function
             (
@@ -1183,10 +1181,10 @@ def train_model(
             # Accumulate gradients (weighted by chunk size for proper averaging)
             chunk_weight = actual_chunk_size / batch_size
             if accumulated_grads is None:
-                accumulated_grads = jax.tree.map(lambda g: g * chunk_weight, chunk_grads)  
+                accumulated_grads = jax.tree.map(lambda g: g * chunk_weight, chunk_grads)
             else:
                 accumulated_grads = jax.tree.map(
-                    lambda acc_g, chunk_g: acc_g + chunk_g * chunk_weight,  
+                    lambda acc_g, chunk_g: acc_g + chunk_g * chunk_weight,
                     accumulated_grads,
                     chunk_grads,
                 )
@@ -1194,10 +1192,10 @@ def train_model(
             # Accumulate loss and metrics (weighted by chunk size)
             accumulated_loss += chunk_loss * chunk_weight
             if accumulated_aux is None:
-                accumulated_aux = jax.tree.map(lambda x: x * chunk_weight, chunk_aux)  
+                accumulated_aux = jax.tree.map(lambda x: x * chunk_weight, chunk_aux)
             else:
                 accumulated_aux = jax.tree.map(
-                    lambda acc_x, chunk_x: acc_x + chunk_x * chunk_weight,  
+                    lambda acc_x, chunk_x: acc_x + chunk_x * chunk_weight,
                     accumulated_aux,
                     chunk_aux,
                 )
@@ -1247,6 +1245,11 @@ def train_model(
     # Track last reset epoch for scheduling
     last_reset_epoch = -1  # Initialize to -1 so first check works correctly
 
+    # Track damage application
+    last_damage_epoch = -1  # Initialize to -1 so first check works correctly
+    num_circuits_damaged = 0  # Track circuits damaged in most recent damage event
+    avg_damage_count = 0.0  # Average knockouts per circuit across pool
+
     # Initialize evaluation datasets for periodic evaluation if enabled
     eval_datasets = None
     if periodic_eval_enabled:
@@ -1259,9 +1262,15 @@ def train_model(
             training_initial_diversity=initial_diversity,
             layer_sizes=layer_sizes,
             arity=arity,
-            eval_batch_size_in=periodic_eval_batch_size_in if periodic_eval_batch_size_in is not None else initial_diversity,
-            eval_batch_size_out=periodic_eval_batch_size_out if periodic_eval_batch_size_out is not None else meta_batch_size,
-            do_ood_evaluation=periodic_eval_do_ood_evaluation if periodic_eval_do_ood_evaluation is not None else wiring_mode == "random",
+            eval_batch_size_in=periodic_eval_batch_size_in
+            if periodic_eval_batch_size_in is not None
+            else initial_diversity,
+            eval_batch_size_out=periodic_eval_batch_size_out
+            if periodic_eval_batch_size_out is not None
+            else meta_batch_size,
+            do_ood_evaluation=periodic_eval_do_ood_evaluation
+            if periodic_eval_do_ood_evaluation is not None
+            else wiring_mode == "random",
         )
 
         log.info(eval_datasets.get_summary())
@@ -1361,10 +1370,7 @@ def train_model(
 
                     # Use consistent key generation for pool resets
                     # Note: "genetic" mode is handled above, so only "fixed" uses wiring_fixed_key here
-                    if wiring_mode == "fixed":
-                        reset_pool_key = wiring_fixed_key
-                    else:
-                        reset_pool_key = fresh_key
+                    reset_pool_key = wiring_fixed_key if wiring_mode == "fixed" else fresh_key
 
                     fresh_pool = initialize_graph_pool(
                         rng=reset_pool_key,
@@ -1374,16 +1380,20 @@ def train_model(
                         arity=arity,
                         circuit_hidden_dim=circuit_hidden_dim,
                         wiring_mode=wiring_mode,
-                        initial_diversity=initial_diversity if wiring_mode == "fixed" else pool_size,
+                        initial_diversity=initial_diversity
+                        if wiring_mode == "fixed"
+                        else pool_size,
+                        initialize_gate_masks=True,
                     )
 
                     # Reset a fraction of the pool and get avg steps of reset graphs
                     circuit_pool, avg_steps_reset = circuit_pool.reset_fraction(
-                        reset_key,
-                        reset_pool_fraction,
-                        fresh_pool.graphs,
-                        fresh_pool.wires,
-                        fresh_pool.logits,
+                        key=reset_key,
+                        fraction=reset_pool_fraction,
+                        new_graphs=fresh_pool.graphs,
+                        new_wires=fresh_pool.wires,
+                        new_logits=fresh_pool.logits,
+                        new_gate_masks=fresh_pool.gate_masks,
                         reset_strategy=reset_strategy,
                         combined_weights=combined_weights,
                     )
@@ -1392,6 +1402,29 @@ def train_model(
                 last_reset_epoch = epoch
                 diversity = circuit_pool.get_wiring_diversity(layer_sizes)
 
+            # Apply damage to ongoing optimizations if enabled
+            if (
+                damage_enabled
+                and damage_interval is not None
+                and should_reset_pool(epoch, damage_interval, last_damage_epoch)
+            ):
+                rng, damage_key = jax.random.split(rng)
+
+                circuit_pool, num_circuits_damaged = circuit_pool.apply_damage(
+                    key=damage_key,
+                    fraction=damage_fraction,
+                    layer_sizes=layer_sizes,
+                    num_knockouts=knockouts_per_event,
+                    input_n=input_n,
+                    arity=arity,
+                    circuit_hidden_dim=circuit_hidden_dim,
+                    faulty_value=faulty_logit_value,
+                    max_damage_per_circuit=max_damage_per_circuit,
+                    selection_strategy="uniform",  # Use uniform for damage
+                )
+
+                last_damage_epoch = epoch
+                avg_damage_count = circuit_pool.get_average_damage_count()
 
             # Record metrics
             losses.append(float(loss))
@@ -1422,6 +1455,9 @@ def train_model(
                 "pool/wiring_diversity": float(diversity),
                 "pool/reset_steps": float(avg_steps_reset),
                 "pool/avg_update_steps": float(avg_steps),
+                "damage/circuits_damaged": int(num_circuits_damaged),
+                "damage/avg_knockouts": float(avg_damage_count),
+                "damage/enabled": damage_enabled,
                 "pool/loss_steps": loss_steps,
             }
 
@@ -1475,6 +1511,10 @@ def train_model(
             # Add early stopping info if active
             if stop_accuracy_enabled and epochs_above_threshold > 0:
                 postfix_dict["ES"] = f"{epochs_above_threshold}/{stop_accuracy_patience}"
+
+            # Add damage info if active
+            if damage_enabled and avg_damage_count > 0:
+                postfix_dict["Dmg"] = f"{avg_damage_count:.1f}"
 
             pbar.set_postfix(postfix_dict)
 
