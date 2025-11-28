@@ -1,0 +1,8 @@
+# Focal-asymmetric hybrid: boost positives + suppress easy negatives
+type: "bce"
+alpha_pos: 0.75      # Explicit positive boost
+alpha_neg: 0.25
+gamma_pos: 1.5      # down-weight positives
+gamma_neg: 3.0      # down-weight negatives more
+power: 4
+name: "focal_asym"

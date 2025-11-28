@@ -30,6 +30,7 @@ from boolean_nca_cc.training.eval_datasets import (
     create_unified_evaluation_datasets,
     evaluate_circuits_in_chunks,
 )
+from boolean_nca_cc.circuits.train import LOSS_L4, LossConfig
 from boolean_nca_cc.training.evaluation import (
     evaluate_model_stepwise_batched,
     get_loss_and_update_graph,
@@ -146,7 +147,7 @@ def _create_single_circuit_visualization(
     arity,
     circuit_hidden_dim,
     n_message_steps,
-    loss_type,
+    loss_cfg,
     layer_sizes,
     circuit_idx=0,
     eval_type="eval_in",
@@ -164,7 +165,7 @@ def _create_single_circuit_visualization(
         arity: Arity of gates
         circuit_hidden_dim: Hidden dimension
         n_message_steps: Number of message steps for evaluation
-        loss_type: Loss function type
+        loss_cfg: Loss config dict
         layer_sizes: Circuit layer sizes
         circuit_idx: Index of circuit to visualize (default 0)
         eval_type: Type of evaluation ("eval_in" or "eval_out")
@@ -191,7 +192,7 @@ def _create_single_circuit_visualization(
             arity=arity,
             circuit_hidden_dim=circuit_hidden_dim,
             max_steps=n_message_steps,
-            loss_type=loss_type,
+            loss_cfg=loss_cfg,
             bidirectional_edges=True,
             layer_sizes=layer_sizes,
         )
@@ -238,7 +239,7 @@ def run_unified_periodic_evaluation(
     arity,
     circuit_hidden_dim,
     n_message_steps,
-    loss_type,
+    loss_cfg,
     epoch,
     wandb_run,
     log_stepwise=False,
@@ -269,7 +270,7 @@ def run_unified_periodic_evaluation(
         arity: Arity of gates
         circuit_hidden_dim: Hidden dimension
         n_message_steps: Number of message steps for evaluation
-        loss_type: Loss function type
+        loss_cfg: Loss config dict
         epoch: Current epoch number
         wandb_run: WandB run object (or None)
         log_stepwise: Whether to log step-by-step metrics
@@ -313,7 +314,7 @@ def run_unified_periodic_evaluation(
                 arity=arity,
                 circuit_hidden_dim=circuit_hidden_dim,
                 n_message_steps=n_message_steps,
-                loss_type=loss_type,
+                loss_cfg=loss_cfg,
                 layer_sizes=layer_sizes,
             )
 
@@ -350,7 +351,7 @@ def run_unified_periodic_evaluation(
                 arity=arity,
                 circuit_hidden_dim=circuit_hidden_dim,
                 n_message_steps=n_message_steps,
-                loss_type=loss_type,
+                loss_cfg=loss_cfg,
                 layer_sizes=layer_sizes,
             )
 
@@ -401,7 +402,7 @@ def run_unified_periodic_evaluation(
                         arity=arity,
                         circuit_hidden_dim=circuit_hidden_dim,
                         n_message_steps=n_message_steps,
-                        loss_type=loss_type,
+                        loss_cfg=loss_cfg,
                         layer_sizes=layer_sizes,
                         circuit_idx=0,
                         eval_type="eval_in",
@@ -437,7 +438,7 @@ def run_unified_periodic_evaluation(
                         arity=arity,
                         circuit_hidden_dim=circuit_hidden_dim,
                         n_message_steps=n_message_steps,
-                        loss_type=loss_type,
+                        loss_cfg=loss_cfg,
                         layer_sizes=layer_sizes,
                         circuit_idx=0,
                         eval_type="eval_out",
@@ -643,7 +644,7 @@ def train_model(
     use_scan: bool = False,
     gradient_checkpointing: bool = False,  # Recompute model activations during backward pass to save memory
     # Loss parameters
-    loss_type: str = "l4",  # Options: 'l4' or 'bce'
+    loss_cfg=None,  # Loss config dict (default: LOSS_L4)
     random_loss_step: bool = False,  # Use random message passing step for loss computation
     use_beta_loss_step: bool = False,  # Use beta distribution for random loss step (varies from early to late steps through training)
     # Wiring mode parameters
@@ -726,7 +727,7 @@ def train_model(
         learning_rate: Learning rate for optimization
         epochs: Number of training epochs
         n_message_steps: Number of message passing steps per pool batch
-        loss_type: Type of loss to use ('l4' for L4 norm or 'bce' for binary cross-entropy)
+        loss_cfg: Loss config dict
         random_loss_step: Use random message passing step for loss computation
         use_beta_loss_step: Use beta distribution for random loss step (varies from early to late steps through training)
         wiring_mode: Mode for circuit wirings ('fixed', 'random', or 'genetic')
@@ -775,6 +776,12 @@ def train_model(
     Returns:
         Dictionary with trained GNN model and training metrics
     """
+    # Default loss config
+    if loss_cfg is None:
+        loss_cfg = LOSS_L4
+    elif isinstance(loss_cfg, dict):
+        loss_cfg = LossConfig.from_dict(loss_cfg)
+        
     # Initialize random key
     rng = jax.random.PRNGKey(key)
 
@@ -858,7 +865,7 @@ def train_model(
         y_target: jp.ndarray,
         layer_sizes: tuple[tuple[int, int], ...],
         n_message_steps: int,
-        loss_type: str,
+        loss_cfg,
         loss_key: jax.random.PRNGKey,
         epoch: int,
         data_fraction: float = 1.0,
@@ -879,7 +886,7 @@ def train_model(
             y_target: Target output data
             layer_sizes: Tuple of (nodes, group_size) tuples for each layer
             n_message_steps: Number of message passing steps
-            loss_type: Type of loss function to use
+            loss_cfg: Loss config dict
             loss_key: Random key for loss computation
             epoch: Current epoch (used for beta loss step scheduling)
             data_fraction: Fraction of data to use for loss computation
@@ -930,7 +937,7 @@ def train_model(
                 wires=wires,
                 x_data=x,
                 y_data=y_target,
-                loss_type=loss_type,
+                loss_cfg=loss_cfg,
                 layer_sizes=layer_sizes,
                 data_fraction=data_fraction,
                 scan_key=scan_key,
@@ -961,7 +968,7 @@ def train_model(
                     wires=wires,
                     x_data=x,
                     y_data=y_target,
-                    loss_type=loss_type,
+                    loss_cfg=loss_cfg,
                     layer_sizes=layer_sizes,
                 )
                 # Update graph globals with current update steps
@@ -1014,7 +1021,7 @@ def train_model(
         static_argnames=(
             "layer_sizes",
             "n_message_steps",
-            "loss_type",
+            "loss_cfg",
             "data_fraction",
         ),
     )(_compute_loss_and_gradients)
@@ -1027,7 +1034,7 @@ def train_model(
         static_argnames=(
             "layer_sizes",
             "n_message_steps",
-            "loss_type",
+            "loss_cfg",
             "data_fraction",
         ),
     )
@@ -1043,7 +1050,7 @@ def train_model(
         y_target: jp.ndarray,
         layer_sizes: tuple[tuple[int, int], ...],
         n_message_steps: int,
-        loss_type: str,
+        loss_cfg,
         loss_key: jax.random.PRNGKey,
         epoch: int,
         data_fraction: float = 1.0,
@@ -1066,7 +1073,7 @@ def train_model(
             y_target: Target output data
             layer_sizes: Tuple of (nodes, group_size) tuples for each layer
             n_message_steps: Number of message passing steps
-            loss_type: Type of loss function to use
+            loss_cfg: Loss config dict
             loss_key: Random key for loss computation
             epoch: Current epoch
             data_fraction: Fraction of data to use for loss computation
@@ -1084,7 +1091,7 @@ def train_model(
             y_target=y_target,
             layer_sizes=layer_sizes,
             n_message_steps=n_message_steps,
-            loss_type=loss_type,
+            loss_cfg=loss_cfg,
             loss_key=loss_key,
             epoch=epoch,
             data_fraction=data_fraction,
@@ -1111,7 +1118,7 @@ def train_model(
         y_target: jp.ndarray,
         layer_sizes: tuple[tuple[int, int], ...],
         n_message_steps: int,
-        loss_type: str,
+        loss_cfg,
         loss_key: jax.random.PRNGKey,
         epoch: int,
         chunk_size: int,
@@ -1167,7 +1174,7 @@ def train_model(
                 y_target=y_target,
                 layer_sizes=layer_sizes,
                 n_message_steps=n_message_steps,
-                loss_type=loss_type,
+                loss_cfg=loss_cfg,
                 loss_key=chunk_loss_keys[chunk_idx],
                 epoch=epoch,
                 data_fraction=data_fraction,
@@ -1299,7 +1306,7 @@ def train_model(
                     y_target=y_train,
                     layer_sizes=layer_sizes,
                     n_message_steps=n_message_steps,
-                    loss_type=loss_type,
+                    loss_cfg=loss_cfg,
                     loss_key=loss_key,
                     epoch=epoch,
                     chunk_size=effective_batch_chunk_size,
@@ -1321,7 +1328,7 @@ def train_model(
                     y_target=y_train,
                     layer_sizes=layer_sizes,
                     n_message_steps=n_message_steps,
-                    loss_type=loss_type,
+                    loss_cfg=loss_cfg,
                     loss_key=loss_key,
                     epoch=epoch,
                     data_fraction=data_fraction,
@@ -1494,7 +1501,7 @@ def train_model(
                     arity=arity,
                     circuit_hidden_dim=circuit_hidden_dim,
                     n_message_steps=periodic_eval_inner_steps,  # Use fixed message steps
-                    loss_type=loss_type,
+                    loss_cfg=loss_cfg,
                     epoch=epoch,
                     wandb_run=wandb_run,
                     log_stepwise=periodic_eval_log_stepwise,

@@ -38,7 +38,7 @@ import wandb
 from boolean_nca_cc import generate_layer_sizes
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.circuits.tasks import get_task_data
-from boolean_nca_cc.circuits.train import TrainState, loss_f, train_step
+from boolean_nca_cc.circuits.train import LOSS_L4, LossConfig, TrainState, loss_f, train_step
 from boolean_nca_cc.training.checkpointing import save_checkpoint
 from boolean_nca_cc.training.eval_datasets import (
     create_unified_evaluation_datasets,
@@ -90,7 +90,7 @@ def extract_track_metrics_config(cfg) -> list[str] | None:
     return list(metrics_config)
 
 
-def run_backpropagation_training(cfg, x_data, y_data, loss_type="l4"):
+def run_backpropagation_training(cfg, x_data, y_data, loss_cfg=None):
     """
     Run standard backpropagation training for comparison.
 
@@ -98,11 +98,14 @@ def run_backpropagation_training(cfg, x_data, y_data, loss_type="l4"):
         cfg: Configuration object
         x_data: Input data
         y_data: Target data
-        loss_type: Loss function type ('l4' or 'bce')
+        loss_cfg: Loss config dict (default: LOSS_L4)
 
     Returns:
         Dictionary of training results
     """
+    if loss_cfg is None:
+        loss_cfg = LOSS_L4
+        
     log.info("Running baseline backpropagation training")
 
     # Generate circuit
@@ -137,7 +140,7 @@ def run_backpropagation_training(cfg, x_data, y_data, loss_type="l4"):
         wires=wires,
         x=x_data,
         y0=y_data,
-        loss_type=loss_type,
+        loss_cfg=loss_cfg,
         do_train=True,
     )
 
@@ -181,7 +184,7 @@ def run_backpropagation_training(cfg, x_data, y_data, loss_type="l4"):
         )
 
     # Final evaluation (using the unified loss function)
-    final_loss, final_aux_metrics = loss_f(state.params, wires, x_data, y_data, loss_type=loss_type)
+    final_loss, final_aux_metrics = loss_f(state.params, wires, x_data, y_data, loss_cfg=loss_cfg)
     final_accuracy = float(final_aux_metrics["accuracy"])
     final_hard_accuracy = float(final_aux_metrics["hard_accuracy"])
     final_hard_loss = float(final_aux_metrics["hard_loss"])
@@ -234,7 +237,7 @@ def create_and_save_final_results(
         # Model and training configuration
         "model_type": cfg.model.type,
         "wiring_mode": cfg.training.wiring_mode,
-        "loss_type": cfg.training.loss_type,
+        "loss_cfg": dict(cfg.loss),
         "learning_rate": cfg.training.learning_rate,
         "epochs_completed": len(model_results["losses"]),
         "total_epochs_planned": cfg.training.epochs or 2**cfg.training.epochs_power_of_2,
@@ -300,7 +303,8 @@ def create_and_save_final_results(
             "mlp_dim": cfg.model.get("mlp_dim", None),
             "total_parameters": total_params,
             "message_steps": cfg.training.n_message_steps,
-            "eval_target_batch_size": cfg.eval.batch_size,
+            "eval_target_batch_size_in": cfg.eval.batch_size_in,
+            "eval_target_batch_size_out": cfg.eval.batch_size_out,
             "pool_size": cfg.pool.size,
             "pool_initial_diversity": cfg.pool.initial_diversity,
         }
@@ -581,6 +585,7 @@ def main(cfg: DictConfig) -> None:
             dir=output_dir,
             config=OmegaConf.to_container(cfg, resolve=True),
             group=cfg.wandb.group,
+            reinit="finish_previous"
         )
         wandb_run = wandb.run
 
@@ -671,7 +676,7 @@ def main(cfg: DictConfig) -> None:
     bp_results = None
     if cfg.backprop.enabled:
         bp_results = run_backpropagation_training(
-            cfg, x_train, y_train, loss_type=cfg.training.loss_type
+            cfg, x_train, y_train, loss_cfg=LossConfig.from_dict(dict(cfg.loss))
         )
         plot_training_curves(bp_results, "Backpropagation", os.path.join(output_dir, "plots"))
 
@@ -762,7 +767,7 @@ def main(cfg: DictConfig) -> None:
         use_scan=cfg.training.use_scan,
         gradient_checkpointing=cfg.training.gradient_checkpointing,
         # Loss parameters
-        loss_type=cfg.training.loss_type,
+        loss_cfg=LossConfig.from_dict(dict(cfg.loss)),
         random_loss_step=cfg.training.random_loss_step,
         use_beta_loss_step=cfg.training.use_beta_loss_step,
         # Wiring mode parameters
@@ -787,8 +792,8 @@ def main(cfg: DictConfig) -> None:
         checkpoint_dir=checkpoint_dir,
         checkpoint_interval=cfg.checkpoint.interval,
         # Periodic evaluation parameters
-        periodic_eval_enabled=cfg.eval.periodic.enabled,
-        periodic_eval_interval=cfg.eval.periodic.interval,
+        periodic_eval_enabled=cfg.eval.enabled,
+        periodic_eval_interval=cfg.eval.interval,
         periodic_eval_inner_steps=cfg.eval.inner_steps,
         periodic_eval_test_seed=cfg.test_seed,
         periodic_eval_log_stepwise=cfg.eval.log_stepwise,
@@ -831,47 +836,51 @@ def main(cfg: DictConfig) -> None:
             filename="final_model.pkl",
         )
 
-    # Create standardized evaluation datasets
-    log.info("Creating standardized evaluation datasets (seed + pool + OOD)")
 
-    # Create evaluation datasets using standardized approach
-    datasets = create_unified_evaluation_datasets(
-        evaluation_base_seed=cfg.test_seed,
-        training_wiring_mode=cfg.training.wiring_mode,
-        training_initial_diversity=cfg.pool.initial_diversity,
-        layer_sizes=layer_sizes,
-        arity=cfg.circuit.arity,
-        eval_batch_size_in=cfg.eval.batch_size_in
-        if cfg.eval.batch_size_in is not None
-        else cfg.training.initial_diversity,
-        eval_batch_size_out=cfg.eval.batch_size_out
-        if cfg.eval.batch_size_out is not None
-        else cfg.training.meta_batch_size,
-    )
 
     # Get track_metrics configuration
     track_metrics = extract_track_metrics_config(cfg)
 
     # Run comprehensive evaluation using standardized datasets
-    eval_results = run_unified_periodic_evaluation(
-        model=model_results["model"],
-        datasets=datasets,
-        pool=model_results.get("pool", None),
-        x_data=x_test,
-        y_data=y_test,
-        input_n=input_n,
-        arity=arity,
-        circuit_hidden_dim=cfg.model.circuit_hidden_dim,
-        n_message_steps=cfg.eval.inner_steps,
-        loss_type=cfg.training.loss_type,
-        epoch=-1,  # Final evaluation marker
-        wandb_run=wandb_run,
-        log_stepwise=False,
-        layer_sizes=layer_sizes,
-        log_pool_scatter=False,
-        # Best model tracking parameters (final evaluation, so no saving)
-        track_metrics=track_metrics,
-    )
+    if cfg.eval.enabled:
+        # Create standardized evaluation datasets
+        log.info("Creating standardized evaluation datasets (seed + pool + OOD)")
+
+        # Create evaluation datasets using standardized approach
+        datasets = create_unified_evaluation_datasets(
+            evaluation_base_seed=cfg.test_seed,
+            training_wiring_mode=cfg.training.wiring_mode,
+            training_initial_diversity=cfg.pool.initial_diversity,
+            layer_sizes=layer_sizes,
+            arity=cfg.circuit.arity,
+            eval_batch_size_in=cfg.eval.batch_size_in
+            if cfg.eval.batch_size_in is not None
+            else cfg.training.initial_diversity,
+            eval_batch_size_out=cfg.eval.batch_size_out
+            if cfg.eval.batch_size_out is not None
+            else cfg.training.meta_batch_size,
+        )
+        eval_results = run_unified_periodic_evaluation(
+            model=model_results["model"],
+            datasets=datasets,
+            pool=model_results.get("pool", None),
+            x_data=x_test,
+            y_data=y_test,
+            input_n=input_n,
+            arity=arity,
+            circuit_hidden_dim=cfg.model.circuit_hidden_dim,
+            n_message_steps=cfg.eval.inner_steps,
+            loss_cfg=LossConfig.from_dict(dict(cfg.loss)),
+            epoch=-1,  # Final evaluation marker
+            wandb_run=wandb_run,
+            log_stepwise=False,
+            layer_sizes=layer_sizes,
+            log_pool_scatter=False,
+            # Best model tracking parameters (final evaluation, so no saving)
+            track_metrics=track_metrics,
+        )
+    else:
+        eval_results = None
 
     if "metrics" in model_results:
         model_results.update(model_results["metrics"])

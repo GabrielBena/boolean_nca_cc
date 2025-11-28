@@ -14,6 +14,8 @@ from tqdm.auto import tqdm
 
 from boolean_nca_cc.circuits.model import run_circuit
 from boolean_nca_cc.circuits.train import (
+    LOSS_L4,
+    LossConfig,
     compute_accuracy,
     compute_loss_from_predictions,
 )
@@ -46,14 +48,23 @@ def get_loss_from_wires_logits(
     wires,
     x,
     y_target,
-    loss_type: str,
+    loss_cfg=None,
 ):
     """
     Run circuit and calculate loss.
     
-    Uses the unified compute_loss_from_predictions from circuits.train.
-    See parse_loss_type() for all supported loss_type values.
+    Args:
+        logits: Circuit logits
+        wires: Wire connections
+        x: Input data
+        y_target: Target output
+        loss_cfg: LossConfig NamedTuple or dict (default: LOSS_L4)
     """
+    if loss_cfg is None:
+        loss_cfg = LOSS_L4
+    elif isinstance(loss_cfg, dict):
+        loss_cfg = LossConfig.from_dict(loss_cfg)
+        
     # Run circuit
     acts = run_circuit(logits, wires, x)
     pred = acts[-1]
@@ -62,7 +73,7 @@ def get_loss_from_wires_logits(
 
     # Use unified loss computation
     loss, hard_loss, res, hard_res, accuracy, hard_accuracy = compute_loss_from_predictions(
-        pred, pred_hard, y_target, loss_type
+        pred, pred_hard, y_target, loss_cfg
     )
 
     return loss, (
@@ -82,7 +93,7 @@ def get_loss_and_update_graph(
     wires: list[jp.ndarray],
     x_data: jp.ndarray,
     y_data: jp.ndarray,
-    loss_type: str,
+    loss_cfg,
     layer_sizes: list[tuple[int, int]],
 ):
     """
@@ -99,7 +110,7 @@ def get_loss_and_update_graph(
         wires: Wire connection patterns
         x_data: Input data
         y_data: Target output data
-        loss_type: Type of loss function to use
+        loss_cfg: Loss config dict
         layer_sizes: List of (nodes, group_size) tuples for each layer
 
     Returns:
@@ -115,7 +126,7 @@ def get_loss_and_update_graph(
         wires=wires,
         x=x_data,
         y_target=y_data,
-        loss_type=loss_type,
+        loss_cfg=loss_cfg,
     )
 
     # Extract residuals from aux for updating loss feature
@@ -138,7 +149,7 @@ def evaluate_model_stepwise_generator(
     arity: int = 2,
     circuit_hidden_dim: int = 16,
     max_steps: int | None = None,
-    loss_type: str = "l4",
+    loss_cfg=None,
     bidirectional_edges: bool = True,
     layer_sizes: list[tuple[int, int]] | None = None,
 ) -> Generator[StepResult, None, None]:
@@ -159,12 +170,15 @@ def evaluate_model_stepwise_generator(
         arity: Number of inputs per gate
         circuit_hidden_dim: Dimension of hidden features
         max_steps: Maximum number of steps to run (None for infinite)
-        loss_type: Loss function to use
+        loss_cfg: Loss config dict (default: LOSS_L4)
         bidirectional_edges: Whether to use bidirectional edges
 
     Yields:
         StepResult: Results from each step including loss, accuracy, predictions, and updated logits
     """
+    if loss_cfg is None:
+        loss_cfg = LOSS_L4
+        
     # Store original shapes for reconstruction (EXACTLY like training)
     logits_original_shapes = [logit.shape for logit in logits]
 
@@ -180,7 +194,7 @@ def evaluate_model_stepwise_generator(
             initial_res,
             initial_hard_res,
         ),
-    ) = get_loss_from_wires_logits(logits, wires, x_data, y_data, loss_type)
+    ) = get_loss_from_wires_logits(logits, wires, x_data, y_data, loss_cfg)
 
     # Build initial graph using the same function as training
     # Initialize with update_steps = 0 (exactly like training pool initialization)
@@ -234,7 +248,7 @@ def evaluate_model_stepwise_generator(
             wires,
             x_data,
             y_data,
-            loss_type,
+            loss_cfg,
             layer_sizes,
         )
 
@@ -281,7 +295,7 @@ def evaluate_model_stepwise(
     arity: int = 2,
     circuit_hidden_dim: int = 16,
     n_message_steps: int = 100,
-    loss_type: str = "l4",
+    loss_cfg=None,
     bidirectional_edges: bool = True,
     layer_sizes: list[tuple[int, int]] | None = None,
     use_tqdm: bool = False,
@@ -303,7 +317,7 @@ def evaluate_model_stepwise(
         arity: Number of inputs per gate
         circuit_hidden_dim: Dimension of hidden features
         n_message_steps: Maximum number of message passing steps to run
-        loss_type: Loss function to use
+        loss_cfg: Loss config dict (default: LOSS_L4)
         bidirectional_edges: Whether to use bidirectional edges
 
     Returns:
@@ -330,7 +344,7 @@ def evaluate_model_stepwise(
         arity=arity,
         circuit_hidden_dim=circuit_hidden_dim,
         max_steps=n_message_steps,
-        loss_type=loss_type,
+        loss_cfg=loss_cfg,
         bidirectional_edges=bidirectional_edges,
         layer_sizes=layer_sizes,
     )
@@ -373,7 +387,7 @@ def evaluate_model_stepwise_batched(
     arity: int = 2,
     circuit_hidden_dim: int = 16,
     n_message_steps: int = 100,
-    loss_type: str = "l4",
+    loss_cfg=None,
     bidirectional_edges: bool = True,
     layer_sizes: list[tuple[int, int]] | None = None,
 ) -> dict:
@@ -393,13 +407,16 @@ def evaluate_model_stepwise_batched(
         arity: Number of inputs per gate
         circuit_hidden_dim: Dimension of hidden features
         n_message_steps: Maximum number of message passing steps to run
-        loss_type: Loss function to use
+        loss_cfg: Loss config dict (default: LOSS_L4)
         bidirectional_edges: Whether to use bidirectional edges
         layer_sizes: List of (nodes, group_size) tuples for each layer
 
     Returns:
         Dictionary with averaged metrics collected at each step
     """
+    if loss_cfg is None:
+        loss_cfg = LOSS_L4
+        
     # Initialize metric storage - same structure as original
     step_metrics = {
         "step": [],
@@ -415,7 +432,7 @@ def evaluate_model_stepwise_batched(
 
     # Calculate initial losses for the batch (EXACTLY like generator)
     vmap_get_loss = jax.vmap(
-        lambda logits, wires: get_loss_from_wires_logits(logits, wires, x_data, y_data, loss_type)
+        lambda logits, wires: get_loss_from_wires_logits(logits, wires, x_data, y_data, loss_cfg)
     )
 
     initial_losses, initial_aux = vmap_get_loss(batch_logits, batch_wires)
@@ -485,7 +502,7 @@ def evaluate_model_stepwise_batched(
                 wires,
                 x_data,
                 y_data,
-                loss_type,
+                loss_cfg,
                 layer_sizes,
             )
         )

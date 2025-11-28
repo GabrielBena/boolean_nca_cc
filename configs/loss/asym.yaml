@@ -1,0 +1,8 @@
+# Asymmetric loss: heavily down-weights easy negatives (prevents all-zeros)
+type: "bce"
+alpha_pos: 1.0
+alpha_neg: 1.0
+gamma_pos: 0.0
+gamma_neg: 4.0
+power: 4  # Not used for BCE, but required field
+name: "asym"

@@ -1,0 +1,8 @@
+type: "l"
+power: 2
+alpha_pos: 1.0  # Not used for L-norm, but required field
+alpha_neg: 1.0
+gamma_pos: 0.0
+gamma_neg: 0.0
+
+name: "l2"

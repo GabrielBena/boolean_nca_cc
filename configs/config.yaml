@@ -4,6 +4,7 @@
 defaults:
   - model: self_attention  # Default model (gnn or self_attention)
   - circuit: text_small
+  - loss: focal_asym  # Options: l2, l4, bce, bce_w3, focal, asym, focal_asym
   - _self_  # For self-overrides
 
 # Random seed for reproducibility
@@ -22,6 +23,7 @@ wandb:
   run_name: null  # Auto-generated if null
   tags: ["boolean-circuit", "nca", "meta-learning"]
   group: null
+  dir: null  # Output directory (null means use current working directory)
 
 
 # Graph configuration
@@ -35,16 +37,7 @@ training:
   wiring_mode: "random"  # Options: "fixed", "genetic", or "random"
   initial_diversity: 1
   # INNER LOOP
-  n_message_steps: 10  # Number of message passing steps per training iteration
-  # LOSS TYPE - Options:
-  # "l2", "l4": L-norm losses
-  # "bce": Standard binary cross-entropy
-  # "bce_w{W}": Weighted BCE (e.g., "bce_w2" = pos_weight=2.0, helps prevent all-zeros collapse)
-  # "focal": Focal loss (alpha=0.75, gamma=2.0) - down-weights easy examples
-  # "focal_a{A}_g{G}": Custom focal (e.g., "focal_a0.8_g3")
-  # "asym": Asymmetric loss (gamma_pos=0, gamma_neg=4) - specifically prevents all-zeros
-  # "asym_p{P}_n{N}": Custom asymmetric (e.g., "asym_p0_n5")
-  loss_type: "bce_w3"
+  n_message_steps: 100  # Number of message passing steps per training iteration
   # DATA FRACTION
   data_per_batch: 64  # Number of data points per batch (null means use all data)
   # RANDOM LOSS STEP
@@ -67,7 +60,7 @@ training:
     alpha: 1e-1 # final lr = 10% of initial lr
   # NUMBER OF EPOCHS
   epochs: null
-  epochs_power_of_2: 16 # 2^n
+  epochs_power_of_2: 17 # 2^n
   # USE SCAN
   use_scan: true
   # GRADIENT CHECKPOINTING (remat)
@@ -130,16 +123,15 @@ backprop:
   
 # Evaluation parameters
 eval:
+  enabled: true  # Whether to run periodic evaluation during training
+  interval: 1024  # Evaluate every N epochs
   inner_steps: 100  # Number of message passing steps for inner loop evaluation
-  # Periodic evaluation during training
   log_stepwise: false  # Whether to log detailed step-by-step metrics to wandb
   batch_size_in: null  # Batch size for IN-distribution evaluation (None means use initial_diversity)
   batch_size_out: null  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
   log_pool_scatter: true
   do_ood_evaluation: null # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
-  periodic:
-    enabled: true  # Whether to run periodic evaluation during training
-    interval: 1024  # Evaluate every N epochs
+
 
 # Early stopping based on accuracy
 stop_accuracy:

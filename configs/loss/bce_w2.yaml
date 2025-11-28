@@ -1,0 +1,8 @@
+# Weighted BCE with 3x weight on positives (prevents all-zeros collapse)
+type: "bce"
+alpha_pos: 2.0
+alpha_neg: 1.0
+gamma_pos: 0.0
+gamma_neg: 0.0
+power: 4  # Not used for BCE, but required field
+name: "bce_w2"

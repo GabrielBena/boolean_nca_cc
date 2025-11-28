@@ -15,6 +15,7 @@ from flax import nnx
 from boolean_nca_cc.models.aggregation import AttentionAggregation, aggregate_sum
 from boolean_nca_cc.models.edge_update import EdgeUpdateModule
 from boolean_nca_cc.models.node_update import NodeUpdateModule
+from boolean_nca_cc.circuits.train import LossConfig
 
 
 class CircuitGNN(nnx.Module):
@@ -171,7 +172,7 @@ def run_gnn_scan_with_loss(
     wires: list[jp.ndarray],
     x_data: jp.ndarray,
     y_data: jp.ndarray,
-    loss_type: str,
+    loss_cfg: LossConfig,
     layer_sizes: tuple[tuple[int, int], ...],
     data_fraction: float = 1.0,
     scan_key: jax.random.PRNGKey = None,
@@ -191,7 +192,7 @@ def run_gnn_scan_with_loss(
         wires: Wire connection patterns
         x_data: Input data
         y_data: Target output data
-        loss_type: Type of loss function to use
+        loss_cfg: LossConfig object
         layer_sizes: List of (nodes, group_size) tuples for each layer
         data_fraction: Fraction of data to use for loss computation (default: 1.0)
         scan_key: Random key for data sampling (required if data_fraction < 1.0)
@@ -241,7 +242,7 @@ def run_gnn_scan_with_loss(
             wires,
             x_batch,
             y_batch,
-            loss_type,
+            loss_cfg,
             layer_sizes,
         )
 

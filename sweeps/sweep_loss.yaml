@@ -1,0 +1,7 @@
+# Define parameter sweeps
+defaults:
+  - override hydra/launcher: basic
+
+sweep:
+  grid:  # parameters to combine in all possible ways
+    loss: [bce, bce_w2, bce_w3, focal, asym, focal_asym, l2, l4]
