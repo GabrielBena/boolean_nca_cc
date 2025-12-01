@@ -558,12 +558,7 @@ def run_perceiver_scan_with_loss(
         final_graph: Graph after all steps
         step_outputs: Tuple of outputs from each step
     """
-    from boolean_nca_cc.circuits.model import run_circuit
-    from boolean_nca_cc.training.evaluation import (
-        get_loss_and_update_graph,
-        get_loss_from_wires_logits,
-    )
-    from boolean_nca_cc.utils import extract_logits_from_graph
+    from boolean_nca_cc.training.evaluation import get_loss_and_update_graph
 
     # Precompute masks
     attention_mask = model._create_attention_mask(graph.senders, graph.receivers, model.n_node)
@@ -594,30 +589,16 @@ def run_perceiver_scan_with_loss(
     if model.restrict_output_cross_attn_to_last_layer:
         output_output_gate = model._create_output_gate(layer_indices, allowed_layer=max_layer)
 
-    # Compute initial residuals
-    # Extract updated logits from the graph
-    current_logits = extract_logits_from_graph(graph, logits_original_shapes)
-
-    # Compute loss and auxiliary data
-    initial_loss, (*_, initial_residuals, _) = get_loss_from_wires_logits(
-        logits=current_logits,
-        wires=wires,
-        x=x_data,
-        y_target=y_data,
-        loss_cfg=loss_cfg,
-    )
-
-    # Initialize graph globals with data
-    initial_steps = graph.globals.update_steps if graph.globals is not None else 0.0
-
-    graph = graph._replace(
-        globals=GraphGlobals(
-            loss=initial_loss,
-            update_steps=initial_steps,
-            x_data=x_batch,
-            y_data=y_batch,
-            residuals=initial_residuals,
-        )
+    # Update initial graph with residuals
+    graph, *_ = get_loss_and_update_graph(
+        graph,
+        logits_original_shapes,
+        wires,
+        x_batch,
+        y_batch,
+        loss_cfg,
+        layer_sizes,
+        update_perceiver_globals=True,
     )
 
     # Optionally wrap with gradient checkpointing
@@ -644,8 +625,9 @@ def run_perceiver_scan_with_loss(
         # Apply model
         model_updated_graph = model_fn(current_graph)
 
-        # Compute loss and update graph
-        updated_graph, loss, current_logits, aux = get_loss_and_update_graph(
+        # Compute loss, update graph, and update GraphGlobals with new residuals
+        # (avoids redundant circuit evaluation since residuals are already computed)
+        final_graph, loss, current_logits, aux = get_loss_and_update_graph(
             model_updated_graph,
             logits_original_shapes,
             wires,
@@ -653,23 +635,7 @@ def run_perceiver_scan_with_loss(
             y_batch,
             loss_cfg,
             layer_sizes,
-        )
-
-        # Compute new residuals
-        acts = run_circuit(current_logits, wires, x_batch)
-        pred = acts[-1]
-        new_residuals = pred - y_batch
-
-        # Update globals
-        current_update_steps = current_graph.globals.update_steps
-        final_graph = updated_graph._replace(
-            globals=GraphGlobals(
-                loss=loss,
-                update_steps=current_update_steps + 1,
-                x_data=x_batch,
-                y_data=y_batch,
-                residuals=new_residuals,
-            )
+            update_perceiver_globals=True,
         )
 
         return final_graph, (final_graph, loss, current_logits, aux)
@@ -679,82 +645,3 @@ def run_perceiver_scan_with_loss(
     )
 
     return final_graph, step_outputs
-
-
-# =============================================================================
-# Graph building utilities
-# =============================================================================
-
-
-def build_perceiver_graph(
-    logits: list[jp.ndarray],
-    wires: list[jp.ndarray],
-    input_n: int,
-    arity: int,
-    circuit_hidden_dim: int,
-    x_data: jp.ndarray,
-    y_data: jp.ndarray,
-    bidirectional_edges: bool = True,
-    neighboring_connections: bool = False,
-    loss_value: float = 0.0,
-    update_steps: int = 0,
-    faulty_logit_value: float = -10.0,
-    gate_knockout_mask: jp.ndarray | list[jp.ndarray] | None = None,
-    positional_encoding_max_val: float = 10000.0,
-    initial_residuals: jp.ndarray | None = None,
-) -> jraph.GraphsTuple:
-    """
-    Build a graph with embedded data for Perceiver-style models.
-
-    Args:
-        logits: List of logit tensors per layer
-        wires: List of wire connection patterns
-        input_n: Number of input nodes
-        arity: Fan-in per gate
-        circuit_hidden_dim: Hidden feature dimension
-        x_data: Input data [N_samples, N_input_bits]
-        y_data: Target output [N_samples, N_output_bits]
-        bidirectional_edges: Create bidirectional edges
-        neighboring_connections: Add intra-layer connections
-        loss_value: Initial loss value
-        update_steps: Initial update step count
-        faulty_logit_value: Value for knocked-out gates
-        gate_knockout_mask: Optional knockout mask
-        positional_encoding_max_val: Max value for positional encoding
-        initial_residuals: Pre-computed residuals (if None, initialized to zeros)
-
-    Returns:
-        jraph.GraphsTuple with GraphGlobals containing data
-    """
-    from boolean_nca_cc.utils.graph_builder import build_graph
-
-    # Build standard graph
-    graph = build_graph(
-        logits=logits,
-        wires=wires,
-        input_n=input_n,
-        arity=arity,
-        circuit_hidden_dim=circuit_hidden_dim,
-        bidirectional_edges=bidirectional_edges,
-        neighboring_connections=neighboring_connections,
-        loss_value=loss_value,
-        update_steps=update_steps,
-        faulty_logit_value=faulty_logit_value,
-        gate_knockout_mask=gate_knockout_mask,
-        positional_encoding_max_val=positional_encoding_max_val,
-    )
-
-    # Initialize residuals if not provided
-    if initial_residuals is None:
-        initial_residuals = jp.zeros_like(y_data)
-
-    # Extend globals with Perceiver-specific data
-    extended_globals = GraphGlobals(
-        loss=graph.globals.loss,
-        update_steps=graph.globals.update_steps,
-        x_data=x_data,
-        y_data=y_data,
-        residuals=initial_residuals,
-    )
-
-    return graph._replace(globals=extended_globals)

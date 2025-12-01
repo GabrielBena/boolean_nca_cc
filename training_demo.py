@@ -821,18 +821,15 @@ class CircuitOptimizationDemo:
         # Calculate loss using the unified function for consistency
         (
             loss,
-            (
-                hard_loss,
-                pred,
-                pred_hard,
-                accuracy,
-                hard_accuracy,
-                res,
-                hard_res,
-            ),
+            aux_data,
         ) = get_loss_from_wires_logits(
             current_logits, self.wires, self.input_x, self.y0, self.loss_type
         )
+        hard_loss = aux_data["hard_loss"]
+        accuracy = aux_data["accuracy"]
+        hard_accuracy = aux_data["hard_accuracy"]
+        pred = aux_data["predictions"]
+        pred_hard = aux_data["hard_predictions"]
 
         if self.is_optimizing and hasattr(self, "logit_optimizer") and self.logit_optimizer:
             # Compute gradients with respect to logits
@@ -947,23 +944,12 @@ class CircuitOptimizationDemo:
                 )
             else:
                 # No result yet, return current state
-                (
-                    loss,
-                    (
-                        hard_loss,
-                        pred,
-                        pred_hard,
-                        accuracy,
-                        hard_accuracy,
-                        res,
-                        hard_res,
-                    ),
-                ) = get_loss_from_wires_logits(
+                loss, aux_data = get_loss_from_wires_logits(
                     self.logits, self.wires, self.input_x, self.y0, self.loss_type
                 )
-                self.current_pred = pred
-                self.current_pred_hard = pred_hard
-                return loss, hard_loss, accuracy, hard_accuracy
+                self.current_pred = aux_data["predictions"]
+                self.current_pred_hard = aux_data["hard_predictions"]
+                return loss, aux_data["hard_loss"], aux_data["accuracy"], aux_data["hard_accuracy"]
 
         except Exception as e:
             import traceback

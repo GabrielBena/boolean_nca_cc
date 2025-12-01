@@ -7,7 +7,6 @@ This package provides models for graph neural network-based evolution of boolean
 from boolean_nca_cc.models.attention.base import AttentionBlock, ReZero
 from boolean_nca_cc.models.attention.perceiver_attention import (
     PerceiverCircuitAttention,
-    build_perceiver_graph,
     run_perceiver_scan,
     run_perceiver_scan_with_loss,
 )
@@ -31,7 +30,6 @@ __all__ = [
     "PerceiverCircuitAttention",
     "ReZero",
     "aggregate_sum",
-    "build_perceiver_graph",
     "run_gnn_scan",
     "run_gnn_scan_with_loss",
     "run_perceiver_scan",

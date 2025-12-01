@@ -365,9 +365,9 @@ def run_unified_periodic_evaluation(
 
             # Get final metrics (last step) for IN-distribution
             final_metrics_in = {
-                "eval_in/final_loss": step_metrics_in["soft_loss"][-1],
+                "eval_in/final_loss": step_metrics_in["loss"][-1],
                 "eval_in/final_hard_loss": step_metrics_in["hard_loss"][-1],
-                "eval_in/final_accuracy": step_metrics_in["soft_accuracy"][-1],
+                "eval_in/final_accuracy": step_metrics_in["accuracy"][-1],
                 "eval_in/final_hard_accuracy": step_metrics_in["hard_accuracy"][-1],
                 "eval_in/epoch": epoch,
             }
@@ -402,9 +402,9 @@ def run_unified_periodic_evaluation(
 
             # Get final metrics (last step) for OUT-of-distribution
             final_metrics_out = {
-                "eval_out/final_loss": step_metrics_out["soft_loss"][-1],
+                "eval_out/final_loss": step_metrics_out["loss"][-1],
                 "eval_out/final_hard_loss": step_metrics_out["hard_loss"][-1],
-                "eval_out/final_accuracy": step_metrics_out["soft_accuracy"][-1],
+                "eval_out/final_accuracy": step_metrics_out["accuracy"][-1],
                 "eval_out/final_hard_accuracy": step_metrics_out["hard_accuracy"][-1],
                 "eval_out/epoch": epoch,
             }
@@ -1464,7 +1464,9 @@ def train_model(
                     data_fraction=data_fraction,
                 )
 
-            *_, hard_loss, _, _, accuracy, hard_accuracy, _, _ = aux
+            hard_loss = aux["hard_loss"]
+            accuracy = aux["accuracy"]
+            hard_accuracy = aux["hard_accuracy"]
 
             # Reset a fraction of the pool using scheduled intervals
 

@@ -10,20 +10,18 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jp
+from flax import nnx
 from tqdm.auto import tqdm
 
 from boolean_nca_cc.circuits.model import run_circuit
 from boolean_nca_cc.circuits.train import (
     LOSS_L4,
     LossConfig,
-    compute_accuracy,
     compute_loss_from_predictions,
 )
 from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention, PerceiverCircuitAttention
 from boolean_nca_cc.training.pool.structural_perturbation import apply_knockout_to_circuit
 from boolean_nca_cc.utils import (
-    GraphGlobals,
-    # build_graph,
     extract_logits_from_graph,
     update_output_node_loss,
 )
@@ -40,6 +38,8 @@ class StepResult(NamedTuple):
     hard_accuracy: float
     predictions: jp.ndarray
     hard_predictions: jp.ndarray
+    residuals: jp.ndarray
+    hard_residuals: jp.ndarray
     logits: list[jp.ndarray]
     graph: jp.ndarray  # The updated graph state
 
@@ -74,19 +74,20 @@ def get_loss_from_wires_logits(
     pred_hard = acts_hard[-1]
 
     # Use unified loss computation
-    loss, hard_loss, res, hard_res, accuracy, hard_accuracy = compute_loss_from_predictions(
-        pred, pred_hard, y_target, loss_cfg
+    loss, hard_loss, residuals, hard_residuals, accuracy, hard_accuracy = (
+        compute_loss_from_predictions(pred, pred_hard, y_target, loss_cfg)
     )
 
-    return loss, (
-        hard_loss,
-        pred,
-        pred_hard,
-        accuracy,
-        hard_accuracy,
-        res,
-        hard_res,
-    )
+    return loss, {
+        "loss": loss,
+        "hard_loss": hard_loss,
+        "predictions": pred,
+        "hard_predictions": pred_hard,
+        "accuracy": accuracy,
+        "hard_accuracy": hard_accuracy,
+        "residuals": residuals,
+        "hard_residuals": hard_residuals,
+    }
 
 
 def get_loss_and_update_graph(
@@ -97,6 +98,7 @@ def get_loss_and_update_graph(
     y_data: jp.ndarray,
     loss_cfg,
     layer_sizes: list[tuple[int, int]],
+    update_perceiver_globals: bool = False,
 ):
     """
     Extract logits from graph, compute loss and residuals, and update graph with loss information.
@@ -105,6 +107,7 @@ def get_loss_and_update_graph(
     1. Extract logits from the updated graph
     2. Compute loss and residuals using the circuit
     3. Update the graph's output node loss features with residuals
+    4. (Optional) Update GraphGlobals with new residuals for Perceiver models
 
     Args:
         graph: Updated graph from model application
@@ -114,16 +117,20 @@ def get_loss_and_update_graph(
         y_data: Target output data
         loss_cfg: Loss config dict
         layer_sizes: List of (nodes, group_size) tuples for each layer
+        update_perceiver_globals: If True, update graph.globals with new loss, residuals, etc.
+            This avoids a redundant circuit evaluation in Perceiver scan functions.
 
     Returns:
-        Tuple of (updated_graph, loss, aux_data)
-        where aux_data contains (hard_loss, pred, pred_hard, accuracy, hard_accuracy, res, hard_res)
+        Tuple of (updated_graph, loss, current_logits, aux)
+        where aux contains (hard_loss, pred, pred_hard, accuracy, hard_accuracy, res, hard_res)
     """
+    from boolean_nca_cc.utils.graph_builder import GraphGlobals
+
     # Extract updated logits from the graph
     current_logits = extract_logits_from_graph(graph, logits_original_shapes)
 
     # Compute loss and auxiliary data
-    loss, aux = get_loss_from_wires_logits(
+    loss, aux_data = get_loss_from_wires_logits(
         logits=current_logits,
         wires=wires,
         x=x_data,
@@ -132,13 +139,27 @@ def get_loss_and_update_graph(
     )
 
     # Extract residuals from aux for updating loss feature
-    *_, res, _ = aux
+    residuals = aux_data["residuals"]
 
     # Update the loss feature for output nodes using residuals
     # We'll use the magnitude of residuals as the loss signal for each output node
-    updated_graph = update_output_node_loss(graph, layer_sizes, jp.abs(res).mean(axis=0))
+    updated_graph = update_output_node_loss(graph, layer_sizes, jp.abs(residuals).mean(axis=0))
 
-    return updated_graph, loss, current_logits, aux
+    # Optionally update GraphGlobals for Perceiver models
+    # This saves a redundant circuit evaluation since residuals are already computed
+    if update_perceiver_globals and updated_graph.globals is not None:
+        current_update_steps = updated_graph.globals.update_steps
+        updated_graph = updated_graph._replace(
+            globals=GraphGlobals(
+                loss=loss,
+                update_steps=current_update_steps + 1,
+                x_data=x_data,
+                y_data=y_data,
+                residuals=residuals,
+            )
+        )
+
+    return updated_graph, loss, current_logits, aux_data
 
 
 def create_damage_steps(
@@ -228,20 +249,6 @@ def evaluate_model_stepwise_generator(
     # Store original shapes for reconstruction (EXACTLY like training)
     logits_original_shapes = [logit.shape for logit in logits]
 
-    # Calculate initial loss using the EXACT same function as training
-    (
-        initial_loss,
-        (
-            initial_hard_loss,
-            initial_pred,
-            initial_pred_hard,
-            initial_accuracy,
-            initial_hard_accuracy,
-            initial_res,
-            initial_hard_res,
-        ),
-    ) = get_loss_from_wires_logits(logits, wires, x_data, y_data, loss_cfg)
-
     # Build initial graph using the same function as training
     # Initialize with update_steps = 0 (exactly like training pool initialization)
     graph = build_graph(
@@ -250,7 +257,7 @@ def evaluate_model_stepwise_generator(
         input_n,
         arity,
         circuit_hidden_dim,
-        loss_value=initial_loss,
+        loss_value=0.0,
         bidirectional_edges=bidirectional_edges,
         gate_knockout_mask=None,
     )
@@ -258,52 +265,33 @@ def evaluate_model_stepwise_generator(
     # Check if we have a Perceiver model that needs data in globals
     is_perceiver = isinstance(model, PerceiverCircuitAttention)
 
-    # Initialize graph globals (always use GraphGlobals NamedTuple)
-    current_update_steps = 0
-    if is_perceiver:
-        # Perceiver models need data in globals
-        globals_tuple = GraphGlobals(
-            loss=float(initial_loss),
-            update_steps=current_update_steps,
-            x_data=x_data,
-            y_data=y_data,
-            residuals=initial_res,
-        )
-    else:
-        globals_tuple = GraphGlobals(
-            loss=float(initial_loss),
-            update_steps=current_update_steps,
-        )
-
-    graph = graph._replace(globals=globals_tuple)
-
-    graph = update_output_node_loss(graph, layer_sizes, initial_res.mean(axis=0))
+    graph, _, _, aux_data = get_loss_and_update_graph(
+        graph,
+        logits_original_shapes,
+        wires,
+        x_data,
+        y_data,
+        loss_cfg,
+        layer_sizes,
+        update_perceiver_globals=is_perceiver,
+    )
 
     # Yield initial state (step 0)
     yield StepResult(
         step=0,
-        loss=float(initial_loss),
-        hard_loss=float(initial_hard_loss),
-        accuracy=float(initial_accuracy),
-        hard_accuracy=float(initial_hard_accuracy),
-        predictions=initial_pred,
-        hard_predictions=initial_pred_hard,
         logits=logits,
         graph=graph,
+        **aux_data,
     )
 
     gate_mask = graph.nodes["gate_knockout_mask"]
 
-    # Run optimization steps (EXACTLY like the training loop)
+    # Run optimization steps
     step = 0
     while max_steps is None or step < max_steps:
         step += 1
 
-        # Extract the current update_steps count from graph globals (EXACTLY like training)
-        current_update_steps = 0
-        if graph.globals is not None:
-            current_update_steps = graph.globals.update_steps
-
+        # Extract the current update_steps count from graph globals
         # Apply damage if needed
         if damage_steps is not None and step in damage_steps:
             damage_key, new_damage_key = jax.random.split(damage_key)
@@ -323,12 +311,12 @@ def evaluate_model_stepwise_generator(
                 print(f"Damage at step {step}")
                 print(f"Damage in graph : {(graph.nodes['gate_knockout_mask'] == 0).sum()}")
 
-        # Apply one step of model processing (EXACTLY like training inner loop)
+        # Apply one step of model processing
         # Note: training does multiple steps in a batch, but we do one at a time for live demo
         updated_graph = model(graph)
 
         # Use the unified get_loss_and_update_graph function for consistency
-        updated_graph, loss, current_logits, aux = get_loss_and_update_graph(
+        graph, _, current_logits, aux_data = get_loss_and_update_graph(
             updated_graph,
             logits_original_shapes,
             wires,
@@ -336,50 +324,15 @@ def evaluate_model_stepwise_generator(
             y_data,
             loss_cfg,
             layer_sizes,
+            update_perceiver_globals=is_perceiver,
         )
-
-        # Extract auxiliary data
-        (
-            hard_loss,
-            pred,
-            pred_hard,
-            accuracy,
-            hard_accuracy,
-            res,
-            hard_res,
-        ) = aux
-
-        # Update with the computed loss and incremented update_steps (EXACTLY like training)
-        if is_perceiver:
-            globals_tuple = GraphGlobals(
-                loss=float(loss),
-                update_steps=current_update_steps + 1,
-                x_data=x_data,
-                y_data=y_data,
-                residuals=res,
-            )
-        else:
-            globals_tuple = GraphGlobals(
-                loss=float(loss),
-                update_steps=current_update_steps + 1,
-            )
-
-        updated_graph = updated_graph._replace(globals=globals_tuple)
-
-        # Update the graph variable for next iteration
-        graph = updated_graph
 
         # Yield current state
         yield StepResult(
             step=step,
-            loss=float(loss),
-            hard_loss=float(hard_loss),
-            accuracy=float(accuracy),
-            hard_accuracy=float(hard_accuracy),
-            predictions=pred,
-            hard_predictions=pred_hard,
             logits=current_logits,
             graph=graph,
+            **aux_data,
         )
 
 
@@ -426,14 +379,14 @@ def evaluate_model_stepwise(
         Dictionary with metrics collected at each step
     """
     # Initialize metric storage
-    step_metrics = {
+    step_results = {
         "step": [],
-        "soft_loss": [],
+        "loss": [],
         "hard_loss": [],
-        "soft_accuracy": [],
+        "accuracy": [],
         "hard_accuracy": [],
-        "logits_mean": [],
     }
+    # step_results = []
 
     # Use the generator to collect all results
     generator = evaluate_model_stepwise_generator(
@@ -463,12 +416,11 @@ def evaluate_model_stepwise(
 
     # Collect all results
     for result in pbar:
-        step_metrics["step"].append(result.step)
-        step_metrics["soft_loss"].append(result.loss)
-        step_metrics["hard_loss"].append(result.hard_loss)
-        step_metrics["soft_accuracy"].append(result.accuracy)
-        step_metrics["hard_accuracy"].append(result.hard_accuracy)
-        step_metrics["logits_mean"].append(float(result.graph.nodes["logits"].mean()))
+        for key, value in result._asdict().items():
+            if key in step_results:
+                step_results[key].append(value)
+
+        # step_results.append(result)
 
         if use_tqdm:
             # Update progress bar
@@ -480,9 +432,11 @@ def evaluate_model_stepwise(
                 }
             )
 
-    return step_metrics
+    # return jax.tree.map(lambda x: jp.array(x), step_results)
+    return step_results
 
 
+# Batched evaluation function. Does not support damage steps. right now
 def evaluate_model_stepwise_batched(
     model: CircuitGNN | CircuitSelfAttention | PerceiverCircuitAttention,
     batch_wires: list[jp.ndarray],  # Shape: [batch_size, ...original_wire_shape...]
@@ -526,34 +480,16 @@ def evaluate_model_stepwise_batched(
     # Initialize metric storage - same structure as original
     step_metrics = {
         "step": [],
-        "soft_loss": [],
+        "loss": [],
         "hard_loss": [],
-        "soft_accuracy": [],
+        "accuracy": [],
         "hard_accuracy": [],
-        "logits_mean": [],
     }
+    # step_results = []
 
-    # Store original shapes for reconstruction (EXACTLY like generator)
-    logits_original_shapes = [logit.shape[1:] for logit in batch_logits]  # Remove batch dim
-
-    # Calculate initial losses for the batch (EXACTLY like generator)
-    vmap_get_loss = jax.vmap(
-        lambda logits, wires: get_loss_from_wires_logits(logits, wires, x_data, y_data, loss_cfg)
-    )
-
-    initial_losses, initial_aux = vmap_get_loss(batch_logits, batch_wires)
-    (
-        initial_hard_losses,
-        initial_preds,
-        initial_pred_hards,
-        initial_accuracies,
-        initial_hard_accuracies,
-        initial_res,
-        initial_hard_res,
-    ) = initial_aux
+    is_perceiver = isinstance(model, PerceiverCircuitAttention)
 
     # Build initial graphs using the same function as generator (vectorized)
-    # We need to handle the loss_value parameter carefully to avoid concretization issues
     vmap_build_graph = jax.vmap(
         lambda logits, wires: build_graph(
             logits,
@@ -567,88 +503,41 @@ def evaluate_model_stepwise_batched(
     )
     batch_graphs = vmap_build_graph(batch_logits, batch_wires)
 
-    # Initialize graph globals with NamedTuple (batched values)
-    current_update_steps = jp.zeros(initial_losses.shape[0])
-    batch_graphs = batch_graphs._replace(
-        globals=GraphGlobals(
-            loss=initial_losses,
-            update_steps=current_update_steps,
+    vmap_get_loss_and_update = jax.vmap(
+        lambda graph, wires, logits: get_loss_and_update_graph(
+            graph=graph,
+            logits_original_shapes=[logit.shape for logit in logits],
+            wires=wires,
+            x_data=x_data,
+            y_data=y_data,
+            loss_cfg=loss_cfg,
+            layer_sizes=layer_sizes,
+            update_perceiver_globals=is_perceiver,
         )
     )
 
-    # Update output node losses (vectorized)
-    vmap_update_loss = jax.vmap(
-        lambda graph, res: update_output_node_loss(graph, layer_sizes, res.mean(axis=0))
-    )
-    batch_graphs = vmap_update_loss(batch_graphs, initial_res)
-
-    # Yield initial state (step 0) - same as generator
-    step_metrics["step"].append(0)
-    step_metrics["soft_loss"].append(float(jp.mean(initial_losses)))
-    step_metrics["hard_loss"].append(float(jp.mean(initial_hard_losses)))
-    step_metrics["soft_accuracy"].append(float(jp.mean(initial_accuracies)))
-    step_metrics["hard_accuracy"].append(float(jp.mean(initial_hard_accuracies)))
-    step_metrics["logits_mean"].append(float(jp.mean(batch_graphs.nodes["logits"])))
-
-    # Run optimization steps (EXACTLY like the generator loop)
-    current_graphs = batch_graphs
-
-    for step in range(1, n_message_steps + 1):
-        # Extract the current update_steps count from graph globals (EXACTLY like generator)
-        if current_graphs.globals is not None:
-            current_update_steps = current_graphs.globals.update_steps
-        else:
-            current_update_steps = jp.zeros(len(batch_logits[0]))
-
-        # Apply one step of model processing (vectorized - EXACTLY like generator)
-        vmap_model = jax.vmap(model)
-        updated_graphs = vmap_model(current_graphs)
-
-        # Use the unified get_loss_and_update_graph function for consistency (vectorized)
-        vmap_get_loss_and_update = jax.vmap(
-            lambda graph, wires: get_loss_and_update_graph(
-                graph,
-                logits_original_shapes,
-                wires,
-                x_data,
-                y_data,
-                loss_cfg,
-                layer_sizes,
-            )
+    for step in range(0, n_message_steps + 1):
+        # Compute loss and update graph
+        batch_graphs, _, current_logits, aux_data = vmap_get_loss_and_update(
+            batch_graphs, batch_wires, batch_logits
         )
-
-        updated_graphs, losses, current_logits, aux_data = vmap_get_loss_and_update(
-            updated_graphs, batch_wires
-        )
-
-        # Extract auxiliary data (vectorized)
-        (
-            hard_losses,
-            preds,
-            pred_hards,
-            accuracies,
-            hard_accuracies,
-            res,
-            hard_res,
-        ) = aux_data
-
-        # Update with the computed loss and incremented update_steps (EXACTLY like generator)
-        updated_graphs = updated_graphs._replace(
-            globals=GraphGlobals(
-                loss=losses,
-                update_steps=current_update_steps + 1,
-            )
-        )
-
-        # Update the graphs for next iteration
-        current_graphs = updated_graphs
 
         # Store averaged metrics (same as generator yields)
-        step_metrics["step"].append(step)
-        step_metrics["soft_loss"].append(float(jp.mean(losses)))
-        step_metrics["hard_loss"].append(float(jp.mean(hard_losses)))
-        step_metrics["soft_accuracy"].append(float(jp.mean(accuracies)))
-        step_metrics["hard_accuracy"].append(float(jp.mean(hard_accuracies)))
-        step_metrics["logits_mean"].append(float(jp.mean(current_graphs.nodes["logits"])))
+        # result = StepResult(
+        #     step=step,
+        #     logits=current_logits,
+        #     graph=batch_graphs,
+        #     **jax.tree.map(lambda x: jp.mean(x, axis=0), aux_data),
+        # )
+        # step_results.append(result)
 
+        step_metrics["step"].append(step)
+        for key, value in aux_data.items():
+            if key in step_metrics:
+                step_metrics[key].append(float(jp.mean(value)))
+
+        # Apply one step of model processing (vectorized)
+        batch_graphs = nnx.vmap(lambda graph: model(graph))(batch_graphs)
+
+    # return jax.tree.map(lambda x: jp.array(x), step_results)
     return step_metrics
