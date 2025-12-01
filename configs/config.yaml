@@ -25,9 +25,9 @@ wandb:
 
 # Circuit configuration
 circuit:
-  task: "binary_multiply"
-  input_bits: 12
-  output_bits: 12
+  task: "add"
+  input_bits: 8
+  output_bits: 8
   arity: 4
   num_layers: 3
   layer_sizes: null  # Auto-generate if null 
@@ -68,19 +68,19 @@ pool:
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
 
   # Sample-based damage (applied post-step, independent of resets)
-  damage_pool_enabled: false  # Enabled to test uniform damage strategy
+  damage_pool_enabled: true  # Enabled to test uniform damage strategy
   damage_pool_interval: 128
   damage_pool_fraction: 0.15
   damage_strategy: "loss_biased"  # Changed from "loss_biased" to test if uniform damage prevents drift
   damage_combined_weights: [0.5, 0.5]
   damage_mode: "greedy_vocabulary"  # Options: "shotgun" (random), "strip" (localized), "greedy" (rolling window), or "greedy_vocabulary" (vocabulary sampling)
   # Number of gates to knock out when generating fresh patterns (ignored if vocabulary is used)
-  damage_prob: 5
+  damage_prob: 20
   # Damage-specific vocabulary size (decoupled from legacy persistent_knockout)
   damage_knockout_diversity: 256
   
   # Unified damage control system
-  damage_injection_mode: "multi"  # "single" (static) or "multi" (periodic)
+  damage_injection_mode: "single"  # "single" (static) or "multi" (periodic)
   max_damage_per_circuit: 10      # Maximum damage events per circuit
   # Number of message passing steps for damage evaluation (baseline and recovery trajectories)
   # This should typically match or be close to the training n_message_steps for realistic recovery assessment
@@ -101,7 +101,7 @@ eval:
   periodic_eval_batch_size: ${pool.damage_knockout_diversity}  # Batch size for knockout evaluation (should match knockout_diversity)
   
   # Input combination train/test split
-  input_split_enabled: true       # Enable train/test split on input combinations
+  input_split_enabled: false       # Enable train/test split on input combinations
   input_train_fraction: 0.8       # Fraction of combinations for training (0.8 = 80% train, 20% test)
   input_split_seed: ${test_seed}  # Seed for reproducible split
   
@@ -117,8 +117,8 @@ eval:
     greedy_window_size: ${pool.greedy_window_size}  # Reuse pool's window size
     greedy_injection_recover_steps: 10     # N recovery steps between injections
     # Damage start offset (warm-up period before first damage)
-    damage_start_offset: 10  # Number of steps to run before first damage injection (0 = damage at step 1)
-    damage_start_offset_random: false  # If true, randomize offset per circuit (0 to damage_start_offset)
+    damage_start_offset: 20  # Number of steps to run before first damage injection (0 = damage at step 1)
+    damage_start_offset_random: true  # If true, randomize offset per circuit (0 to damage_start_offset)
     damage_start_offset_seed: 42  # Seed for random offset generation
     # Note: Greedy ordered indices are defined once under pool.greedy_ordered_indices
     

@@ -1327,10 +1327,11 @@ def train_model(
        # Validate unified damage control parameters
     if damage_injection_mode not in ["single", "multi"]:
         raise ValueError(f"damage_injection_mode must be 'single' or 'multi', got '{damage_injection_mode}'")
+    # Automatically set max_damage_per_circuit=1 when mode is 'single'
+    if damage_injection_mode == "single":
+        max_damage_per_circuit = 1
     if max_damage_per_circuit < 1:
         raise ValueError(f"max_damage_per_circuit must be >= 1, got {max_damage_per_circuit}")
-    if damage_injection_mode == "single" and max_damage_per_circuit != 1:
-        raise ValueError(f"damage_injection_mode='single' requires max_damage_per_circuit=1, got {max_damage_per_circuit}")
 
     # Initialize random key
     rng = jax.random.PRNGKey(key)
@@ -1837,7 +1838,15 @@ def train_model(
                     new_patterns = vmapped_pattern_creator(pattern_keys)
 
                 # Apply into pool (increments perturb_counter internally)
-                circuit_pool = circuit_pool.apply_knockouts(damaged_idxs, new_patterns)
+                # Determine accumulation behavior based on model's damage mode
+                damage_behavior = getattr(model, "damage_behavior", "permanent")
+                should_accumulate = (damage_behavior == "permanent")
+                
+                circuit_pool = circuit_pool.apply_knockouts(
+                    damaged_idxs, 
+                    new_patterns, 
+                    accumulate=should_accumulate
+                )
 
                 damaged_count = int(damaged_idxs.shape[0]) if hasattr(damaged_idxs, "shape") else 0
                 damaged_frac = damaged_count / float(pool_size) if pool_size > 0 else 0.0
@@ -1926,16 +1935,6 @@ def train_model(
                 # Add learning rate if available
                 schedule_value = schedule(epoch) if schedule is not None else learning_rate
                 metrics_dict["scheduler/learning_rate"] = schedule_value
-
-                # DEBUG BLOCK: Add scale parameters if available (for re_zero_update models)
-                # Add scale parameters if available (for re_zero_update models)
-                logit_scale = _extract_scale_parameter(model, "logit_scale")
-                if logit_scale is not None:
-                    metrics_dict["model/logit_scale"] = logit_scale
-                
-                hidden_scale = _extract_scale_parameter(model, "hidden_scale")
-                if hidden_scale is not None:
-                    metrics_dict["model/hidden_scale"] = hidden_scale
 
                 # Add early stopping metrics if enabled
                 if stop_accuracy_enabled:

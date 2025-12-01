@@ -376,11 +376,12 @@ class GraphPool(struct.PyTreeNode):
 
         return reset_pool, avg_steps_reset
 
-    @jax.jit
+    @partial(jax.jit, static_argnames=("accumulate",))
     def apply_knockouts(
         self,
         idxs: Array,
         new_knockout_patterns: Array,
+        accumulate: bool = False,
     ) -> "GraphPool":
         """
         Apply new knockout patterns at the specified indices and return an updated pool.
@@ -391,6 +392,8 @@ class GraphPool(struct.PyTreeNode):
         Args:
             idxs: 1D indices in the pool to update.
             new_knockout_patterns: Boolean knockout masks aligned with `idxs`.
+            accumulate: If True, new patterns are merged with existing ones via logical OR.
+                       If False, new patterns replace existing ones (default).
 
         Returns:
             Updated GraphPool with modified `knockout_patterns`.
@@ -399,9 +402,16 @@ class GraphPool(struct.PyTreeNode):
             # Nothing to update if knockout storage is not initialized
             return self
 
-        updated_knockout_patterns = self.knockout_patterns.at[idxs].set(
-            new_knockout_patterns
-        )
+        if accumulate:
+            # Accumulate damage using bitwise OR (|)
+            updated_knockout_patterns = self.knockout_patterns.at[idxs].set(
+                self.knockout_patterns[idxs] | new_knockout_patterns
+            )
+        else:
+            # Replace damage pattern (standard behavior)
+            updated_knockout_patterns = self.knockout_patterns.at[idxs].set(
+                new_knockout_patterns
+            )
 
         # Increment per-circuit perturbation counter for the affected indices
         updated_perturb_counter = (
@@ -499,7 +509,7 @@ class GraphPool(struct.PyTreeNode):
                 new_patterns = vmapped_pattern_creator(pattern_keys)
 
             # Apply into pool
-            updated_pool = self.apply_knockouts(damaged_idxs, new_patterns)
+            updated_pool = self.apply_knockouts(damaged_idxs, new_patterns, accumulate=False) # Helper uses explicit replacement by default
             return updated_pool, damaged_idxs
 
         # Use a conditional to keep shapes consistent under jit (though floor=1 normally)

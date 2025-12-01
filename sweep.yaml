@@ -55,9 +55,14 @@ parameters:
 
   pool.damage_prob:
     values:
-      - 10
-      - 15
+      # - 5
       - 20
+      - 160
+
+  # pool.damage_injection_mode:
+  #   values:
+  #     - "single"
+  #     - "multi"
 
   # pool.damage_mode:
   #   values:
@@ -71,19 +76,19 @@ parameters:
   #     - 0.15
   #     - 0.2
 
-  # Self-attention model parameters (state size scaling)
-  # model.attention_dim:
-  #   values:
-  #     - 64
-  #     - 128
-  #     - 256
-  #     # - 512
+  # Self-attention model parameters (biggest impact on parameter count)
+  # attention_dim has QUADRATIC impact (~96.6% of total params)
+  model.attention_dim:
+    values:
+      - 64
+      - 128  # 75% reduction in attention params vs 256
+      - 256  # baseline (current)
 
-  # model.num_layers:
-  #   values:
-  #     # - 1
-  #     - 2
-  #     - 4
+  # num_layers has LINEAR impact (direct multiplier)
+  model.num_layers:
+    values:
+      - 2    # 50% reduction vs 4 layers
+      - 4    # baseline (current)
 
   # model.num_heads:
   #   values:

@@ -470,10 +470,11 @@ def evaluate_model_stepwise_batched(
     # Validate new parameters
     if damage_injection_mode not in ["single", "multi"]:
         raise ValueError(f"damage_injection_mode must be 'single' or 'multi', got '{damage_injection_mode}'")
+    # Automatically set max_damage_per_circuit=1 when mode is 'single'
+    if damage_injection_mode == "single":
+        max_damage_per_circuit = 1
     if max_damage_per_circuit < 1:
         raise ValueError(f"max_damage_per_circuit must be >= 1, got {max_damage_per_circuit}")
-    if damage_injection_mode == "single" and max_damage_per_circuit != 1:
-        raise ValueError(f"damage_injection_mode='single' requires max_damage_per_circuit=1, got {max_damage_per_circuit}")
     if damage_start_offset < 0:
         raise ValueError(f"damage_start_offset must be >= 0, got {damage_start_offset}")
     batch_size = batch_wires[0].shape[0]
@@ -697,10 +698,11 @@ def _evaluate_with_loop(
     # Validate new parameters
     if damage_injection_mode not in ["single", "multi"]:
         raise ValueError(f"damage_injection_mode must be 'single' or 'multi', got '{damage_injection_mode}'")
+    # Automatically set max_damage_per_circuit=1 when mode is 'single'
+    if damage_injection_mode == "single":
+        max_damage_per_circuit = 1
     if max_damage_per_circuit < 1:
         raise ValueError(f"max_damage_per_circuit must be >= 1, got {max_damage_per_circuit}")
-    if damage_injection_mode == "single" and max_damage_per_circuit != 1:
-        raise ValueError(f"damage_injection_mode='single' requires max_damage_per_circuit=1, got {max_damage_per_circuit}")
     # Run message passing steps
     current_graphs = batch_graphs
     
