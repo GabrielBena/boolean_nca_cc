@@ -694,7 +694,7 @@ class CircuitOptimizationDemo:
                     print(f"Using width factor: {self.width_factor}")
                     loaded_config.circuit.width_factor = self.width_factor
 
-                model, loaded_dict = load_model_from_config_and_checkpoint(
+                model, loaded_dict, _ = load_model_from_config_and_checkpoint(
                     config=loaded_config,
                     checkpoint_path=checkpoint_path,
                     run_id=run_id,
@@ -733,7 +733,7 @@ class CircuitOptimizationDemo:
                     print(f"Using width factor: {self.width_factor}")
                     loaded_config.circuit.width_factor = self.width_factor
 
-                model, loaded_dict = load_model_from_config_and_checkpoint(
+                model, loaded_dict, _ = load_model_from_config_and_checkpoint(
                     config=loaded_config,
                     checkpoint_path=checkpoint_path,
                     run_id=run_id,

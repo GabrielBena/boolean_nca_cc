@@ -12,11 +12,38 @@ logits and wires, with support for:
 - Positional encodings for layer and intra-layer positions
 """
 
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jp
 import jraph
 
 from boolean_nca_cc.utils.positional_encoding import get_positional_encoding
+
+
+class GraphGlobals(NamedTuple):
+    """
+    Global features for circuit graphs.
+
+    This NamedTuple provides a consistent structure for graph globals
+    that works well with JAX pytree operations (vmap, jit, etc.).
+
+    Base fields (used by all models):
+        loss: Current circuit loss value
+        update_steps: Number of optimization steps applied
+
+    Perceiver-specific fields (optional, for cross-attention to data):
+        x_data: Input data batch [N_samples, N_input_bits] or None
+        y_data: Target output batch [N_samples, N_output_bits] or None
+        residuals: Current prediction errors [N_samples, N_output_bits] or None
+    """
+
+    loss: float | jp.ndarray
+    update_steps: int | jp.ndarray
+    # Perceiver-specific fields (None for non-Perceiver models)
+    x_data: jp.ndarray | None = None
+    y_data: jp.ndarray | None = None
+    residuals: jp.ndarray | None = None
 
 
 def build_graph(
@@ -200,7 +227,7 @@ def build_graph(
             receivers=jp.array([], dtype=jp.int32),
             n_node=jp.array([0]),
             n_edge=jp.array([0]),
-            globals=jp.zeros((2,), dtype=jp.float32),
+            globals=GraphGlobals(loss=0.0, update_steps=0),
         )
 
     # Combine node features from all layers
@@ -254,8 +281,11 @@ def build_graph(
     n_node = current_global_node_idx
     n_edge = len(senders)
 
-    # Combine loss_value and update_steps into globals
-    globals_val = jp.array([float(loss_value), float(update_steps)], dtype=jp.float32)
+    # Store globals as NamedTuple for consistent access across all models
+    globals_tuple = GraphGlobals(
+        loss=float(loss_value),
+        update_steps=int(update_steps),
+    )
 
     return jraph.GraphsTuple(
         nodes=all_nodes,
@@ -264,7 +294,7 @@ def build_graph(
         receivers=receivers.astype(jp.int32),
         n_node=jp.array([n_node]),
         n_edge=jp.array([n_edge]),
-        globals=globals_val,
+        globals=globals_tuple,
     )
 
 

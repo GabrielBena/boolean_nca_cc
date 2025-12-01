@@ -18,8 +18,8 @@ from tqdm.auto import tqdm
 
 import wandb
 from boolean_nca_cc.circuits.train import LOSS_L4, LossConfig
-from boolean_nca_cc.circuits.viz import create_wandb_visualization
-from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention
+from boolean_nca_cc.circuits.viz import create_wandb_visualization, plot_wandb_stepwise_results
+from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention, PerceiverCircuitAttention
 from boolean_nca_cc.training.checkpointing import (
     BestModelTracker,
     check_early_stopping,
@@ -41,6 +41,7 @@ from boolean_nca_cc.training.schedulers import (
     get_step_beta,
     should_reset_pool,
 )
+from boolean_nca_cc.training.utils import check_gradients
 
 # Type alias for PyTree
 PyTree = Any
@@ -113,7 +114,7 @@ def _log_pool_scatter(pool, epoch, wandb_run):
     if wandb_run is None:
         return
 
-    all_loss, all_steps = pool.graphs.globals[..., 0], pool.graphs.globals[..., 1]
+    all_loss, all_steps = pool.graphs.globals.loss, pool.graphs.globals.update_steps
     data = list(zip(all_steps, all_loss, strict=False))
     table = wandb.Table(data=data, columns=["steps", "loss"])
     wandb_run.log({"pool/scatter": wandb.plot.scatter(table, "steps", "loss")})
@@ -133,6 +134,10 @@ def _create_single_circuit_visualization(
     layer_sizes,
     circuit_idx=0,
     eval_type="eval_in",
+    log_stepwise=False,
+    damage_steps=None,
+    knockout_per_damage_step=1,
+    damage_key=jax.random.PRNGKey(42),
 ):
     """
     Create a wandb visualization for a single circuit from the evaluation batch.
@@ -180,9 +185,33 @@ def _create_single_circuit_visualization(
         )
 
         # Run to completion
-        final_result = None
+        results = []
         for result in generator:
-            final_result = result
+            results.append(result)
+
+        if damage_steps is not None:
+            damage_generator = evaluate_model_stepwise_generator(
+                model=model,
+                wires=single_wires,
+                logits=single_logits,
+                x_data=x_data,
+                y_data=y_data,
+                input_n=input_n,
+                arity=arity,
+                circuit_hidden_dim=circuit_hidden_dim,
+                max_steps=n_message_steps,
+                loss_cfg=loss_cfg,
+                bidirectional_edges=True,
+                layer_sizes=layer_sizes,
+                damage_steps=damage_steps,
+                knockout_per_damage_step=knockout_per_damage_step,
+                damage_key=damage_key,
+            )
+            damage_results = []
+            for result in damage_generator:
+                damage_results.append(result)
+
+        final_result = results[-1]
 
         if final_result is None:
             return None
@@ -197,14 +226,44 @@ def _create_single_circuit_visualization(
             hard=True,
         )
 
-        return {
+        if log_stepwise:
+            viz_result["stepwise_fig"] = plot_wandb_stepwise_results(results)
+        else:
+            viz_result["stepwise_fig"] = None
+
+        if damage_steps is not None:
+            viz_result_damaged = create_wandb_visualization(
+                logits=damage_results[-1].logits,
+                wires=single_wires,
+                x=x_data,
+                y0=y_data,
+                title_prefix=f"{eval_type.upper()} Circuit {circuit_idx} - Damaged",
+                hard=True,
+            )
+            if log_stepwise:
+                viz_result_damaged["stepwise_fig"] = plot_wandb_stepwise_results(damage_results)
+            else:
+                viz_result_damaged["stepwise_fig"] = None
+
+        final_viz_result = {
             "figure": viz_result["figure"],
+            "stepwise_fig": viz_result["stepwise_fig"],
             "accuracy": viz_result["accuracy"],
             "error_count": viz_result["error_count"],
             "total_bits": viz_result["total_bits"],
             "final_loss": float(final_result.loss),
             "final_hard_loss": float(final_result.hard_loss),
         }
+        if damage_steps is not None:
+            final_viz_result["figure_damaged"] = viz_result_damaged["figure"]
+            final_viz_result["stepwise_fig_damaged"] = viz_result_damaged["stepwise_fig"]
+            final_viz_result["accuracy_damaged"] = viz_result_damaged["accuracy"]
+            final_viz_result["error_count_damaged"] = viz_result_damaged["error_count"]
+            final_viz_result["total_bits_damaged"] = viz_result_damaged["total_bits"]
+            final_viz_result["final_loss_damaged"] = float(damage_results[-1].loss)
+            final_viz_result["final_hard_loss_damaged"] = float(damage_results[-1].hard_loss)
+
+        return final_viz_result
 
     except Exception as e:
         log.warning(f"Error creating circuit visualization: {e}")
@@ -236,6 +295,10 @@ def run_unified_periodic_evaluation(
     track_metrics: list[str] | None = None,
     x_plot: jp.ndarray | None = None,
     y_plot: jp.ndarray | None = None,
+    # Damage parameters
+    damage_steps=None,
+    knockout_per_damage_step=1,
+    damage_key=jax.random.PRNGKey(42),
 ) -> dict:
     """
     Run unified periodic evaluation with only IN-distribution and OUT-of-distribution testing.
@@ -388,7 +451,13 @@ def run_unified_periodic_evaluation(
                         layer_sizes=layer_sizes,
                         circuit_idx=0,
                         eval_type="eval_in",
+                        log_stepwise=log_stepwise,
+                        damage_steps=damage_steps,
+                        knockout_per_damage_step=knockout_per_damage_step,
+                        damage_key=damage_key,
                     )
+
+                    import matplotlib.pyplot as plt
 
                     if viz_in is not None:
                         # Log the visualization figure
@@ -396,14 +465,37 @@ def run_unified_periodic_evaluation(
                             {
                                 "eval_in/circuit_visualization": wandb_run.Image(viz_in["figure"]),
                                 "eval_in/viz_accuracy": viz_in["accuracy"],
-                                "eval_in/viz_error_count": viz_in["error_count"],
-                                "eval_in/viz_final_loss": viz_in["final_loss"],
+                                # "eval_in/viz_error_count": viz_in["error_count"],
+                                # "eval_in/viz_final_loss": viz_in["final_loss"],
                             }
                         )
-                        # Close the figure to free memory
-                        import matplotlib.pyplot as plt
+                        if viz_in["stepwise_fig"] is not None:
+                            wandb_run.log(
+                                {
+                                    "eval_in/stepwise_fig": wandb_run.Image(viz_in["stepwise_fig"]),
+                                }
+                            )
 
-                        plt.close(viz_in["figure"])
+                        if viz_in.get("figure_damaged", None) is not None:
+                            wandb_run.log(
+                                {
+                                    "eval_in/circuit_visualization_damaged": wandb_run.Image(
+                                        viz_in["figure_damaged"]
+                                    ),
+                                    "eval_in/viz_accuracy_damaged": viz_in["accuracy_damaged"],
+                                }
+                            )
+
+                        if viz_in.get("stepwise_fig_damaged", None) is not None:
+                            wandb_run.log(
+                                {
+                                    "eval_in/stepwise_fig_damaged": wandb_run.Image(
+                                        viz_in["stepwise_fig_damaged"]
+                                    ),
+                                }
+                            )
+
+                        plt.close("all")  # Close all figures to free memory
 
                 # Create visualization for OUT-of-distribution circuit (if available)
                 if (
@@ -424,7 +516,13 @@ def run_unified_periodic_evaluation(
                         layer_sizes=layer_sizes,
                         circuit_idx=0,
                         eval_type="eval_out",
+                        log_stepwise=log_stepwise,
+                        damage_steps=damage_steps,
+                        knockout_per_damage_step=knockout_per_damage_step,
+                        damage_key=damage_key,
                     )
+
+                    import matplotlib.pyplot as plt
 
                     if viz_out is not None:
                         # Log the visualization figure
@@ -433,50 +531,45 @@ def run_unified_periodic_evaluation(
                                 "eval_out/circuit_visualization": wandb_run.Image(
                                     viz_out["figure"]
                                 ),
-                                # "eval_out/viz_accuracy": viz_out["accuracy"],
+                                "eval_out/viz_accuracy": viz_out["accuracy"],
                                 # "eval_out/viz_error_count": viz_out["error_count"],
                                 # "eval_out/viz_final_loss": viz_out["final_loss"],
                             }
                         )
-                        # Close the figure to free memory
-                        import matplotlib.pyplot as plt
+                        if viz_out.get("stepwise_fig", None) is not None:
+                            wandb_run.log(
+                                {
+                                    "eval_out/stepwise_fig": wandb_run.Image(
+                                        viz_out["stepwise_fig"]
+                                    ),
+                                }
+                            )
 
-                        plt.close(viz_out["figure"])
+                        if viz_out.get("figure_damaged", None) is not None:
+                            wandb_run.log(
+                                {
+                                    "eval_out/circuit_visualization_damaged": wandb_run.Image(
+                                        viz_out["figure_damaged"]
+                                    ),
+                                    "eval_out/viz_accuracy_damaged": viz_out["accuracy_damaged"],
+                                }
+                            )
+                            if viz_out.get("stepwise_fig_damaged", None) is not None:
+                                wandb_run.log(
+                                    {
+                                        "eval_out/stepwise_fig_damaged": wandb_run.Image(
+                                            viz_out["stepwise_fig_damaged"]
+                                        ),
+                                    }
+                                )
+                        plt.close("all")  # Close all figures to free memory
 
             except Exception as e:
+                import traceback
+
+                tb_str = traceback.format_exc()
                 log.warning(f"Error creating wandb circuit visualizations: {e}")
-
-            # Optionally log step-by-step metrics for both evaluations
-            if log_stepwise:
-                # IN-distribution step-wise metrics
-                if step_metrics_in is not None:
-                    for step_idx in range(len(step_metrics_in["step"])):
-                        step_data_in = {
-                            "eval_in_steps/step": step_metrics_in["step"][step_idx],
-                            "eval_in_steps/loss": step_metrics_in["soft_loss"][step_idx],
-                            "eval_in_steps/hard_loss": step_metrics_in["hard_loss"][step_idx],
-                            "eval_in_steps/accuracy": step_metrics_in["soft_accuracy"][step_idx],
-                            "eval_in_steps/hard_accuracy": step_metrics_in["hard_accuracy"][
-                                step_idx
-                            ],
-                            "eval_in_steps/epoch": epoch,
-                        }
-                        wandb_run.log(step_data_in)
-
-                # OUT-of-distribution step-wise metrics
-                if step_metrics_out is not None:
-                    for step_idx in range(len(step_metrics_out["step"])):
-                        step_data_out = {
-                            "eval_out_steps/step": step_metrics_out["step"][step_idx],
-                            "eval_out_steps/loss": step_metrics_out["soft_loss"][step_idx],
-                            "eval_out_steps/hard_loss": step_metrics_out["hard_loss"][step_idx],
-                            "eval_out_steps/accuracy": step_metrics_out["soft_accuracy"][step_idx],
-                            "eval_out_steps/hard_accuracy": step_metrics_out["hard_accuracy"][
-                                step_idx
-                            ],
-                            "eval_out_steps/epoch": epoch,
-                        }
-                        wandb_run.log(step_data_out)
+                log.warning(f"Traceback: {tb_str}")
 
         # Log summary to console
         training_config = datasets.training_config
@@ -493,7 +586,10 @@ def run_unified_periodic_evaluation(
             in_chunk_info = f", {num_in_chunks} chunks"
 
         out_chunk_info = ""
-        if datasets.out_actual_batch_size > datasets.target_batch_size:
+        if (
+            datasets.out_actual_batch_size is not None
+            and datasets.out_actual_batch_size > datasets.target_batch_size
+        ):
             num_out_chunks = (
                 datasets.out_actual_batch_size + datasets.target_batch_size - 1
             ) // datasets.target_batch_size
@@ -591,7 +687,8 @@ def run_unified_periodic_evaluation(
                 "target_batch_size": datasets.target_batch_size,
                 "in_used_chunking": datasets.in_actual_batch_size is not None
                 and datasets.in_actual_batch_size > datasets.target_batch_size,
-                "out_used_chunking": datasets.out_actual_batch_size > datasets.target_batch_size,
+                "out_used_chunking": datasets.out_actual_batch_size is not None
+                and datasets.out_actual_batch_size > datasets.target_batch_size,
                 "training_wiring_mode": datasets.training_config["wiring_mode"],
                 "training_initial_diversity": datasets.training_config["initial_diversity"],
                 "evaluation_base_seed": datasets.training_config["evaluation_base_seed"],
@@ -601,7 +698,10 @@ def run_unified_periodic_evaluation(
         return result
 
     except Exception as e:
-        log.warning(f"Error during unified periodic evaluation at epoch {epoch}: {e}")
+        import traceback
+
+        tb_str = traceback.format_exc()
+        log.warning(f"Error during unified periodic evaluation at epoch {epoch}: {e}\n{tb_str}")
         return {}
 
 
@@ -665,7 +765,6 @@ def train_model(
     save_best: bool = True,
     best_metric: str = "hard_accuracy",  # Options: 'loss', 'hard_loss', 'accuracy', 'hard_accuracy'
     best_metric_source: str = "training",  # Options: 'training' or 'eval'
-    save_stable_states: bool = True,
     # Periodic evaluation parameters
     periodic_eval_enabled: bool = False,
     periodic_eval_inner_steps: int = 100,
@@ -679,6 +778,8 @@ def train_model(
     periodic_eval_do_ood_evaluation: bool
     | None = None,  # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
     periodic_eval_log_pool_scatter: bool = False,
+    periodic_eval_damage_enabled: bool = False,
+    periodic_eval_n_damage_steps: int = 1,
     # Wandb parameters
     wandb_logging: bool = False,
     log_interval: int = 1,
@@ -699,6 +800,8 @@ def train_model(
     knockouts_per_event: int = 1,  # Gates to knock out per damage event
     max_damage_per_circuit: int | None = None,  # Max knockouts per circuit
     faulty_logit_value: float = -10.0,  # Value for knocked-out gate logits
+    # Debugging parameters
+    do_check_gradients: bool = False,
 ):
     """
     Train a GNN to optimize boolean circuit parameters.
@@ -744,7 +847,6 @@ def train_model(
         save_best: Whether to track and save the best model
         best_metric: Metric to use for determining the best model
         best_metric_source: Source of the metric ('training' or 'eval')
-        save_stable_states: Whether to save stable states (before potential NaN losses)
         periodic_eval_enabled: Whether to enable periodic evaluation
         periodic_eval_inner_steps: Number of inner steps for periodic evaluation
         periodic_eval_interval: Interval for periodic evaluation
@@ -771,6 +873,7 @@ def train_model(
         knockouts_per_event: Number of gates to knock out per damage event
         max_damage_per_circuit: Maximum knockouts per circuit (None = no limit)
         faulty_logit_value: Value for knocked-out gate logits (large negative)
+        do_check_gradients: Whether to check gradients for zero values
     Returns:
         Dictionary with trained GNN model and training metrics
     """
@@ -916,11 +1019,17 @@ def train_model(
 
                 scan_fn = run_gnn_scan_with_loss
             elif isinstance(model, CircuitSelfAttention):
-                from boolean_nca_cc.models.self_attention import (
+                from boolean_nca_cc.models.attention.self_attention import (
                     run_self_attention_scan_with_loss,
                 )
 
                 scan_fn = run_self_attention_scan_with_loss
+            elif isinstance(model, PerceiverCircuitAttention):
+                from boolean_nca_cc.models.attention.perceiver_attention import (
+                    run_perceiver_scan_with_loss,
+                )
+
+                scan_fn = run_perceiver_scan_with_loss
             else:
                 raise ValueError(f"Unknown model type: {type(model)}")
 
@@ -948,6 +1057,14 @@ def train_model(
                 lambda x: x[loss_step], step_outputs
             )
 
+            # # Take the mean of the losses until the loss step: more grads !
+            # # Use masking instead of dynamic_slice since loss_step is a traced value
+            # all_losses = step_outputs[1]  # shape: [n_message_steps]
+            # indices = jp.arange(n_message_steps)
+            # mask = indices <= loss_step
+            # # Compute masked mean: sum of valid losses / count of valid losses
+            # final_loss = jp.sum(jp.where(mask, all_losses, 0.0)) / (loss_step + 1)
+
             return final_loss, (final_aux, final_graph, final_logits, loss_step)
 
         def loss_fn_no_scan(model, graph, logits, wires, loss_key):
@@ -968,11 +1085,6 @@ def train_model(
                     y_data=y_target,
                     loss_cfg=loss_cfg,
                     layer_sizes=layer_sizes,
-                )
-                # Update graph globals with current update steps
-                current_update_steps = graph.globals[..., 1] if graph.globals is not None else 0
-                graph = graph._replace(
-                    globals=jp.array([loss, current_update_steps + 1], dtype=jp.float32)
                 )
                 all_results.append((loss, aux, graph, logits))
 
@@ -1027,16 +1139,7 @@ def train_model(
     # =========================================================================
     # Single batch training step (processes full batch at once)
     # =========================================================================
-    @partial(
-        nnx.jit,
-        static_argnames=(
-            "layer_sizes",
-            "n_message_steps",
-            "loss_cfg",
-            "data_fraction",
-        ),
-    )
-    def pool_train_step(
+    def _pool_train_step(
         model: CircuitGNN,
         optimizer: nnx.Optimizer,
         pool: GraphPool,
@@ -1079,6 +1182,7 @@ def train_model(
         Returns:
             Tuple of (loss, (aux, updated_pool, loss_steps))
         """
+
         # Compute loss and gradients using shared core logic
         loss, aux, updated_graphs, updated_logits, loss_steps, grads = _compute_loss_and_gradients(
             model=model,
@@ -1095,6 +1199,8 @@ def train_model(
             data_fraction=data_fraction,
         )
 
+        if do_check_gradients:
+            check_gradients(grads)
         # Update GNN parameters
         optimizer.update(model, grads)
 
@@ -1103,8 +1209,23 @@ def train_model(
 
         return loss, (aux, updated_pool, loss_steps)
 
-    # Define efficient sequential batch processing function
-    def pool_train_step_sequential(
+    _pool_train_step_jit = partial(
+        nnx.jit,
+        static_argnames=(
+            "layer_sizes",
+            "n_message_steps",
+            "loss_cfg",
+            "data_fraction",
+        ),
+    )(_pool_train_step)
+
+    # We can't perfrom gradient checking on the JIT-compiled version
+    pool_train_step = _pool_train_step if do_check_gradients else _pool_train_step_jit
+
+    # =========================================================================
+    # Sequential batch training step (processes batch in smaller chunks)
+    # =========================================================================
+    def _pool_train_step_sequential(
         model: CircuitGNN,
         optimizer: nnx.Optimizer,
         pool: GraphPool,
@@ -1303,7 +1424,7 @@ def train_model(
                 (
                     loss,
                     (aux, circuit_pool, loss_steps),
-                ) = pool_train_step_sequential(
+                ) = _pool_train_step_sequential(
                     model=model,
                     optimizer=optimizer,
                     pool=circuit_pool,
@@ -1531,6 +1652,18 @@ def train_model(
                 # The pool evaluation circuits are recreated with the same logic as training
                 current_datasets = eval_datasets
 
+                if periodic_eval_damage_enabled:
+                    damage_steps = jp.linspace(
+                        0,
+                        periodic_eval_inner_steps,
+                        periodic_eval_n_damage_steps + 1,
+                        endpoint=False,
+                    ).astype(int)[1:]
+                    damage_key = jax.random.PRNGKey(42)
+                else:
+                    damage_steps = None
+                    damage_key = None
+
                 eval_results = run_unified_periodic_evaluation(
                     model=model,
                     datasets=current_datasets,
@@ -1556,6 +1689,10 @@ def train_model(
                     track_metrics=track_metrics,
                     x_plot=x_total[:256],
                     y_plot=y_total[:256],
+                    # Damage parameters
+                    damage_steps=damage_steps,
+                    knockout_per_damage_step=knockouts_per_event,
+                    damage_key=damage_key,
                 )
                 # Extract final metrics for best model tracking (use IN-distribution metrics)
                 current_eval_metrics = eval_results.get("final_metrics_in", None)

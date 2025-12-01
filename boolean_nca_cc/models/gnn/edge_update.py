@@ -37,7 +37,6 @@ class EdgeUpdateModule(nnx.Module):
             arity: Number of inputs per gate in the boolean circuit
             rngs: Random number generators
             zero_init: Whether to initialize weights and biases to zero
-            re_zero_update: Whether to use learnable update residual rate
         """
         self.circuit_hidden_dim = circuit_hidden_dim
         self.arity = arity

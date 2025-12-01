@@ -430,10 +430,14 @@ def process_pool_configuration(cfg):
         return cfg
 
     # Check which parameters need to be computed
+    if cfg.training.random_loss_step:
+        n_message_steps_effective = cfg.training.n_message_steps // 2
+    else:
+        n_message_steps_effective = cfg.training.n_message_steps
     pool_params = {
         "pool_size": cfg.pool.size,
         "batch_size": cfg.training.meta_batch_size,
-        "n_message_steps": cfg.training.n_message_steps,
+        "n_message_steps": n_message_steps_effective,
         "reset_interval": cfg.pool.reset_interval,
         "reset_fraction": cfg.pool.reset_fraction,
     }
@@ -495,7 +499,7 @@ def process_pool_configuration(cfg):
             updated_params = {
                 "pool_size": cfg.pool.size,
                 "batch_size": cfg.training.meta_batch_size,
-                "n_message_steps": cfg.training.n_message_steps,
+                "n_message_steps": n_message_steps_effective,
                 "reset_interval": cfg.pool.reset_interval,
                 "reset_fraction": cfg.pool.reset_fraction,
             }
@@ -863,7 +867,7 @@ def main(cfg: DictConfig) -> None:
 
     # Specific overrides based on model type, which should still be in the YAML.
     # Alternatively, we could inspect cfg.model._target_ if 'type' was removed.
-    if cfg.model.type == "self_attention":
+    if cfg.model.type in ["self_attention", "perceiver_attention"]:
         instantiate_overrides["n_node"] = n_nodes
     # CircuitGNN does not require n_node in its constructor based on original setup.
 
@@ -975,6 +979,10 @@ def main(cfg: DictConfig) -> None:
         periodic_eval_batch_size_out=cfg.eval.batch_size_out,
         periodic_eval_do_ood_evaluation=cfg.eval.do_ood_evaluation,
         periodic_eval_log_pool_scatter=cfg.eval.log_pool_scatter,
+        periodic_eval_damage_enabled=cfg.eval.damage_enabled and cfg.damage.enabled,
+        periodic_eval_n_damage_steps=cfg.eval.n_damage_steps
+        if cfg.eval.damage_enabled and cfg.damage.enabled
+        else None,
         # WandB parameters
         wandb_logging=cfg.wandb.enabled,
         log_interval=cfg.logging.log_interval,
@@ -996,6 +1004,8 @@ def main(cfg: DictConfig) -> None:
         knockouts_per_event=cfg.damage.knockouts_per_event,
         max_damage_per_circuit=cfg.damage.max_damage_per_circuit,
         faulty_logit_value=cfg.damage.faulty_logit_value,
+        # Debugging parameters
+        do_check_gradients=cfg.training.check_gradients,
     )
 
     # Save final model if checkpointing is enabled
@@ -1038,7 +1048,9 @@ def main(cfg: DictConfig) -> None:
             eval_batch_size_out=cfg.eval.batch_size_out
             if cfg.eval.batch_size_out is not None
             else cfg.training.meta_batch_size,
-            do_ood_evaluation=cfg.eval.do_ood_evaluation,
+            do_ood_evaluation=cfg.eval.do_ood_evaluation
+            if cfg.eval.do_ood_evaluation is not None
+            else cfg.training.wiring_mode == "random",
         )
         eval_results = run_unified_periodic_evaluation(
             model=model_results["model"],

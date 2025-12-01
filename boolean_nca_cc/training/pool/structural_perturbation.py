@@ -307,6 +307,7 @@ def apply_knockout_to_circuit(
     layer_sizes: list[tuple[int, int]],
     num_knockouts: int,
     faulty_value: float = -10.0,
+    flat: bool = False,
 ) -> tuple[list[jp.ndarray], list[jp.ndarray]]:
     """
     Apply permanent gate knockout to a single circuit.
@@ -328,18 +329,33 @@ def apply_knockout_to_circuit(
         - knockout_masks: List of mask arrays (one per layer, including input)
     """
     # Generate knockout pattern
-    knockout_masks = create_knockout_pattern(key, layer_sizes, num_knockouts)
+    if flat:
+        # Find eligible range (hidden layers only - skip input and output)
+        total_gates = sum(gate_n for gate_n, _ in layer_sizes)
+        input_gates = layer_sizes[0][0]
+        output_gates = layer_sizes[-1][0] if len(layer_sizes) > 1 else 0
+        eligible_start = input_gates
+        eligible_end = total_gates - output_gates
+        knockout_mask_flat = create_flat_knockout_pattern(
+            key, total_gates, eligible_start, eligible_end, num_knockouts
+        )
+        # Apply faulty values where mask is 0 (knocked out)
+        modified_logits = jp.where(knockout_mask_flat[:, None] == 0.0, faulty_value, logits)
+        return modified_logits, knockout_mask_flat
 
-    # Apply faulty logits to knocked-out gates
-    # Note: logits list doesn't include input layer, masks list does
-    modified_logits = []
-    for layer_idx, layer_logits in enumerate(logits):
-        # Masks are indexed from 0 (input layer), logits start at layer 1
-        layer_mask = knockout_masks[layer_idx + 1]
-        faulty_logits = create_faulty_gate_logits(layer_logits, layer_mask, faulty_value)
-        modified_logits.append(faulty_logits)
+    else:
+        knockout_masks = create_knockout_pattern(key, layer_sizes, num_knockouts)
 
-    return modified_logits, knockout_masks
+        # Apply faulty logits to knocked-out gates
+        # Note: logits list doesn't include input layer, masks list does
+        modified_logits = []
+        for layer_idx, layer_logits in enumerate(logits):
+            # Masks are indexed from 0 (input layer), logits start at layer 1
+            layer_mask = knockout_masks[layer_idx + 1]
+            faulty_logits = create_faulty_gate_logits(layer_logits, layer_mask, faulty_value)
+            modified_logits.append(faulty_logits)
+
+        return modified_logits, knockout_masks
 
 
 def apply_knockout_to_batch(

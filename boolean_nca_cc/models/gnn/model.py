@@ -12,10 +12,11 @@ import jax.numpy as jp
 import jraph
 from flax import nnx
 
-from boolean_nca_cc.models.aggregation import AttentionAggregation, aggregate_sum
-from boolean_nca_cc.models.edge_update import EdgeUpdateModule
-from boolean_nca_cc.models.node_update import NodeUpdateModule
 from boolean_nca_cc.circuits.train import LossConfig
+from boolean_nca_cc.models.gnn.aggregation import AttentionAggregation, aggregate_sum
+from boolean_nca_cc.models.gnn.edge_update import EdgeUpdateModule
+from boolean_nca_cc.models.gnn.node_update import NodeUpdateModule
+from boolean_nca_cc.utils.graph_builder import GraphGlobals
 
 
 class CircuitGNN(nnx.Module):
@@ -248,10 +249,13 @@ def run_gnn_scan_with_loss(
 
         # Update graph globals with current update steps
         current_update_steps = (
-            updated_graph.globals[..., 1] if updated_graph.globals is not None else 0
+            updated_graph.globals.update_steps if updated_graph.globals is not None else 0
         )
         final_graph = updated_graph._replace(
-            globals=jp.array([loss, current_update_steps + 1], dtype=jp.float32)
+            globals=GraphGlobals(
+                loss=loss,
+                update_steps=current_update_steps + 1,
+            )
         )
 
         return final_graph, (final_graph, loss, current_logits, aux)

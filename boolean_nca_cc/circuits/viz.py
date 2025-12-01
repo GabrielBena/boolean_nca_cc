@@ -529,3 +529,44 @@ def create_wandb_visualization(logits, wires, x, y0, title_prefix="", hard=True)
         "error_count": int(jp.sum(errors)),
         "total_bits": int(errors.size),
     }
+
+
+def plot_wandb_stepwise_results(step_metrics):
+    """
+    Plot the step-wise results of a wandb run.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True, dpi=200)
+
+    step_dict = {
+        key: np.array([getattr(s, key) for s in step_metrics])
+        for key in ["step", "loss", "hard_loss", "accuracy", "hard_accuracy"]
+    }
+
+    v = len(step_dict["step"]) // 20
+
+    smooth_step_dict = {
+        key: np.convolve(step_dict[key], np.ones(v) / v, mode="valid")
+        for key in ["loss", "hard_loss", "accuracy", "hard_accuracy"]
+    }
+
+    # Plot Loss
+    axes[0].plot(smooth_step_dict["loss"], label="Soft Loss")
+    axes[0].plot(smooth_step_dict["hard_loss"], label="Hard Loss")
+    axes[0].set_title("Loss")
+    axes[0].set_xlabel("Step")
+    axes[0].set_ylabel("Loss")
+    axes[0].legend()
+
+    # Plot Accuracy
+    axes[1].plot(smooth_step_dict["accuracy"], label="Soft Accuracy")
+    axes[1].plot(smooth_step_dict["hard_accuracy"], label="Hard Accuracy")
+    axes[1].set_title("Accuracy")
+    axes[1].set_xlabel("Step")
+    axes[1].set_ylabel("Accuracy")
+    axes[1].legend()
+
+    fig.suptitle("Step-wise Results")
+
+    plt.show()
+
+    return fig

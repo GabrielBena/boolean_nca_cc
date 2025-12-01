@@ -19,8 +19,10 @@ from boolean_nca_cc.circuits.train import (
     compute_accuracy,
     compute_loss_from_predictions,
 )
-from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention
+from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention, PerceiverCircuitAttention
+from boolean_nca_cc.training.pool.structural_perturbation import apply_knockout_to_circuit
 from boolean_nca_cc.utils import (
+    GraphGlobals,
     # build_graph,
     extract_logits_from_graph,
     update_output_node_loss,
@@ -139,8 +141,48 @@ def get_loss_and_update_graph(
     return updated_graph, loss, current_logits, aux
 
 
+def create_damage_steps(
+    n_damage_steps: int = 0,
+    max_steps: int | None = None,
+    verbose: bool = False,
+    damage_key: jax.random.PRNGKey = jax.random.PRNGKey(42),
+    min_damage_interval: int = 16,
+) -> list[int]:
+    """
+    Create damage steps with at least min_damage_interval spacing.
+    """
+
+    if n_damage_steps > 0:
+        # Create random damage steps with at least min_damage_interval spacing
+        total_steps = max_steps if max_steps is not None else 1000
+
+        # Calculate minimum required steps to fit all damages with proper spacing
+        min_required_steps = (n_damage_steps - 1) * min_damage_interval + 1
+        assert total_steps >= min_required_steps, (
+            f"Not enough steps ({total_steps}) to apply {n_damage_steps} damages "
+            f"with min_damage_interval={min_damage_interval} (need at least {min_required_steps})"
+        )
+
+        # Generate truly random damage steps with guaranteed minimum spacing:
+        # 1. "Compress" the range by removing mandatory spacing between points
+        # 2. Pick n random points in that compressed range
+        # 3. Sort and expand back by adding cumulative offsets
+        compressed_range = total_steps - (n_damage_steps - 1) * min_damage_interval
+        random_points = jax.random.randint(damage_key, (n_damage_steps,), 0, compressed_range)
+        sorted_points = jp.sort(random_points)
+        offsets = jp.arange(n_damage_steps) * min_damage_interval
+        damage_steps = sorted_points + offsets
+
+        if verbose:
+            print(f"Random points (compressed): {sorted_points}")
+            print(f"Offsets: {offsets}")
+            print(f"Damage steps: {damage_steps}")
+
+    return damage_steps
+
+
 def evaluate_model_stepwise_generator(
-    model: CircuitGNN | CircuitSelfAttention,
+    model: CircuitGNN | CircuitSelfAttention | PerceiverCircuitAttention,
     wires: list[jp.ndarray],
     logits: list[jp.ndarray],
     x_data: jp.ndarray,
@@ -152,6 +194,10 @@ def evaluate_model_stepwise_generator(
     loss_cfg=None,
     bidirectional_edges: bool = True,
     layer_sizes: list[tuple[int, int]] | None = None,
+    damage_steps: list[int] | None = None,
+    knockout_per_damage_step: int = 1,
+    damage_key: jax.random.PRNGKey = jax.random.PRNGKey(42),
+    verbose: bool = False,
 ) -> Generator[StepResult, None, None]:
     """
     Generator that yields step-by-step evaluation results for GNN model optimization.
@@ -206,11 +252,30 @@ def evaluate_model_stepwise_generator(
         circuit_hidden_dim,
         loss_value=initial_loss,
         bidirectional_edges=bidirectional_edges,
+        gate_knockout_mask=None,
     )
 
-    # Initialize graph globals with [loss, update_steps] exactly like training
+    # Check if we have a Perceiver model that needs data in globals
+    is_perceiver = isinstance(model, PerceiverCircuitAttention)
+
+    # Initialize graph globals (always use GraphGlobals NamedTuple)
     current_update_steps = 0
-    graph = graph._replace(globals=jp.array([initial_loss, current_update_steps], dtype=jp.float32))
+    if is_perceiver:
+        # Perceiver models need data in globals
+        globals_tuple = GraphGlobals(
+            loss=float(initial_loss),
+            update_steps=current_update_steps,
+            x_data=x_data,
+            y_data=y_data,
+            residuals=initial_res,
+        )
+    else:
+        globals_tuple = GraphGlobals(
+            loss=float(initial_loss),
+            update_steps=current_update_steps,
+        )
+
+    graph = graph._replace(globals=globals_tuple)
 
     graph = update_output_node_loss(graph, layer_sizes, initial_res.mean(axis=0))
 
@@ -227,6 +292,8 @@ def evaluate_model_stepwise_generator(
         graph=graph,
     )
 
+    gate_mask = graph.nodes["gate_knockout_mask"]
+
     # Run optimization steps (EXACTLY like the training loop)
     step = 0
     while max_steps is None or step < max_steps:
@@ -234,8 +301,27 @@ def evaluate_model_stepwise_generator(
 
         # Extract the current update_steps count from graph globals (EXACTLY like training)
         current_update_steps = 0
-        if graph.globals is not None and graph.globals.shape[-1] > 1:
-            current_update_steps = graph.globals[..., 1]
+        if graph.globals is not None:
+            current_update_steps = graph.globals.update_steps
+
+        # Apply damage if needed
+        if damage_steps is not None and step in damage_steps:
+            damage_key, new_damage_key = jax.random.split(damage_key)
+            modified_logits, modified_gate_mask = apply_knockout_to_circuit(
+                new_damage_key,
+                graph.nodes["logits"],
+                layer_sizes,
+                num_knockouts=knockout_per_damage_step,
+                flat=True,
+            )
+            gate_mask *= modified_gate_mask
+
+            graph.nodes["gate_knockout_mask"] = gate_mask
+            graph.nodes["logits"] = modified_logits
+
+            if verbose:
+                print(f"Damage at step {step}")
+                print(f"Damage in graph : {(graph.nodes['gate_knockout_mask'] == 0).sum()}")
 
         # Apply one step of model processing (EXACTLY like training inner loop)
         # Note: training does multiple steps in a batch, but we do one at a time for live demo
@@ -264,9 +350,21 @@ def evaluate_model_stepwise_generator(
         ) = aux
 
         # Update with the computed loss and incremented update_steps (EXACTLY like training)
-        updated_graph = updated_graph._replace(
-            globals=jp.array([loss, current_update_steps + 1], dtype=jp.float32)
-        )
+        if is_perceiver:
+            globals_tuple = GraphGlobals(
+                loss=float(loss),
+                update_steps=current_update_steps + 1,
+                x_data=x_data,
+                y_data=y_data,
+                residuals=res,
+            )
+        else:
+            globals_tuple = GraphGlobals(
+                loss=float(loss),
+                update_steps=current_update_steps + 1,
+            )
+
+        updated_graph = updated_graph._replace(globals=globals_tuple)
 
         # Update the graph variable for next iteration
         graph = updated_graph
@@ -286,7 +384,7 @@ def evaluate_model_stepwise_generator(
 
 
 def evaluate_model_stepwise(
-    model: CircuitGNN | CircuitSelfAttention,
+    model: CircuitGNN | CircuitSelfAttention | PerceiverCircuitAttention,
     wires: list[jp.ndarray],
     logits: list[jp.ndarray],
     x_data: jp.ndarray,
@@ -299,6 +397,10 @@ def evaluate_model_stepwise(
     bidirectional_edges: bool = True,
     layer_sizes: list[tuple[int, int]] | None = None,
     use_tqdm: bool = False,
+    verbose: bool = False,
+    knockout_per_damage_step: int = 1,
+    damage_key: jax.random.PRNGKey = jax.random.PRNGKey(42),
+    damage_steps: list[int] | None = None,
 ) -> dict:
     """
     Evaluate GNN performance by running message passing steps one by one
@@ -347,6 +449,10 @@ def evaluate_model_stepwise(
         loss_cfg=loss_cfg,
         bidirectional_edges=bidirectional_edges,
         layer_sizes=layer_sizes,
+        verbose=verbose,
+        knockout_per_damage_step=knockout_per_damage_step,
+        damage_key=damage_key,
+        damage_steps=damage_steps,
     )
 
     # Create progress bar for evaluation
@@ -378,7 +484,7 @@ def evaluate_model_stepwise(
 
 
 def evaluate_model_stepwise_batched(
-    model: CircuitGNN | CircuitSelfAttention,
+    model: CircuitGNN | CircuitSelfAttention | PerceiverCircuitAttention,
     batch_wires: list[jp.ndarray],  # Shape: [batch_size, ...original_wire_shape...]
     batch_logits: list[jp.ndarray],  # Shape: [batch_size, ...original_logit_shape...]
     x_data: jp.ndarray,
@@ -461,10 +567,13 @@ def evaluate_model_stepwise_batched(
     )
     batch_graphs = vmap_build_graph(batch_logits, batch_wires)
 
-    # Initialize graph globals with [loss, update_steps] exactly like generator
+    # Initialize graph globals with NamedTuple (batched values)
     current_update_steps = jp.zeros(initial_losses.shape[0])
     batch_graphs = batch_graphs._replace(
-        globals=jp.stack([initial_losses, current_update_steps], axis=1)
+        globals=GraphGlobals(
+            loss=initial_losses,
+            update_steps=current_update_steps,
+        )
     )
 
     # Update output node losses (vectorized)
@@ -486,9 +595,10 @@ def evaluate_model_stepwise_batched(
 
     for step in range(1, n_message_steps + 1):
         # Extract the current update_steps count from graph globals (EXACTLY like generator)
-        current_update_steps = jp.zeros(current_graphs.globals.shape[0])
-        if current_graphs.globals is not None and current_graphs.globals.shape[-1] > 1:
-            current_update_steps = current_graphs.globals[..., 1]
+        if current_graphs.globals is not None:
+            current_update_steps = current_graphs.globals.update_steps
+        else:
+            current_update_steps = jp.zeros(len(batch_logits[0]))
 
         # Apply one step of model processing (vectorized - EXACTLY like generator)
         vmap_model = jax.vmap(model)
@@ -524,7 +634,10 @@ def evaluate_model_stepwise_batched(
 
         # Update with the computed loss and incremented update_steps (EXACTLY like generator)
         updated_graphs = updated_graphs._replace(
-            globals=jp.stack([losses, current_update_steps + 1], axis=1)
+            globals=GraphGlobals(
+                loss=losses,
+                update_steps=current_update_steps + 1,
+            )
         )
 
         # Update the graphs for next iteration

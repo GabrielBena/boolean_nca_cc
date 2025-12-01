@@ -229,14 +229,14 @@ class GraphPool(struct.PyTreeNode):
         """Get the average number of update steps across all graphs in the pool."""
         if self.graphs.globals is None:
             return 0.0
-        update_steps = self.graphs.globals[..., 1]
+        update_steps = self.graphs.globals.update_steps
         return float(jp.mean(update_steps))
 
     def get_average_update_steps_for_indices(self, indices: Array) -> float:
         """Get the average number of update steps for specified graph indices."""
         if self.graphs.globals is None:
             return 0.0
-        update_steps = self.graphs.globals[indices, 1]
+        update_steps = self.graphs.globals.update_steps[indices]
         return float(jp.mean(update_steps))
 
     def get_average_damage_count(self) -> float:
@@ -339,7 +339,7 @@ class GraphPool(struct.PyTreeNode):
                     key, self.size, shape=(num_select,), replace=False
                 )
             else:
-                update_steps = self.graphs.globals[..., 1]
+                update_steps = self.graphs.globals.update_steps
                 probs = update_steps
                 probs = jp.where(
                     jp.sum(probs) > 0, probs / jp.sum(probs), jp.ones(self.size) / self.size
@@ -354,7 +354,7 @@ class GraphPool(struct.PyTreeNode):
                     key, self.size, shape=(num_select,), replace=False
                 )
             else:
-                loss_values = self.graphs.globals[..., 0]
+                loss_values = self.graphs.globals.loss
                 probs = loss_values
                 probs = jp.where(
                     jp.sum(probs) > 0, probs / jp.sum(probs), jp.ones(self.size) / self.size
@@ -369,8 +369,8 @@ class GraphPool(struct.PyTreeNode):
                     key, self.size, shape=(num_select,), replace=False
                 )
             else:
-                loss_values = self.graphs.globals[..., 0]
-                update_steps = self.graphs.globals[..., 1]
+                loss_values = self.graphs.globals.loss
+                update_steps = self.graphs.globals.update_steps
                 loss_weight, steps_weight = combined_weights
 
                 loss_scores = jp.where(
@@ -673,6 +673,11 @@ class GraphPool(struct.PyTreeNode):
             )
         )
         modified_graphs = vmap_build_graph(modified_logits, selected_wires, combined_masks)
+
+        # update graphs so that they keep their current loss value and update steps
+        modified_graphs = modified_graphs._replace(
+            globals=jax.tree.map(lambda leaf: leaf[damage_idxs], self.graphs.globals)
+        )
 
         # Update pool
         updated_pool = self.update(

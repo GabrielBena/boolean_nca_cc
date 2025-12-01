@@ -10,10 +10,11 @@ from boolean_nca_cc.utils.extraction import (
     get_output_node_indices,
     update_output_node_loss,
 )
-from boolean_nca_cc.utils.graph_builder import build_graph
+from boolean_nca_cc.utils.graph_builder import GraphGlobals, build_graph
 from boolean_nca_cc.utils.positional_encoding import get_positional_encoding
 
 __all__ = [
+    "GraphGlobals",
     "build_graph",
     "extract_logits_from_graph",
     "get_output_node_indices",

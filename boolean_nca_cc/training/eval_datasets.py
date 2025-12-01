@@ -99,7 +99,7 @@ def create_unified_evaluation_datasets(
         arity: Number of inputs per gate
         eval_batch_size_in: Number of circuits in each IN-distribution evaluation set
         eval_batch_size_out: Number of circuits in each OUT-of-distribution evaluation set
-        do_ood_evaluation: Whether to create OUT-of-distribution evaluation circuits    
+        do_ood_evaluation: Whether to create OUT-of-distribution evaluation circuits
 
     Returns:
         UnifiedEvaluationDatasets object containing IN and OUT distribution circuits
@@ -216,19 +216,17 @@ def _create_circuit_batch_with_pattern(
                 single_logits,
             )
             actual_batch_size = batch_size
-        elif effective_diversity >= batch_size and get_all_wirings:
+        elif effective_diversity >= batch_size:
             # Generate ALL unique wirings (not just a subset)
             # This ensures comprehensive evaluation across the full diversity
-            rngs = jax.random.split(rng, effective_diversity)
+            rngs = (
+                jax.random.split(rng, effective_diversity)
+                if get_all_wirings
+                else jax.random.split(rng, effective_diversity)[:batch_size]
+            )
             vmap_gen_circuit = jax.vmap(lambda rng: gen_circuit(rng, layer_sizes, arity=arity))
             batch_wires, batch_logits = vmap_gen_circuit(rngs)
-            actual_batch_size = effective_diversity
-        elif effective_diversity >= batch_size and not get_all_wirings:
-            # Generate N different wirings and repeat them across the batch
-            diversity_rngs = jax.random.split(rng, effective_diversity)[:batch_size]
-            vmap_gen_circuit = jax.vmap(lambda rng: gen_circuit(rng, layer_sizes, arity=arity))
-            batch_wires, batch_logits = vmap_gen_circuit(diversity_rngs)
-            actual_batch_size = batch_size
+            actual_batch_size = effective_diversity if get_all_wirings else batch_size
         else:
             # Generate N different wirings and repeat them across the batch
             diversity_rngs = jax.random.split(rng, effective_diversity)

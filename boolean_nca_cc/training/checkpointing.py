@@ -1,3 +1,4 @@
+import copy
 import logging
 import os
 import pickle
@@ -282,7 +283,7 @@ def configure_notebook_logging(level=logging.INFO):
     print(f"Logging configured for notebooks. Level: {logging.getLevelName(level)}")
 
 
-def instantiate_model_from_config(config, seed=0):
+def instantiate_model_from_config(config, seed=0, **overrides: Any):
     """
     Instantiate a model from a loaded configuration using hydra.utils.instantiate.
 
@@ -337,7 +338,8 @@ def instantiate_model_from_config(config, seed=0):
     rng = nnx.Rngs(params=jax.random.PRNGKey(seed))
 
     # Common overrides for hydra.instantiate
-    instantiate_overrides = {"arity": config.circuit.arity, "rngs": rng}
+    instantiate_overrides = {"arity": config.circuit.arity, "rngs": rng, **overrides}
+    print(f"Instantiate overrides: {instantiate_overrides}")
 
     # Check if this is a self-attention model and add n_node if needed
     if (
@@ -911,22 +913,23 @@ def _select_best_artifact(artifacts: list, prefer_metric: str | None = None):
     for artifact in artifacts:
         # Extract metric from artifact name (e.g., "best_model_eval_in_hard_accuracy" -> "eval_in_hard_accuracy")
         name_parts = artifact.name.split("best_model_")
+        version = artifact.version
         if len(name_parts) > 1:
             metric_part = name_parts[1]
             # Remove version suffix if present (e.g., ":v0")
             if ":" in metric_part:
                 metric_part = metric_part.split(":")[0]
-            artifact_metrics.append((artifact, metric_part))
+            artifact_metrics.append((artifact, metric_part, version))
         else:
             # Fallback for artifacts that don't follow the new naming scheme
-            artifact_metrics.append((artifact, "unknown"))
+            artifact_metrics.append((artifact, "unknown", version))
 
     # If a specific metric is preferred, try to find it
     if prefer_metric:
-        for artifact, metric in artifact_metrics:
+        for artifact, metric, version in artifact_metrics:
             if metric == prefer_metric:
                 log.info(f"Found preferred metric '{prefer_metric}' in artifact: {artifact.name}")
-                return artifact
+                return artifact, version
         log.warning(f"Preferred metric '{prefer_metric}' not found, using intelligent selection")
 
     # Intelligent selection priority:
@@ -935,9 +938,11 @@ def _select_best_artifact(artifacts: list, prefer_metric: str | None = None):
     # 3. In-distribution over out-of-distribution
     # 4. Accuracy over loss
 
-    def metric_priority(metric: str) -> tuple[int, int, int, int]:
+    def metric_priority(artifact_metric: tuple[Any, str, str]) -> tuple[int, int, int, int]:
         """Calculate priority score for a metric (lower is better)."""
         # Eval vs training (0 = eval, 1 = training)
+        _, metric, version = artifact_metric
+
         eval_score = 0 if metric.startswith("eval") else 1
 
         # Hard vs soft (0 = hard, 1 = soft)
@@ -954,15 +959,16 @@ def _select_best_artifact(artifacts: list, prefer_metric: str | None = None):
         # Accuracy vs loss (0 = accuracy, 1 = loss)
         acc_score = 0 if "accuracy" in metric else 1
 
-        return (eval_score, hard_score, dist_score, acc_score)
+        # Sort by version number (newest first)
+        return (eval_score, hard_score, dist_score, acc_score, -int(version[1:]))
 
     # Sort artifacts by priority
-    artifact_metrics.sort(key=lambda x: metric_priority(x[1]))
+    artifact_metrics.sort(key=lambda x: metric_priority(x))
 
-    selected_artifact, selected_metric = artifact_metrics[0]
+    selected_artifact, selected_metric, selected_version = artifact_metrics[0]
     log.info(f"Selected artifact with metric '{selected_metric}' using intelligent priority")
 
-    return selected_artifact
+    return selected_artifact, selected_version
 
 
 def load_config_from_wandb(
@@ -1141,7 +1147,7 @@ def load_config_from_wandb(
             for a in best_models:
                 log.info(f"  - {a.name}")
 
-            selected_artifact = _select_best_artifact(best_models, prefer_metric)
+            selected_artifact, selected_version = _select_best_artifact(best_models, prefer_metric)
             log.info(f"Selected best model artifact: {selected_artifact.name}")
 
     latest_best = selected_artifact
@@ -1169,6 +1175,7 @@ def load_model_from_config_and_checkpoint(
     checkpoint_path: str,
     run_id: str,
     seed: int = 0,
+    **overrides: Any,
 ) -> tuple[Any, dict[str, Any]]:
     """
     Load a model from config and checkpoint file.
@@ -1181,7 +1188,7 @@ def load_model_from_config_and_checkpoint(
         checkpoint_path: Path to the checkpoint file
         run_id: The WandB run ID
         seed: Seed for RNG initialization
-
+        **overrides: Optional overrides to apply to the model constructor
     Returns:
         Tuple of (loaded_model, loaded_dict) containing the instantiated model
         and full loaded state
@@ -1196,8 +1203,11 @@ def load_model_from_config_and_checkpoint(
         raise
 
     # Instantiate model using the reusable function
-    model = instantiate_model_from_config(config, seed=seed)
+    init_model = instantiate_model_from_config(config, seed=seed, **overrides)
 
+    model = copy.deepcopy(
+        init_model
+    )  # Make a deep copy of the model to avoid modifying the original
     # Update model with loaded state (compatibility handled during loading)
     nnx.update(model, loaded_dict["model"])
 
@@ -1207,7 +1217,7 @@ def load_model_from_config_and_checkpoint(
     if "config" not in loaded_dict:
         loaded_dict["config"] = config
 
-    return model, loaded_dict
+    return model, loaded_dict, init_model
 
 
 def load_best_model_from_wandb(
@@ -1225,6 +1235,7 @@ def load_best_model_from_wandb(
     select_by_best_metric: bool = False,
     metric_name: str = "eval_out_hard_accuracy",
     prefer_metric: str | None = None,
+    **overrides: Any,
 ) -> tuple[Any, dict[str, Any], Any]:
     """
     Load the best model from WandB artifacts with full backward compatibility.
@@ -1253,7 +1264,7 @@ def load_best_model_from_wandb(
         prefer_metric: Optional specific metric to prefer when multiple best models are available
                       (e.g., "eval_in_hard_accuracy", "eval_out_hard_accuracy"). If None, uses
                       intelligent selection prioritizing eval metrics over training metrics.
-
+        overrides: Optional overrides to the config
     Returns:
         Tuple of (loaded_model, loaded_dict, config) containing the instantiated model,
         full loaded state, and the complete hydra config used during training
@@ -1263,6 +1274,8 @@ def load_best_model_from_wandb(
     if filename == "best_model_hard_accuracy":
         log.info("Detected old-style filename, updating to generic 'best_model' for compatibility")
         filename = "best_model"
+
+    print(f"Overrides: {overrides}")
 
     # Load config and checkpoint information
     config, checkpoint_path, run_id = load_config_from_wandb(
@@ -1282,11 +1295,12 @@ def load_best_model_from_wandb(
     )
 
     # Load model from config and checkpoint
-    model, loaded_dict = load_model_from_config_and_checkpoint(
+    model, loaded_dict, init_model = load_model_from_config_and_checkpoint(
         config=config,
         checkpoint_path=checkpoint_path,
         run_id=run_id,
         seed=seed,
+        **overrides,
     )
 
-    return model, loaded_dict, config
+    return model, loaded_dict, init_model, config

@@ -1,0 +1,34 @@
+_target_: boolean_nca_cc.models.PerceiverCircuitAttention
+# Configuration for Perceiver-style Self-Attention model with cross-attention to data
+
+defaults:
+  - _base
+
+type: "perceiver_attention"
+
+# Attention architecture
+attention_dim: 24
+mlp_dim: null  # If null, will be set to attention_dim * mlp_dim_multiplier
+mlp_dim_multiplier: 2
+num_heads: 4
+dropout_rate: 0.0
+
+# Self-attention (among gates)
+num_self_attn_layers: 1
+use_attention_mask: true
+
+# Cross-attention (gates query data)
+num_cross_attn_layers: 1
+use_input_cross_attention: true   # Cross-attend to input bit patterns
+use_output_cross_attention: true  # Cross-attend to output residuals
+input_encoding_dim: 8            # Hidden dimension for encoding data tokens
+token_pe_dim: 8                   # Sinusoidal PE dimension for sample/bit positions
+                                  # Enables linking samples across input/output cross-attention
+
+# Structural constraints (respect circuit topology)
+# If true, only first gate layer can attend to inputs (mirrors circuit input flow)
+restrict_input_cross_attn_to_first_layer: true
+# If true, only output layer can attend to residuals (mirrors circuit output flow)
+restrict_output_cross_attn_to_last_layer: true
+
+# Note: Uses ReZero for stable training throughout (no LayerNorm option needed)

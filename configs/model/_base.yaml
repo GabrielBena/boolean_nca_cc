@@ -1,6 +1,5 @@
 defaults:
   - _self_
 
+arity: ${circuit.arity}
 circuit_hidden_dim: ${circuit.circuit_hidden_dim}
-zero_init: false
-re_zero_update: true
