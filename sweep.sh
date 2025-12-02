@@ -3,7 +3,7 @@
 # This script launches 5 W&B agents in parallel on different GPUs
 # for the specified sweep.
 
-SWEEP_ID="marcello-barylli-growai/boolean-nca-cc/xsg2de35"
+SWEEP_ID="marcello-barylli-growai/boolean-nca-cc/0ynwbiv1"
 
 echo "Starting agents for sweep: $SWEEP_ID"
 

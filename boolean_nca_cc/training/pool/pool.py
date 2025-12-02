@@ -114,6 +114,7 @@ class GraphPool(struct.PyTreeNode):
         batch_of_wires: PyTree = None,
         batch_of_logits: PyTree = None,
         batch_of_knockout_patterns: Optional[Array] = None,
+        reset_perturb_counter: bool = False,  # Reset perturb counter for the specified indices if True
     ) -> "GraphPool":
         """
         Update graphs in the pool at the specified indices with a batch of graphs.
@@ -219,12 +220,18 @@ class GraphPool(struct.PyTreeNode):
             else None
         )
 
+        # Only reset perturb_counter if explicitly requested (e.g., during full circuit reset)
+        updated_perturb_counter = self.perturb_counter
+        if reset_perturb_counter and self.perturb_counter is not None:
+            updated_perturb_counter = self.perturb_counter.at[idxs].set(0)
+
         return self.replace(
             graphs=updated_graphs_data,
             wires=updated_wires,
             logits=updated_logits,
             reset_counter=updated_reset_counter,
             knockout_patterns=updated_knockout_patterns,
+            perturb_counter=updated_perturb_counter,
         )
 
 
@@ -367,6 +374,7 @@ class GraphPool(struct.PyTreeNode):
             reset_wires,
             reset_logits,
             reset_knockout_patterns,
+            reset_perturb_counter=True,  # Only reset counter during actual resets
         )
 
         # Increment the reset counter for all elements

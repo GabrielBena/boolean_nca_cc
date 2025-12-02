@@ -436,6 +436,8 @@ def evaluate_model_stepwise_batched(
     # Vocabulary-based evaluation parameters
     knockout_vocabulary: Optional[jp.ndarray] = None,  # If provided => seen (sample from vocab); else => unseen (fresh)
     blind_mode: bool = False,  # If True, force loss feedback to zero (ablation study)
+    # Permanent damage validation tracking
+    track_damage_validation: bool = True,  # Enable detailed tracking for permanent damage validation
 ) -> Dict:
     """
     Evaluate GNN performance on a batch of circuits by running message passing steps
@@ -575,6 +577,7 @@ def evaluate_model_stepwise_batched(
         damage_start_offset_seed=damage_start_offset_seed,
         knockout_vocabulary=knockout_vocabulary,
         blind_mode=blind_mode,
+        track_damage_validation=track_damage_validation,
     )
 
 def evaluate_circuits_in_chunks(
@@ -691,6 +694,8 @@ def _evaluate_with_loop(
     # Vocabulary-based evaluation parameters
     knockout_vocabulary: Optional[jp.ndarray] = None,  # If provided => seen; else => unseen (fresh)
     blind_mode: bool = False,
+    # Permanent damage validation tracking
+    track_damage_validation: bool = True,  # Enable detailed tracking for permanent damage validation
 ) -> Dict:
     """
     Evaluate using loop mode (original behavior).
@@ -751,6 +756,24 @@ def _evaluate_with_loop(
     else:
         # Fixed offset for all circuits
         per_circuit_offsets = jp.full((batch_size,), damage_start_offset, dtype=jp.int32)
+
+    # Initialize cumulative damage pattern tracking for permanent damage mode
+    # This ensures previously damaged nodes remain damaged across all subsequent steps
+    damage_behavior = getattr(model, "damage_behavior", "permanent")
+    total_nodes = sum(total_gates for total_gates, _ in layer_sizes)
+    cumulative_knockout_patterns = jp.zeros((batch_size, total_nodes), dtype=jp.bool_)
+    
+    # Simple damage validation tracking for single-damage permanent mode
+    # Just tracks: when damage happened, which nodes, and validates permanence
+    damage_validation_tracking = None
+    if track_damage_validation:
+        damage_validation_tracking = {
+            "first_damage_step": None,  # Step when damage was first injected
+            "damage_pattern": None,  # The damage pattern (set once)
+            "validation_failures": [],  # List of (step, circuit_idx, details) for any failures
+            "total_checks": 0,
+            "passed_checks": 0,
+        }
 
     for step in range(1, n_message_steps + 1):
         # Apply model to all graphs in batch
@@ -838,7 +861,6 @@ def _evaluate_with_loop(
                 step_knockout_patterns = jp.zeros((batch_size, total_nodes), dtype=jp.bool_)
 
             # For reversible mode, force one-shot bias by zeroing step counters on injection steps
-            damage_behavior = getattr(model, "damage_behavior", "permanent")
             if damage_behavior == "reversible":
                 steps_before = current_graphs.globals[:, 1]
                 steps_after = jp.where(inject_now_mask, jp.zeros_like(steps_before), steps_before)
@@ -848,9 +870,26 @@ def _evaluate_with_loop(
 
             # Increment eval_perturb_counter AFTER using it to compute starts (only on injection steps)
             eval_perturb_counter = jp.where(inject_now_mask, eval_perturb_counter + 1, eval_perturb_counter)
+            
+            # For permanent damage: accumulate patterns using logical OR
+            # This ensures previously damaged nodes remain damaged
+            if damage_behavior == "permanent" and step_knockout_patterns is not None:
+                cumulative_knockout_patterns = cumulative_knockout_patterns | step_knockout_patterns
+                
+                # Track first damage event for validation (single damage mode)
+                if track_damage_validation and damage_validation_tracking["first_damage_step"] is None:
+                    if jp.any(step_knockout_patterns):
+                        damage_validation_tracking["first_damage_step"] = step
+                        damage_validation_tracking["damage_pattern"] = cumulative_knockout_patterns.copy()
+
+        # For permanent damage, use cumulative patterns; for reversible, use step patterns
+        effective_knockout_patterns = (
+            cumulative_knockout_patterns if damage_behavior == "permanent" 
+            else step_knockout_patterns
+        )
 
         # Apply model with per-step patterns if available
-        if step_knockout_patterns is not None:
+        if effective_knockout_patterns is not None and jp.any(effective_knockout_patterns):
             vmap_model = jax.vmap(
                 lambda g, k: model(
                     g,
@@ -859,7 +898,7 @@ def _evaluate_with_loop(
                     layer_sizes=layer_sizes,
                 )
             )
-            updated_graphs = vmap_model(current_graphs, step_knockout_patterns)
+            updated_graphs = vmap_model(current_graphs, effective_knockout_patterns)
         else:
             vmap_model = jax.vmap(
                 lambda g: model(
@@ -869,6 +908,35 @@ def _evaluate_with_loop(
                 )
             )
             updated_graphs = vmap_model(current_graphs)
+
+        # === PERMANENT DAMAGE VALIDATION (Simple) ===
+        # Verify damaged node features remain at expected values: logits=-10.0, hidden=0.0
+        if track_damage_validation and damage_behavior == "permanent" and jp.any(cumulative_knockout_patterns):
+            node_logits = updated_graphs.nodes["logits"]  # [batch_size, n_nodes, logit_dim]
+            node_hidden = updated_graphs.nodes["hidden"]  # [batch_size, n_nodes, hidden_dim]
+            
+            for circuit_idx in range(batch_size):
+                mask = cumulative_knockout_patterns[circuit_idx]
+                if jp.any(mask):
+                    damaged_logits = node_logits[circuit_idx][mask]
+                    damaged_hidden = node_hidden[circuit_idx][mask]
+                    
+                    logits_ok = bool(jp.allclose(damaged_logits, -10.0, atol=1e-6))
+                    hidden_ok = bool(jp.allclose(damaged_hidden, 0.0, atol=1e-6))
+                    
+                    damage_validation_tracking["total_checks"] += 1
+                    
+                    if logits_ok and hidden_ok:
+                        damage_validation_tracking["passed_checks"] += 1
+                    else:
+                        # Log failure details
+                        damage_validation_tracking["validation_failures"].append({
+                            "step": step,
+                            "circuit_idx": circuit_idx,
+                            "logits_range": (float(jp.min(damaged_logits)), float(jp.max(damaged_logits))),
+                            "hidden_range": (float(jp.min(damaged_hidden)), float(jp.max(damaged_hidden))),
+                            "n_damaged_nodes": int(jp.sum(mask)),
+                        })
 
         # Extract logits from updated graphs
         current_batch_logits = vmap_extract_logits(updated_graphs)
@@ -925,5 +993,40 @@ def _evaluate_with_loop(
     
     if return_per_pattern:
         step_metrics["per_pattern"] = step_metrics_per_pattern
+
+    # Add damage validation summary if enabled
+    if track_damage_validation and damage_validation_tracking is not None:
+        total = damage_validation_tracking["total_checks"]
+        passed = damage_validation_tracking["passed_checks"]
+        failures = damage_validation_tracking["validation_failures"]
+        
+        step_metrics["damage_validation_summary"] = {
+            "first_damage_step": damage_validation_tracking["first_damage_step"],
+            "total_checks": total,
+            "passed_checks": passed,
+            "pass_rate": passed / total if total > 0 else 1.0,
+            "num_failures": len(failures),
+        }
+        
+        # Log summary
+        if total > 0:
+            import logging
+            log = logging.getLogger(__name__)
+            if len(failures) == 0:
+                log.info(f"DAMAGE VALIDATION PASSED: {passed}/{total} checks passed (100%)")
+            else:
+                log.warning(f"DAMAGE VALIDATION FAILED: {passed}/{total} checks passed ({100*passed/total:.1f}%)")
+                for f in failures[:5]:  # Show first 5 failures
+                    log.warning(
+                        f"  Step {f['step']}, Circuit {f['circuit_idx']}: "
+                        f"logits={f['logits_range']}, hidden={f['hidden_range']}, "
+                        f"n_damaged={f['n_damaged_nodes']}"
+                    )
+                if len(failures) > 5:
+                    log.warning(f"  ... and {len(failures) - 5} more failures")
+        
+        # Include detailed failures for debugging if needed
+        if failures:
+            step_metrics["damage_validation_failures"] = failures
 
     return step_metrics
