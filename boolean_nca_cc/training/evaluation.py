@@ -437,7 +437,7 @@ def evaluate_model_stepwise_batched(
     knockout_vocabulary: Optional[jp.ndarray] = None,  # If provided => seen (sample from vocab); else => unseen (fresh)
     blind_mode: bool = False,  # If True, force loss feedback to zero (ablation study)
     # Permanent damage validation tracking
-    track_damage_validation: bool = True,  # Enable detailed tracking for permanent damage validation
+    track_damage_validation: bool = False,  # Enable detailed tracking for permanent damage validation
 ) -> Dict:
     """
     Evaluate GNN performance on a batch of circuits by running message passing steps
@@ -695,7 +695,7 @@ def _evaluate_with_loop(
     knockout_vocabulary: Optional[jp.ndarray] = None,  # If provided => seen; else => unseen (fresh)
     blind_mode: bool = False,
     # Permanent damage validation tracking
-    track_damage_validation: bool = True,  # Enable detailed tracking for permanent damage validation
+    track_damage_validation: bool = False,  # Enable detailed tracking for permanent damage validation
 ) -> Dict:
     """
     Evaluate using loop mode (original behavior).
@@ -766,6 +766,8 @@ def _evaluate_with_loop(
     # Simple damage validation tracking for single-damage permanent mode
     # Just tracks: when damage happened, which nodes, and validates permanence
     damage_validation_tracking = None
+    prev_node_logits = None  # For tracking magnitude of change
+    prev_node_hidden = None
     if track_damage_validation:
         damage_validation_tracking = {
             "first_damage_step": None,  # Step when damage was first injected
@@ -773,7 +775,13 @@ def _evaluate_with_loop(
             "validation_failures": [],  # List of (step, circuit_idx, details) for any failures
             "total_checks": 0,
             "passed_checks": 0,
+            # Per-step magnitude of change (normalized per-gate average)
+            "damaged_node_avg_change": [],  # Should be ~0 for permanently damaged nodes
+            "healthy_node_avg_change": [],  # Should be non-zero for healthy nodes
         }
+        # Store initial node features for change tracking
+        prev_node_logits = current_graphs.nodes["logits"].copy()
+        prev_node_hidden = current_graphs.nodes["hidden"].copy()
 
     for step in range(1, n_message_steps + 1):
         # Apply model to all graphs in batch
@@ -909,34 +917,88 @@ def _evaluate_with_loop(
             )
             updated_graphs = vmap_model(current_graphs)
 
-        # === PERMANENT DAMAGE VALIDATION (Simple) ===
+        # === PERMANENT DAMAGE VALIDATION (Vectorized) ===
         # Verify damaged node features remain at expected values: logits=-10.0, hidden=0.0
         if track_damage_validation and damage_behavior == "permanent" and jp.any(cumulative_knockout_patterns):
             node_logits = updated_graphs.nodes["logits"]  # [batch_size, n_nodes, logit_dim]
             node_hidden = updated_graphs.nodes["hidden"]  # [batch_size, n_nodes, hidden_dim]
             
-            for circuit_idx in range(batch_size):
-                mask = cumulative_knockout_patterns[circuit_idx]
-                if jp.any(mask):
-                    damaged_logits = node_logits[circuit_idx][mask]
-                    damaged_hidden = node_hidden[circuit_idx][mask]
-                    
-                    logits_ok = bool(jp.allclose(damaged_logits, -10.0, atol=1e-6))
-                    hidden_ok = bool(jp.allclose(damaged_hidden, 0.0, atol=1e-6))
-                    
-                    damage_validation_tracking["total_checks"] += 1
-                    
-                    if logits_ok and hidden_ok:
-                        damage_validation_tracking["passed_checks"] += 1
-                    else:
-                        # Log failure details
-                        damage_validation_tracking["validation_failures"].append({
-                            "step": step,
-                            "circuit_idx": circuit_idx,
-                            "logits_range": (float(jp.min(damaged_logits)), float(jp.max(damaged_logits))),
-                            "hidden_range": (float(jp.min(damaged_hidden)), float(jp.max(damaged_hidden))),
-                            "n_damaged_nodes": int(jp.sum(mask)),
-                        })
+            # Vectorized validation - no Python loops!
+            # Expand mask for broadcasting: [batch, n_nodes] -> [batch, n_nodes, 1]
+            mask_expanded = cumulative_knockout_patterns[:, :, None]
+            
+            # Check logits: damaged should be -10.0 (use large value for non-damaged to ignore them)
+            logits_diff = jp.where(mask_expanded, jp.abs(node_logits - (-10.0)), 0.0)
+            logits_ok_per_circuit = jp.all(logits_diff < 1e-6, axis=(1, 2))  # [batch]
+            
+            # Check hidden: damaged should be 0.0
+            hidden_diff = jp.where(mask_expanded, jp.abs(node_hidden), 0.0)
+            hidden_ok_per_circuit = jp.all(hidden_diff < 1e-6, axis=(1, 2))  # [batch]
+            
+            # Count passes (only for circuits with damage)
+            both_ok = logits_ok_per_circuit & hidden_ok_per_circuit
+            circuits_with_damage = jp.any(cumulative_knockout_patterns, axis=1)  # [batch]
+            
+            num_checks = int(jp.sum(circuits_with_damage))
+            num_passed = int(jp.sum(both_ok & circuits_with_damage))
+            
+            damage_validation_tracking["total_checks"] += num_checks
+            damage_validation_tracking["passed_checks"] += num_passed
+            
+            # Only record failures if any exist (rare path - keeps fast path fast)
+            if num_passed < num_checks:
+                failed_mask = circuits_with_damage & ~both_ok
+                failed_indices = jp.where(failed_mask)[0]
+                for idx in failed_indices[:3]:  # Limit to first 3 for performance
+                    idx = int(idx)
+                    mask = cumulative_knockout_patterns[idx]
+                    damaged_logits = node_logits[idx][mask]
+                    damaged_hidden = node_hidden[idx][mask]
+                    damage_validation_tracking["validation_failures"].append({
+                        "step": step,
+                        "circuit_idx": idx,
+                        "logits_range": (float(jp.min(damaged_logits)), float(jp.max(damaged_logits))),
+                        "hidden_range": (float(jp.min(damaged_hidden)), float(jp.max(damaged_hidden))),
+                        "n_damaged_nodes": int(jp.sum(mask)),
+                    })
+
+        # === MAGNITUDE OF CHANGE TRACKING (Vectorized) ===
+        # Track per-gate average change for damaged vs healthy nodes
+        if track_damage_validation and prev_node_logits is not None:
+            node_logits = updated_graphs.nodes["logits"]
+            node_hidden = updated_graphs.nodes["hidden"]
+            
+            # Compute absolute change from previous step
+            logits_change = jp.abs(node_logits - prev_node_logits)  # [batch, n_nodes, logit_dim]
+            hidden_change = jp.abs(node_hidden - prev_node_hidden)  # [batch, n_nodes, hidden_dim]
+            
+            # Combined change magnitude per node (sum over feature dims, then mean over batch)
+            # Shape: [batch, n_nodes]
+            per_node_change = jp.mean(logits_change, axis=-1) + jp.mean(hidden_change, axis=-1)
+            
+            # Separate into damaged vs healthy using cumulative pattern
+            if jp.any(cumulative_knockout_patterns):
+                damaged_mask = cumulative_knockout_patterns  # [batch, n_nodes]
+                healthy_mask = ~damaged_mask
+                
+                # Average change per damaged gate (should be ~0)
+                n_damaged = jp.sum(damaged_mask)
+                damaged_avg = float(jp.sum(per_node_change * damaged_mask) / jp.maximum(n_damaged, 1))
+                
+                # Average change per healthy gate (should be non-zero)
+                n_healthy = jp.sum(healthy_mask)
+                healthy_avg = float(jp.sum(per_node_change * healthy_mask) / jp.maximum(n_healthy, 1))
+            else:
+                # No damage yet - all nodes are healthy
+                damaged_avg = 0.0
+                healthy_avg = float(jp.mean(per_node_change))
+            
+            damage_validation_tracking["damaged_node_avg_change"].append(damaged_avg)
+            damage_validation_tracking["healthy_node_avg_change"].append(healthy_avg)
+            
+            # Update previous for next step
+            prev_node_logits = node_logits
+            prev_node_hidden = node_hidden
 
         # Extract logits from updated graphs
         current_batch_logits = vmap_extract_logits(updated_graphs)
@@ -1007,6 +1069,11 @@ def _evaluate_with_loop(
             "pass_rate": passed / total if total > 0 else 1.0,
             "num_failures": len(failures),
         }
+        
+        # Add stepwise magnitude of change for wandb plotting
+        # damaged_node_avg_change should be ~0, healthy_node_avg_change should be non-zero
+        step_metrics["damaged_node_avg_change"] = damage_validation_tracking["damaged_node_avg_change"]
+        step_metrics["healthy_node_avg_change"] = damage_validation_tracking["healthy_node_avg_change"]
         
         # Log summary
         if total > 0:

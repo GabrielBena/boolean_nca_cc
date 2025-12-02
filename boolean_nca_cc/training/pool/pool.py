@@ -106,7 +106,7 @@ class GraphPool(struct.PyTreeNode):
             perturb_counter=perturb_counter,
         )
 
-    @jax.jit
+    @partial(jax.jit, static_argnames=("reset_perturb_counter",))
     def update(
         self,
         idxs: Array,
