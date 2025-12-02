@@ -26,6 +26,7 @@ from boolean_nca_cc.circuits.train import (
 from boolean_nca_cc.training.pool.structural_perturbation import (
     create_group_greedy_pattern,
     create_greedy_subset_random_pattern,
+    create_reproducible_knockout_pattern,
 )
 
 
@@ -437,7 +438,7 @@ def evaluate_model_stepwise_batched(
     knockout_vocabulary: Optional[jp.ndarray] = None,  # If provided => seen (sample from vocab); else => unseen (fresh)
     blind_mode: bool = False,  # If True, force loss feedback to zero (ablation study)
     # Permanent damage validation tracking
-    track_damage_validation: bool = False,  # Enable detailed tracking for permanent damage validation
+    track_damage_validation: bool = True,  # Enable detailed tracking for permanent damage validation
 ) -> Dict:
     """
     Evaluate GNN performance on a batch of circuits by running message passing steps
@@ -695,7 +696,7 @@ def _evaluate_with_loop(
     knockout_vocabulary: Optional[jp.ndarray] = None,  # If provided => seen; else => unseen (fresh)
     blind_mode: bool = False,
     # Permanent damage validation tracking
-    track_damage_validation: bool = False,  # Enable detailed tracking for permanent damage validation
+    track_damage_validation: bool = True,  # Enable detailed tracking for permanent damage validation
 ) -> Dict:
     """
     Evaluate using loop mode (original behavior).
@@ -739,12 +740,17 @@ def _evaluate_with_loop(
     # Prepare periodic injection schedule for applicable damage modes
     batch_size = batch_wires[0].shape[0]
     eval_perturb_counter = None
-    # Enable periodic injections for greedy modes (damage_mode controls behavior)
-    periodic_injections_enabled = damage_mode in ["greedy", "greedy_vocabulary"]
-    if periodic_injections_enabled and greedy_ordered_indices is not None and len(greedy_ordered_indices) > 0:
+    # Enable periodic injections for greedy modes AND shotgun mode (damage_mode controls behavior)
+    periodic_injections_enabled = damage_mode in ["greedy", "greedy_vocabulary", "shotgun"]
+    if periodic_injections_enabled:
         eval_perturb_counter = jp.zeros((batch_size,), dtype=jp.int32)
-        window = max(1, int(greedy_window_size))
-        greedy_len = int(len(greedy_ordered_indices))
+        # Only needed for greedy modes, but safe to compute
+        if greedy_ordered_indices is not None and len(greedy_ordered_indices) > 0:
+            window = max(1, int(greedy_window_size))
+            greedy_len = int(len(greedy_ordered_indices))
+        else:
+            window = 1
+            greedy_len = 1  # Fallback for shotgun mode
     
     # Compute per-circuit damage start offsets
     if damage_start_offset_random:
@@ -858,6 +864,40 @@ def _evaluate_with_loop(
                     
                     # Get patterns from vocabulary
                     generated_patterns = knockout_vocabulary[vocab_indices]
+                
+                # Apply patterns only to circuits that should inject this step
+                step_knockout_patterns = jp.where(
+                    inject_now_mask[:, None], generated_patterns, jp.zeros_like(generated_patterns)
+                )
+            elif damage_mode == "shotgun":
+                # Shotgun mode: sample from vocabulary or generate fresh patterns
+                total_nodes = sum(total_gates for total_gates, _ in layer_sizes)
+                damage_prob = greedy_window_size  # Use window size as damage amount (matches greedy_vocabulary)
+                
+                if knockout_vocabulary is not None:
+                    # Sample from vocabulary (seen patterns)
+                    vocab_size = knockout_vocabulary.shape[0]
+                    vocab_keys = jax.random.split(
+                        jax.random.PRNGKey(step + int(jp.sum(eval_perturb_counter))),
+                        batch_size
+                    )
+                    vm_sample_vocab = jax.vmap(
+                        lambda k: jax.random.choice(k, vocab_size, shape=(), replace=True)
+                    )
+                    vocab_indices = vm_sample_vocab(vocab_keys)
+                    generated_patterns = knockout_vocabulary[vocab_indices]
+                else:
+                    # Generate fresh random patterns (unseen)
+                    pattern_keys = jax.random.split(
+                        jax.random.PRNGKey(step + int(jp.sum(eval_perturb_counter)) + 1000),
+                        batch_size
+                    )
+                    vm_create_pattern = jax.vmap(
+                        lambda k: create_reproducible_knockout_pattern(
+                            k, layer_sizes, damage_prob
+                        )
+                    )
+                    generated_patterns = vm_create_pattern(pattern_keys)
                 
                 # Apply patterns only to circuits that should inject this step
                 step_knockout_patterns = jp.where(
