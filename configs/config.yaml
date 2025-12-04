@@ -37,22 +37,23 @@ training:
   wiring_mode: "random"  # Options: "fixed", "genetic", or "random"
   initial_diversity: 1
   # INNER LOOP
-  n_message_steps: 100  # Number of message passing steps per training iteration
+  n_message_steps: 10  # Number of message passing steps per training iteration
   # DATA FRACTION
-  data_per_batch: 64  # Number of data points per batch (null means use all data)
+  data_per_batch: 128  # Number of data points per batch (null means use all data)
   # RANDOM LOSS STEP
   random_loss_step: true  # Use random message passing step for loss computation
+  random_loss_step_min: 2
   use_beta_loss_step: false  # Use beta distribution for random loss step (varies from early to late steps through training)
   # TRAIN/TEST SPLIT
   test_num: 256  # Fraction/absolute number of data to use for testing (from all input combinations)
   # BATCH SIZE
-  meta_batch_size: 196 
+  meta_batch_size: 512 
   batch_chunk_size: null  # Sequential batch processing chunk size (null means use meta_batch_size)
   # OPTIMIZATION
   learning_rate: 4e-4
-  weight_decay: 1e-4
+  weight_decay: 1e-5
   # LEARNING RATE SCHEDULER
-  lr_scheduler: "linear_warmup"  # Options: "constant", "exponential", "cosine", "linear_warmup"
+  lr_scheduler: "cosine"  # Options: "constant", "exponential", "cosine", "linear_warmup"
   lr_scheduler_params:
     warmup_steps_factor: 50
     lr_warmup_start: 1e-6
@@ -66,7 +67,7 @@ training:
   # GRADIENT CHECKPOINTING (remat)
   # Trades compute for memory by recomputing model activations during backward pass
   # Useful when n_message_steps is high or batch size is large and you're running out of memory
-  # In practice it looks like it's FASTER with gradient checkpointing enabled... Adn the memory saves are huge.
+  # In practice it looks like it's FASTER with gradient checkpointing enabled... And the memory saves are huge.
   gradient_checkpointing: true
   # Debugging
   check_gradients: false
@@ -93,15 +94,15 @@ pool:
 # Simulates permanent structural damage to gates during ongoing optimization
 # Damaged gates have faulty logits and cannot receive model updates
 damage:
-  enabled: false  # Master switch for damage system
+  enabled: true  # Master switch for damage system
   
   # Damage intensity - how many gates to knock out per damage event
   knockouts_per_event: 2
   
   # Damage scheduling (similar to pool reset scheduling)
   # Formula: expected_damages = (expected_updates / damage_interval) × damage_fraction
-  damage_interval: 16  # Epochs between damage applications (can be auto-computed)
-  damage_fraction: 0.5   # Fraction of pool to damage each interval
+  damage_interval: null  # Epochs between damage applications (can be auto-computed)
+  damage_fraction: 0.25   # Fraction of pool to damage each interval
   
   # Automatic computation target (like pool.expected_updates)
   # If specified with one null parameter above, computes the missing one
@@ -127,14 +128,14 @@ backprop:
 eval:
   enabled: true  # Whether to run periodic evaluation during training
   interval: 1024  # Evaluate every N epochs
-  inner_steps: 256  # Number of message passing steps for inner loop evaluation
+  inner_steps: ${pool.expected_updates}  # Number of message passing steps for inner loop evaluation
   log_stepwise: true  # Whether to log detailed step-by-step metrics to wandb
   batch_size_in: null  # Batch size for IN-distribution evaluation (None means use initial_diversity)
   batch_size_out: null  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
   log_pool_scatter: true
   do_ood_evaluation: null # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
-  damage_enabled: true # Whether to apply damage during evaluation (if damage.enabled is true)
-  n_damage_steps: 2 # Number of damage steps to apply during evaluation
+  damage_enabled: true # Whether to apply damage during evaluation (if damage.enabled is also true)
+  n_damage_steps: 1 # Number of damage steps to apply during evaluation
 
 # Early stopping based on accuracy
 stop_accuracy:

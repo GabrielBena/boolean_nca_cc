@@ -424,16 +424,19 @@ def process_pool_configuration(cfg):
     Raises:
         ValueError: If configuration is underspecified or invalid
     """
+
+
+    if cfg.training.random_loss_step:
+        n_message_steps_effective = (cfg.training.n_message_steps + cfg.training.random_loss_step_min) // 2
+    else:
+        n_message_steps_effective = cfg.training.n_message_steps
+
     if cfg.pool.expected_updates is None:
         # No automatic computation requested, validate current config
         log.info("Using explicit pool configuration (no expected_updates specified)")
-        return cfg
+        return cfg, n_message_steps_effective
 
     # Check which parameters need to be computed
-    if cfg.training.random_loss_step:
-        n_message_steps_effective = cfg.training.n_message_steps // 2
-    else:
-        n_message_steps_effective = cfg.training.n_message_steps
     pool_params = {
         "pool_size": cfg.pool.size,
         "batch_size": cfg.training.meta_batch_size,
@@ -461,7 +464,7 @@ def process_pool_configuration(cfg):
         else:
             log.info(f"Configuration verified: {actual_updates:.2f} expected updates per circuit")
 
-        return cfg
+        return cfg, n_message_steps_effective
 
     elif len(none_params) == 1:
         # Exactly one parameter to compute
@@ -519,10 +522,10 @@ def process_pool_configuration(cfg):
             f"training.n_message_steps, pool.reset_interval, pool.reset_fraction"
         )
 
-    return cfg
+    return cfg, n_message_steps_effective
 
 
-def process_damage_configuration(cfg):
+def process_damage_configuration(cfg, expected_lifetime_epochs=None):
     """
     Process damage configuration to automatically compute missing parameters.
 
@@ -530,10 +533,11 @@ def process_damage_configuration(cfg):
         expected_damages = (expected_updates / damage_interval) * damage_fraction
 
     Where expected_updates comes from the pool configuration (must be processed first).
+    If expected_lifetime_epochs is provided, it is used to compute the expected damages.
 
     Args:
         cfg: Configuration object with damage and pool settings.
-             Pool configuration must be processed first (pool.expected_updates resolved).
+             Pool configuration must be processed first (pool.expected_updates resolved) or expected_lifetime_epochs must be provided.
 
     Returns:
         Updated configuration with computed damage parameters
@@ -546,13 +550,16 @@ def process_damage_configuration(cfg):
         log.info("Damage system disabled (damage.enabled=false)")
         return cfg
 
-    # Ensure pool configuration is processed (we need expected_updates)
-    expected_updates = cfg.pool.expected_updates
-    if expected_updates is None:
-        raise ValueError(
-            "Cannot process damage configuration: pool.expected_updates is not set. "
-            "Ensure pool configuration is processed first."
-        )
+    if expected_lifetime_epochs is None:
+        # Ensure pool configuration is processed (we need expected_updates)
+        expected_updates = cfg.pool.expected_updates
+        if expected_updates is None:
+            raise ValueError(
+                "Cannot process damage configuration: pool.expected_updates is not set. "
+                "Ensure pool configuration is processed first."
+            )
+    else:
+        expected_updates = expected_lifetime_epochs
 
     # Check if expected_damages is specified (triggers auto-computation)
     if cfg.damage.expected_damages is None:
@@ -679,12 +686,23 @@ def main(cfg: DictConfig) -> None:
     """
     # Print configuration
     log.info(OmegaConf.to_yaml(cfg))
+    
 
     # Process pool configuration for automatic parameter computation
-    cfg = process_pool_configuration(cfg)
+    cfg, effective_n_message_steps = process_pool_configuration(cfg)
+
+    # Log final pool configuration and expected updates
+    pool_params = {
+        "pool_size": cfg.pool.size,
+        "batch_size": cfg.training.meta_batch_size,
+        "n_message_steps": effective_n_message_steps,
+        "reset_interval": cfg.pool.reset_interval,
+        "reset_fraction": cfg.pool.reset_fraction,
+    }
+    stats = calculate_expected_pool_updates(**pool_params)
 
     # Process damage configuration (requires pool config to be processed first)
-    cfg = process_damage_configuration(cfg)
+    cfg = process_damage_configuration(cfg, expected_lifetime_epochs=stats.expected_lifetime_epochs)
 
     # Configure global build_graph function with settings from config
     log.info(
@@ -701,20 +719,10 @@ def main(cfg: DictConfig) -> None:
     else:
         log.warning("⚠️ Graph builder configuration failed, will use defaults")
 
-    # Log final pool configuration and expected updates
-    pool_params = {
-        "pool_size": cfg.pool.size,
-        "batch_size": cfg.training.meta_batch_size,
-        "n_message_steps": cfg.training.n_message_steps,
-        "reset_interval": cfg.pool.reset_interval,
-        "reset_fraction": cfg.pool.reset_fraction,
-    }
-    stats = calculate_expected_pool_updates(**pool_params)
-
     log.info("Final Pool Configuration:")
     log.info(f"  Pool Size: {cfg.pool.size}")
     log.info(f"  Batch Size: {cfg.training.meta_batch_size}")
-    log.info(f"  Message Steps: {cfg.training.n_message_steps}")
+    log.info(f"  Message Steps: {effective_n_message_steps}")
     log.info(f"  Reset Interval: {cfg.pool.reset_interval}")
     log.info(f"  Reset Fraction: {cfg.pool.reset_fraction:.4f}")
     log.info(f"  Expected Updates per Circuit: {stats.expected_updates:.2f}")
@@ -724,7 +732,7 @@ def main(cfg: DictConfig) -> None:
     # Log damage configuration if enabled
     if cfg.damage.enabled:
         damage_stats = calculate_expected_damages(
-            expected_updates=stats.expected_updates,
+            expected_updates=stats.expected_lifetime_epochs,
             damage_interval=cfg.damage.damage_interval,
             damage_fraction=cfg.damage.damage_fraction,
             knockouts_per_event=cfg.damage.knockouts_per_event,
@@ -947,6 +955,7 @@ def main(cfg: DictConfig) -> None:
         # Loss parameters
         loss_cfg=LossConfig.from_dict(dict(cfg.loss)),
         random_loss_step=cfg.training.random_loss_step,
+        random_loss_step_min=cfg.training.random_loss_step_min,
         use_beta_loss_step=cfg.training.use_beta_loss_step,
         # Wiring mode parameters
         wiring_mode=cfg.training.wiring_mode,

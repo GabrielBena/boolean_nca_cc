@@ -728,6 +728,7 @@ def train_model(
     # Loss parameters
     loss_cfg=None,  # Loss config dict (default: LOSS_L4)
     random_loss_step: bool = False,  # Use random message passing step for loss computation
+    random_loss_step_min: int = 0,
     use_beta_loss_step: bool = False,  # Use beta distribution for random loss step (varies from early to late steps through training)
     # Wiring mode parameters
     wiring_mode: str = "random",  # Options: 'fixed', 'random', or 'genetic'
@@ -824,6 +825,7 @@ def train_model(
         n_message_steps: Number of message passing steps per pool batch
         loss_cfg: Loss config dict
         random_loss_step: Use random message passing step for loss computation
+        random_loss_step_min: Minimum message passing step for random loss computation
         use_beta_loss_step: Use beta distribution for random loss step (varies from early to late steps through training)
         wiring_mode: Mode for circuit wirings ('fixed', 'random', or 'genetic')
         meta_batch_size: Batch size for training
@@ -1005,7 +1007,7 @@ def train_model(
                         training_progress=epoch / (epochs - 1),
                     )
                 else:
-                    return jax.random.randint(loss_key, (1,), 0, n_message_steps)[0]
+                    return jax.random.randint(loss_key, (1,), random_loss_step_min, n_message_steps)[0]
             else:
                 return n_message_steps - 1
 

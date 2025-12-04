@@ -4,8 +4,6 @@ defaults:
 
 sweep:
   grid:  # parameters to combine in all possible ways
-    model: [gnn, self_attention]
-    training.loss_type: [bce]
-    training.learning_rate: [3e-4, 1e-4]
-    training.n_message_steps: [50]
-    circuit: [add, binary_multiply, text]
+    training.wiring_mode: [fixed, random]
+    damage.enabled: [false, true]
+    circuit: [text_small, add, binary_multiply, text]
