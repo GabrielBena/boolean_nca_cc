@@ -48,6 +48,8 @@ class GraphPool(struct.PyTreeNode):
     knockout_patterns: Optional[Array] = None
     # Count how many times each circuit has been perturbed (damage applied)
     perturb_counter: Optional[Array] = None
+    # DEBUG: Track whether circuit has been trained since last damage (for validation filtering)
+    trained_since_damage: Optional[Array] = None  # DEBUG
 
     @classmethod
     def create(
@@ -58,6 +60,7 @@ class GraphPool(struct.PyTreeNode):
         reset_counter: Optional[Array] = None,
         knockout_patterns: Optional[Array] = None,
         perturb_counter: Optional[Array] = None,
+        trained_since_damage: Optional[Array] = None,  # DEBUG
     ) -> "GraphPool":
         """
         Create a new GraphPool instance from a batched GraphsTuple.
@@ -96,6 +99,11 @@ class GraphPool(struct.PyTreeNode):
         if perturb_counter is None:
             perturb_counter = jp.zeros(size, dtype=jp.int32)
 
+        # DEBUG: Initialize trained_since_damage flag if not provided
+        # True means the circuit has been trained since last damage (or never damaged)
+        if trained_since_damage is None:
+            trained_since_damage = jp.ones(size, dtype=jp.bool_)  # All circuits start as "trained" (no pending damage)
+
         return cls(
             size=size,
             graphs=batched_graphs,
@@ -104,6 +112,7 @@ class GraphPool(struct.PyTreeNode):
             reset_counter=reset_counter,
             knockout_patterns=knockout_patterns,
             perturb_counter=perturb_counter,
+            trained_since_damage=trained_since_damage,  # DEBUG
         )
 
     @partial(jax.jit, static_argnames=("reset_perturb_counter",))
@@ -225,6 +234,13 @@ class GraphPool(struct.PyTreeNode):
         if reset_perturb_counter and self.perturb_counter is not None:
             updated_perturb_counter = self.perturb_counter.at[idxs].set(0)
 
+        # DEBUG: Mark circuits as trained since damage (graph features are now updated)
+        updated_trained_since_damage = (
+            self.trained_since_damage.at[idxs].set(True)
+            if self.trained_since_damage is not None
+            else None
+        )
+
         return self.replace(
             graphs=updated_graphs_data,
             wires=updated_wires,
@@ -232,6 +248,7 @@ class GraphPool(struct.PyTreeNode):
             reset_counter=updated_reset_counter,
             knockout_patterns=updated_knockout_patterns,
             perturb_counter=updated_perturb_counter,
+            trained_since_damage=updated_trained_since_damage,  # DEBUG
         )
 
 
@@ -310,7 +327,7 @@ class GraphPool(struct.PyTreeNode):
             0.5,
             0.5,
         ),  # Weights for [loss, steps] in combined strategy
-    ) -> Tuple["GraphPool", float]:
+    ) -> Tuple["GraphPool", float, Array]:
         """
         Reset a random fraction of the pool with fresh graphs.
 
@@ -329,7 +346,7 @@ class GraphPool(struct.PyTreeNode):
             combined_weights: Tuple of weights (loss_weight, steps_weight) for the combined strategy
 
         Returns:
-            Updated pool with reset elements and the average update steps of reset graphs
+            Tuple of (updated pool, average update steps of reset graphs, reset indices)
         """
         # Split the key for different random operations
         selection_key, sampling_key = jax.random.split(key)
@@ -382,7 +399,7 @@ class GraphPool(struct.PyTreeNode):
             new_counter = reset_pool.reset_counter + 1
             reset_pool = reset_pool.replace(reset_counter=new_counter)
 
-        return reset_pool, avg_steps_reset
+        return reset_pool, avg_steps_reset, reset_idxs
 
     @partial(jax.jit, static_argnames=("accumulate",))
     def apply_knockouts(
@@ -428,19 +445,19 @@ class GraphPool(struct.PyTreeNode):
             else None
         )
 
+        # DEBUG: Mark circuits as NOT trained since damage (pending graph feature update)
+        updated_trained_since_damage = (
+            self.trained_since_damage.at[idxs].set(False)
+            if self.trained_since_damage is not None
+            else None
+        )
+
         return self.replace(
             knockout_patterns=updated_knockout_patterns,
             perturb_counter=updated_perturb_counter,
+            trained_since_damage=updated_trained_since_damage,  # DEBUG
         )
-
-    # @partial(
-    #     jax.jit,
-    #     static_argnames=(
-    #         "layer_sizes",
-    #         "selection_strategy",
-    #         "combined_weights",
-    #     ),
-    # )
+        
     def damage_fraction(
         self,
         key: Array,
@@ -701,6 +718,284 @@ class GraphPool(struct.PyTreeNode):
 
         return reset_idxs, avg_steps_reset
 
+    # DEBUG: FUNCTION FOR VALIDATING PERMANENT DAMAGE
+    def validate_permanent_damage(  # DEBUG
+        self,
+        damage_behavior: str = "permanent",
+        tolerance: float = 1e-6,
+    ) -> Dict[str, Any]:
+        """
+        Validate that in permanent damage mode, damaged nodes remain at expected values
+        (logits=-10.0, hidden=0.0) across pool updates.
+        
+        This is a non-JIT function for validation/debugging purposes.
+        
+        Args:
+            damage_behavior: Expected damage behavior ("permanent" or "reversible")
+            tolerance: Tolerance for floating point comparisons
+            
+        Returns:
+            Dictionary with validation results including:
+            - total_checks: Number of damaged nodes checked
+            - passed_checks: Number of nodes that passed validation
+            - pass_rate: Fraction of checks that passed
+            - failures: List of failure details (circuit_idx, node_idx, logits_range, hidden_range)
+        """
+        if damage_behavior != "permanent":
+            # Only validate permanent mode
+            return {
+                "total_checks": 0,
+                "passed_checks": 0,
+                "pass_rate": 1.0,
+                "num_failures": 0,
+                "failures": [],
+            }
+        
+        if self.knockout_patterns is None or not jp.any(self.knockout_patterns):
+            # No damage patterns to validate
+            return {
+                "total_checks": 0,
+                "passed_checks": 0,
+                "pass_rate": 1.0,
+                "num_failures": 0,
+                "failures": [],
+                "skipped_pending": 0,
+            }
+        
+        # Extract node features from graphs
+        node_logits = self.graphs.nodes["logits"]  # [pool_size, n_nodes, logit_dim]
+        node_hidden = self.graphs.nodes["hidden"]  # [pool_size, n_nodes, hidden_dim]
+        
+        # Vectorized validation - check all damaged nodes at once
+        # Expand mask for broadcasting: [pool_size, n_nodes] -> [pool_size, n_nodes, 1]
+        mask_expanded = self.knockout_patterns[:, :, None]
+        
+        # Check logits: damaged should be -10.0
+        logits_diff = jp.where(mask_expanded, jp.abs(node_logits - (-10.0)), 0.0)
+        logits_ok_per_circuit = jp.all(logits_diff < tolerance, axis=(1, 2))  # [pool_size]
+        
+        # Check hidden: damaged should be 0.0
+        hidden_diff = jp.where(mask_expanded, jp.abs(node_hidden), 0.0)
+        hidden_ok_per_circuit = jp.all(hidden_diff < tolerance, axis=(1, 2))  # [pool_size]
+        
+        # Count passes (only for circuits with damage AND that have been trained since damage)
+        both_ok = logits_ok_per_circuit & hidden_ok_per_circuit
+        circuits_with_damage = jp.any(self.knockout_patterns, axis=1)  # [pool_size]
+        
+        # DEBUG: Filter to only circuits that have been trained since receiving damage
+        # Circuits with pending damage (trained_since_damage=False) are skipped
+        trained_filter = (
+            self.trained_since_damage 
+            if self.trained_since_damage is not None 
+            else jp.ones(self.size, dtype=jp.bool_)
+        )
+        eligible_circuits = circuits_with_damage & trained_filter  # DEBUG
+        skipped_pending = int(jp.sum(circuits_with_damage & ~trained_filter))  # DEBUG
+        
+        num_checks = int(jp.sum(eligible_circuits))
+        num_passed = int(jp.sum(both_ok & eligible_circuits))
+        
+        # Collect failure details (limit to first 10 for performance)
+        failures = []
+        if num_passed < num_checks:
+            failed_mask = eligible_circuits & ~both_ok
+            failed_indices = jp.where(failed_mask)[0]
+            for idx in failed_indices[:10]:  # Limit to first 10
+                idx = int(idx)
+                mask = self.knockout_patterns[idx]
+                damaged_logits = node_logits[idx][mask]
+                damaged_hidden = node_hidden[idx][mask]
+                failures.append({
+                    "circuit_idx": idx,
+                    "logits_range": (float(jp.min(damaged_logits)), float(jp.max(damaged_logits))),
+                    "hidden_range": (float(jp.min(damaged_hidden)), float(jp.max(damaged_hidden))),
+                    "n_damaged_nodes": int(jp.sum(mask)),
+                })
+        
+        return {
+            "total_checks": num_checks,
+            "passed_checks": num_passed,
+            "pass_rate": num_passed / num_checks if num_checks > 0 else 1.0,
+            "skipped_pending": skipped_pending,
+            "num_failures": len(failures),
+            "failures": failures,
+        }
+    
+    # DEBUG: FUNCTION FOR VALIDATING CUMULATIVE DAMAGE
+    def validate_cumulative_damage(  # DEBUG
+        self,
+        damaged_indices: Array,
+        new_patterns: Array,
+        old_patterns: Array,
+        damage_behavior: str = "permanent",
+    ) -> Dict[str, Any]:
+        """
+        Validate that damage is cumulative (OR'd) when a second damage event occurs.
+        
+        For permanent mode, verifies that:
+        1. Previously damaged nodes remain damaged after new damage is applied
+        2. New damage nodes are added to existing damage (OR operation)
+        3. Total damage is the union of old and new patterns
+        
+        Args:
+            damaged_indices: Indices of circuits that received new damage
+            new_patterns: New damage patterns that were applied
+            old_patterns: Damage patterns before application (for comparison)
+            damage_behavior: Expected damage behavior ("permanent" or "reversible")
+            
+        Returns:
+            Dictionary with validation results including:
+            - total_checks: Number of circuits checked
+            - passed_checks: Number of circuits that passed validation
+            - pass_rate: Fraction of checks that passed
+            - failures: List of failure details
+        """
+        if damage_behavior != "permanent":
+            # Only validate permanent mode (reversible mode replaces, doesn't accumulate)
+            return {
+                "total_checks": 0,
+                "passed_checks": 0,
+                "pass_rate": 1.0,
+                "num_failures": 0,
+                "failures": [],
+            }
+        
+        if self.knockout_patterns is None:
+            return {
+                "total_checks": 0,
+                "passed_checks": 0,
+                "pass_rate": 1.0,
+                "num_failures": 0,
+                "failures": [],
+            }
+        
+        # Get current patterns after application
+        current_patterns = self.knockout_patterns[damaged_indices]  # [n_damaged, n_nodes]
+        
+        # Check circuits that had existing damage (old_patterns has any True values)
+        has_old_damage = jp.any(old_patterns, axis=1)  # [n_damaged]
+        circuits_with_previous_damage = jp.where(has_old_damage)[0]
+        
+        if len(circuits_with_previous_damage) == 0:
+            # No circuits with previous damage to validate
+            return {
+                "total_checks": 0,
+                "passed_checks": 0,
+                "pass_rate": 1.0,
+                "num_failures": 0,
+                "failures": [],
+                "note": "No circuits with previous damage to validate",
+            }
+        
+        # Validate cumulative damage for circuits with previous damage
+        failures = []
+        total_checks = len(circuits_with_previous_damage)
+        passed_checks = 0
+        
+        for idx_in_damaged in circuits_with_previous_damage:
+            idx_in_damaged = int(idx_in_damaged)
+            circuit_idx = int(damaged_indices[idx_in_damaged])
+            
+            old_pattern = old_patterns[idx_in_damaged]  # Pattern before new damage
+            new_pattern = new_patterns[idx_in_damaged]  # New damage pattern applied
+            current_pattern = current_patterns[idx_in_damaged]  # Pattern after application
+            
+            # Expected pattern: OR of old and new
+            expected_pattern = old_pattern | new_pattern
+            
+            # Check 1: Previously damaged nodes remain damaged
+            previously_damaged_remain = jp.all(
+                jp.where(old_pattern, current_pattern, True)  # True if old was damaged, check current is also damaged
+            )
+            
+            # Check 2: New damage nodes are added
+            new_damage_added = jp.all(
+                jp.where(new_pattern, current_pattern, True)  # True if new is damaged, check current is also damaged
+            )
+            
+            # Check 3: Total damage matches expected (OR operation)
+            patterns_match = jp.array_equal(current_pattern, expected_pattern)
+            
+            all_checks_pass = previously_damaged_remain & new_damage_added & patterns_match
+            
+            if all_checks_pass:
+                passed_checks += 1
+            else:
+                # Collect failure details
+                old_count = int(jp.sum(old_pattern))
+                new_count = int(jp.sum(new_pattern))
+                current_count = int(jp.sum(current_pattern))
+                expected_count = int(jp.sum(expected_pattern))
+                
+                failures.append({
+                    "circuit_idx": circuit_idx,
+                    "previously_damaged_remain": bool(previously_damaged_remain),
+                    "new_damage_added": bool(new_damage_added),
+                    "patterns_match": bool(patterns_match),
+                    "old_damage_count": old_count,
+                    "new_damage_count": new_count,
+                    "current_damage_count": current_count,
+                    "expected_damage_count": expected_count,
+                })
+        
+        return {
+            "total_checks": total_checks,
+            "passed_checks": passed_checks,
+            "pass_rate": passed_checks / total_checks if total_checks > 0 else 1.0,
+            "num_failures": len(failures),
+            "failures": failures,
+        }
+    
+    # DEBUG: FUNCTION FOR VALIDATING RESET DAMAGE CLEARING
+    def validate_reset_cleared_damage(  # DEBUG
+        self,
+        reset_indices: Array,
+    ) -> Dict[str, Any]:
+        """
+        DEBUG: Validate that after a reset, knockout patterns are cleared (all zeros) for reset indices.
+        
+        Args:
+            reset_indices: Indices that were reset
+            
+        Returns:
+            Dictionary with validation results
+        """
+        if self.knockout_patterns is None:
+            return {
+                "total_checks": 0,
+                "passed_checks": 0,
+                "pass_rate": 1.0,
+                "num_failures": 0,
+                "failures": [],
+            }
+        
+        # Check if reset indices have all-zero knockout patterns
+        reset_patterns = self.knockout_patterns[reset_indices]  # [n_reset, n_nodes]
+        has_damage = jp.any(reset_patterns, axis=1)  # [n_reset]
+        
+        num_checks = reset_indices.shape[0]
+        num_passed = int(jp.sum(~has_damage))
+        
+        failures = []
+        if num_passed < num_checks:
+            failed_mask = has_damage
+            failed_indices = reset_indices[jp.where(failed_mask)[0]]
+            for idx in failed_indices[:10]:  # Limit to first 10
+                idx = int(idx)
+                pattern = self.knockout_patterns[idx]
+                failures.append({
+                    "circuit_idx": idx,
+                    "n_damaged_nodes": int(jp.sum(pattern)),
+                })
+        
+        return {
+            "total_checks": num_checks,
+            "passed_checks": num_passed,
+            "pass_rate": num_passed / num_checks if num_checks > 0 else 1.0,
+            "num_failures": len(failures),
+            "failures": failures,
+        }
+
 
 def initialize_graph_pool(
     rng: jax.random.PRNGKey,
@@ -821,6 +1116,11 @@ def initialize_graph_pool(
     # Initialize perturbation counter
     perturb_counter = jp.zeros(pool_size, dtype=jp.int32)
 
+    # Initialize trained_since_damage: True if no damage, False if circuit has pending damage
+    # DEBUG: Circuits with knockout patterns at init haven't been trained with those patterns yet
+    has_damage = jp.any(pool_knockout_patterns, axis=1)  # [pool_size]  # DEBUG
+    trained_since_damage = ~has_damage  # False if has damage, True if no damage  # DEBUG
+
     return GraphPool.create(
         graphs,
         all_wires,
@@ -828,4 +1128,5 @@ def initialize_graph_pool(
         reset_counter,
         pool_knockout_patterns,
         perturb_counter,
+        trained_since_damage,  # DEBUG
     )

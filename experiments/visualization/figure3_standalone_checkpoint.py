@@ -28,7 +28,7 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from boolean_nca_cc.training.checkpointing import load_best_model_from_wandb
-from boolean_nca_cc.training.train_loop import plot_combined_bp_sa_stepwise_performance
+from boolean_nca_cc.analysis.visualization import plot_combined_bp_sa_stepwise_performance
 from boolean_nca_cc.training.backprop import _run_backpropagation_training_with_knockouts
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.utils.graph_builder import build_graph

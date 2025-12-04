@@ -419,10 +419,12 @@ def main(cfg: DictConfig) -> None:
         stop_accuracy_source=cfg.early_stop.get("source", "eval_ko_in"),
         stop_accuracy_patience=cfg.early_stop.get("patience", 10),
         stop_accuracy_min_epochs=cfg.early_stop.get("min_epochs", 100),
-        # Pass backprop config for joint analysis
-        backprop_config=OmegaConf.to_container(cfg.backprop, resolve=True) if cfg.backprop.enabled else None,
+        # Pass backprop config for joint analysis and preconfiguration
+        backprop_config=OmegaConf.to_container(cfg.backprop, resolve=True),
         # Hamming distance analysis parameters
         hamming_analysis_dir=cfg.eval.get("hamming_analysis_dir", None),
+        # DEBUG: Permanent damage validation
+        track_pool_damage_validation=cfg.eval.get("track_pool_damage_validation", False),  # DEBUG
     )
 
     # Save final model if checkpointing is enabled

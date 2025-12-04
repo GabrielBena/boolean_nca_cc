@@ -5,6 +5,7 @@ This module provides functions for evaluating the performance of GNN
 models on optimizing boolean circuits.
 """
 
+from pickle import FALSE
 import jax
 import jax.numpy as jp
 import jraph
@@ -438,7 +439,7 @@ def evaluate_model_stepwise_batched(
     knockout_vocabulary: Optional[jp.ndarray] = None,  # If provided => seen (sample from vocab); else => unseen (fresh)
     blind_mode: bool = False,  # If True, force loss feedback to zero (ablation study)
     # Permanent damage validation tracking
-    track_damage_validation: bool = True,  # Enable detailed tracking for permanent damage validation
+    track_damage_validation: bool = False,  # Enable detailed tracking for permanent damage validation
 ) -> Dict:
     """
     Evaluate GNN performance on a batch of circuits by running message passing steps
@@ -696,7 +697,7 @@ def _evaluate_with_loop(
     knockout_vocabulary: Optional[jp.ndarray] = None,  # If provided => seen; else => unseen (fresh)
     blind_mode: bool = False,
     # Permanent damage validation tracking
-    track_damage_validation: bool = True,  # Enable detailed tracking for permanent damage validation
+    track_damage_validation: bool = False,  # Enable detailed tracking for permanent damage validation
 ) -> Dict:
     """
     Evaluate using loop mode (original behavior).
@@ -769,7 +770,7 @@ def _evaluate_with_loop(
     total_nodes = sum(total_gates for total_gates, _ in layer_sizes)
     cumulative_knockout_patterns = jp.zeros((batch_size, total_nodes), dtype=jp.bool_)
     
-    # Simple damage validation tracking for single-damage permanent mode
+    # DEBUG: Damage validation tracking initialization for single-damage permanent mode
     # Just tracks: when damage happened, which nodes, and validates permanence
     damage_validation_tracking = None
     prev_node_logits = None  # For tracking magnitude of change
@@ -924,7 +925,7 @@ def _evaluate_with_loop(
             if damage_behavior == "permanent" and step_knockout_patterns is not None:
                 cumulative_knockout_patterns = cumulative_knockout_patterns | step_knockout_patterns
                 
-                # Track first damage event for validation (single damage mode)
+                # DEBUG: Track first damage event for validation (single damage mode)
                 if track_damage_validation and damage_validation_tracking["first_damage_step"] is None:
                     if jp.any(step_knockout_patterns):
                         damage_validation_tracking["first_damage_step"] = step
@@ -957,7 +958,7 @@ def _evaluate_with_loop(
             )
             updated_graphs = vmap_model(current_graphs)
 
-        # === PERMANENT DAMAGE VALIDATION (Vectorized) ===
+        # DEBUG: PERMANENT DAMAGE VALIDATION (Vectorized)
         # Verify damaged node features remain at expected values: logits=-10.0, hidden=0.0
         if track_damage_validation and damage_behavior == "permanent" and jp.any(cumulative_knockout_patterns):
             node_logits = updated_graphs.nodes["logits"]  # [batch_size, n_nodes, logit_dim]
@@ -1002,7 +1003,7 @@ def _evaluate_with_loop(
                         "n_damaged_nodes": int(jp.sum(mask)),
                     })
 
-        # === MAGNITUDE OF CHANGE TRACKING (Vectorized) ===
+        # DEBUG: MAGNITUDE OF CHANGE TRACKING (Vectorized)
         # Track per-gate average change for damaged vs healthy nodes
         if track_damage_validation and prev_node_logits is not None:
             node_logits = updated_graphs.nodes["logits"]
@@ -1096,7 +1097,7 @@ def _evaluate_with_loop(
     if return_per_pattern:
         step_metrics["per_pattern"] = step_metrics_per_pattern
 
-    # Add damage validation summary if enabled
+    # DEBUG: Add damage validation summary if enabled
     if track_damage_validation and damage_validation_tracking is not None:
         total = damage_validation_tracking["total_checks"]
         passed = damage_validation_tracking["passed_checks"]
@@ -1110,7 +1111,7 @@ def _evaluate_with_loop(
             "num_failures": len(failures),
         }
         
-        # Add stepwise magnitude of change for wandb plotting
+        # DEBUG: Add stepwise magnitude of change for wandb plotting
         # damaged_node_avg_change should be ~0, healthy_node_avg_change should be non-zero
         step_metrics["damaged_node_avg_change"] = damage_validation_tracking["damaged_node_avg_change"]
         step_metrics["healthy_node_avg_change"] = damage_validation_tracking["healthy_node_avg_change"]
