@@ -31,7 +31,6 @@ from boolean_nca_cc.models.attention.base import (
     create_attention_mask,
     extract_node_features,
 )
-from boolean_nca_cc.utils.graph_builder import GraphGlobals
 from boolean_nca_cc.utils.positional_encoding import get_positional_encoding
 
 
@@ -70,7 +69,6 @@ class PerceiverCircuitAttention(nnx.Module):
         # Perceiver-specific options
         use_input_cross_attention: bool = True,
         use_output_cross_attention: bool = True,
-        input_encoding_dim: int = 32,
         token_pe_dim: int = 8,
         # Structural constraints
         restrict_input_cross_attn_to_first_layer: bool = False,
@@ -96,7 +94,6 @@ class PerceiverCircuitAttention(nnx.Module):
             use_node_loss: Whether to include per-node loss in features
             use_input_cross_attention: Enable cross-attention to input data
             use_output_cross_attention: Enable cross-attention to output residuals
-            input_encoding_dim: Hidden dimension for encoding data tokens
             token_pe_dim: Dimension for sinusoidal positional encodings
             restrict_input_cross_attn_to_first_layer: Only first gate layer attends to inputs
             restrict_output_cross_attn_to_last_layer: Only output layer attends to residuals
@@ -136,29 +133,27 @@ class PerceiverCircuitAttention(nnx.Module):
             kernel_init=nnx.initializers.kaiming_normal(),
         )
 
-        # === Cross-attention to input data ===
-        if use_input_cross_attention:
-            # === Input data encoder ===
+        def create_cross_attention_layers() -> tuple[nnx.Sequential, nnx.List]:
             # Encodes (bit_value, sample_pe, bit_pe) -> attention_dim
             token_input_dim = 1 + 2 * token_pe_dim
-            self.input_encoder = nnx.Sequential(
+            # === Input data encoder ===
+            encoder = nnx.Sequential(
                 nnx.Linear(
                     token_input_dim,
-                    input_encoding_dim,
+                    attention_dim,
                     rngs=rngs,
                     kernel_init=nnx.initializers.kaiming_normal(),
                 ),
                 nnx.gelu,
                 nnx.Linear(
-                    input_encoding_dim,
+                    attention_dim,
                     attention_dim,
                     rngs=rngs,
                     kernel_init=nnx.initializers.kaiming_normal(),
                 ),
             )
-
             # === Cross-attention layers (using shared AttentionBlock with ReZero) ===
-            self.input_cross_attn_layers = nnx.List(
+            cross_attn_layers = nnx.List(
                 [
                     AttentionBlock(
                         dim=attention_dim,
@@ -170,40 +165,15 @@ class PerceiverCircuitAttention(nnx.Module):
                     for _ in range(num_cross_attn_layers)
                 ]
             )
+            return encoder, cross_attn_layers
+
+        # === Cross-attention to input data ===
+        if use_input_cross_attention:
+            self.input_encoder, self.input_cross_attn_layers = create_cross_attention_layers()
 
         # === Cross-attention to output residuals ===
         if use_output_cross_attention:
-            # === Output residual encoder ===
-            # Encodes (residual_value, sample_pe, residual_pe) -> attention_dim
-            token_input_dim = 1 + 2 * token_pe_dim
-            self.output_encoder = nnx.Sequential(
-                nnx.Linear(
-                    token_input_dim,
-                    input_encoding_dim,
-                    rngs=rngs,
-                    kernel_init=nnx.initializers.kaiming_normal(),
-                ),
-                nnx.gelu,
-                nnx.Linear(
-                    input_encoding_dim,
-                    attention_dim,
-                    rngs=rngs,
-                    kernel_init=nnx.initializers.kaiming_normal(),
-                ),
-            )
-            # === Cross-attention layers (using shared AttentionBlock with ReZero) ===
-            self.output_cross_attn_layers = nnx.List(
-                [
-                    AttentionBlock(
-                        dim=attention_dim,
-                        mlp_dim=mlp_dim,
-                        num_heads=num_heads,
-                        dropout_rate=dropout_rate,
-                        rngs=rngs,
-                    )
-                    for _ in range(num_cross_attn_layers)
-                ]
-            )
+            self.output_encoder, self.output_cross_attn_layers = create_cross_attention_layers()
 
         # === Self-attention layers ===
         self.self_attn_layers = nnx.List(
@@ -248,28 +218,6 @@ class PerceiverCircuitAttention(nnx.Module):
         """Create topology-based attention mask using shared utility."""
         return create_attention_mask(senders, receivers, n_node, self.use_attention_mask)
 
-    def _create_cross_attention_mask(
-        self,
-        layer_indices: jp.ndarray,
-        n_tokens: int,
-        allowed_layer: int,
-    ) -> jp.ndarray:
-        """
-        Create a cross-attention mask that restricts which gates can attend to data.
-
-        Args:
-            layer_indices: Layer index for each node [N_nodes]
-            n_tokens: Number of data tokens to attend to
-            allowed_layer: Which layer is allowed to attend
-
-        Returns:
-            Attention mask [1, 1, N_nodes, N_tokens] where True = can attend
-        """
-        n_nodes = layer_indices.shape[0]
-        gate_can_attend = layer_indices == allowed_layer  # [N_nodes]
-        mask = jp.broadcast_to(gate_can_attend[:, None], (n_nodes, n_tokens))
-        return mask[None, None, ...]
-
     def _create_output_gate(
         self,
         layer_indices: jp.ndarray,
@@ -292,17 +240,17 @@ class PerceiverCircuitAttention(nnx.Module):
         gate = (layer_indices == allowed_layer).astype(jp.float32)  # [N_nodes]
         return gate[None, :, None]  # [1, N_nodes, 1]
 
-    def _encode_input_data(self, x_data: jp.ndarray) -> jp.ndarray:
+    def _encode_data(self, data: jp.ndarray) -> jp.ndarray:
         """
-        Encode input data as tokens with sinusoidal positional encodings.
+        Encode data as tokens with sinusoidal positional encodings.
 
         Args:
-            x_data: Input data [N_samples, N_input_bits]
+            data: Input data [N_samples, N_input_bits]
 
         Returns:
             Encoded tokens [N_samples * N_input_bits, attention_dim]
         """
-        N_samples, N_bits = x_data.shape
+        N_samples, N_bits = data.shape
 
         # Sinusoidal positional encodings
         sample_pe = get_positional_encoding(jp.arange(N_samples), self.token_pe_dim)
@@ -317,47 +265,11 @@ class PerceiverCircuitAttention(nnx.Module):
         )
         # Concatenate [value, sample_pe, bit_pe] and flatten
         features = jp.concatenate(
-            [x_data[:, :, None], sample_pe_broadcast, bit_pe_broadcast], axis=-1
+            [data[:, :, None], sample_pe_broadcast, bit_pe_broadcast], axis=-1
         )
         features = features.reshape(-1, 1 + 2 * self.token_pe_dim)
 
-        encoded_tokens = self.input_encoder(features)
-
-        return encoded_tokens
-
-    def _encode_output_residuals(self, residuals: jp.ndarray) -> jp.ndarray:
-        """
-        Encode output residuals as tokens with sinusoidal positional encodings.
-
-        Uses SAME sample_pe as _encode_input_data for sample matching.
-
-        Args:
-            residuals: Prediction residuals [N_samples, N_output_bits]
-
-        Returns:
-            Encoded tokens [N_samples * N_output_bits, attention_dim]
-        """
-        N_samples, N_outputs = residuals.shape
-
-        # Same sample PE as input encoder
-        sample_pe = get_positional_encoding(jp.arange(N_samples), self.token_pe_dim)
-        output_pe = get_positional_encoding(jp.arange(N_outputs), self.token_pe_dim)
-
-        # Broadcast
-        sample_pe_broadcast = jp.broadcast_to(
-            sample_pe[:, None, :], (N_samples, N_outputs, self.token_pe_dim)
-        )
-        output_pe_broadcast = jp.broadcast_to(
-            output_pe[None, :, :], (N_samples, N_outputs, self.token_pe_dim)
-        )
-
-        # Concatenate and flatten
-        features = jp.concatenate(
-            [residuals[:, :, None], sample_pe_broadcast, output_pe_broadcast], axis=-1
-        )
-        features = features.reshape(-1, 1 + 2 * self.token_pe_dim)
-
-        return self.output_encoder(features)
+        return features
 
     def __call__(
         self,
@@ -406,16 +318,8 @@ class PerceiverCircuitAttention(nnx.Module):
 
         # === Cross-attention to input data ===
         if self.use_input_cross_attention and x_data is not None:
-            input_tokens = self._encode_input_data(x_data)[None, ...]
-
-            # Create output gate if layer restriction is enabled
-            # The output gate hard-zeros contributions for non-input layers.
-            # Note: We don't use attention mask for layer restrictions because:
-            # - Fully-masked rows produce uniform attention (not zero)
-            # - The output gate is sufficient and cleaner
-            # - Attention mask can be passed externally for finer control if needed
-            if input_output_gate is None and self.restrict_input_cross_attn_to_first_layer:
-                input_output_gate = self._create_output_gate(layer_indices, allowed_layer=0)
+            input_features = self._encode_data(x_data)
+            input_tokens = self.input_encoder(input_features)[None, ...]
 
             for cross_attn in self.input_cross_attn_layers:
                 gate_latents = cross_attn(
@@ -429,7 +333,8 @@ class PerceiverCircuitAttention(nnx.Module):
 
         # === Cross-attention to output residuals ===
         if self.use_output_cross_attention and residuals is not None:
-            output_tokens = self._encode_output_residuals(residuals)[None, ...]
+            output_features = self._encode_data(residuals)
+            output_tokens = self.output_encoder(output_features)[None, ...]
 
             # Create output gate if layer restriction is enabled
             if output_output_gate is None and self.restrict_output_cross_attn_to_last_layer:
