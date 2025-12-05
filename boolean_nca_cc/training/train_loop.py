@@ -1007,7 +1007,9 @@ def train_model(
                         training_progress=epoch / (epochs - 1),
                     )
                 else:
-                    return jax.random.randint(loss_key, (1,), random_loss_step_min, n_message_steps)[0]
+                    return jax.random.randint(
+                        loss_key, (1,), random_loss_step_min, n_message_steps
+                    )[0]
             else:
                 return n_message_steps - 1
 
@@ -1017,7 +1019,7 @@ def train_model(
 
             # Determine which scan function to use based on model type
             if isinstance(model, CircuitGNN):
-                from boolean_nca_cc.models.gnn import run_gnn_scan_with_loss
+                from boolean_nca_cc.models.gnn.model import run_gnn_scan_with_loss
 
                 scan_fn = run_gnn_scan_with_loss
             elif isinstance(model, CircuitSelfAttention):

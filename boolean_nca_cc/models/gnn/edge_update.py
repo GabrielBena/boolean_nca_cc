@@ -36,7 +36,6 @@ class EdgeUpdateModule(nnx.Module):
             circuit_hidden_dim: Dimension of hidden features
             arity: Number of inputs per gate in the boolean circuit
             rngs: Random number generators
-            zero_init: Whether to initialize weights and biases to zero
         """
         self.circuit_hidden_dim = circuit_hidden_dim
         self.arity = arity
@@ -64,8 +63,7 @@ class EdgeUpdateModule(nnx.Module):
                     in_f,
                     out_f,
                     rngs=rngs,
-                    kernel_init=nnx.initializers.xavier_normal(),
-                    bias_init=jax.nn.initializers.normal(stddev=1e-4),
+                    kernel_init=nnx.initializers.kaiming_normal(),
                 )
             )
             # Add BatchNorm and ReLU except for the last layer

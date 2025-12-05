@@ -37,8 +37,6 @@ class CircuitGNN(nnx.Module):
         *,
         rngs: nnx.Rngs,
         type: str = "gnn",
-        zero_init: bool = True,
-        re_zero_update: bool = False,
     ):
         """
         Initialize the Circuit GNN.
@@ -52,8 +50,6 @@ class CircuitGNN(nnx.Module):
             use_attention: Whether to use attention-based message aggregation
             rngs: Random number generators
             type: Type of model
-            zero_init: Whether to initialize weights to zero
-            re_zero_update: Whether to use learnable update residual rate
         """
         self.arity = arity
         self.message_passing = message_passing
@@ -68,8 +64,6 @@ class CircuitGNN(nnx.Module):
             arity=arity,
             message_passing=message_passing,
             rngs=rngs,
-            zero_init=zero_init,
-            re_zero_update=re_zero_update,
         )
 
         self.edge_update = EdgeUpdateModule(
@@ -225,10 +219,7 @@ def run_gnn_scan_with_loss(
     # Optionally wrap model call with gradient checkpointing (remat)
     # This recomputes model activations during backward pass to save memory
     # We use nnx.remat instead of jax.checkpoint to properly handle NNX modules
-    if gradient_checkpointing:
-        model_fn = nnx.remat(lambda g: model(g))
-    else:
-        model_fn = model
+    model_fn = nnx.remat(lambda g: model(g)) if gradient_checkpointing else model
 
     def gnn_step_with_loss(carry, _):
         current_graph = carry
@@ -237,7 +228,7 @@ def run_gnn_scan_with_loss(
         model_updated_graph = model_fn(current_graph)
 
         # Compute loss and update graph
-        updated_graph, loss, current_logits, aux = get_loss_and_update_graph(
+        final_graph, loss, current_logits, aux = get_loss_and_update_graph(
             model_updated_graph,
             logits_original_shapes,
             wires,
@@ -245,17 +236,7 @@ def run_gnn_scan_with_loss(
             y_batch,
             loss_cfg,
             layer_sizes,
-        )
-
-        # Update graph globals with current update steps
-        current_update_steps = (
-            updated_graph.globals.update_steps if updated_graph.globals is not None else 0
-        )
-        final_graph = updated_graph._replace(
-            globals=GraphGlobals(
-                loss=loss,
-                update_steps=current_update_steps + 1,
-            )
+            update_perceiver_globals=False,
         )
 
         return final_graph, (final_graph, loss, current_logits, aux)

@@ -46,7 +46,6 @@ class CircuitSelfAttention(nnx.Module):
         *,
         rngs: nnx.Rngs,
         type: str = "self_attention",
-        zero_init: bool = True,
         use_node_loss: bool = False,
     ):
         """
@@ -65,7 +64,6 @@ class CircuitSelfAttention(nnx.Module):
             use_attention_mask: Whether to use self-attention masks based on circuit wiring
             rngs: Random number generators
             type: Type of model
-            zero_init: Whether to initialize output projection weights to zero
             use_node_loss: Whether to include per-node loss in features
         """
         self.n_node = int(n_node)
@@ -113,16 +111,14 @@ class CircuitSelfAttention(nnx.Module):
             self.attention_dim,
             self.logit_dim,
             use_bias=True,
-            kernel_init=nnx.initializers.zeros if zero_init else nnx.initializers.lecun_normal(),
-            bias_init=nnx.initializers.zeros,
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
         self.hidden_proj = nnx.Linear(
             self.attention_dim,
             circuit_hidden_dim,
             use_bias=True,
-            kernel_init=nnx.initializers.zeros if zero_init else nnx.initializers.lecun_normal(),
-            bias_init=nnx.initializers.zeros,
+            kernel_init=nnx.initializers.lecun_normal(),
             rngs=rngs,
         )
 

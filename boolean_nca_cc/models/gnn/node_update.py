@@ -11,6 +11,8 @@ import jax
 import jax.numpy as jp
 from flax import nnx
 
+from boolean_nca_cc.models.attention.base import ReZero
+
 # Type aliases for clarity
 NodeType = dict[str, jp.ndarray]
 
@@ -30,8 +32,6 @@ class NodeUpdateModule(nnx.Module):
         message_passing: bool = True,
         *,
         rngs: nnx.Rngs,
-        zero_init: bool = True,
-        re_zero_update: bool = False,
     ):
         """
         Initialize the node update module.
@@ -42,8 +42,6 @@ class NodeUpdateModule(nnx.Module):
             arity: Number of inputs per gate in the boolean circuit
             message_passing: Whether to use message passing or only self-updates
             rngs: Random number generators
-            zero_init: Whether to initialize weights and biases to zero
-            re_zero_update: Whether to use learnable update residual rate
         """
         self.arity = arity
         self.circuit_hidden_dim = circuit_hidden_dim
@@ -53,9 +51,7 @@ class NodeUpdateModule(nnx.Module):
 
         # Calculate MLP input size
         # Current features: Logits, Hidden, Layer PE, Intra-Layer PE, Loss
-        current_features_size = (
-            self.logit_dim + circuit_hidden_dim + pe_dim + pe_dim + 1
-        )  # +1 for loss feature
+        current_features_size = self.logit_dim + circuit_hidden_dim + pe_dim + pe_dim
 
         if message_passing:
             # If using message passing, include aggregated messages
@@ -90,12 +86,6 @@ class NodeUpdateModule(nnx.Module):
             epsilon=1e-5,
             rngs=rngs,
         )
-        # Add normalization for loss feature
-        self.loss_norm = nnx.LayerNorm(
-            1,  # Loss is a scalar per node
-            epsilon=1e-5,
-            rngs=rngs,
-        )
 
         if message_passing:
             self.message_norm = nnx.LayerNorm(
@@ -119,12 +109,7 @@ class NodeUpdateModule(nnx.Module):
                     # kernel_init=nnx.initializers.normal(
                     #     stddev=1e-4
                     # ),  # Small random init
-                    kernel_init=nnx.initializers.zeros
-                    if zero_init
-                    else nnx.initializers.kaiming_normal(),
-                    bias_init=jax.nn.initializers.zeros
-                    if zero_init
-                    else nnx.initializers.normal(stddev=1e-4),
+                    kernel_init=nnx.initializers.kaiming_normal(),
                     rngs=rngs,
                 )
                 mlp_layers.append(final_linear)
@@ -143,25 +128,8 @@ class NodeUpdateModule(nnx.Module):
         self.mlp = nnx.Sequential(*mlp_layers)
 
         # Re-zero learnable scaling parameters
-        self.logit_scale = (
-            nnx.Param(
-                jp.zeros(1),
-                name="logit_scale",
-                rngs=rngs,
-            )
-            if re_zero_update
-            else 1.0
-        )
-
-        self.hidden_scale = (
-            nnx.Param(
-                jp.zeros(1),
-                name="hidden_scale",
-                rngs=rngs,
-            )
-            if re_zero_update
-            else 1.0
-        )
+        self.logit_scale = ReZero(rngs=rngs)
+        self.hidden_scale = ReZero(rngs=rngs)
 
     def __call__(
         self,
@@ -187,7 +155,6 @@ class NodeUpdateModule(nnx.Module):
         current_hidden = nodes["hidden"]  # Shape: [num_nodes, circuit_hidden_dim]
         current_layer_pe = nodes["layer_pe"]  # Shape: [num_nodes, pe_dim]
         current_intra_layer_pe = nodes["intra_layer_pe"]  # Shape: [num_nodes, pe_dim]
-        current_loss = nodes["loss"]  # Shape: [num_nodes]
 
         # Normalize input features
         normalized_logits = self.logits_norm(current_logits)
@@ -195,7 +162,6 @@ class NodeUpdateModule(nnx.Module):
         normalized_layer_pe = self.layer_pe_norm(current_layer_pe)
         normalized_intra_layer_pe = self.intra_layer_pe_norm(current_intra_layer_pe)
         # Add dimension for loss normalization: [num_nodes] -> [num_nodes, 1]
-        normalized_loss = self.loss_norm(current_loss[:, None])  # [num_nodes, 1]
 
         # Combine normalized features
         current_node_combined_features = jp.concatenate(
@@ -204,7 +170,6 @@ class NodeUpdateModule(nnx.Module):
                 normalized_hidden,
                 normalized_layer_pe,
                 normalized_intra_layer_pe,
-                normalized_loss,  # Include normalized loss feature
             ],
             axis=-1,
         )
@@ -229,8 +194,8 @@ class NodeUpdateModule(nnx.Module):
         delta_hidden = delta_combined_features[..., self.logit_dim :]
 
         # Apply re-zero scaling to deltas
-        scaled_delta_logits = self.logit_scale * delta_logits
-        scaled_delta_hidden = self.hidden_scale * delta_hidden
+        scaled_delta_logits = self.logit_scale(delta_logits)
+        scaled_delta_hidden = self.hidden_scale(delta_hidden)
 
         # Apply residual update only to non-input nodes (layer > 0)
         is_gate_node = nodes["layer"] > 0
