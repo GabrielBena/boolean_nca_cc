@@ -184,6 +184,7 @@ def run_knockout_periodic_evaluation(
     bp_hamming_summary: Optional[List[Dict]] = None,
     layer_neighbors: bool = False,
     metric_suffix: str = "",  # Suffix for metric names (e.g., "_train" for train data eval)
+    blind_mode: bool = False,  # If True, zero out loss feedback (ablation study)
 ) -> Tuple[Dict, List]:  # Return both results and updated accumulated data
     """
     Run periodic evaluation on circuits with persistent knockouts using vocabulary-based sampling.
@@ -286,6 +287,7 @@ def run_knockout_periodic_evaluation(
             damage_start_offset_seed=int(knockout_config.get("damage_start_offset_seed", 42)),
             # Vocabulary-based evaluation parameters
             knockout_vocabulary=knockout_vocabulary,  # If provided => seen; else => unseen
+            blind_mode=blind_mode,  # Ablation study: disable loss feedback
         )
 
         final_metrics_in = {
@@ -341,6 +343,7 @@ def run_knockout_periodic_evaluation(
             damage_start_offset_seed=int(knockout_config.get("damage_start_offset_seed", 42)),
             # For OUT, force unseen by not providing a vocabulary
             knockout_vocabulary=None,  # Force unseen patterns for OUT evaluation
+            blind_mode=blind_mode,  # Ablation study: disable loss feedback
         )
 
         final_metrics_out = {

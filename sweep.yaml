@@ -9,99 +9,26 @@ metric:
   goal: maximize
   name: eval_ko_in/final_hard_accuracy
 
+# Ablation Study: Test "Architect" vs "Technician" Hypothesis
+# This sweep compares models with and without loss feedback during evaluation
+# to determine if generalization is structural or relies on test-time optimization
+
 # Parameters to sweep over
 parameters:
-  # Core training parameters
-  # training.meta_batch_size:
-  #   values:
-  #     - 8
-  #     - 32
-  #     - 64
-  #     - 128
-  # training.layer_neighbors:
-  #   values:
-  #     - true
-  #     - false
-
-  # # Damage and recovery parameters
-  # pool.damage_pool_fraction:
-  #   values:
-  #     - 0.1
-  #     - 0.2
-
-  # pool.damage_knockout_diversity:
-  #   values:
-      # - 10
-      # - 32
-      # - 512
-      # - 128
-      # - 256
-      # - 32
-      # - 256
-      # - 512
-
-  # # Evaluation parameters
-  # eval.periodic_eval_inner_steps:
-  #   values:
-  #     - 10
-  #     - 20
-  #     - 25
-
-  # # Additional strategic parameters that could affect performance
-  # training.learning_rate:
-  #   values:
-  #     - 1e-4
-  #     - 5e-4
-
-  # pool.damage_prob:
-  #   values:
-  #     # - 5
-  #     - 20
-  #     - 160
-
-  # pool.damage_injection_mode:
-  #   values:
-  #     - "single"
-  #     - "multi"
-
-  # pool.damage_mode:
-  #   values:
-  #     - shotgun
-      # - strip
-      # - greedy
-
-  # pool.reset_fraction:
-  #   values:
-  #     - 0.1
-  #     - 0.15
-  #     - 0.2
-
-  # Self-attention model parameters (biggest impact on parameter count)
-  # attention_dim has QUADRATIC impact (~96.6% of total params)
-  model.attention_dim:
+  # ABLATION: Blind Mode (Loss Feedback)
+  eval.blind_mode:
     values:
-      - 64
-      - 128  # 75% reduction in attention params vs 256
-      - 256  # baseline (current)
-
-  # num_layers has LINEAR impact (direct multiplier)
-  model.num_layers:
+      - false  # Normal: Model sees loss signal (Technician mode)
+      - true   # Blind: Model cannot see loss signal (Architect mode)
+  
+  # Optional: Test with input split to verify unseen combo generalization
+  eval.input_split_enabled:
     values:
-      - 2    # 50% reduction vs 4 layers
-      - 4    # baseline (current)
-
-  # model.num_heads:
-  #   values:
-  #     # - 4
-  #     - 8
-  #     - 16
-
-  # Circuit hidden dimension (affects circuit representation size)
-  # circuit.circuit_hidden_dim:
-  #   values:
-  #     - 16
-  #     - 32
-  #     - 64
+      - true   # Enable train/test split on input combinations
+      
+  eval.input_train_fraction:
+    values:
+      - 0.8   # 80% train, 20% test
 
 
 
