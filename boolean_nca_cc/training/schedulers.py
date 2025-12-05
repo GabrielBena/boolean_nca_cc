@@ -3,13 +3,24 @@ Schedulers for training parameters like reset intervals and learning rates.
 
 This module provides various scheduling functions for dynamically adjusting
 training parameters over the course of training.
+
+Supported LR schedulers:
+- constant: Fixed learning rate
+- exponential: Exponential decay
+- cosine: Cosine annealing
+- linear_warmup: Linear warmup + cosine decay
+- adaptive: Loss-aware adaptive scheduler (warmup -> stable -> decay based on loss moments)
+- reduce_on_plateau: Reduce LR when loss plateaus
 """
 
+import logging
 from typing import Any
 
 import jax
 import jax.numpy as jp
 import optax
+
+log = logging.getLogger(__name__)
 
 
 def get_learning_rate_schedule(
@@ -17,18 +28,25 @@ def get_learning_rate_schedule(
     learning_rate: float,
     epochs: int,
     lr_scheduler_params: dict[str, Any] | None = None,
-) -> optax.Schedule:
+) -> optax.Schedule | tuple[optax.Schedule, Any]:
     """
     Create a learning rate schedule based on configuration.
 
     Args:
-        lr_scheduler: Type of scheduler ("constant", "exponential", "cosine", "linear_warmup")
+        lr_scheduler: Type of scheduler. Options:
+            - "constant": Fixed learning rate
+            - "exponential": Exponential decay
+            - "cosine": Cosine annealing
+            - "linear_warmup": Linear warmup + cosine decay
+            - "adaptive": Loss-aware adaptive scheduler
+            - "reduce_on_plateau": Reduce LR when loss plateaus
         learning_rate: Base learning rate
         epochs: Total number of training epochs
         lr_scheduler_params: Optional parameters for the scheduler
 
     Returns:
-        An optax Schedule object
+        For static schedulers: optax.Schedule
+        For adaptive schedulers: tuple of (optax.Schedule, AdaptiveScheduler)
     """
     if lr_scheduler_params is None:
         lr_scheduler_params = {}
@@ -39,34 +57,34 @@ def get_learning_rate_schedule(
     elif lr_scheduler == "exponential":
         return optax.exponential_decay(
             init_value=learning_rate,
-            transition_steps=lr_scheduler_params.get("transition_steps", epochs),
-            decay_rate=lr_scheduler_params.get("decay_rate", 0.9),
+            transition_steps=lr_scheduler_params.exponential.get("transition_steps", epochs),
+            decay_rate=lr_scheduler_params.exponential.get("decay_rate", 0.9),
         )
 
     elif lr_scheduler == "cosine":
         return optax.cosine_decay_schedule(
             init_value=learning_rate,
-            decay_steps=lr_scheduler_params.get("decay_steps", epochs),
-            alpha=lr_scheduler_params.get("alpha", 0.0),
-            exponent=lr_scheduler_params.get("exponent", 1.0),
+            decay_steps=lr_scheduler_params.cosine.get("decay_steps", epochs),
+            alpha=lr_scheduler_params.cosine.get("alpha", 0.0),
+            exponent=lr_scheduler_params.cosine.get("exponent", 1.0),
         )
 
     elif lr_scheduler == "linear_warmup":
         # Combine warmup with another schedule (e.g., cosine)
         warmup_steps = lr_scheduler_params.get(
-            "warmup_steps", epochs // lr_scheduler_params.get("warmup_steps_factor", 10)
+            "warmup_steps", epochs // lr_scheduler_params.cosine.get("warmup_steps_factor", 10)
         )
-        print(f"Warmup steps: {warmup_steps}")
+        log.info(f"Linear warmup scheduler: {warmup_steps} warmup steps")
         target_schedule = optax.cosine_decay_schedule(  # Default to cosine after warmup
             init_value=learning_rate,
             decay_steps=epochs - warmup_steps,
-            alpha=lr_scheduler_params.get("alpha", 0.0),
-            exponent=lr_scheduler_params.get("exponent", 1.0),
+            alpha=lr_scheduler_params.cosine.get("alpha", 0.0),
+            exponent=lr_scheduler_params.cosine.get("exponent", 1.0),
         )
         return optax.join_schedules(
             [
                 optax.linear_schedule(
-                    lr_scheduler_params.get("lr_warmup_start", 0.0),
+                    lr_scheduler_params.cosine.get("lr_warmup_start", 0.0),
                     learning_rate,
                     warmup_steps,
                 ),
@@ -74,6 +92,48 @@ def get_learning_rate_schedule(
             ],
             [warmup_steps],
         )
+
+    elif lr_scheduler == "adaptive":
+        # Adaptive scheduler based on loss statistics
+        from boolean_nca_cc.training.adaptive_lr import AdaptiveLRScheduler
+
+        log.info("Using adaptive LR scheduler (loss-aware)")
+        adaptive_scheduler = AdaptiveLRScheduler(
+            lr_start=lr_scheduler_params.adaptive.get("lr_start", learning_rate / 100),
+            lr_max=lr_scheduler_params.adaptive.get("lr_max", learning_rate),
+            lr_min=lr_scheduler_params.adaptive.get("lr_min", learning_rate / 10000),
+            warmup_rate=lr_scheduler_params.adaptive.get("warmup_rate", 1.02),
+            decay_factor=lr_scheduler_params.adaptive.get("decay_factor", 0.5),
+            ema_alpha_fast=lr_scheduler_params.adaptive.get("ema_alpha_fast", 0.1),
+            ema_alpha_slow=lr_scheduler_params.adaptive.get("ema_alpha_slow", 0.01),
+            variance_window=lr_scheduler_params.adaptive.get("variance_window", 50),
+            variance_threshold=lr_scheduler_params.adaptive.get("variance_threshold", 0.1),
+            rebound_threshold=lr_scheduler_params.adaptive.get("rebound_threshold", 0.05),
+            patience=lr_scheduler_params.adaptive.get("patience", 100),
+            min_warmup_epochs=lr_scheduler_params.adaptive.get("min_warmup_epochs", 100),
+            cooldown_epochs=lr_scheduler_params.adaptive.get("cooldown_epochs", 50),
+            max_lr_reductions=lr_scheduler_params.adaptive.get("max_lr_reductions", 10),
+        )
+        # Return constant schedule (LR managed externally) + adaptive scheduler
+        return optax.constant_schedule(1.0), adaptive_scheduler
+
+    elif lr_scheduler == "reduce_on_plateau":
+        # Simple reduce-on-plateau scheduler
+        from boolean_nca_cc.training.adaptive_lr import ReduceOnPlateauScheduler
+
+        log.info("Using reduce-on-plateau LR scheduler")
+        plateau_scheduler = ReduceOnPlateauScheduler(
+            lr_initial=learning_rate,
+            lr_min=lr_scheduler_params.plateau.get("lr_min", learning_rate / 10000),
+            factor=lr_scheduler_params.plateau.get("factor", 0.5),
+            patience=lr_scheduler_params.plateau.get("patience", 100),
+            threshold=lr_scheduler_params.plateau.get("threshold", 1e-4),
+            cooldown=lr_scheduler_params.plateau.get("cooldown", 50),
+            max_reductions=lr_scheduler_params.plateau.get("max_reductions", 10),
+        )
+        # Return constant schedule (LR managed externally) + plateau scheduler
+        return optax.constant_schedule(1.0), plateau_scheduler
+
     else:
         raise ValueError(f"Unknown lr_scheduler: {lr_scheduler}")
 

@@ -29,7 +29,9 @@ class CircuitGNN(nnx.Module):
     def __init__(
         self,
         circuit_hidden_dim: int = 16,
-        mlp_dim: int = 32,
+        mlp_dim: int
+        | None = None,  # If None, will be set to circuit_hidden_dim * mlp_dim_multiplier (default 2)
+        mlp_dim_multiplier: int = 2,
         mlp_n_layers: int = 2,
         arity: int = 2,
         message_passing: bool = True,
@@ -54,7 +56,7 @@ class CircuitGNN(nnx.Module):
         self.arity = arity
         self.message_passing = message_passing
         self.circuit_hidden_dim = circuit_hidden_dim
-        self.mlp_dim = mlp_dim if mlp_dim is not None else circuit_hidden_dim * 2
+        self.mlp_dim = mlp_dim if mlp_dim is not None else circuit_hidden_dim * mlp_dim_multiplier
         self.mlp_n_layers = mlp_n_layers
 
         # Create the node and edge update modules

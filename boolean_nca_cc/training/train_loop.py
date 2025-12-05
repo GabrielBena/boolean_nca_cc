@@ -918,18 +918,38 @@ def train_model(
     model = init_model
 
     # Create optimizer or reuse existing optimizer
+    adaptive_scheduler = None  # Will be set if using adaptive/reduce_on_plateau
+
     if init_optimizer is None:
         # Create the learning rate schedule using our scheduler module
-        schedule = get_learning_rate_schedule(
+        schedule_result = get_learning_rate_schedule(
             lr_scheduler, learning_rate, epochs, lr_scheduler_params
         )
 
-        # Create a new optimizer with the schedule
-        opt_fn = optax.chain(
-            optax.clip_by_global_norm(1.0),
-            optax.zero_nans(),
-            optax.adamw(learning_rate=schedule, weight_decay=weight_decay),
-        )
+        # Handle adaptive schedulers (return tuple) vs static schedulers
+        if isinstance(schedule_result, tuple):
+            schedule, adaptive_scheduler = schedule_result
+            log.info(f"Using adaptive LR scheduler: {type(adaptive_scheduler).__name__}")
+            # For adaptive schedulers, we use inject_hyperparams to allow dynamic LR updates
+            # The learning_rate is exposed as a mutable hyperparameter
+            opt_fn = optax.inject_hyperparams(optax.adamw)(
+                learning_rate=adaptive_scheduler.get_lr(),
+                weight_decay=weight_decay,
+            )
+            # Wrap with gradient clipping
+            opt_fn = optax.chain(
+                optax.clip_by_global_norm(1.0),
+                optax.zero_nans(),
+                opt_fn,
+            )
+        else:
+            schedule = schedule_result
+            # Create a new optimizer with the static schedule
+            opt_fn = optax.chain(
+                optax.clip_by_global_norm(1.0),
+                optax.zero_nans(),
+                optax.adamw(learning_rate=schedule, weight_decay=weight_decay),
+            )
         optimizer = nnx.Optimizer(model, opt_fn, wrt=nnx.Param)
     else:
         # Use the provided optimizer
@@ -1560,6 +1580,24 @@ def train_model(
             hard_accuracies.append(float(hard_accuracy))
             reset_steps.append(float(avg_steps_reset))
 
+            # Update adaptive scheduler if enabled (uses loss to adjust LR)
+            if adaptive_scheduler is not None:
+                # Update scheduler with current loss and get new LR
+                new_lr = adaptive_scheduler.update(float(loss), epoch)
+
+                # Update optimizer's learning rate hyperparameter
+                # For optax.inject_hyperparams, the hyperparams are in opt_state
+                try:
+                    # Navigate to the injected hyperparams in the optimizer state
+                    # Structure: chain -> [clip, zero_nans, inject_hyperparams(adamw)]
+                    opt_state = optimizer.opt_state
+                    if hasattr(opt_state, "inner_state") and len(opt_state.inner_state) >= 3:
+                        adamw_state = opt_state.inner_state[2]
+                        if hasattr(adamw_state, "hyperparams"):
+                            adamw_state.hyperparams["learning_rate"] = jp.array(new_lr)
+                except Exception as e:
+                    log.debug(f"Could not update adaptive LR in optimizer state: {e}")
+
             # Prepare training metrics for best model tracking
             training_metrics = {
                 "loss": float(loss),
@@ -1572,6 +1610,15 @@ def train_model(
             current_eval_metrics = None
 
             avg_steps = circuit_pool.get_average_update_steps()
+
+            # Determine current learning rate
+            if adaptive_scheduler is not None:
+                schedule_value = adaptive_scheduler.get_lr()
+            elif schedule is not None:
+                schedule_value = schedule(epoch)
+            else:
+                schedule_value = learning_rate
+
             # Log to wandb if enabled
             metrics_dict = {
                 "training/epoch": epoch,
@@ -1604,9 +1651,12 @@ def train_model(
             else:
                 metrics_dict["training/sequential_batching"] = False
 
-            # Add learning rate if available
-            schedule_value = schedule(epoch) if schedule is not None else learning_rate
+            # Add learning rate
             metrics_dict["scheduler/learning_rate"] = schedule_value
+
+            # Add adaptive scheduler stats if enabled
+            if adaptive_scheduler is not None:
+                metrics_dict.update(adaptive_scheduler.get_stats())
 
             # Add early stopping metrics if enabled
             if stop_accuracy_enabled:
@@ -1626,6 +1676,7 @@ def train_model(
                 "Diversity": f"{diversity:.3f}",
                 "Reset Steps": f"{avg_steps_reset:.2f}",
                 "Loss Steps": f"{loss_steps:.2f}",
+                "LR": f"{schedule_value:.1e}",
             }
 
             # Add chunk info if using sequential batching

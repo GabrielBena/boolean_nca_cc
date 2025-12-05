@@ -5,5 +5,4 @@ defaults:
 input_bits: 8
 output_bits: 8
 task: "text"
-# text: "Hello NCAs!"
 text: "Hello Neural CA! Self-Organizing Circuits are Real!"

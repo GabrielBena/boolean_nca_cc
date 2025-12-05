@@ -2,11 +2,11 @@ defaults:
   - _self_
 
 
-input_bits: 10
-output_bits: 10
+input_bits: 8
+output_bits: 8
 arity: 4
-num_layers: 4
+num_layers: 3
 width_factor: 2
 layer_sizes: null  # Auto-generate if null 
-circuit_hidden_dim: 16
+circuit_hidden_dim: 64
 text: "Hello NCAs!"

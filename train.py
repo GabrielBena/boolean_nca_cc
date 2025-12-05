@@ -425,9 +425,10 @@ def process_pool_configuration(cfg):
         ValueError: If configuration is underspecified or invalid
     """
 
-
     if cfg.training.random_loss_step:
-        n_message_steps_effective = (cfg.training.n_message_steps + cfg.training.random_loss_step_min) // 2
+        n_message_steps_effective = (
+            cfg.training.n_message_steps + cfg.training.random_loss_step_min
+        ) // 2
     else:
         n_message_steps_effective = cfg.training.n_message_steps
 
@@ -686,7 +687,6 @@ def main(cfg: DictConfig) -> None:
     """
     # Print configuration
     log.info(OmegaConf.to_yaml(cfg))
-    
 
     # Process pool configuration for automatic parameter computation
     cfg, effective_n_message_steps = process_pool_configuration(cfg)
@@ -832,6 +832,10 @@ def main(cfg: DictConfig) -> None:
                 test_ratio = 1
             else:
                 test_ratio = cfg.training.test_num / case_n
+
+        # Max 1/4 of the data for testing
+        test_ratio = min(test_ratio, 0.25)
+        print(f"Test ratio: {test_ratio}")
     else:
         test_ratio = None
 
@@ -848,6 +852,8 @@ def main(cfg: DictConfig) -> None:
 
     # Compute data fraction
     n_train = x_train.shape[0]
+    print(f"Train data shape : {x_train.shape}")
+
     data_fraction = (
         min(cfg.training.data_per_batch / n_train, 1.0)
         if cfg.training.data_per_batch is not None

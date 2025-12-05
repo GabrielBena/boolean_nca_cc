@@ -4,6 +4,11 @@ defaults:
 
 sweep:
   grid:  # parameters to combine in all possible ways
+    training.meta_batch_size: [64, 256]
+    training.n_message_steps: [5, 20]
+    training.learning_rate: [1e-4]
+    training.random_loss_step: [false, true]
+    model: [perceiver_attention, self_attention, gnn]
     training.wiring_mode: [fixed, random]
     damage.enabled: [false, true]
-    circuit: [text_small, add, binary_multiply, text]
+    circuit: [add, binary_multiply, text]

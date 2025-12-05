@@ -3,7 +3,7 @@
 # Default parameters for experiment
 defaults:
   - model: self_attention  # Default model (gnn or self_attention or perceiver_attention)
-  - circuit: text
+  - circuit: binary_multiply
   - loss: bce  # Options: l2, l4, bce, bce_w3, focal, asym, focal_asym
   - _self_  # For self-overrides
 
@@ -34,34 +34,65 @@ graph:
 # Training parameters
 training:
   # WIRING MODE : "random" or "fixed"
-  wiring_mode: "random"  # Options: "fixed", "genetic", or "random"
+  wiring_mode: "fixed"  # Options: "fixed", "genetic", or "random"
   initial_diversity: 1
   # INNER LOOP
-  n_message_steps: 10  # Number of message passing steps per training iteration
+  n_message_steps: 5  # Number of message passing steps per training iteration
   # DATA FRACTION
   data_per_batch: 64  # Number of data points per batch (null means use all data)
   # RANDOM LOSS STEP
-  random_loss_step: true  # Use random message passing step for loss computation
+  random_loss_step: false  # Use random message passing step for loss computation
   random_loss_step_min: 2
   use_beta_loss_step: false  # Use beta distribution for random loss step (varies from early to late steps through training)
   # TRAIN/TEST SPLIT
   test_num: 256  # Fraction/absolute number of data to use for testing (from all input combinations)
   # BATCH SIZE
-  meta_batch_size: 256 
+  meta_batch_size: 64 
   batch_chunk_size: null  # Sequential batch processing chunk size (null means use meta_batch_size)
   # OPTIMIZATION
   learning_rate: 1e-4
   weight_decay: 1e-5
   # LEARNING RATE SCHEDULER
-  lr_scheduler: "cosine"  # Options: "constant", "exponential", "cosine", "linear_warmup"
+  # Options: "constant", "exponential", "cosine", "linear_warmup", "adaptive", "reduce_on_plateau"
+  lr_scheduler: "linear_warmup"  # Loss-aware scheduler - reduces LR when loss plateaus
   lr_scheduler_params:
-    warmup_steps_factor: 50
-    lr_warmup_start: 1e-6
-    exponent: 1
-    alpha: 1e-1 # final lr = 10% of initial lr
+    
+    # === For exponential decay ===
+    exponential:
+      decay_rate: 0.9
+
+    # === For linear_warmup (default cosine decay after warmup) ===
+    cosine:
+      warmup_steps_factor: 50
+      lr_warmup_start: 1e-7
+      exponent: 2  # Quadratic decay - faster initial drop, slower at end
+      alpha: 0.01  # final lr = 1% of initial lr
+    
+    # === For reduce_on_plateau (simple, effective) ===
+    plateau:
+      factor: 0.5        # Multiply LR by this when plateau detected
+      patience: 200      # Epochs to wait before reducing LR
+      threshold: 1e-4    # Minimum relative improvement to count as progress
+      cooldown: 100      # Epochs to wait after reduction before allowing another
+      lr_min: 1e-8       # Minimum LR floor
+      max_reductions: 8  # Maximum number of LR reductions
+    
+    # === For adaptive (advanced loss-aware scheduler) ===
+    adaptive:
+      lr_start: 1e-8        # Starting LR for warmup
+      lr_max: 1e-4          # Maximum LR target
+      lr_min: 1e-9          # Minimum LR floor
+      warmup_rate: 1.005     # Geometric rate for LR increase during warmup
+      decay_factor: 0.5     # Factor to reduce LR by during decay
+      variance_threshold: 0.1  # Relative variance threshold for instability
+      rebound_threshold: 0.05  # Loss increase % to trigger decay
+      patience: 500         # Epochs before plateau detection triggers decay
+      min_warmup_epochs: 2500  # Minimum epochs in warmup phase
+
+
   # NUMBER OF EPOCHS
   epochs: null
-  epochs_power_of_2: 17 # 2^n
+  epochs_power_of_2: 16 # 2^n
   # USE SCAN
   use_scan: true
   # GRADIENT CHECKPOINTING (remat)
@@ -74,10 +105,11 @@ training:
 
 # Pool configuration for meta-learning
 pool:
-  size: 8192
-  reset_fraction: 0.25
+  # size: 8192
+  size: 1024
+  reset_fraction: 0.1  # Reduced from 0.25 - smaller resets = more stable training
   reset_interval: null
-  reset_strategy: "uniform"  # Options: "uniform", "steps_biased", "loss_biased", "combined"
+  reset_strategy: "steps_biased"  # Reset oldest circuits (highest update steps) - more stable than uniform
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
   
   # Automatic parameter computation based on target expected updates

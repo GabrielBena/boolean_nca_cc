@@ -106,6 +106,10 @@ class AttentionBlock(nnx.Module):
         self.attn_rezero = ReZero(rngs=rngs) if re_zero else PassThrough()
         self.ffn_rezero = ReZero(rngs=rngs) if re_zero else PassThrough()
 
+        # Layer normalization
+        self.layer_norm_q = nnx.LayerNorm(dim, rngs=rngs)
+        self.layer_norm_kv = nnx.LayerNorm(dim, rngs=rngs)
+
     def __call__(
         self,
         query: jp.ndarray,  # [batch, seq_q, dim]
@@ -133,6 +137,10 @@ class AttentionBlock(nnx.Module):
         # Self-attention mode: Q=K=V
         if key_value is None:
             key_value = query
+
+        # Layer normalization
+        query = self.layer_norm_q(query)
+        key_value = self.layer_norm_kv(key_value)
 
         # Attention
         attn_output = self.attention(
