@@ -38,7 +38,7 @@ class CircuitSelfAttention(nnx.Module):
         arity: int = 2,
         attention_dim: int = 128,
         num_heads: int = 4,
-        num_layers: int = 1,
+        num_self_attn_layers: int = 1,
         mlp_dim: int | None = None,
         mlp_dim_multiplier: int = 2,
         dropout_rate: float = 0.0,
@@ -57,7 +57,7 @@ class CircuitSelfAttention(nnx.Module):
             arity: Number of inputs per gate in the boolean circuit
             attention_dim: Total dimension for attention mechanism
             num_heads: Number of attention heads
-            num_layers: Number of self-attention layers
+            num_self_attn_layers: Number of self-attention layers
             mlp_dim: Dimension of feed-forward network in attention blocks
             mlp_dim_multiplier: Multiplier for mlp_dim (default 2)
             dropout_rate: Dropout rate
@@ -102,7 +102,7 @@ class CircuitSelfAttention(nnx.Module):
                     dropout_rate=dropout_rate,
                     rngs=rngs,
                 )
-                for _ in range(num_layers)
+                for _ in range(num_self_attn_layers)
             ]
         )
 

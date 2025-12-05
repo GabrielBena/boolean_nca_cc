@@ -3,19 +3,10 @@ _target_: boolean_nca_cc.models.PerceiverCircuitAttention
 
 defaults:
   - _base
+  - self_attention
 
 type: "perceiver_attention"
 
-# Attention architecture
-attention_dim: 32
-mlp_dim: null  # If null, will be set to attention_dim * mlp_dim_multiplier
-mlp_dim_multiplier: 2
-num_heads: 4
-dropout_rate: 0.0
-
-# Self-attention (among gates)
-num_self_attn_layers: 1
-use_attention_mask: true
 
 # Cross-attention (gates query data)
 num_cross_attn_layers: 1
@@ -28,5 +19,3 @@ token_pe_dim: 16                   # Sinusoidal PE dimension for sample/bit posi
 restrict_input_cross_attn_to_first_layer: true
 # If true, only output layer can attend to residuals (mirrors circuit output flow)
 restrict_output_cross_attn_to_last_layer: true
-
-# Note: Uses ReZero for stable training throughout (no LayerNorm option needed)
