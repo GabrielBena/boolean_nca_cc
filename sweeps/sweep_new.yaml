@@ -11,4 +11,4 @@ sweep:
     model: [perceiver_attention, self_attention, gnn]
     training.wiring_mode: [fixed, random]
     damage.enabled: [false, true]
-    circuit: [add, binary_multiply, text]
+    circuit: [add, binary_multiply, text, reverse]
