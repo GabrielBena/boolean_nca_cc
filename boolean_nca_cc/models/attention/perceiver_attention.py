@@ -321,6 +321,10 @@ class PerceiverCircuitAttention(nnx.Module):
             input_features = self._encode_data(x_data)
             input_tokens = self.input_encoder(input_features)[None, ...]
 
+            # Create input gate if layer restriction is enabled
+            if input_output_gate is None and self.restrict_input_cross_attn_to_first_layer:
+                input_output_gate = self._create_output_gate(layer_indices, allowed_layer=0)
+
             for cross_attn in self.input_cross_attn_layers:
                 gate_latents = cross_attn(
                     gate_latents,
@@ -495,7 +499,7 @@ def run_perceiver_scan_with_loss(
         output_output_gate = model._create_output_gate(layer_indices, allowed_layer=max_layer)
 
     # Update initial graph with residuals
-    graph, *_ = get_loss_and_update_graph(
+    graph, _, _, aux_data = get_loss_and_update_graph(
         graph,
         logits_original_shapes,
         wires,

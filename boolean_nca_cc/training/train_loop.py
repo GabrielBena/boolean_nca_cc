@@ -241,7 +241,9 @@ def _create_single_circuit_visualization(
                 hard=True,
             )
             if log_stepwise:
-                viz_result_damaged["stepwise_fig"] = plot_wandb_stepwise_results(damage_results)
+                viz_result_damaged["stepwise_fig"] = plot_wandb_stepwise_results(
+                    damage_results, damage_steps=damage_steps
+                )
             else:
                 viz_result_damaged["stepwise_fig"] = None
 

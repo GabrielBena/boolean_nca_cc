@@ -2,7 +2,7 @@
 
 # Default parameters for experiment
 defaults:
-  - model: self_attention  # Default model (gnn or self_attention or perceiver_attention)
+  - model: perceiver_attention  # Default model (gnn or self_attention or perceiver_attention)
   - circuit: binary_multiply
   - loss: bce  # Options: l2, l4, bce, bce_w3, focal, asym, focal_asym
   - _self_  # For self-overrides
@@ -37,20 +37,20 @@ training:
   wiring_mode: "fixed"  # Options: "fixed", "genetic", or "random"
   initial_diversity: 1
   # INNER LOOP
-  n_message_steps: 5  # Number of message passing steps per training iteration
+  n_message_steps: 10  # Number of message passing steps per training iteration
   # DATA FRACTION
   data_per_batch: 64  # Number of data points per batch (null means use all data)
   # RANDOM LOSS STEP
-  random_loss_step: false  # Use random message passing step for loss computation
+  random_loss_step: true  # Use random message passing step for loss computation
   random_loss_step_min: 2
   use_beta_loss_step: false  # Use beta distribution for random loss step (varies from early to late steps through training)
   # TRAIN/TEST SPLIT
   test_num: 256  # Fraction/absolute number of data to use for testing (from all input combinations)
   # BATCH SIZE
-  meta_batch_size: 64 
+  meta_batch_size: 96 
   batch_chunk_size: null  # Sequential batch processing chunk size (null means use meta_batch_size)
   # OPTIMIZATION
-  learning_rate: 1e-4
+  learning_rate: 2e-4
   weight_decay: 1e-5
   # LEARNING RATE SCHEDULER
   # Options: "constant", "exponential", "cosine", "linear_warmup", "adaptive", "reduce_on_plateau"
@@ -64,9 +64,9 @@ training:
     # === For linear_warmup (default cosine decay after warmup) ===
     cosine:
       warmup_steps_factor: 50
-      lr_warmup_start: 1e-7
-      exponent: 2  # Quadratic decay - faster initial drop, slower at end
-      alpha: 0.01  # final lr = 1% of initial lr
+      lr_warmup_start: 1e-6
+      exponent: 1  # Quadratic decay - faster initial drop, slower at end
+      alpha: 0.1  # final lr = 1% of initial lr
     
     # === For reduce_on_plateau (simple, effective) ===
     plateau:
@@ -106,8 +106,8 @@ training:
 # Pool configuration for meta-learning
 pool:
   # size: 8192
-  size: 1024
-  reset_fraction: 0.1  # Reduced from 0.25 - smaller resets = more stable training
+  size: 2048
+  reset_fraction: 0.25  # Reduced from 0.25 - smaller resets = more stable training
   reset_interval: null
   reset_strategy: "steps_biased"  # Reset oldest circuits (highest update steps) - more stable than uniform
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
@@ -115,7 +115,7 @@ pool:
   # Automatic parameter computation based on target expected updates
   # If expected_updates is specified and some parameters above are null, 
   # the system will automatically compute the missing parameter(s)
-  expected_updates: 128  # Target expected updates per circuit (e.g., 50.0)
+  expected_updates: 256  # Target expected updates per circuit (e.g., 50.0)
   
   # Genetic mutation parameters
   mutation_rate: 1e-3 # For genetic mutation rate
@@ -124,9 +124,9 @@ pool:
 
 # Gate damage configuration for resilience testing
 # Simulates permanent structural damage to gates during ongoing optimization
-# Damaged gates have faulty logits and cannot receive model updates
+# Damaged gates have faulty logits and cannot receive model updates (they still emit messages to neighbors)
 damage:
-  enabled: false  # Master switch for damage system
+  enabled: true  # Master switch for damage system
   
   # Damage intensity - how many gates to knock out per damage event
   knockouts_per_event: 2
@@ -138,7 +138,7 @@ damage:
   
   # Automatic computation target (like pool.expected_updates)
   # If specified with one null parameter above, computes the missing one
-  expected_damages: 2.0  # Target average damages per circuit before reset
+  expected_damages: 5  # Target average damages per circuit before reset
   
   # Behavior of damaged gates
   faulty_logit_value: -10.0  # Large negative value → sigmoid outputs ~0
@@ -167,7 +167,7 @@ eval:
   log_pool_scatter: true
   do_ood_evaluation: null # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
   damage_enabled: true # Whether to apply damage during evaluation (if damage.enabled is also true)
-  n_damage_steps: 1 # Number of damage steps to apply during evaluation
+  n_damage_steps: 2 # Number of damage steps to apply during evaluation
 
 # Early stopping based on accuracy
 stop_accuracy:

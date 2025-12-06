@@ -531,7 +531,7 @@ def create_wandb_visualization(logits, wires, x, y0, title_prefix="", hard=True)
     }
 
 
-def plot_wandb_stepwise_results(step_metrics):
+def plot_wandb_stepwise_results(step_metrics, damage_steps=None, smooth=False):
     """
     Plot the step-wise results of a wandb run.
     """
@@ -542,12 +542,16 @@ def plot_wandb_stepwise_results(step_metrics):
         for key in ["step", "loss", "hard_loss", "accuracy", "hard_accuracy"]
     }
 
-    v = len(step_dict["step"]) // 20
+    if damage_steps is not None or not smooth:
+        # We don't smooth the results to plot vlines at damage steps
+        smooth_step_dict = step_dict
+    else:
+        v = len(step_dict["step"]) // 20
 
-    smooth_step_dict = {
-        key: np.convolve(step_dict[key], np.ones(v) / v, mode="valid")
-        for key in ["loss", "hard_loss", "accuracy", "hard_accuracy"]
-    }
+        smooth_step_dict = {
+            key: np.convolve(step_dict[key], np.ones(v) / v, mode="valid")
+            for key in ["loss", "hard_loss", "accuracy", "hard_accuracy"]
+        }
 
     # Plot Loss
     axes[0].plot(smooth_step_dict["loss"], label="Soft Loss")
@@ -556,6 +560,8 @@ def plot_wandb_stepwise_results(step_metrics):
     axes[0].set_xlabel("Step")
     axes[0].set_ylabel("Loss")
     axes[0].legend()
+    if damage_steps is not None:
+        [axes[0].axvline(i, color="r", linestyle="--") for i in damage_steps]
 
     # Plot Accuracy
     axes[1].plot(smooth_step_dict["accuracy"], label="Soft Accuracy")
@@ -564,6 +570,8 @@ def plot_wandb_stepwise_results(step_metrics):
     axes[1].set_xlabel("Step")
     axes[1].set_ylabel("Accuracy")
     axes[1].legend()
+    if damage_steps is not None:
+        [axes[1].axvline(i, color="r", linestyle="--") for i in damage_steps]
 
     fig.suptitle("Step-wise Results")
 
