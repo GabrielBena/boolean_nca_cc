@@ -551,6 +551,16 @@ def process_damage_configuration(cfg, expected_lifetime_epochs=None):
         log.info("Damage system disabled (damage.enabled=false)")
         return cfg
 
+    if cfg.damage.knockouts_per_event is None:
+        assert cfg.damage.random_knockouts_per_event, (
+            "random_knockouts_per_event must be set to True"
+        )
+        # we'll draw from normal distribution with mean = (random_knockouts_per_event_min + random_knockouts_per_event_max) / 2
+        cfg.damage.knockouts_per_event = (
+            cfg.damage.random_knockouts_per_event_min + cfg.damage.random_knockouts_per_event_max
+        ) / 2
+
+        log.info(f"Computed knockouts_per_event = {cfg.damage.knockouts_per_event}")
     if expected_lifetime_epochs is None:
         # Ensure pool configuration is processed (we need expected_updates)
         expected_updates = cfg.pool.expected_updates
@@ -1017,6 +1027,9 @@ def main(cfg: DictConfig) -> None:
         damage_interval=cfg.damage.damage_interval,
         damage_fraction=cfg.damage.damage_fraction,
         knockouts_per_event=cfg.damage.knockouts_per_event,
+        random_knockouts_per_event=cfg.damage.random_knockouts_per_event,
+        random_knockouts_per_event_min=cfg.damage.random_knockouts_per_event_min,
+        random_knockouts_per_event_max=cfg.damage.random_knockouts_per_event_max,
         max_damage_per_circuit=cfg.damage.max_damage_per_circuit,
         faulty_logit_value=cfg.damage.faulty_logit_value,
         # Debugging parameters

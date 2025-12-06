@@ -7,7 +7,7 @@ sweep:
     training.meta_batch_size: [64, 256]
     training.n_message_steps: [5, 20]
     training.random_loss_step: [false, true]
-    model: [perceiver_attention, self_attention, gnn]
+    model: [perceiver_attention]
     training.wiring_mode: [fixed, random]
     damage.enabled: [false, true]
     circuit: [add, binary_multiply, text, reverse]

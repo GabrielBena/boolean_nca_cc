@@ -801,6 +801,9 @@ def train_model(
     damage_interval: int | None = None,  # Epochs between damage applications
     damage_fraction: float = 0.1,  # Fraction of pool to damage each interval
     knockouts_per_event: int = 1,  # Gates to knock out per damage event
+    random_knockouts_per_event: bool = False,
+    random_knockouts_per_event_min: int = 2,
+    random_knockouts_per_event_max: int = 4,
     max_damage_per_circuit: int | None = None,  # Max knockouts per circuit
     faulty_logit_value: float = -10.0,  # Value for knocked-out gate logits
     # Debugging parameters
@@ -1564,6 +1567,9 @@ def train_model(
                     fraction=damage_fraction,
                     layer_sizes=layer_sizes,
                     num_knockouts=knockouts_per_event,
+                    random_knockouts_per_event=random_knockouts_per_event,
+                    random_knockouts_per_event_min=random_knockouts_per_event_min,
+                    random_knockouts_per_event_max=random_knockouts_per_event_max,
                     input_n=input_n,
                     arity=arity,
                     circuit_hidden_dim=circuit_hidden_dim,

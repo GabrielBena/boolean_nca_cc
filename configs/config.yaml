@@ -129,7 +129,10 @@ damage:
   enabled: true  # Master switch for damage system
   
   # Damage intensity - how many gates to knock out per damage event
-  knockouts_per_event: 2
+  knockouts_per_event: null
+  random_knockouts_per_event: true
+  random_knockouts_per_event_min: 1
+  random_knockouts_per_event_max: 7
   
   # Damage scheduling (similar to pool reset scheduling)
   # Formula: expected_damages = (expected_updates / damage_interval) × damage_fraction

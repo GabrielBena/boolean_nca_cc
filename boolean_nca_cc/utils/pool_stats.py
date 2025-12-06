@@ -471,7 +471,7 @@ def calculate_expected_damages(
         raise ValueError("damage_interval must be positive")
     if not (0 < damage_fraction <= 1):
         raise ValueError("damage_fraction must be between 0 and 1 (exclusive/inclusive)")
-    if knockouts_per_event <= 0:
+    if knockouts_per_event is not None and knockouts_per_event <= 0:
         raise ValueError("knockouts_per_event must be positive")
 
     # Number of damage events during circuit lifetime

@@ -585,6 +585,9 @@ class GraphPool(struct.PyTreeNode):
         max_damage_per_circuit: int | None = None,
         selection_strategy: str = "uniform",
         combined_weights: tuple[float, float] = (0.5, 0.5),
+        random_knockouts_per_event: bool = False,
+        random_knockouts_per_event_min: int = 2,
+        random_knockouts_per_event_max: int = 4,
     ) -> tuple["GraphPool", int]:
         """
         Apply permanent gate knockouts to a fraction of existing pool elements.
@@ -645,12 +648,34 @@ class GraphPool(struct.PyTreeNode):
             total_gates = sum(gate_n for gate_n, _ in layer_sizes)
             current_masks = jp.ones((num_damaged, total_gates), dtype=jp.float32)
 
+        if random_knockouts_per_event:
+            knockout_key, normal_key = jax.random.split(knockout_key)
+            mean = (random_knockouts_per_event_min + random_knockouts_per_event_max) / 2
+            std = (random_knockouts_per_event_max - random_knockouts_per_event_min) / 8
+            batch_num_knockouts = (
+                (
+                    jax.random.normal(
+                        normal_key,
+                        (num_damaged,),
+                    )
+                    * std
+                    + mean
+                )
+                .clip(random_knockouts_per_event_min, random_knockouts_per_event_max)
+                .astype(jp.int32)
+            )
+        else:
+            assert num_knockouts is not None, (
+                "num_knockouts must be set if random_knockouts_per_event is False"
+            )
+            batch_num_knockouts = jp.full((num_damaged,), num_knockouts, dtype=jp.int32)
+
         # Apply new knockouts
         modified_logits, layered_knockout_masks = apply_knockout_to_batch(
             knockout_key,
             selected_logits,
             layer_sizes,
-            num_knockouts,
+            batch_num_knockouts,
             faulty_value,
         )
 

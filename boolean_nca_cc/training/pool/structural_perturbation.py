@@ -362,7 +362,7 @@ def apply_knockout_to_batch(
     key: jax.random.PRNGKey,
     batch_logits: list[jp.ndarray],
     layer_sizes: list[tuple[int, int]],
-    num_knockouts: int,
+    batch_num_knockouts: jp.ndarray,
     faulty_value: float = -10.0,
 ) -> tuple[list[jp.ndarray], list[jp.ndarray]]:
     """
@@ -375,7 +375,7 @@ def apply_knockout_to_batch(
         key: Random key for knockout generation
         batch_logits: List of batched logit arrays, each with shape (batch_size, ...)
         layer_sizes: Circuit layer sizes
-        num_knockouts: Number of gates to knock out per circuit
+        batch_num_knockouts: Number of gates to knock out per circuit, shape (batch_size,)
         faulty_value: Value for knocked-out gate logits
 
     Returns:
@@ -399,11 +399,13 @@ def apply_knockout_to_batch(
 
     # Vectorized knockout mask creation using vmap
     vmapped_create_mask = jax.vmap(
-        lambda k: create_flat_knockout_pattern(
-            k, total_gates, eligible_start, eligible_end, num_knockouts
+        lambda key, num_knockouts: create_flat_knockout_pattern(
+            key, total_gates, eligible_start, eligible_end, num_knockouts
         )
     )
-    batch_flat_masks = vmapped_create_mask(keys)  # Shape: (batch_size, total_gates)
+    batch_flat_masks = vmapped_create_mask(
+        keys, batch_num_knockouts
+    )  # Shape: (batch_size, total_gates)
 
     # Apply faulty logits to each layer using vectorized operations
     modified_batch_logits = []
