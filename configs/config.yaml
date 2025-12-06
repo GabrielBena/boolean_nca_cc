@@ -106,7 +106,7 @@ training:
 # Pool configuration for meta-learning
 pool:
   # size: 8192
-  size: 4096
+  size: 1024
   reset_fraction: 0.25  # Reduced from 0.25 - smaller resets = more stable training
   reset_interval: null
   reset_strategy: "steps_biased"  # Reset oldest circuits (highest update steps) - more stable than uniform
@@ -141,7 +141,7 @@ damage:
   
   # Automatic computation target (like pool.expected_updates)
   # If specified with one null parameter above, computes the missing one
-  expected_damages: 10  # Target average damages per circuit before reset
+  expected_damages: 4  # Target average damages per circuit before reset (x knockouts_per_event !)
   
   # Behavior of damaged gates
   faulty_logit_value: -10.0  # Large negative value → sigmoid outputs ~0
