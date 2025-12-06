@@ -709,7 +709,9 @@ class GraphPool(struct.PyTreeNode):
             damage_idxs, modified_graphs, selected_wires, modified_logits, combined_masks
         )
 
-        return updated_pool, int(num_damaged)
+        num_knockouts = jp.sum(batch_num_knockouts)
+
+        return updated_pool, int(num_damaged), int(num_knockouts)
 
 
 def initialize_graph_pool(

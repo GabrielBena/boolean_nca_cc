@@ -264,7 +264,7 @@ def create_flat_knockout_pattern(
         total_gates: Total number of gates across all layers
         eligible_start: Start index of eligible gates (after input layer)
         eligible_end: End index of eligible gates (before output layer)
-        num_knockouts: Number of gates to knock out
+        num_knockouts: Number of gates to knock out (can be dynamic/traced)
 
     Returns:
         Flat mask with shape (total_gates,), values 0.0 = knocked out, 1.0 = active
@@ -272,31 +272,31 @@ def create_flat_knockout_pattern(
     # Start with all active
     mask = jp.ones(total_gates, dtype=jp.float32)
 
-    # Handle edge case
+    # Handle edge case (static check - eligible_start/end are static)
     num_eligible = eligible_end - eligible_start
-    if num_knockouts == 0 or num_eligible <= 0:
+    if num_eligible <= 0:
         return mask
 
     # Clamp knockouts to available gates
     actual_knockouts = jp.minimum(num_knockouts, num_eligible)
 
-    # Create eligible indices array
-    eligible_indices = jp.arange(eligible_start, eligible_end)
-
     # Use Gumbel-top-k trick for differentiable/vmappable sampling without replacement
-    # Add Gumbel noise and take top-k indices
+    # Add Gumbel noise
     gumbel_noise = jax.random.gumbel(key, shape=(num_eligible,))
 
     # Get the indices that would sort the noise (descending)
-    # Take the first `actual_knockouts` indices
     sorted_indices = jp.argsort(-gumbel_noise)
-    knockout_local_indices = sorted_indices[:actual_knockouts]
 
-    # Convert to global indices
-    knockout_global_indices = eligible_indices[knockout_local_indices]
+    # Compute ranks: ranks[i] = position of element i in sorted order
+    # This avoids dynamic slicing which JAX can't handle with traced values
+    ranks = jp.argsort(sorted_indices)
 
-    # Set knocked out positions to 0
-    mask = mask.at[knockout_global_indices].set(0.0)
+    # Create knockout mask for eligible gates: knock out where rank < actual_knockouts
+    # This works with dynamic actual_knockouts since it's a boolean comparison
+    eligible_knockout_mask = ranks < actual_knockouts
+
+    # Apply to full mask: set knocked out positions to 0
+    mask = mask.at[eligible_start:eligible_end].set(jp.where(eligible_knockout_mask, 0.0, 1.0))
 
     return mask
 

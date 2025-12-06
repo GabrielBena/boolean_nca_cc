@@ -1562,7 +1562,7 @@ def train_model(
             ):
                 rng, damage_key = jax.random.split(rng)
 
-                circuit_pool, num_circuits_damaged = circuit_pool.apply_damage(
+                circuit_pool, num_circuits_damaged, num_knockouts = circuit_pool.apply_damage(
                     key=damage_key,
                     fraction=damage_fraction,
                     layer_sizes=layer_sizes,
@@ -1638,6 +1638,7 @@ def train_model(
                 "pool/reset_steps": float(avg_steps_reset),
                 "pool/avg_update_steps": float(avg_steps),
                 "damage/circuits_damaged": int(num_circuits_damaged),
+                "damage/knockouts": int(num_knockouts),
                 "damage/avg_knockouts": float(avg_damage_count),
                 "damage/enabled": damage_enabled,
                 "pool/loss_steps": loss_steps,
