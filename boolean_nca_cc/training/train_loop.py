@@ -1694,10 +1694,15 @@ def train_model(
                             layer_sizes=layer_sizes,
                             return_per_pattern=False,
                             layer_neighbors=layer_neighbors,
-                            # Disable damage injection (knockout_patterns=None means no damage will be applied)
+                            # Disable damage injection completely
                             damage_mode="greedy",  # Won't matter since no patterns
                             damage_injection_mode="single",
-                            max_damage_per_circuit=1,  # Required by validation, but no damage applied since knockout_patterns=None
+                            max_damage_per_circuit=1,
+                            greedy_ordered_indices=None,  # Explicitly disable periodic injections
+                            greedy_window_size=1,
+                            greedy_injection_recover_steps=10,
+                            damage_start_offset=0,
+                            knockout_vocabulary=None,  # Also disable vocabulary
                         )
                         
                         # Log metrics
@@ -1715,8 +1720,8 @@ def train_model(
                         if wandb_run:
                             wandb_run.log(final_metrics)
                         
-                        # Log stepwise if enabled (only for default/test eval)
-                        if periodic_eval_log_stepwise and not metric_suffix and wandb_run:
+                        # Log stepwise if enabled (for both test and train sets)
+                        if periodic_eval_log_stepwise and wandb_run:
                             for step_idx in range(len(step_metrics["step"])):
                                 wandb_run.log({
                                     f"eval_no_damage{metric_suffix}_steps/step": step_metrics["step"][step_idx],

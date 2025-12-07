@@ -8,6 +8,9 @@ circuit generalization to held-out input patterns.
 import jax
 import jax.numpy as jp
 from typing import Tuple
+import logging
+
+log = logging.getLogger(__name__)
 
 def split_input_combinations(
     x_data: jp.ndarray,
@@ -47,6 +50,14 @@ def split_input_combinations(
 
     n_samples = x_data.shape[0]
     n_train = int(n_samples * train_fraction)
+    
+    # Ensure at least 1 sample in training set (unless train_fraction is exactly 0.0)
+    if train_fraction > 0.0 and n_train == 0:
+        n_train = 1
+        log.warning(
+            f"train_fraction={train_fraction} with {n_samples} samples resulted in 0 training samples. "
+            f"Using minimum of 1 training sample instead."
+        )
 
     indices = jp.arange(n_samples)
 

@@ -742,11 +742,23 @@ def _evaluate_with_loop(
     batch_size = batch_wires[0].shape[0]
     eval_perturb_counter = None
     # Enable periodic injections for greedy modes AND shotgun mode (damage_mode controls behavior)
-    periodic_injections_enabled = damage_mode in ["greedy", "greedy_vocabulary", "shotgun"]
+    # BUT only if the required data is available:
+    # - "greedy" mode requires greedy_ordered_indices
+    # - "greedy_vocabulary" mode requires greedy_ordered_indices OR knockout_vocabulary
+    # - "shotgun" mode works without greedy_ordered_indices
+    has_greedy_indices = greedy_ordered_indices is not None and len(greedy_ordered_indices) > 0
+    periodic_injections_enabled = (
+        damage_mode in ["greedy", "greedy_vocabulary", "shotgun"]
+        and (
+            damage_mode == "shotgun"  # Shotgun doesn't need greedy indices
+            or has_greedy_indices  # Greedy modes need greedy indices
+            or (damage_mode == "greedy_vocabulary" and knockout_vocabulary is not None)  # Vocab mode can use vocabulary
+        )
+    )
     if periodic_injections_enabled:
         eval_perturb_counter = jp.zeros((batch_size,), dtype=jp.int32)
         # Only needed for greedy modes, but safe to compute
-        if greedy_ordered_indices is not None and len(greedy_ordered_indices) > 0:
+        if has_greedy_indices:
             window = max(1, int(greedy_window_size))
             greedy_len = int(len(greedy_ordered_indices))
         else:

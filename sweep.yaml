@@ -28,6 +28,8 @@ parameters:
       
   eval.input_train_fraction:
     values:
+      - 0.0001
+      - 0.3
       - 0.8   # 80% train, 20% test
 
 
