@@ -9,28 +9,16 @@ metric:
   goal: maximize
   name: eval_ko_in/final_hard_accuracy
 
-# Ablation Study: Test "Architect" vs "Technician" Hypothesis
-# This sweep compares models with and without loss feedback during evaluation
-# to determine if generalization is structural or relies on test-time optimization
+# Sweep over number of layers (num_layers) with values smaller than default (3)
+# Testing how number of layers affects model performance
 
 # Parameters to sweep over
 parameters:
-  # ABLATION: Blind Mode (Loss Feedback)
-  eval.blind_mode:
+  model.num_layers:
     values:
-      - false  # Normal: Model sees loss signal (Technician mode)
-      - true   # Blind: Model cannot see loss signal (Architect mode)
-  
-  # Optional: Test with input split to verify unseen combo generalization
-  eval.input_split_enabled:
-    values:
-      - true   # Enable train/test split on input combinations
-      
-  eval.input_train_fraction:
-    values:
-      - 0.0001
-      - 0.3
-      - 0.8   # 80% train, 20% test
+      - 1
+      - 2
+      - 3
 
 
 

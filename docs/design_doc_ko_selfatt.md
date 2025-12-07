@@ -6,6 +6,32 @@ This experiment tests the robustness of self-attention-based optimization of boo
 
 The system now supports a comprehensive range of damage modes, evaluation trajectories, and recovery mechanisms, enabling sophisticated analysis of circuit robustness and adaptation under various perturbation scenarios.
 
+## Three Core Experimental Dimensions
+
+The experimental framework is organized around three fundamental questions:
+
+### 1. **Boolean Function Discovery (Growth Mode)**
+- **Question**: Can the model learn to configure circuits that implement correct boolean functions?
+- **Generalization Test**: Do learned functions generalize to **unseen input combinations**?
+- **Mechanism**: Input combinations serve as "data samples" - splitting them into train/test sets tests whether the model discovers true boolean functions vs memorizing specific input-output pairs
+- **Configuration**: `training_mode: "growth"` with `input_split_enabled: true`
+
+### 2. **Damage Recovery Generalization (Repair Mode)**
+- **Question**: Can the model learn recovery strategies that generalize beyond training?
+- **Generalization Test**: Do recovery strategies work on **unseen damage patterns**?
+- **Mechanism**: Vocabulary-based damage patterns during training; evaluation tests both seen (vocabulary) and unseen (fresh) patterns
+- **Configuration**: `training_mode: "repair"` with `damage_mode: "greedy_vocabulary"` for vocabulary creation
+
+### 3. **Permanent vs Reversible Damage**
+- **Question**: How do different damage mechanisms affect circuit robustness?
+- **Distinction**: 
+  - **Permanent**: Structural elimination - gates removed, must find alternative paths
+  - **Reversible**: Functional perturbation - gates can heal, tests both workaround and repair
+- **Significance**: These test fundamentally different robustness mechanisms (structural adaptation vs functional repair)
+- **Configuration**: `damage_behavior: "permanent"` or `"reversible"`
+
+These three dimensions are orthogonal and can be combined in various ways to test different aspects of circuit optimization and robustness.
+
 ## Architecture Flow
 
 The experimental pipeline follows this sequence:
@@ -20,10 +46,20 @@ this codebase uses the 'metabool' conda environment. IMPORTANT: conda activate m
 
 Circuits are layered networks of LUTs as nodes, with N inputs and M outputs. Circuit-level tasks are defined as eg binary multiply, reverse of input bit processing. Loss is the element-wise difference between circuit output and target pattern at output bits.
 
+**Key Concept: Input Combinations as Data Samples**
+- Input bit combinations (e.g., all 256 combinations for 8-bit inputs) serve as the "data samples" that provide supervision signals
+- Each input combination has a corresponding target output determined by the boolean task
+- The model learns to configure circuits to produce correct outputs for these input-output pairs
+- This enables testing generalization: can the learned circuit function correctly on unseen input combinations?
+
 - **`boolean_nca_cc/circuits/model.py`**
   - Implements differentiable boolean circuits with lookup tables as gates
   - Provides circuit generation (`gen_circuit`) and execution (`run_circuit`)
   - Core functions: `make_nops`, `run_layer`, `gen_wires`
+- **`boolean_nca_cc/circuits/data_split.py`**
+  - Implements train/test splitting of input combinations
+  - Enables evaluation of boolean function generalization to held-out input patterns
+  - Key function: `split_input_combinations` with reproducible shuffling
 
 ### 2. Graph Representation
 
@@ -114,6 +150,10 @@ Circuits are layered networks of LUTs as nodes, with N inputs and M outputs. Cir
     - `damage_pool_fraction`: Percentage of circuits damaged per training injection
     - `damage_knockout_diversity`: Vocabulary size for pattern generation
     - `damage_prob`: Number of gates per damage pattern
+  - **Input Combination Splitting**:
+    - `input_split_enabled`: Enable train/test split on input combinations (for growth mode generalization)
+    - `input_train_fraction`: Fraction of combinations for training (default 0.8)
+    - `input_split_seed`: Seed for reproducible split
   - **Model Selection**: Swappable model architectures via Hydra config
 - **`configs/model/self_attention.yaml`**
 
@@ -130,24 +170,53 @@ Circuits are layered networks of LUTs as nodes, with N inputs and M outputs. Cir
 
 ### Core Experiment Design
 
-The primary experiment investigates the effect of structural damage on circuit optimization. The model is trained on meta-batches where some circuits have damage patterns applied, then evaluated on K inner loop steps to see if alternative configurations can be found that produce the target output despite damage.
+The experimental framework investigates three fundamental questions about circuit optimization and robustness:
 
-**Key Insight**: The exact LUT configurations of a circuit should vary depending on the damage pattern applied, demonstrating the model's ability to find alternative solutions under constraints.
+1. **Boolean Function Discovery (Growth Mode)**: Can the model learn to configure circuits that implement correct boolean functions, and do these functions generalize to unseen input combinations?
+
+2. **Damage Recovery Generalization (Repair Mode)**: Can the model learn recovery strategies that generalize to unseen damage patterns, not just those seen during training?
+
+3. **Damage Type Robustness**: How do permanent vs reversible damage modes affect the model's ability to find alternative solutions vs repair damaged components?
+
+The model is trained on meta-batches where some circuits have damage patterns applied, then evaluated on K inner loop steps to see if alternative configurations can be found that produce the target output despite damage.
+
+**Key Insights**: 
+- The exact LUT configurations of a circuit should vary depending on the damage pattern applied, demonstrating the model's ability to find alternative solutions under constraints
+- Input combinations serve as "data samples" - splitting them tests whether the model discovers true boolean functions
+- Damage patterns test structural robustness - splitting them tests whether recovery strategies generalize
 
 ### Damage Application Modes
+
+**Critical Distinction**: The choice between permanent and reversible damage fundamentally changes the recovery mechanism and what the model must learn.
 
 #### 1. **Permanent Damage (Stuck-at Faults)**
 
 - **Behavior**: Gates are completely removed from attention graph and zeroed out
+  - Attention edges to/from damaged gates are pruned
+  - Logits are clamped to zero (or fixed value)
+  - Residual updates are zeroed out
+- **Mechanism**: Structural elimination - damaged gates cannot participate in computation
 - **Use Case**: Testing circuit robustness under permanent structural loss
-- **Recovery**: No recovery possible - circuits must work around damaged gates
+- **Recovery**: No recovery possible - circuits must work around damaged gates by finding alternative paths
+- **Learning Objective**: Model must learn to find alternative circuit configurations that bypass damaged gates
+- **Implementation**: `damage_behavior: "permanent"`
 
 #### 2. **Reversible Damage (SEU-like)**
 
 - **Behavior**: One-shot logit bias applied to damaged gates, then normal updates resume
-- **Use Case**: Testing circuit recovery from temporary perturbations
-- **Recovery**: Gates can "heal" through normal optimization updates
+  - Initial perturbation: logits biased by `reversible_bias` (typically negative to push toward zero output)
+  - After initial damage: gates continue to receive normal attention and residual updates
+  - Gates can "heal" through optimization
+- **Mechanism**: Functional perturbation with recovery potential - gates remain structurally intact
+- **Use Case**: Testing circuit recovery from temporary perturbations (Single Event Upsets)
+- **Recovery**: Gates can "heal" through normal optimization updates - model can restore damaged gates
+- **Learning Objective**: Model must learn both to work around damage AND to repair damaged gates
 - **Implementation**: `damage_behavior: "reversible"` with tunable `reversible_bias`
+
+**Experimental Significance**: 
+- **Permanent damage** tests whether the model can find alternative solutions (structural adaptation)
+- **Reversible damage** tests whether the model can recover from perturbations (functional repair)
+- These represent fundamentally different robustness mechanisms and should be analyzed separately
 
 ### Pattern Generation Strategies
 
@@ -179,7 +248,8 @@ The primary experiment investigates the effect of structural damage on circuit o
 
 ### Training Modes
 
-#### **1. Growth Mode**
+#### **1. Growth Mode: Boolean Function Discovery**
+
 - **Objective**: Learn to configure circuits from scratch (NOPs → configured)
 - **Pool Initialization**: Randomly wired NOPs circuits (unconfigured)
 - **Training Focus**: Self-attention learns to configure fresh circuits from scratch
@@ -187,7 +257,21 @@ The primary experiment investigates the effect of structural damage on circuit o
 - **Use Case**: Testing circuit optimization and configuration learning
 - **Configuration**: `training_mode: "growth"`
 
-#### **2. Repair Mode**
+**Input Combination Generalization (Core Aspect)**:
+- **Training Data**: Model sees only a subset of input combinations (e.g., 80% via `input_train_fraction`)
+- **Test Data**: Held-out input combinations (e.g., 20%) are never seen during training
+- **Evaluation Question**: Does the learned circuit generalize to unseen input combinations?
+- **Significance**: Tests whether the model discovers the true boolean function or memorizes specific input-output pairs
+- **Implementation**: `input_split_enabled: true` with `input_train_fraction: 0.8`
+- **Key Insight**: Input combinations are the "data samples" - splitting them tests function generalization, not just circuit structure
+
+**Example**: For binary multiplication with 8-bit inputs (256 combinations):
+- Train on 204 combinations (80%)
+- Test on 52 combinations (20%)
+- Success means the model learned the multiplication function, not just memorized training pairs
+
+#### **2. Repair Mode: Damage Recovery and Reconfiguration**
+
 - **Objective**: Learn to reconfigure already working circuits after damage
 - **Preconfiguration**: One-time backprop optimization creates working base circuit `(base_wires, base_logits)`
 - **Pool Initialization**: Clone preconfigured working circuits (with optional noise)
@@ -195,6 +279,14 @@ The primary experiment investigates the effect of structural damage on circuit o
 - **Resets**: Reintroduce clones of preconfigured circuit
 - **Use Case**: Testing damage recovery and circuit reconfiguration capabilities
 - **Configuration**: `training_mode: "repair"` with `preconfig_steps` and `preconfig_lr`
+
+**Damage Pattern Generalization (Core Aspect)**:
+- **Training Vocabulary**: Model sees a fixed set of damage patterns during training (vocabulary-based sampling)
+- **Seen Patterns (IN)**: Evaluation uses patterns from training vocabulary (`eval_ko_in`)
+- **Unseen Patterns (OUT)**: Evaluation generates fresh patterns from same distribution (`eval_ko_out`)
+- **Evaluation Question**: Does the model generalize recovery strategies to unseen damage patterns?
+- **Significance**: Tests whether the model learns general recovery principles vs memorizing specific damage-response mappings
+- **Implementation**: Vocabulary created during training, then sampled for `eval_ko_in`; fresh patterns for `eval_ko_out`
 
 ### Damage Injection Control
 
@@ -214,11 +306,36 @@ The primary experiment investigates the effect of structural damage on circuit o
 
 ### Evaluation Trajectories
 
-#### **Seen vs Unseen Patterns**
+#### **Two Dimensions of Generalization**
 
-- **Seen (IN)**: Evaluation uses patterns from training vocabulary
-- **Unseen (OUT)**: Evaluation generates fresh patterns from same distribution
-- **Purpose**: Testing generalization vs memorization of damage patterns
+The experimental framework tests generalization along two independent dimensions:
+
+##### **1. Input Combination Generalization (Growth Mode Focus)**
+
+- **Purpose**: Test whether learned boolean function generalizes to unseen inputs
+- **Training**: Model sees subset of input combinations (e.g., 80% via `input_train_fraction`)
+- **Evaluation**: 
+  - **Train Inputs**: Performance on training input combinations
+  - **Test Inputs**: Performance on held-out input combinations (never seen during training)
+- **Key Question**: Does the circuit implement the correct boolean function or just memorize training pairs?
+- **Configuration**: `input_split_enabled: true` with `input_train_fraction: 0.8`
+- **Relevance**: Critical for **growth mode** where the model discovers boolean functions from scratch
+
+##### **2. Damage Pattern Generalization (Repair Mode Focus)**
+
+- **Purpose**: Test whether recovery strategies generalize to unseen damage patterns
+- **Training Vocabulary**: Fixed set of damage patterns used during training (when `damage_mode: "greedy_vocabulary"`)
+- **Evaluation**:
+  - **Seen Patterns (IN)**: `eval_ko_in` uses patterns from training vocabulary
+  - **Unseen Patterns (OUT)**: `eval_ko_out` generates fresh patterns from same distribution
+- **Key Question**: Does the model learn general recovery principles or memorize specific damage-response mappings?
+- **Configuration**: Vocabulary created during training; `knockout_vocabulary` parameter controls seen vs unseen
+- **Relevance**: Critical for **repair mode** where the model learns to recover from damage
+
+**Important Distinction**:
+- **Input combinations** = functional inputs (the "data samples" for boolean function learning)
+- **Damage patterns** = structural perturbations (which gates are knocked out)
+- These are orthogonal: a circuit can generalize to unseen inputs but fail on unseen damage patterns, and vice versa
 
 #### **Statistical Robustness**
 
@@ -257,11 +374,17 @@ The primary experiment investigates the effect of structural damage on circuit o
 
 ## Configuration Examples
 
-### Growth Mode: Circuit Optimization + Damage Robustness
+### Growth Mode: Circuit Optimization + Input Generalization
 
 ```yaml
 training:
   training_mode: "growth"  # Learn to configure circuits from scratch
+
+eval:
+  # Input combination train/test split (tests boolean function generalization)
+  input_split_enabled: true
+  input_train_fraction: 0.8  # 80% train, 20% test
+  input_split_seed: 42
 
 pool:
   damage_mode: "greedy_vocabulary"
@@ -274,7 +397,7 @@ model:
   reversible_bias: -10.0
 ```
 
-### Repair Mode: Damage Recovery + Reconfiguration
+### Repair Mode: Damage Recovery + Pattern Generalization
 
 ```yaml
 training:
@@ -283,13 +406,22 @@ training:
   preconfig_lr: 1e-2
 
 pool:
-  damage_mode: "greedy"
+  damage_mode: "greedy_vocabulary"  # Creates vocabulary for seen/unseen testing
   damage_injection_mode: "single"
   max_damage_per_circuit: 1
   damage_pool_fraction: 0.15
+  damage_knockout_diversity: 256  # Vocabulary size
+
+eval:
+  knockout_eval:
+    # Tests generalization to unseen damage patterns
+    damage_mode: ${pool.damage_mode}
+    damage_injection_mode: "single"
+    max_damage_per_circuit: 1
+    # eval_ko_in uses vocabulary (seen), eval_ko_out generates fresh (unseen)
 
 model:
-  damage_behavior: "permanent"
+  damage_behavior: "permanent"  # Or "reversible" for different recovery mechanism
 ```
 
 ### Single Damage with Reversible Recovery
@@ -380,7 +512,10 @@ This comprehensive framework enables sophisticated analysis of circuit robustnes
 
 #### **2. Scientific Rigor**
 
-- **Seen vs Unseen**: Clear distinction between training and generalization testing
+- **Dual Generalization Testing**: 
+  - Input combination splits test boolean function generalization (growth mode)
+  - Damage pattern splits test recovery strategy generalization (repair mode)
+- **Fundamental Damage Distinction**: Permanent vs reversible damage test different robustness mechanisms
 - **Recovery Analysis**: Both permanent and reversible damage for different recovery scenarios
 - **Targeted Damage**: Greedy modes focus on most critical circuit components
 - **Multi-Damage Testing**: Cumulative damage effects and adaptation capabilities
