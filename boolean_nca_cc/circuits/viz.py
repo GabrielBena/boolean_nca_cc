@@ -555,7 +555,7 @@ def plot_wandb_stepwise_results(step_metrics, damage_steps=None, smooth=False):
 
     # Plot Loss
     axes[0].plot(smooth_step_dict["loss"], label="Soft Loss")
-    axes[0].plot(smooth_step_dict["hard_loss"], label="Hard Loss")
+    # axes[0].plot(smooth_step_dict["hard_loss"], label="Hard Loss")
     axes[0].set_title("Loss")
     axes[0].set_xlabel("Step")
     axes[0].set_ylabel("Loss")

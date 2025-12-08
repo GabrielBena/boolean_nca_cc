@@ -66,6 +66,7 @@ class PerceiverCircuitAttention(nnx.Module):
         rngs: nnx.Rngs,
         type: str = "perceiver_attention",
         use_node_loss: bool = False,
+        re_zero_attn: bool = True,
         # Perceiver-specific options
         use_input_cross_attention: bool = True,
         use_output_cross_attention: bool = True,
@@ -161,6 +162,7 @@ class PerceiverCircuitAttention(nnx.Module):
                         num_heads=num_heads,
                         dropout_rate=dropout_rate,
                         rngs=rngs,
+                        re_zero=re_zero_attn,
                     )
                     for _ in range(num_cross_attn_layers)
                 ]
@@ -184,6 +186,7 @@ class PerceiverCircuitAttention(nnx.Module):
                     num_heads=num_heads,
                     dropout_rate=dropout_rate,
                     rngs=rngs,
+                    re_zero=re_zero_attn,
                 )
                 for _ in range(num_self_attn_layers)
             ]
@@ -432,6 +435,8 @@ def run_perceiver_scan(
     return final_graph, all_graphs
 
 
+# DEPRECATED: Use run_model_scan_with_loss from boolean_nca_cc.training.evaluation instead
+# This function is kept for backward compatibility but will be removed in a future version.
 def run_perceiver_scan_with_loss(
     model: PerceiverCircuitAttention,
     graph: jraph.GraphsTuple,
@@ -447,110 +452,32 @@ def run_perceiver_scan_with_loss(
     gradient_checkpointing: bool = False,
 ) -> tuple[jraph.GraphsTuple, list[jraph.GraphsTuple], jp.ndarray, list]:
     """
-    Run the Perceiver model for multiple steps with loss computation at each step.
+    DEPRECATED: Use run_model_scan_with_loss from boolean_nca_cc.training.evaluation instead.
 
-    Args:
-        model: The PerceiverCircuitAttention model
-        graph: Initial graph state
-        num_steps: Number of optimization steps
-        logits_original_shapes: Original shapes of logits for reconstruction
-        wires: Wire connection patterns
-        x_data: Input data [N_samples, N_input_bits]
-        y_data: Target output [N_samples, N_output_bits]
-        loss_cfg: Loss configuration
-        layer_sizes: Layer sizes for graph operations
-        data_fraction: Fraction of data to use
-        scan_key: Random key for data sampling
-        gradient_checkpointing: Whether to use gradient checkpointing
-
-    Returns:
-        final_graph: Graph after all steps
-        step_outputs: Tuple of outputs from each step
+    This function wraps the unified run_model_scan_with_loss for backward compatibility.
     """
-    from boolean_nca_cc.training.evaluation import get_loss_and_update_graph
+    import warnings
 
-    # Precompute masks
-    attention_mask = model._create_attention_mask(graph.senders, graph.receivers, model.n_node)
+    from boolean_nca_cc.training.evaluation import run_model_scan_with_loss
 
-    # Select data subset if needed
-    if data_fraction < 1.0:
-        random_indices = jax.random.randint(
-            key=scan_key,
-            shape=(int(x_data.shape[0] * data_fraction),),
-            minval=0,
-            maxval=x_data.shape[0],
-        )
-        x_batch = x_data[random_indices]
-        y_batch = y_data[random_indices]
-    else:
-        x_batch = x_data
-        y_batch = y_data
-
-    # Precompute output gates for layer restrictions
-    layer_indices = graph.nodes["layer"]
-    max_layer = jp.max(layer_indices)
-
-    input_output_gate = None
-    if model.restrict_input_cross_attn_to_first_layer:
-        input_output_gate = model._create_output_gate(layer_indices, allowed_layer=0)
-
-    output_output_gate = None
-    if model.restrict_output_cross_attn_to_last_layer:
-        output_output_gate = model._create_output_gate(layer_indices, allowed_layer=max_layer)
-
-    # Update initial graph with residuals
-    graph, _, _, aux_data = get_loss_and_update_graph(
-        graph,
-        logits_original_shapes,
-        wires,
-        x_batch,
-        y_batch,
-        loss_cfg,
-        layer_sizes,
-        update_perceiver_globals=True,
+    warnings.warn(
+        "run_perceiver_scan_with_loss is deprecated. "
+        "Use run_model_scan_with_loss from boolean_nca_cc.training.evaluation instead.",
+        DeprecationWarning,
+        stacklevel=2,
     )
 
-    # Optionally wrap with gradient checkpointing
-    if gradient_checkpointing:
-        model_fn = nnx.remat(
-            lambda g: model(
-                g,
-                attention_mask=attention_mask,
-                input_output_gate=input_output_gate,
-                output_output_gate=output_output_gate,
-            )
-        )
-    else:
-        model_fn = lambda g: model(  # noqa: E731
-            g,
-            attention_mask=attention_mask,
-            input_output_gate=input_output_gate,
-            output_output_gate=output_output_gate,
-        )
-
-    def perceiver_step_with_loss(carry, _):
-        current_graph = carry
-
-        # Apply model
-        model_updated_graph = model_fn(current_graph)
-
-        # Compute loss, update graph, and update GraphGlobals with new residuals
-        # (avoids redundant circuit evaluation since residuals are already computed)
-        final_graph, loss, current_logits, aux = get_loss_and_update_graph(
-            model_updated_graph,
-            logits_original_shapes,
-            wires,
-            x_batch,
-            y_batch,
-            loss_cfg,
-            layer_sizes,
-            update_perceiver_globals=True,
-        )
-
-        return final_graph, (final_graph, loss, current_logits, aux)
-
-    final_graph, step_outputs = jax.lax.scan(
-        perceiver_step_with_loss, graph, xs=None, length=num_steps
+    return run_model_scan_with_loss(
+        model=model,
+        graph=graph,
+        num_steps=num_steps,
+        logits_original_shapes=logits_original_shapes,
+        wires=wires,
+        x_data=x_data,
+        y_data=y_data,
+        loss_cfg=loss_cfg,
+        layer_sizes=layer_sizes,
+        data_fraction=data_fraction,
+        scan_key=scan_key,
+        gradient_checkpointing=gradient_checkpointing,
     )
-
-    return final_graph, step_outputs

@@ -7,11 +7,12 @@ defaults:
 type: "self_attention"
 
 # Attention architecture
-attention_dim: 96
+attention_dim: 128
 mlp_dim: null  # If null, will be set to attention_dim * mlp_dim_multiplier
 mlp_dim_multiplier: 2
 num_heads: 8
 dropout_rate: 0.0
+re_zero_attn: false
 
 # Self-attention (among gates)
 num_self_attn_layers: 1

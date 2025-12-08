@@ -34,12 +34,12 @@ graph:
 # Training parameters
 training:
   # WIRING MODE : "random" or "fixed"
-  wiring_mode: "fixed"  # Options: "fixed", "genetic", or "random"
+  wiring_mode: "random"  # Options: "fixed", "genetic", or "random"
   initial_diversity: 1
   # INNER LOOP
-  n_message_steps: 10  # Number of message passing steps per training iteration
+  n_message_steps: 15  # Number of message passing steps per training iteration
   # DATA FRACTION
-  data_per_batch: 64  # Number of data points per batch (null means use all data)
+  data_per_batch: 256  # Number of data points per batch (null means use all data)
   # RANDOM LOSS STEP
   random_loss_step: true  # Use random message passing step for loss computation
   random_loss_step_min: 2
@@ -47,10 +47,10 @@ training:
   # TRAIN/TEST SPLIT
   test_num: 256  # Fraction/absolute number of data to use for testing (from all input combinations)
   # BATCH SIZE
-  meta_batch_size: 96 
+  meta_batch_size: 128 
   batch_chunk_size: null  # Sequential batch processing chunk size (null means use meta_batch_size)
   # OPTIMIZATION
-  learning_rate: 3e-4
+  learning_rate: 2e-4
   weight_decay: 1e-5
   # LEARNING RATE SCHEDULER
   # Options: "constant", "exponential", "cosine", "linear_warmup", "adaptive", "reduce_on_plateau"
@@ -109,7 +109,7 @@ pool:
   size: 1024
   reset_fraction: 0.25  # Reduced from 0.25 - smaller resets = more stable training
   reset_interval: null
-  reset_strategy: "steps_biased"  # Reset oldest circuits (highest update steps) - more stable than uniform
+  reset_strategy: "uniform"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
   
   # Automatic parameter computation based on target expected updates
@@ -186,19 +186,21 @@ checkpoint:
   enabled: true
   interval: 1031  # Save checkpoints every N epochs (prime number to avoid rest pool before)
   save_best: true
+  save_latest: true  # Always save latest checkpoint
   # Save checkpoints on MNT storage (if available)
   save_on_mnt_storage: false
   # Multi-metric best model tracking - specify which metrics to track and save
   track_best_metrics:
-    enabled: true  # Whether to enable multi-metric tracking (in addition to the single best_metric above)
+    enabled: true  # Whether to enable multi-metric tracking
     metrics:
-      # Format: "source_metric" where source is 'training', 'eval_in', or 'eval_out'
-      # and metric is 'hard_accuracy', 'accuracy', 'hard_loss', or 'loss'
-      - "eval_in_hard_accuracy"    # In-distribution hard accuracy (most important)
-      - "eval_out_hard_accuracy"   # Out-of-distribution hard accuracy (generalization)
-      # - "training_hard_accuracy"   # Training hard accuracy (uncomment if needed)
-      # - "eval_in_hard_loss"        # In-distribution hard loss (uncomment if needed)
-      # - "eval_out_hard_loss"       # Out-of-distribution hard loss (uncomment if needed)
+      # Format: "eval_{wiring}_{data}_{metric}" 
+      # wiring: 'in' or 'out', data: 'test' or 'train'
+      # metric: 'hard_accuracy', 'accuracy', 'hard_loss', or 'loss'
+      - "eval_in_test_hard_accuracy"     # IN-distribution on test data (generalization)
+      - "eval_in_train_hard_accuracy"    # IN-distribution on train data (fitting)
+      - "eval_out_test_hard_accuracy"    # OUT-distribution on test data (OOD generalization)
+      - "eval_out_train_hard_accuracy"   # OUT-distribution on train data (OOD fitting)
+  
 
 # Logging configuration
 logging:

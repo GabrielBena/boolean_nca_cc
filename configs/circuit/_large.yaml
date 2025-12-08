@@ -2,8 +2,8 @@ defaults:
   - _self_
 
 
-input_bits: 14
-output_bits: 14
+input_bits: 12
+output_bits: 12
 arity: 4
 num_layers: 4
 width_factor: 2

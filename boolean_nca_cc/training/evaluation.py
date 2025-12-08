@@ -11,7 +11,6 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jp
 from flax import nnx
-from tqdm.auto import tqdm
 
 from boolean_nca_cc.circuits.model import run_circuit
 from boolean_nca_cc.circuits.train import (
@@ -98,7 +97,6 @@ def get_loss_and_update_graph(
     y_data: jp.ndarray,
     loss_cfg,
     layer_sizes: list[tuple[int, int]],
-    update_perceiver_globals: bool = False,
 ):
     """
     Extract logits from graph, compute loss and residuals, and update graph with loss information.
@@ -107,7 +105,11 @@ def get_loss_and_update_graph(
     1. Extract logits from the updated graph
     2. Compute loss and residuals using the circuit
     3. Update the graph's output node loss features with residuals
-    4. (Optional) Update GraphGlobals with new residuals for Perceiver models
+    4. Update GraphGlobals with loss, update_steps, x_data, y_data, and residuals
+
+    All models receive the same GraphGlobals structure for consistency.
+    Models that don't use all fields (e.g., GNN doesn't use x_data/y_data/residuals)
+    simply ignore them.
 
     Args:
         graph: Updated graph from model application
@@ -117,8 +119,6 @@ def get_loss_and_update_graph(
         y_data: Target output data
         loss_cfg: Loss config dict
         layer_sizes: List of (nodes, group_size) tuples for each layer
-        update_perceiver_globals: If True, update graph.globals with new loss, residuals, etc.
-            This avoids a redundant circuit evaluation in Perceiver scan functions.
 
     Returns:
         Tuple of (updated_graph, loss, current_logits, aux)
@@ -145,21 +145,301 @@ def get_loss_and_update_graph(
     # We'll use the magnitude of residuals as the loss signal for each output node
     updated_graph = update_output_node_loss(graph, layer_sizes, jp.abs(residuals).mean(axis=0))
 
-    # Optionally update GraphGlobals for Perceiver models
-    # This saves a redundant circuit evaluation since residuals are already computed
-    if update_perceiver_globals and updated_graph.globals is not None:
-        current_update_steps = updated_graph.globals.update_steps
-        updated_graph = updated_graph._replace(
-            globals=GraphGlobals(
-                loss=loss,
-                update_steps=current_update_steps + 1,
-                x_data=x_data,
-                y_data=y_data,
-                residuals=residuals,
-            )
+    # Always update GraphGlobals with full information for consistency across all models
+    current_update_steps = (
+        updated_graph.globals.update_steps if updated_graph.globals is not None else 0
+    )
+    updated_graph = updated_graph._replace(
+        globals=GraphGlobals(
+            loss=loss,
+            update_steps=current_update_steps + 1,
+            x_data=x_data,
+            y_data=y_data,
+            residuals=residuals,
         )
+    )
 
     return updated_graph, loss, current_logits, aux_data
+
+
+# =============================================================================
+# Unified Model Step and Scan Functions
+# =============================================================================
+
+
+def apply_model_and_compute_loss(
+    model_fn,
+    graph: jp.ndarray,
+    logits_original_shapes: list[tuple],
+    wires: list[jp.ndarray],
+    x_data: jp.ndarray,
+    y_data: jp.ndarray,
+    loss_cfg,
+    layer_sizes: list[tuple[int, int]],
+):
+    """
+    Core step function: apply model and compute loss with graph update.
+
+    This is the single source of truth for applying a model step and computing loss.
+    Used by:
+    - run_model_scan_with_loss (training scan)
+    - evaluate_model_stepwise_generator (demo/continuous mode)
+    - evaluate_model_stepwise (JIT evaluation)
+
+    Args:
+        model_fn: Callable that takes a graph and returns an updated graph.
+                  Should be pre-wrapped with any model-specific preprocessing
+                  (e.g., attention masks, output gates).
+        graph: Current graph state
+        logits_original_shapes: Original shapes of logits for reconstruction
+        wires: Wire connection patterns
+        x_data: Input data
+        y_data: Target output data
+        loss_cfg: Loss configuration
+        layer_sizes: List of (nodes, group_size) tuples for each layer
+
+    Returns:
+        Tuple of (updated_graph, loss, current_logits, aux_data)
+    """
+    # Apply model
+    model_updated_graph = model_fn(graph)
+
+    # Compute loss and update graph (always updates full GraphGlobals)
+    updated_graph, loss, current_logits, aux_data = get_loss_and_update_graph(
+        model_updated_graph,
+        logits_original_shapes,
+        wires,
+        x_data,
+        y_data,
+        loss_cfg,
+        layer_sizes,
+    )
+
+    return updated_graph, loss, current_logits, aux_data
+
+
+def _prepare_model_fn(
+    model: CircuitGNN | CircuitSelfAttention | PerceiverCircuitAttention,
+    graph,
+    gradient_checkpointing: bool = False,
+):
+    """
+    Prepare a model function with precomputed masks for attention models.
+
+    Returns a callable that takes a graph and returns an updated graph,
+    with all model-specific preprocessing (attention masks, output gates) pre-applied.
+
+    Args:
+        model: The model to wrap
+        graph: Graph (used to precompute masks)
+        gradient_checkpointing: Whether to wrap with nnx.remat
+
+    Returns:
+        Tuple of (model_fn, attention_mask) where:
+        - model_fn: Callable[graph] -> updated_graph
+        - attention_mask: Precomputed mask (or None for GNN)
+    """
+    attention_mask = None
+    input_output_gate = None
+    output_output_gate = None
+
+    if isinstance(model, PerceiverCircuitAttention):
+        # Perceiver: precompute attention mask and output gates
+        attention_mask = model._create_attention_mask(graph.senders, graph.receivers, model.n_node)
+
+        layer_indices = graph.nodes["layer"]
+        max_layer = jp.max(layer_indices)
+
+        if model.restrict_input_cross_attn_to_first_layer:
+            input_output_gate = model._create_output_gate(layer_indices, allowed_layer=0)
+
+        if model.restrict_output_cross_attn_to_last_layer:
+            output_output_gate = model._create_output_gate(layer_indices, allowed_layer=max_layer)
+
+        def base_fn(g):
+            return model(
+                g,
+                attention_mask=attention_mask,
+                input_output_gate=input_output_gate,
+                output_output_gate=output_output_gate,
+            )
+
+    elif isinstance(model, CircuitSelfAttention):
+        # Self-attention: precompute attention mask
+        attention_mask = model._create_attention_mask(graph.senders, graph.receivers, model.n_node)
+
+        def base_fn(g):
+            return model(g, attention_mask=attention_mask)
+
+    else:
+        # GNN: no preprocessing needed
+        base_fn = model
+
+    # Optionally wrap with gradient checkpointing
+    model_fn = nnx.remat(base_fn) if gradient_checkpointing else base_fn
+
+    return model_fn, attention_mask
+
+
+def run_model_scan_with_loss(
+    model: CircuitGNN | CircuitSelfAttention | PerceiverCircuitAttention,
+    graph,
+    num_steps: int,
+    logits_original_shapes: list[tuple],
+    wires: list[jp.ndarray],
+    x_data: jp.ndarray,
+    y_data: jp.ndarray,
+    loss_cfg: LossConfig,
+    layer_sizes: tuple[tuple[int, int], ...],
+    data_fraction: float = 1.0,
+    scan_key: jax.random.PRNGKey = None,
+    gradient_checkpointing: bool = False,
+    # Damage parameters (optional)
+    damage_steps: jp.ndarray | None = None,
+    knockout_per_damage_step: int = 1,
+):
+    """
+    Unified scan function for all model types with loss computation at each step.
+
+    This replaces the model-specific scan functions:
+    - run_gnn_scan_with_loss
+    - run_self_attention_scan_with_loss
+    - run_perceiver_scan_with_loss
+
+    Args:
+        model: Any supported model (CircuitGNN, CircuitSelfAttention, PerceiverCircuitAttention)
+        graph: Initial graph state
+        num_steps: Number of optimization steps
+        logits_original_shapes: Original shapes of logits for reconstruction
+        wires: Wire connection patterns
+        x_data: Input data [N_samples, N_input_bits]
+        y_data: Target output [N_samples, N_output_bits]
+        loss_cfg: Loss configuration
+        layer_sizes: Layer sizes for graph operations
+        data_fraction: Fraction of data to use (for stochastic training)
+        scan_key: Random key for data sampling and damage
+        gradient_checkpointing: Whether to use gradient checkpointing (remat)
+        damage_steps: Array of step indices at which to apply damage (None = no damage)
+        knockout_per_damage_step: Number of gates to knock out at each damage step
+
+    Returns:
+        Tuple of (final_graph, step_outputs) where step_outputs contains
+        (graphs, losses, logits, aux_data) for each step
+    """
+    # Split key for data sampling and damage
+    if scan_key is not None:
+        data_key, damage_key = jax.random.split(scan_key)
+    else:
+        data_key = None
+        damage_key = jax.random.PRNGKey(42)
+
+    # Select data subset if needed
+    if data_fraction < 1.0 and data_key is not None:
+        random_indices = jax.random.randint(
+            key=data_key,
+            shape=(int(x_data.shape[0] * data_fraction),),
+            minval=0,
+            maxval=x_data.shape[0],
+        )
+        x_batch = x_data[random_indices]
+        y_batch = y_data[random_indices]
+    else:
+        x_batch = x_data
+        y_batch = y_data
+
+    # Prepare model function with precomputed masks
+    model_fn, _ = _prepare_model_fn(model, graph, gradient_checkpointing)
+
+    # Initialize graph globals with initial loss computation
+    graph, _, _, _ = get_loss_and_update_graph(
+        graph,
+        logits_original_shapes,
+        wires,
+        x_batch,
+        y_batch,
+        loss_cfg,
+        layer_sizes,
+    )
+
+    # Precompute damage keys for all potential damage steps
+    # This avoids dynamic key splitting inside the scan
+    if damage_steps is not None:
+        n_damage = len(damage_steps)
+        damage_keys = jax.random.split(damage_key, n_damage)
+        # Convert damage_steps to array for JIT compatibility
+        damage_steps_array = jp.asarray(damage_steps)
+    else:
+        damage_keys = None
+        damage_steps_array = jp.array([], dtype=jp.int32)
+
+    def apply_damage_if_needed(graph, step_idx, gate_mask):
+        """Apply damage at specific steps using vectorized conditional."""
+        if damage_steps is None or len(damage_steps_array) == 0:
+            return graph, gate_mask
+
+        # Check if current step is a damage step
+        is_damage_step = jp.any(damage_steps_array == step_idx)
+
+        # Get the damage key index (which damage event this is)
+        damage_idx = jp.searchsorted(damage_steps_array, step_idx)
+        damage_idx = jp.clip(damage_idx, 0, len(damage_keys) - 1)
+
+        def do_damage(_):
+            # Apply knockout
+            modified_logits, modified_gate_mask = apply_knockout_to_circuit(
+                damage_keys[damage_idx],
+                graph.nodes["logits"],
+                layer_sizes,
+                num_knockouts=knockout_per_damage_step,
+                flat=True,
+            )
+            new_gate_mask = gate_mask * modified_gate_mask
+            new_nodes = {
+                **graph.nodes,
+                "logits": modified_logits,
+                "gate_knockout_mask": new_gate_mask,
+            }
+            return graph._replace(nodes=new_nodes), new_gate_mask
+
+        def no_damage(_):
+            return graph, gate_mask
+
+        return jax.lax.cond(is_damage_step, do_damage, no_damage, None)
+
+    def scan_step(carry, step_idx):
+        current_graph, current_gate_mask = carry
+
+        # Apply damage if this is a damage step
+        current_graph, current_gate_mask = apply_damage_if_needed(
+            current_graph,
+            step_idx + 1,
+            current_gate_mask,  # +1 because scan starts at 0
+        )
+
+        # Apply model and compute loss using the unified step function
+        updated_graph, loss, current_logits, aux = apply_model_and_compute_loss(
+            model_fn,
+            current_graph,
+            logits_original_shapes,
+            wires,
+            x_batch,
+            y_batch,
+            loss_cfg,
+            layer_sizes,
+        )
+
+        return (updated_graph, current_gate_mask), (updated_graph, loss, current_logits, aux)
+
+    # Run scan with step indices
+    initial_gate_mask = graph.nodes["gate_knockout_mask"]
+    (final_graph, _), step_outputs = jax.lax.scan(
+        scan_step,
+        (graph, initial_gate_mask),
+        xs=jp.arange(num_steps),
+        length=num_steps,
+    )
+
+    return final_graph, step_outputs
 
 
 def create_damage_steps(
@@ -221,14 +501,16 @@ def evaluate_model_stepwise_generator(
     verbose: bool = False,
 ) -> Generator[StepResult, None, None]:
     """
-    Generator that yields step-by-step evaluation results for GNN model optimization.
+    Generator that yields step-by-step evaluation results for model optimization.
 
-    This function provides EXACTLY the same computation path as the training loop,
-    including using the same loss function, graph initialization, and step tracking.
-    Perfect for live demos and interactive use with zero discrepancy from training.
+    This function uses the same core step logic as training (via apply_model_and_compute_loss),
+    but yields results one at a time for live demos and interactive use.
+
+    For JIT-compiled evaluation with known step count, use evaluate_model_stepwise instead,
+    which internally uses run_model_scan_with_loss.
 
     Args:
-        model: Trained CircuitGNN or CircuitSelfAttention model
+        model: Trained model (CircuitGNN, CircuitSelfAttention, or PerceiverCircuitAttention)
         wires: List of wire connection patterns
         logits: List of initial logit tensors for each layer
         x_data: Input data for evaluation
@@ -239,6 +521,11 @@ def evaluate_model_stepwise_generator(
         max_steps: Maximum number of steps to run (None for infinite)
         loss_cfg: Loss config dict (default: LOSS_L4)
         bidirectional_edges: Whether to use bidirectional edges
+        layer_sizes: List of (nodes, group_size) tuples for each layer
+        damage_steps: List of step indices at which to apply damage
+        knockout_per_damage_step: Number of gates to knock out at each damage step
+        damage_key: Random key for damage
+        verbose: Print damage info
 
     Yields:
         StepResult: Results from each step including loss, accuracy, predictions, and updated logits
@@ -246,11 +533,10 @@ def evaluate_model_stepwise_generator(
     if loss_cfg is None:
         loss_cfg = LOSS_L4
 
-    # Store original shapes for reconstruction (EXACTLY like training)
+    # Store original shapes for reconstruction
     logits_original_shapes = [logit.shape for logit in logits]
 
-    # Build initial graph using the same function as training
-    # Initialize with update_steps = 0 (exactly like training pool initialization)
+    # Build initial graph
     graph = build_graph(
         logits,
         wires,
@@ -262,9 +548,7 @@ def evaluate_model_stepwise_generator(
         gate_knockout_mask=None,
     )
 
-    # Check if we have a Perceiver model that needs data in globals
-    is_perceiver = isinstance(model, PerceiverCircuitAttention)
-
+    # Initialize graph with loss computation (uses unified function)
     graph, _, _, aux_data = get_loss_and_update_graph(
         graph,
         logits_original_shapes,
@@ -273,7 +557,6 @@ def evaluate_model_stepwise_generator(
         y_data,
         loss_cfg,
         layer_sizes,
-        update_perceiver_globals=is_perceiver,
     )
 
     # Yield initial state (step 0)
@@ -284,6 +567,9 @@ def evaluate_model_stepwise_generator(
         **aux_data,
     )
 
+    # Prepare model function with precomputed masks (same as training)
+    model_fn, _ = _prepare_model_fn(model, graph, gradient_checkpointing=False)
+
     gate_mask = graph.nodes["gate_knockout_mask"]
 
     # Run optimization steps
@@ -291,7 +577,6 @@ def evaluate_model_stepwise_generator(
     while max_steps is None or step < max_steps:
         step += 1
 
-        # Extract the current update_steps count from graph globals
         # Apply damage if needed
         if damage_steps is not None and step in damage_steps:
             damage_key, new_damage_key = jax.random.split(damage_key)
@@ -302,29 +587,30 @@ def evaluate_model_stepwise_generator(
                 num_knockouts=knockout_per_damage_step,
                 flat=True,
             )
-            gate_mask *= modified_gate_mask
+            gate_mask = gate_mask * modified_gate_mask
 
-            graph.nodes["gate_knockout_mask"] = gate_mask
-            graph.nodes["logits"] = modified_logits
+            # Update graph nodes with new damage
+            new_nodes = {
+                **graph.nodes,
+                "gate_knockout_mask": gate_mask,
+                "logits": modified_logits,
+            }
+            graph = graph._replace(nodes=new_nodes)
 
             if verbose:
                 print(f"Damage at step {step}")
                 print(f"Damage in graph : {(graph.nodes['gate_knockout_mask'] == 0).sum()}")
 
-        # Apply one step of model processing
-        # Note: training does multiple steps in a batch, but we do one at a time for live demo
-        updated_graph = model(graph)
-
-        # Use the unified get_loss_and_update_graph function for consistency
-        graph, _, current_logits, aux_data = get_loss_and_update_graph(
-            updated_graph,
+        # Apply model and compute loss using unified step function
+        graph, _, current_logits, aux_data = apply_model_and_compute_loss(
+            model_fn,
+            graph,
             logits_original_shapes,
             wires,
             x_data,
             y_data,
             loss_cfg,
             layer_sizes,
-            update_perceiver_globals=is_perceiver,
         )
 
         # Yield current state
@@ -356,14 +642,13 @@ def evaluate_model_stepwise(
     damage_steps: list[int] | None = None,
 ) -> dict:
     """
-    Evaluate GNN performance by running message passing steps one by one
-    and collecting metrics at each step.
+    Evaluate model performance using the unified JIT-compiled scan.
 
-    This function now uses the generator implementation to ensure consistency
-    with the step-by-step evaluation used in demos.
+    This function uses run_model_scan_with_loss internally for efficient JIT-compiled
+    evaluation. For live demos with streaming results, use evaluate_model_stepwise_generator.
 
     Args:
-        model: Trained CircuitGNN or CircuitSelfAttention model
+        model: Trained model (CircuitGNN, CircuitSelfAttention, or PerceiverCircuitAttention)
         wires: List of wire connection patterns
         logits: List of initial logit tensors for each layer
         x_data: Input data for evaluation
@@ -374,69 +659,83 @@ def evaluate_model_stepwise(
         n_message_steps: Maximum number of message passing steps to run
         loss_cfg: Loss config dict (default: LOSS_L4)
         bidirectional_edges: Whether to use bidirectional edges
+        layer_sizes: List of (nodes, group_size) tuples for each layer
+        use_tqdm: Show progress bar (only affects post-processing display)
+        verbose: Print verbose output
+        knockout_per_damage_step: Number of gates to knock out at each damage step
+        damage_key: Random key for damage
+        damage_steps: List of step indices at which to apply damage
 
     Returns:
         Dictionary with metrics collected at each step
     """
-    # Initialize metric storage
-    step_results = {
-        "step": [],
-        "loss": [],
-        "hard_loss": [],
-        "accuracy": [],
-        "hard_accuracy": [],
-    }
-    # step_results = []
+    if loss_cfg is None:
+        loss_cfg = LOSS_L4
 
-    # Use the generator to collect all results
-    generator = evaluate_model_stepwise_generator(
-        model=model,
-        wires=wires,
-        logits=logits,
-        x_data=x_data,
-        y_data=y_data,
-        input_n=input_n,
-        arity=arity,
-        circuit_hidden_dim=circuit_hidden_dim,
-        max_steps=n_message_steps,
-        loss_cfg=loss_cfg,
+    # Store original shapes for reconstruction
+    logits_original_shapes = [logit.shape for logit in logits]
+
+    # Build initial graph
+    graph = build_graph(
+        logits,
+        wires,
+        input_n,
+        arity,
+        circuit_hidden_dim,
+        loss_value=0.0,
         bidirectional_edges=bidirectional_edges,
-        layer_sizes=layer_sizes,
-        verbose=verbose,
-        knockout_per_damage_step=knockout_per_damage_step,
-        damage_key=damage_key,
-        damage_steps=damage_steps,
+        gate_knockout_mask=None,
     )
 
-    # Create progress bar for evaluation
+    # Convert damage_steps to array if provided
+    damage_steps_array = jp.asarray(damage_steps) if damage_steps is not None else None
+
+    # Run unified scan
+    _, step_outputs = run_model_scan_with_loss(
+        model=model,
+        graph=graph,
+        num_steps=n_message_steps,
+        logits_original_shapes=logits_original_shapes,
+        wires=wires,
+        x_data=x_data,
+        y_data=y_data,
+        loss_cfg=loss_cfg,
+        layer_sizes=tuple(layer_sizes) if layer_sizes else None,
+        data_fraction=1.0,
+        scan_key=damage_key,
+        gradient_checkpointing=False,
+        damage_steps=damage_steps_array,
+        knockout_per_damage_step=knockout_per_damage_step,
+    )
+
+    # Extract metrics from scan outputs
+    # step_outputs is (graphs, losses, logits, aux_data) for each step
+    _graphs, losses, _logits_list, aux_data = step_outputs
+
+    # Build results dictionary
+    step_results = {
+        "step": list(range(1, n_message_steps + 1)),  # Steps 1 to n_message_steps
+        "loss": [float(loss) for loss in losses],
+        "hard_loss": [float(hl) for hl in aux_data["hard_loss"]],
+        "accuracy": [float(a) for a in aux_data["accuracy"]],
+        "hard_accuracy": [float(a) for a in aux_data["hard_accuracy"]],
+    }
+
+    if verbose:
+        print(f"Final loss: {step_results['loss'][-1]:.4f}")
+        print(f"Final accuracy: {step_results['accuracy'][-1]:.4f}")
+        print(f"Final hard accuracy: {step_results['hard_accuracy'][-1]:.4f}")
+
     if use_tqdm:
-        pbar = tqdm(generator, total=n_message_steps + 1, desc="Evaluating model steps")
-    else:
-        pbar = generator
+        # Print summary if tqdm was requested (for compatibility)
+        print(f"Evaluation complete: {n_message_steps} steps")
+        print(f"  Loss: {step_results['loss'][-1]:.4f}")
+        print(f"  Accuracy: {step_results['accuracy'][-1]:.4f}")
+        print(f"  Hard Acc: {step_results['hard_accuracy'][-1]:.4f}")
 
-    # Collect all results
-    for result in pbar:
-        for key, value in result._asdict().items():
-            if key in step_results:
-                step_results[key].append(value)
-
-        # step_results.append(result)
-
-        if use_tqdm:
-            # Update progress bar
-            pbar.set_postfix(
-                {
-                    "Loss": f"{result.loss:.4f}",
-                    "Accuracy": f"{result.accuracy:.4f}",
-                    "Hard Acc": f"{result.hard_accuracy:.4f}",
-                }
-            )
-
-    # return jax.tree.map(lambda x: jp.array(x), step_results)
     return step_results
 
 
-# Batched evaluation function. Does not support damage steps. right now
 def evaluate_model_stepwise_batched(
     model: CircuitGNN | CircuitSelfAttention | PerceiverCircuitAttention,
     batch_wires: list[jp.ndarray],  # Shape: [batch_size, ...original_wire_shape...]
@@ -450,15 +749,21 @@ def evaluate_model_stepwise_batched(
     loss_cfg=None,
     bidirectional_edges: bool = True,
     layer_sizes: list[tuple[int, int]] | None = None,
+    damage_steps: jp.ndarray | None = None,
+    knockout_per_damage_step: int = 1,
+    damage_key: jax.random.PRNGKey = jax.random.PRNGKey(42),
+    chunk_size: int | None = None,
+    return_first_circuit_details: bool = False,
 ) -> dict:
     """
-    Vectorized evaluation of GNN performance on a batch of circuits.
+    Vectorized evaluation of model performance on a batch of circuits.
 
-    This mirrors the exact computation path of evaluate_model_stepwise but processes
-    all circuits in the batch simultaneously using vectorized operations.
+    Uses the unified scan function (run_model_scan_with_loss) with vmap for
+    efficient batch processing. Supports damage steps and automatic chunking
+    for memory efficiency.
 
     Args:
-        model: Trained CircuitGNN or CircuitSelfAttention model
+        model: Trained model (CircuitGNN, CircuitSelfAttention, or PerceiverCircuitAttention)
         batch_wires: Batched wire connection patterns [batch_size, ...wire_shape...]
         batch_logits: Batched initial logit tensors [batch_size, ...logit_shape...]
         x_data: Input data for evaluation
@@ -470,26 +775,141 @@ def evaluate_model_stepwise_batched(
         loss_cfg: Loss config dict (default: LOSS_L4)
         bidirectional_edges: Whether to use bidirectional edges
         layer_sizes: List of (nodes, group_size) tuples for each layer
+        damage_steps: Array of step indices at which to apply damage
+        knockout_per_damage_step: Number of gates to knock out at each damage step
+        damage_key: Random key for damage
+        chunk_size: If provided, process circuits in chunks of this size for memory efficiency.
+                   If None, process all circuits at once.
+        return_first_circuit_details: If True, include detailed StepResult list for first circuit
+                                     (useful for visualization without re-running evaluation)
 
     Returns:
-        Dictionary with averaged metrics collected at each step
+        Dictionary with averaged metrics collected at each step.
+        If return_first_circuit_details=True, also includes 'first_circuit_results' key
+        with list of StepResult objects for visualization.
     """
     if loss_cfg is None:
         loss_cfg = LOSS_L4
 
-    # Initialize metric storage - same structure as original
-    step_metrics = {
-        "step": [],
-        "loss": [],
-        "hard_loss": [],
-        "accuracy": [],
-        "hard_accuracy": [],
-    }
-    # step_results = []
+    # Normalize layer_sizes to tuple for consistency
+    layer_sizes_tuple = tuple(layer_sizes) if layer_sizes else None
 
-    is_perceiver = isinstance(model, PerceiverCircuitAttention)
+    # Get total batch size
+    total_circuits = batch_logits[0].shape[0]
 
-    # Build initial graphs using the same function as generator (vectorized)
+    # If chunking is requested and we have more circuits than chunk_size, process in chunks
+    if chunk_size is not None and total_circuits > chunk_size:
+        return _evaluate_batched_chunked(
+            model=model,
+            batch_wires=batch_wires,
+            batch_logits=batch_logits,
+            x_data=x_data,
+            y_data=y_data,
+            input_n=input_n,
+            arity=arity,
+            circuit_hidden_dim=circuit_hidden_dim,
+            n_message_steps=n_message_steps,
+            loss_cfg=loss_cfg,
+            bidirectional_edges=bidirectional_edges,
+            layer_sizes=layer_sizes_tuple,
+            damage_steps=damage_steps,
+            knockout_per_damage_step=knockout_per_damage_step,
+            damage_key=damage_key,
+            chunk_size=chunk_size,
+            return_first_circuit_details=return_first_circuit_details,
+        )
+
+    # Process all circuits at once
+    return _evaluate_batched_single_chunk(
+        model=model,
+        batch_wires=batch_wires,
+        batch_logits=batch_logits,
+        x_data=x_data,
+        y_data=y_data,
+        input_n=input_n,
+        arity=arity,
+        circuit_hidden_dim=circuit_hidden_dim,
+        n_message_steps=n_message_steps,
+        loss_cfg=loss_cfg,
+        bidirectional_edges=bidirectional_edges,
+        layer_sizes=layer_sizes_tuple,
+        damage_steps=damage_steps,
+        knockout_per_damage_step=knockout_per_damage_step,
+        damage_key=damage_key,
+        return_first_circuit_details=return_first_circuit_details,
+    )
+
+
+def _extract_single_circuit_step_results(
+    batch_step_outputs,
+    circuit_idx: int,
+    n_message_steps: int,
+) -> list[StepResult]:
+    """
+    Extract StepResult objects for a single circuit from batched evaluation outputs.
+
+    Args:
+        batch_step_outputs: Tuple of (graphs, losses, logits, aux_data) from batched scan
+        circuit_idx: Index of circuit to extract
+        n_message_steps: Number of steps
+
+    Returns:
+        List of StepResult objects for the specified circuit
+    """
+    graphs, losses, logits_all, aux_data = batch_step_outputs
+
+    # Bundle all outputs (flatten aux_data) for single tree_map extraction
+    all_outputs = {"loss": losses, **aux_data, "logits": logits_all, "graph": graphs}
+
+    def make_step_result(s):
+        e = jax.tree.map(lambda x, step=s: x[circuit_idx, step], all_outputs)
+        return StepResult(
+            step=s + 1,
+            loss=float(e["loss"]),
+            hard_loss=float(e["hard_loss"]),
+            accuracy=float(e["accuracy"]),
+            hard_accuracy=float(e["hard_accuracy"]),
+            predictions=e["predictions"],
+            hard_predictions=e["hard_predictions"],
+            residuals=e["residuals"],
+            hard_residuals=e["hard_residuals"],
+            logits=e["logits"],
+            graph=e["graph"],
+        )
+
+    return [make_step_result(s) for s in range(n_message_steps)]
+
+
+def _evaluate_batched_single_chunk(
+    model,
+    batch_wires,
+    batch_logits,
+    x_data,
+    y_data,
+    input_n,
+    arity,
+    circuit_hidden_dim,
+    n_message_steps,
+    loss_cfg,
+    bidirectional_edges,
+    layer_sizes,
+    damage_steps,
+    knockout_per_damage_step,
+    damage_key,
+    return_first_circuit_details: bool = False,
+) -> dict:
+    """
+    Internal function to evaluate a single chunk of circuits.
+
+    Args:
+        ... (same as before)
+        return_first_circuit_details: If True, also return detailed StepResult list for circuit 0
+
+    Returns:
+        Dictionary with averaged metrics. If return_first_circuit_details=True, also includes
+        'first_circuit_results' key with list of StepResult objects for visualization.
+    """
+    # Build initial graphs (vectorized)
     vmap_build_graph = jax.vmap(
         lambda logits, wires: build_graph(
             logits,
@@ -497,47 +917,175 @@ def evaluate_model_stepwise_batched(
             input_n,
             arity,
             circuit_hidden_dim,
-            loss_value=0.0,  # Use dummy value, will be set in globals later
+            loss_value=0.0,
             bidirectional_edges=bidirectional_edges,
         )
     )
     batch_graphs = vmap_build_graph(batch_logits, batch_wires)
 
-    vmap_get_loss_and_update = jax.vmap(
-        lambda graph, wires, logits: get_loss_and_update_graph(
+    # Split damage keys for each batch element (use dummy key if no damage)
+    batch_size = batch_logits[0].shape[0]
+    if damage_key is None:
+        damage_key = jax.random.PRNGKey(0)  # Dummy key, won't be used if no damage_steps
+    damage_keys = jax.random.split(damage_key, batch_size)
+
+    # Run unified scan for each circuit in batch
+    def run_single_scan(graph, wires, logits, scan_key):
+        return run_model_scan_with_loss(
+            model=model,
             graph=graph,
+            num_steps=n_message_steps,
             logits_original_shapes=[logit.shape for logit in logits],
             wires=wires,
             x_data=x_data,
             y_data=y_data,
             loss_cfg=loss_cfg,
             layer_sizes=layer_sizes,
-            update_perceiver_globals=is_perceiver,
+            data_fraction=1.0,
+            scan_key=scan_key,
+            gradient_checkpointing=False,
+            damage_steps=damage_steps,
+            knockout_per_damage_step=knockout_per_damage_step,
         )
+
+    # Vmap over batch
+    _, batch_step_outputs = nnx.vmap(run_single_scan)(
+        batch_graphs, batch_wires, batch_logits, damage_keys
     )
 
-    for step in range(0, n_message_steps + 1):
-        # Compute loss and update graph
-        batch_graphs, _, current_logits, aux_data = vmap_get_loss_and_update(
-            batch_graphs, batch_wires, batch_logits
+    # Extract and average metrics
+    _, losses, _, aux_data = batch_step_outputs
+
+    # Average across batch dimension
+    step_metrics = {
+        "step": list(range(1, n_message_steps + 1)),
+        "loss": [float(jp.mean(losses[:, i])) for i in range(n_message_steps)],
+        "hard_loss": [float(jp.mean(aux_data["hard_loss"][:, i])) for i in range(n_message_steps)],
+        "accuracy": [float(jp.mean(aux_data["accuracy"][:, i])) for i in range(n_message_steps)],
+        "hard_accuracy": [
+            float(jp.mean(aux_data["hard_accuracy"][:, i])) for i in range(n_message_steps)
+        ],
+    }
+
+    # Optionally extract detailed results for first circuit (for visualization)
+    if return_first_circuit_details:
+        step_metrics["first_circuit_results"] = _extract_single_circuit_step_results(
+            batch_step_outputs, circuit_idx=0, n_message_steps=n_message_steps
         )
 
-        # Store averaged metrics (same as generator yields)
-        # result = StepResult(
-        #     step=step,
-        #     logits=current_logits,
-        #     graph=batch_graphs,
-        #     **jax.tree.map(lambda x: jp.mean(x, axis=0), aux_data),
-        # )
-        # step_results.append(result)
-
-        step_metrics["step"].append(step)
-        for key, value in aux_data.items():
-            if key in step_metrics:
-                step_metrics[key].append(float(jp.mean(value)))
-
-        # Apply one step of model processing (vectorized)
-        batch_graphs = nnx.vmap(lambda graph: model(graph))(batch_graphs)
-
-    # return jax.tree.map(lambda x: jp.array(x), step_results)
     return step_metrics
+
+
+def _evaluate_batched_chunked(
+    model,
+    batch_wires,
+    batch_logits,
+    x_data,
+    y_data,
+    input_n,
+    arity,
+    circuit_hidden_dim,
+    n_message_steps,
+    loss_cfg,
+    bidirectional_edges,
+    layer_sizes,
+    damage_steps,
+    knockout_per_damage_step,
+    damage_key,
+    chunk_size,
+    return_first_circuit_details: bool = False,
+) -> dict:
+    """Internal function to evaluate circuits in chunks for memory efficiency."""
+    total_circuits = batch_logits[0].shape[0]
+    num_chunks = (total_circuits + chunk_size - 1) // chunk_size
+    chunk_results = []
+
+    # Split damage key for each chunk
+    chunk_keys = jax.random.split(damage_key, num_chunks)
+
+    first_circuit_results = None
+
+    for chunk_idx in range(num_chunks):
+        start_idx = chunk_idx * chunk_size
+        end_idx = min(start_idx + chunk_size, total_circuits)
+
+        # Extract chunk
+        chunk_wires = [w[start_idx:end_idx] for w in batch_wires]
+        chunk_logits = [log[start_idx:end_idx] for log in batch_logits]
+
+        # Only request detailed results for first chunk (which contains circuit 0)
+        request_details = return_first_circuit_details and chunk_idx == 0
+
+        # Evaluate chunk
+        chunk_result = _evaluate_batched_single_chunk(
+            model=model,
+            batch_wires=chunk_wires,
+            batch_logits=chunk_logits,
+            x_data=x_data,
+            y_data=y_data,
+            input_n=input_n,
+            arity=arity,
+            circuit_hidden_dim=circuit_hidden_dim,
+            n_message_steps=n_message_steps,
+            loss_cfg=loss_cfg,
+            bidirectional_edges=bidirectional_edges,
+            layer_sizes=layer_sizes,
+            damage_steps=damage_steps,
+            knockout_per_damage_step=knockout_per_damage_step,
+            damage_key=chunk_keys[chunk_idx],
+            return_first_circuit_details=request_details,
+        )
+
+        # Extract first circuit details from first chunk
+        if request_details and "first_circuit_results" in chunk_result:
+            first_circuit_results = chunk_result.pop("first_circuit_results")
+
+        chunk_results.append(chunk_result)
+
+    # Average results across chunks (weighted by chunk size for correctness)
+    averaged_result = {"step": chunk_results[0]["step"]}
+
+    for key in ["loss", "hard_loss", "accuracy", "hard_accuracy"]:
+        # Average at each step across chunks
+        step_averages = []
+        for step_idx in range(len(chunk_results[0][key])):
+            step_values = [chunk[key][step_idx] for chunk in chunk_results]
+            step_averages.append(float(jp.mean(jp.array(step_values))))
+        averaged_result[key] = step_averages
+
+    # Include first circuit details if requested
+    if first_circuit_results is not None:
+        averaged_result["first_circuit_results"] = first_circuit_results
+
+    return averaged_result
+
+
+# Backwards compatibility alias - will be deprecated
+def evaluate_circuits_in_chunks(
+    eval_fn,
+    wires: list[jp.ndarray],
+    logits: list[jp.ndarray],
+    target_chunk_size: int,
+    **eval_kwargs,
+) -> dict:
+    """
+    DEPRECATED: Use evaluate_model_stepwise_batched with chunk_size parameter instead.
+
+    This function is kept for backward compatibility but will be removed.
+    """
+    import warnings
+
+    warnings.warn(
+        "evaluate_circuits_in_chunks is deprecated. "
+        "Use evaluate_model_stepwise_batched with chunk_size parameter instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+
+    # Call the batched function with chunking
+    return evaluate_model_stepwise_batched(
+        batch_wires=wires,
+        batch_logits=logits,
+        chunk_size=target_chunk_size,
+        **eval_kwargs,
+    )

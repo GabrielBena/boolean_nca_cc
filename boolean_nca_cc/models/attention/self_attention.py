@@ -47,6 +47,7 @@ class CircuitSelfAttention(nnx.Module):
         rngs: nnx.Rngs,
         type: str = "self_attention",
         use_node_loss: bool = False,
+        re_zero_attn: bool = True,
     ):
         """
         Initialize the circuit self-attention model.
@@ -101,6 +102,7 @@ class CircuitSelfAttention(nnx.Module):
                     num_heads=num_heads,
                     dropout_rate=dropout_rate,
                     rngs=rngs,
+                    re_zero=re_zero_attn,
                 )
                 for _ in range(num_self_attn_layers)
             ]
@@ -217,6 +219,8 @@ def run_self_attention_scan(
     return final_graph, all_graphs
 
 
+# DEPRECATED: Use run_model_scan_with_loss from boolean_nca_cc.training.evaluation instead
+# This function is kept for backward compatibility but will be removed in a future version.
 def run_self_attention_scan_with_loss(
     model: CircuitSelfAttention,
     graph: jraph.GraphsTuple,
@@ -232,84 +236,32 @@ def run_self_attention_scan_with_loss(
     gradient_checkpointing: bool = False,
 ) -> tuple[jraph.GraphsTuple, list[jraph.GraphsTuple], jp.ndarray, list]:
     """
-    Run the self-attention model for multiple steps with loss computation.
+    DEPRECATED: Use run_model_scan_with_loss from boolean_nca_cc.training.evaluation instead.
 
-    Args:
-        model: The CircuitSelfAttention model to apply
-        graph: Initial graph state
-        num_steps: Number of steps to run
-        logits_original_shapes: Original shapes of logits for reconstruction
-        wires: Wire connection patterns
-        x_data: Input data
-        y_data: Target output data
-        loss_cfg: LossConfig object
-        layer_sizes: List of (nodes, group_size) tuples for each layer
-        data_fraction: Fraction of data to use for loss computation
-        scan_key: Random key for data sampling
-        gradient_checkpointing: If True, recompute model activations during backward pass
-
-    Returns:
-        final_graph: The graph after all steps
-        step_outputs: Outputs from each step
+    This function wraps the unified run_model_scan_with_loss for backward compatibility.
     """
-    from boolean_nca_cc.training.evaluation import get_loss_and_update_graph
+    import warnings
 
-    # Compute mask once before the scan
-    attention_mask = model._create_attention_mask(graph.senders, graph.receivers, model.n_node)
+    from boolean_nca_cc.training.evaluation import run_model_scan_with_loss
 
-    # Select random fraction of data if needed
-    if data_fraction < 1.0:
-        random_indices = jax.random.randint(
-            key=scan_key,
-            shape=(int(x_data.shape[0] * data_fraction),),
-            minval=0,
-            maxval=x_data.shape[0],
-        )
-        x_batch = x_data[random_indices]
-        y_batch = y_data[random_indices]
-    else:
-        x_batch = x_data
-        y_batch = y_data
-
-    # Optionally wrap with gradient checkpointing
-    if gradient_checkpointing:
-        model_fn = nnx.remat(lambda g: model(g, attention_mask=attention_mask))
-    else:
-        model_fn = lambda g: model(g, attention_mask=attention_mask)  # noqa: E731
-
-    def attention_step_with_loss(carry, _):
-        current_graph = carry
-
-        # Apply self-attention
-        model_updated_graph = model_fn(current_graph)
-
-        # Compute loss and update graph
-        updated_graph, loss, current_logits, aux = get_loss_and_update_graph(
-            model_updated_graph,
-            logits_original_shapes,
-            wires,
-            x_batch,
-            y_batch,
-            loss_cfg,
-            layer_sizes,
-        )
-
-        # Update graph globals
-        current_update_steps = (
-            updated_graph.globals.update_steps if updated_graph.globals is not None else 0
-        )
-        final_graph = updated_graph._replace(
-            globals=GraphGlobals(
-                loss=loss,
-                update_steps=current_update_steps + 1,
-            )
-        )
-
-        return final_graph, (final_graph, loss, current_logits, aux)
-
-    # Run scan
-    final_graph, step_outputs = jax.lax.scan(
-        attention_step_with_loss, graph, xs=None, length=num_steps
+    warnings.warn(
+        "run_self_attention_scan_with_loss is deprecated. "
+        "Use run_model_scan_with_loss from boolean_nca_cc.training.evaluation instead.",
+        DeprecationWarning,
+        stacklevel=2,
     )
 
-    return final_graph, step_outputs
+    return run_model_scan_with_loss(
+        model=model,
+        graph=graph,
+        num_steps=num_steps,
+        logits_original_shapes=logits_original_shapes,
+        wires=wires,
+        x_data=x_data,
+        y_data=y_data,
+        loss_cfg=loss_cfg,
+        layer_sizes=layer_sizes,
+        data_fraction=data_fraction,
+        scan_key=scan_key,
+        gradient_checkpointing=gradient_checkpointing,
+    )

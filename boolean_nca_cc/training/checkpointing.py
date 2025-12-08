@@ -722,18 +722,18 @@ def track_and_save_best_models(
                 available_metrics.append(("training", metric, training_metrics[metric]))
 
     # Add evaluation metrics if available
+    # Supports new keys: eval_{wiring}_{data}/final_{metric} (e.g., eval_in_test/final_hard_accuracy)
     if eval_metrics:
-        # In-distribution metrics
-        for metric in ["hard_accuracy", "accuracy", "hard_loss", "loss"]:
-            eval_key = f"eval_in/final_{metric}"
-            if eval_key in eval_metrics:
-                available_metrics.append(("eval_in", metric, eval_metrics[eval_key]))
-
-        # Out-of-distribution metrics
-        for metric in ["hard_accuracy", "accuracy", "hard_loss", "loss"]:
-            eval_key = f"eval_out/final_{metric}"
-            if eval_key in eval_metrics:
-                available_metrics.append(("eval_out", metric, eval_metrics[eval_key]))
+        # Check for all wiring x data combinations
+        for wiring in ["in", "out"]:
+            for data_split in ["test", "train"]:
+                for metric in ["hard_accuracy", "accuracy", "hard_loss", "loss"]:
+                    # New key format: eval_in_test/final_hard_accuracy
+                    eval_key = f"eval_{wiring}_{data_split}/final_{metric}"
+                    if eval_key in eval_metrics:
+                        # Use format eval_in_test_hard_accuracy for tracker key
+                        source = f"eval_{wiring}_{data_split}"
+                        available_metrics.append((source, metric, eval_metrics[eval_key]))
 
     # Filter metrics to track based on configuration
     if track_metrics is not None:

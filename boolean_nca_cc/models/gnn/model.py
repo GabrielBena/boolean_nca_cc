@@ -161,6 +161,8 @@ def run_gnn_scan(
     return final_graph, all_graphs
 
 
+# DEPRECATED: Use run_model_scan_with_loss from boolean_nca_cc.training.evaluation instead
+# This function is kept for backward compatibility but will be removed in a future version.
 def run_gnn_scan_with_loss(
     model: CircuitGNN,
     graph: jraph.GraphsTuple,
@@ -176,74 +178,32 @@ def run_gnn_scan_with_loss(
     gradient_checkpointing: bool = False,
 ) -> tuple[jraph.GraphsTuple, list[jraph.GraphsTuple], jp.ndarray, list]:
     """
-    Run the GNN for multiple steps with loss computation and graph updating at each step.
+    DEPRECATED: Use run_model_scan_with_loss from boolean_nca_cc.training.evaluation instead.
 
-    This function combines model application with loss computation and graph updating,
-    allowing for efficient computation of all steps and later indexing of a random step.
-
-    Args:
-        model: The CircuitGNN model to apply
-        graph: Initial graph state
-        num_steps: Number of steps to run
-        logits_original_shapes: Original shapes of logits for reconstruction
-        wires: Wire connection patterns
-        x_data: Input data
-        y_data: Target output data
-        loss_cfg: LossConfig object
-        layer_sizes: List of (nodes, group_size) tuples for each layer
-        data_fraction: Fraction of data to use for loss computation (default: 1.0)
-        scan_key: Random key for data sampling (required if data_fraction < 1.0)
-        gradient_checkpointing: If True, recompute model activations during backward pass
-            to save memory. Trades compute for memory - useful when num_steps is high.
-
-    Returns:
-        final_graph: The graph after all steps
-        all_graphs: List of graphs from each step (including initial)
-        all_losses: Array of losses from each step [num_steps+1]
-        all_aux: List of auxiliary data from each step
+    This function wraps the unified run_model_scan_with_loss for backward compatibility.
     """
-    from boolean_nca_cc.training.evaluation import get_loss_and_update_graph
+    import warnings
 
-    # Select a random fraction of the data
-    if data_fraction < 1.0:
-        random_indices = jax.random.randint(
-            key=scan_key,
-            shape=(int(x_data.shape[0] * data_fraction),),
-            minval=0,
-            maxval=x_data.shape[0],
-        )
-        x_batch = x_data[random_indices]
-        y_batch = y_data[random_indices]
-    else:
-        x_batch = x_data
-        y_batch = y_data
+    from boolean_nca_cc.training.evaluation import run_model_scan_with_loss
 
-    # Optionally wrap model call with gradient checkpointing (remat)
-    # This recomputes model activations during backward pass to save memory
-    # We use nnx.remat instead of jax.checkpoint to properly handle NNX modules
-    model_fn = nnx.remat(lambda g: model(g)) if gradient_checkpointing else model
+    warnings.warn(
+        "run_gnn_scan_with_loss is deprecated. "
+        "Use run_model_scan_with_loss from boolean_nca_cc.training.evaluation instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
-    def gnn_step_with_loss(carry, _):
-        current_graph = carry
-
-        # Apply GNN (potentially checkpointed)
-        model_updated_graph = model_fn(current_graph)
-
-        # Compute loss and update graph
-        final_graph, loss, current_logits, aux = get_loss_and_update_graph(
-            model_updated_graph,
-            logits_original_shapes,
-            wires,
-            x_batch,
-            y_batch,
-            loss_cfg,
-            layer_sizes,
-            update_perceiver_globals=False,
-        )
-
-        return final_graph, (final_graph, loss, current_logits, aux)
-
-    # Run scan
-    final_graph, step_outputs = jax.lax.scan(gnn_step_with_loss, graph, xs=None, length=num_steps)
-
-    return final_graph, step_outputs
+    return run_model_scan_with_loss(
+        model=model,
+        graph=graph,
+        num_steps=num_steps,
+        logits_original_shapes=logits_original_shapes,
+        wires=wires,
+        x_data=x_data,
+        y_data=y_data,
+        loss_cfg=loss_cfg,
+        layer_sizes=layer_sizes,
+        data_fraction=data_fraction,
+        scan_key=scan_key,
+        gradient_checkpointing=gradient_checkpointing,
+    )

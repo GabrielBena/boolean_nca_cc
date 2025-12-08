@@ -285,6 +285,8 @@ def _create_circuit_batch_with_pattern(
     return batch_wires, batch_logits, actual_batch_size
 
 
+# DEPRECATED: evaluate_circuits_in_chunks has been moved to evaluation.py
+# Import for backwards compatibility
 def evaluate_circuits_in_chunks(
     eval_fn,
     wires: list[jp.ndarray],
@@ -293,54 +295,18 @@ def evaluate_circuits_in_chunks(
     **eval_kwargs,
 ) -> dict:
     """
-    Evaluate circuits in chunks to handle cases where diversity exceeds target batch size.
+    DEPRECATED: Use evaluate_model_stepwise_batched with chunk_size parameter instead.
 
-    Args:
-        eval_fn: Evaluation function to apply to each chunk
-        wires: List of wire arrays for all circuits
-        logits: List of logit arrays for all circuits
-        target_chunk_size: Target size for each evaluation chunk
-        **eval_kwargs: Additional keyword arguments to pass to eval_fn
-
-    Returns:
-        Dictionary with averaged metrics across all chunks
+    This function is provided for backward compatibility and will be removed in a future version.
     """
-    total_circuits = wires[0].shape[0]
+    import warnings
 
-    if total_circuits <= target_chunk_size:
-        # No need to chunk, evaluate all at once
-        return eval_fn(batch_wires=wires, batch_logits=logits, **eval_kwargs)
+    from boolean_nca_cc.training.evaluation import evaluate_circuits_in_chunks as _eval_chunks
 
-    # Split into chunks and evaluate each
-    num_chunks = (total_circuits + target_chunk_size - 1) // target_chunk_size
-    chunk_results = []
-
-    for chunk_idx in range(num_chunks):
-        start_idx = chunk_idx * target_chunk_size
-        end_idx = min(start_idx + target_chunk_size, total_circuits)
-
-        # Extract chunk
-        chunk_wires = [w[start_idx:end_idx] for w in wires]
-        chunk_logits = [log[start_idx:end_idx] for log in logits]
-
-        # Evaluate chunk
-        chunk_result = eval_fn(batch_wires=chunk_wires, batch_logits=chunk_logits, **eval_kwargs)
-        chunk_results.append(chunk_result)
-
-    # Average results across chunks
-    # Assume all chunk results have the same structure
-    averaged_result = {}
-    for key in chunk_results[0]:
-        if isinstance(chunk_results[0][key], list):
-            # For step-wise metrics, average at each step
-            step_averages = []
-            for step_idx in range(len(chunk_results[0][key])):
-                step_values = [chunk[key][step_idx] for chunk in chunk_results]
-                step_averages.append(float(jp.mean(jp.array(step_values))))
-            averaged_result[key] = step_averages
-        else:
-            # For scalar metrics, simple average
-            values = [chunk[key] for chunk in chunk_results]
-            averaged_result[key] = float(jp.mean(jp.array(values)))
-
-    return averaged_result
+    warnings.warn(
+        "evaluate_circuits_in_chunks from eval_datasets is deprecated. "
+        "Use evaluate_model_stepwise_batched with chunk_size parameter from evaluation.py instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return _eval_chunks(eval_fn, wires, logits, target_chunk_size, **eval_kwargs)

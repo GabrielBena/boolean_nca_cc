@@ -226,10 +226,11 @@ def create_and_save_final_results(
     Args:
         cfg: Configuration object
         model_results: Results from model training
-        eval_results: Results from evaluation
+        eval_results: Results from evaluation (with final_metrics dict)
         layer_sizes: Circuit layer sizes
         output_dir: Directory to save results
         wandb_run: WandB run object (optional)
+        total_params: Total model parameters (optional)
 
     Returns:
         dict: Final results dictionary
@@ -254,139 +255,98 @@ def create_and_save_final_results(
         # Best model performance
         "best_metric": model_results.get("best_metric", None),
         "best_metric_value": model_results.get("best_metric_value", None),
+        # Circuit and model architecture
+        "input_bits": cfg.circuit.input_bits,
+        "output_bits": cfg.circuit.output_bits,
+        "num_layers": len(layer_sizes),
+        "total_nodes": sum(size[0] for size in layer_sizes),
+        "circuit_hidden_dim": cfg.model.circuit_hidden_dim,
+        "attention_dim": cfg.model.get("attention_dim", None),
+        "mlp_dim_multiplier": cfg.model.get("mlp_dim_multiplier", None),
+        "mlp_dim": cfg.model.get("mlp_dim", None),
+        "total_parameters": total_params,
+        "message_steps": cfg.training.n_message_steps,
+        "eval_target_batch_size_in": cfg.eval.batch_size_in,
+        "eval_target_batch_size_out": cfg.eval.batch_size_out,
+        "pool_size": cfg.pool.size,
+        "pool_initial_diversity": cfg.pool.initial_diversity,
     }
 
-    # Add unified evaluation metrics (IN-distribution and OUT-of-distribution)
+    # Add evaluation metrics from all scenarios (wiring x data)
     if eval_results:
-        # IN-distribution evaluation (matches training pattern)
-        final_in_metrics = eval_results.get("final_metrics_in", {})
-        if final_in_metrics is not None:
+        final_metrics = eval_results.get("final_metrics", {})
+
+        # Extract metrics for all evaluation scenarios
+        for full_key, metrics in final_metrics.items():
+            if metrics is None:
+                continue
+            # full_key is e.g. "in_test", "out_train", "damaged_in_test"
+            prefix = f"eval_{full_key}"
+            for metric_name in [
+                "final_loss",
+                "final_hard_loss",
+                "final_accuracy",
+                "final_hard_accuracy",
+            ]:
+                wandb_key = f"{prefix}/{metric_name}"
+                result_key = f"{full_key}_{metric_name}".replace("/", "_")
+                final_results[result_key] = metrics.get(wandb_key)
+
+        # Add datasets info
+        datasets_info = eval_results.get("datasets_info", {})
+        if datasets_info:
             final_results.update(
                 {
-                    "eval_in_final_loss": final_in_metrics.get("eval_in/final_loss", None),
-                    "eval_in_final_hard_loss": final_in_metrics.get(
-                        "eval_in/final_hard_loss", None
-                    ),
-                    "eval_in_final_accuracy": final_in_metrics.get("eval_in/final_accuracy", None),
-                    "eval_in_final_hard_accuracy": final_in_metrics.get(
-                        "eval_in/final_hard_accuracy", None
+                    "eval_in_actual_batch_size": datasets_info.get("in_actual_batch_size"),
+                    "eval_out_actual_batch_size": datasets_info.get("out_actual_batch_size"),
+                    "eval_in_used_chunking": datasets_info.get("in_used_chunking", False),
+                    "eval_out_used_chunking": datasets_info.get("out_used_chunking", False),
+                    "eval_training_wiring_mode": datasets_info.get("training_wiring_mode"),
+                    "eval_training_initial_diversity": datasets_info.get(
+                        "training_initial_diversity"
                     ),
                 }
             )
 
-        # OUT-of-distribution evaluation (always random)
-        final_out_metrics = eval_results.get("final_metrics_out", {})
-        if final_out_metrics is not None:
-            final_results.update(
-                {
-                    "eval_out_final_loss": final_out_metrics.get("eval_out/final_loss", None),
-                    "eval_out_final_hard_loss": final_out_metrics.get(
-                        "eval_out/final_hard_loss", None
-                    ),
-                    "eval_out_final_accuracy": final_out_metrics.get(
-                        "eval_out/final_accuracy", None
-                    ),
-                    "eval_out_final_hard_accuracy": final_out_metrics.get(
-                        "eval_out/final_hard_accuracy", None
-                    ),
-                }
-            )
-
-    # Circuit and model architecture info
-    final_results.update(
-        {
-            "input_bits": cfg.circuit.input_bits,
-            "output_bits": cfg.circuit.output_bits,
-            "num_layers": len(layer_sizes),
-            "total_nodes": sum(size[0] for size in layer_sizes),
-            "circuit_hidden_dim": cfg.model.circuit_hidden_dim,
-            "attention_dim": cfg.model.get("attention_dim", None),
-            "mlp_dim_multiplier": cfg.model.get("mlp_dim_multiplier", None),
-            "mlp_dim": cfg.model.get("mlp_dim", None),
-            "total_parameters": total_params,
-            "message_steps": cfg.training.n_message_steps,
-            "eval_target_batch_size_in": cfg.eval.batch_size_in,
-            "eval_target_batch_size_out": cfg.eval.batch_size_out,
-            "pool_size": cfg.pool.size,
-            "pool_initial_diversity": cfg.pool.initial_diversity,
-        }
-    )
-
-    # Add unified evaluation specific information if available
-    if eval_results:
-        # Check if datasets information is available (from UnifiedEvaluationDatasets)
-        eval_datasets_info = eval_results.get("datasets_info", {})
-        if eval_datasets_info:
-            final_results.update(
-                {
-                    "eval_in_actual_batch_size": eval_datasets_info.get(
-                        "in_actual_batch_size", None
-                    ),
-                    "eval_out_actual_batch_size": eval_datasets_info.get(
-                        "out_actual_batch_size", None
-                    ),
-                    "eval_in_used_chunking": eval_datasets_info.get("in_used_chunking", False),
-                    "eval_out_used_chunking": eval_datasets_info.get("out_used_chunking", False),
-                    "eval_training_wiring_mode": eval_datasets_info.get(
-                        "training_wiring_mode", None
-                    ),
-                    "eval_training_initial_diversity": eval_datasets_info.get(
-                        "training_initial_diversity", None
-                    ),
-                }
-            )
-
-    # Create pandas DataFrame
+    # Save to CSV
     results_df = pd.DataFrame([final_results])
-
-    # Save DataFrame to CSV
     results_csv_path = os.path.join(output_dir, "final_results.csv")
     results_df.to_csv(results_csv_path, index=False)
     log.info(f"Final results saved to: {results_csv_path}")
 
-    # Display the DataFrame
-    log.info("Final Results Summary:")
+    # Display summary
     pd.set_option("display.max_columns", None)
     pd.set_option("display.width", None)
-    log.info("\n" + str(results_df.T))  # Transpose for better readability
+    log.info("Final Results Summary:\n" + str(results_df.T))
 
-    # Log to wandb if enabled
+    # Log to wandb
     if cfg.wandb.enabled and wandb_run:
-        # Log the DataFrame as a table
         wandb.log({"final_results_table": wandb.Table(dataframe=results_df)})
-        # Also log individual final metrics for easy access
         wandb.log({f"final/{k}": v for k, v in final_results.items() if v is not None})
 
-    # Final log (traditional format for backward compatibility)
+    # Console summary
     log.info("Training complete. Final results:")
-    log.info(f"  Meta Loss: {model_results['losses'][-1]:.4f}")
-    log.info(f"  Meta Hard Loss: {model_results['hard_losses'][-1]:.4f}")
-    log.info(f"  Meta Accuracy: {model_results['accuracies'][-1]:.4f}")
-    log.info(f"  Meta Hard Accuracy: {model_results['hard_accuracies'][-1]:.4f}")
+    log.info(
+        f"  Meta: Loss={model_results['losses'][-1]:.4f}, "
+        f"Hard Acc={model_results['hard_accuracies'][-1]:.4f}"
+    )
 
     if eval_results:
-        final_in_metrics = eval_results.get("final_metrics_in", {})
-        if final_in_metrics:
-            log.info(
-                f"  Eval IN-distribution Final Loss: {final_in_metrics.get('eval_in/final_loss', 'N/A'):.4f}"
-            )
-            log.info(
-                f"  Eval IN-distribution Final Hard Accuracy: {final_in_metrics.get('eval_in/final_hard_accuracy', 'N/A'):.4f}"
-            )
+        final_metrics = eval_results.get("final_metrics", {})
+        for key in ["in_test", "out_test", "in_train", "out_train"]:
+            m = final_metrics.get(key)
+            if m:
+                prefix = f"eval_{key}"
+                desc = key.replace("_", " ").upper()
+                log.info(
+                    f"  {desc}: Loss={m.get(f'{prefix}/final_loss', 0):.4f}, "
+                    f"Hard Acc={m.get(f'{prefix}/final_hard_accuracy', 0):.4f}"
+                )
 
-        final_out_metrics = eval_results.get("final_metrics_out", {})
-        if final_out_metrics:
-            log.info(
-                f"  Eval OUT-of-distribution Final Loss: {final_out_metrics.get('eval_out/final_loss', 'N/A'):.4f}"
-            )
-            log.info(
-                f"  Eval OUT-of-distribution Final Hard Accuracy: {final_out_metrics.get('eval_out/final_hard_accuracy', 'N/A'):.4f}"
-            )
-
-    # Display best model performance if applicable
     if cfg.checkpoint.save_best and "best_metric_value" in model_results:
         log.info(
-            f"  Best {model_results.get('best_metric', 'metric')}: {model_results['best_metric_value']:.4f}"
+            f"  Best {model_results.get('best_metric', 'metric')}: "
+            f"{model_results['best_metric_value']:.4f}"
         )
 
     # Display early stopping and threshold information if applicable
