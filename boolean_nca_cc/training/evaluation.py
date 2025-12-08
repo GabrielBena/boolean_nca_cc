@@ -23,6 +23,7 @@ from boolean_nca_cc.circuits.train import (
     res2loss,
     binary_cross_entropy,
     compute_accuracy,
+    compute_full_map_accuracy,
 )
 from boolean_nca_cc.training.pool.structural_perturbation import (
     create_group_greedy_pattern,
@@ -39,6 +40,7 @@ class StepResult(NamedTuple):
     hard_loss: float
     accuracy: float
     hard_accuracy: float
+    full_map_accuracy: float  # Hard version only
     predictions: jp.ndarray
     hard_predictions: jp.ndarray
     logits: List[jp.ndarray]
@@ -72,6 +74,7 @@ def get_loss_from_wires_logits(logits, wires, x, y_target, loss_type: str):
 
     accuracy = compute_accuracy(pred, y_target)
     hard_accuracy = compute_accuracy(pred_hard, y_target)
+    full_map_accuracy = compute_full_map_accuracy(pred_hard, y_target)  # Only hard version
 
     return loss, (
         hard_loss,
@@ -79,6 +82,7 @@ def get_loss_from_wires_logits(logits, wires, x, y_target, loss_type: str):
         pred_hard,
         accuracy,
         hard_accuracy,
+        full_map_accuracy,
         res,
         hard_res,
     )
@@ -112,7 +116,7 @@ def get_loss_and_update_graph(
 
     Returns:
         Tuple of (updated_graph, loss, aux_data)
-        where aux_data contains (hard_loss, pred, pred_hard, accuracy, hard_accuracy, res, hard_res)
+        where aux_data contains (hard_loss, pred, pred_hard, accuracy, hard_accuracy, full_map_accuracy, res, hard_res)
     """
     # Extract updated logits from the graph
     current_logits = extract_logits_from_graph(graph, logits_original_shapes)
@@ -283,6 +287,7 @@ def evaluate_model_stepwise_generator(
             pred_hard,
             accuracy,
             hard_accuracy,
+            full_map_accuracy,
             res,
             hard_res,
         ) = aux
@@ -308,6 +313,7 @@ def evaluate_model_stepwise_generator(
             hard_loss=float(hard_loss),
             accuracy=float(accuracy),
             hard_accuracy=float(hard_accuracy),
+            full_map_accuracy=float(full_map_accuracy),
             predictions=pred,
             hard_predictions=pred_hard,
             logits=current_logits,
@@ -360,6 +366,7 @@ def evaluate_model_stepwise(
         "hard_loss": [],
         "soft_accuracy": [],
         "hard_accuracy": [],
+        "full_map_accuracy": [],
         "logits_mean": [],
     }
 
@@ -392,6 +399,7 @@ def evaluate_model_stepwise(
         step_metrics["hard_loss"].append(result.hard_loss)
         step_metrics["soft_accuracy"].append(result.accuracy)
         step_metrics["hard_accuracy"].append(result.hard_accuracy)
+        step_metrics["full_map_accuracy"].append(result.full_map_accuracy)
         step_metrics["logits_mean"].append(float(result.graph.nodes["logits"].mean()))
 
         if use_tqdm:
@@ -512,6 +520,7 @@ def evaluate_model_stepwise_batched(
         _,
         initial_accuracies,
         initial_hard_accuracies,
+        initial_full_map_accuracies,
         initial_res,
         _,
     ) = [aux_elem for aux_elem in initial_aux]
@@ -534,6 +543,7 @@ def evaluate_model_stepwise_batched(
         "hard_loss": [],
         "soft_accuracy": [],
         "hard_accuracy": [],
+        "full_map_accuracy": [],
         "logits_mean": [],
     }
 
@@ -543,6 +553,7 @@ def evaluate_model_stepwise_batched(
     step_metrics["hard_loss"].append(float(jp.mean(initial_hard_losses)))
     step_metrics["soft_accuracy"].append(float(jp.mean(initial_accuracies)))
     step_metrics["hard_accuracy"].append(float(jp.mean(initial_hard_accuracies)))
+    step_metrics["full_map_accuracy"].append(float(jp.mean(initial_full_map_accuracies)))
     step_metrics["logits_mean"].append(float(jp.mean(batch_graphs.nodes["logits"])))
     
 
@@ -1064,6 +1075,7 @@ def _evaluate_with_loop(
             _,
             current_accuracies,
             current_hard_accuracies,
+            current_full_map_accuracies,
             current_res,
             _,
         ) = [aux_elem for aux_elem in current_aux]
@@ -1093,6 +1105,7 @@ def _evaluate_with_loop(
         step_metrics["hard_loss"].append(float(jp.mean(current_hard_losses)))
         step_metrics["soft_accuracy"].append(float(jp.mean(current_accuracies)))
         step_metrics["hard_accuracy"].append(float(jp.mean(per_pattern_metrics["pattern_hard_accuracies"][-1])))
+        step_metrics["full_map_accuracy"].append(float(jp.mean(current_full_map_accuracies)))
         step_metrics["logits_mean"].append(
             float(jp.mean(updated_graphs.nodes["logits"]))
         )

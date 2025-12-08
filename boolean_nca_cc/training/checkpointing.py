@@ -915,7 +915,7 @@ def get_metric_value(
     Get metric value from the appropriate source.
 
     Args:
-        metric_name: Name of the metric ('loss', 'hard_loss', 'accuracy', 'hard_accuracy')
+        metric_name: Name of the metric ('loss', 'hard_loss', 'accuracy', 'hard_accuracy', 'full_map_accuracy')
         metric_source: Source of the metric ('training' or 'eval')
         training_metrics: Dictionary with training metrics
         eval_metrics: Dictionary with evaluation metrics (optional)
@@ -935,6 +935,7 @@ def get_metric_value(
             "hard_loss": "eval_ko_in/final_hard_loss",
             "accuracy": "eval_ko_in/final_accuracy",
             "hard_accuracy": "eval_ko_in/final_hard_accuracy",
+            "full_map_accuracy": "eval_ko_in/final_full_map_accuracy",
         }
 
         # Fallback map to OUT-of-distribution evaluation metrics
@@ -943,6 +944,7 @@ def get_metric_value(
             "hard_loss": "eval_ko_out/final_hard_loss",
             "accuracy": "eval_ko_out/final_accuracy",
             "hard_accuracy": "eval_ko_out/final_hard_accuracy",
+            "full_map_accuracy": "eval_ko_out/final_full_map_accuracy",
         }
 
         # Fallback map to no-damage evaluation metrics (for zero-damage training runs)
@@ -951,6 +953,7 @@ def get_metric_value(
             "hard_loss": "eval_no_damage/final_hard_loss",
             "accuracy": "eval_no_damage/final_accuracy",
             "hard_accuracy": "eval_no_damage/final_hard_accuracy",
+            "full_map_accuracy": "eval_no_damage/final_full_map_accuracy",
         }
 
         # Try IN-distribution metrics first, fallback to OUT-of-distribution, then no-damage
@@ -975,6 +978,7 @@ def get_metric_value(
             "hard_loss": "eval_ko_in/final_hard_loss",
             "accuracy": "eval_ko_in/final_accuracy",
             "hard_accuracy": "eval_ko_in/final_hard_accuracy",
+            "full_map_accuracy": "eval_ko_in/final_full_map_accuracy",
         }
         # Fallback to no-damage metrics if knockout metrics don't exist (e.g., when knockout_eval.enabled=false)
         eval_no_damage_key_map = {
@@ -982,6 +986,7 @@ def get_metric_value(
             "hard_loss": "eval_no_damage/final_hard_loss",
             "accuracy": "eval_no_damage/final_accuracy",
             "hard_accuracy": "eval_no_damage/final_hard_accuracy",
+            "full_map_accuracy": "eval_no_damage/final_full_map_accuracy",
         }
         primary_key = eval_key_map[metric_name]
         fallback_key = eval_no_damage_key_map[metric_name]
@@ -992,6 +997,23 @@ def get_metric_value(
             return eval_metrics[fallback_key]
         else:
             raise KeyError(f"Neither {primary_key} nor {fallback_key} found in evaluation metrics")
+    elif metric_source == "eval_ko_out":
+        if eval_metrics is None:
+            raise ValueError("Out-of-distribution knockout evaluation metrics not available for eval_ko_out source")
+        # Map to out-of-distribution knockout evaluation metric keys
+        eval_key_map = {
+            "loss": "eval_ko_out/final_loss",
+            "hard_loss": "eval_ko_out/final_hard_loss",
+            "accuracy": "eval_ko_out/final_accuracy",
+            "hard_accuracy": "eval_ko_out/final_hard_accuracy",
+            "full_map_accuracy": "eval_ko_out/final_full_map_accuracy",
+        }
+        primary_key = eval_key_map[metric_name]
+        
+        if primary_key in eval_metrics:
+            return eval_metrics[primary_key]
+        else:
+            raise KeyError(f"{primary_key} not found in evaluation metrics")
     elif metric_source == "eval_no_damage":
         if eval_metrics is None:
             raise ValueError("No-damage evaluation metrics not available for eval_no_damage source")
@@ -1001,6 +1023,7 @@ def get_metric_value(
             "hard_loss": "eval_no_damage/final_hard_loss",
             "accuracy": "eval_no_damage/final_accuracy",
             "hard_accuracy": "eval_no_damage/final_hard_accuracy",
+            "full_map_accuracy": "eval_no_damage/final_full_map_accuracy",
         }
         return eval_metrics[eval_key_map[metric_name]]
     else:
@@ -1196,23 +1219,29 @@ def track_and_save_best_models(
 
     # Add training metrics if available
     if training_metrics:
-        for metric in ["hard_accuracy", "accuracy", "hard_loss", "loss"]:
+        for metric in ["hard_accuracy", "accuracy", "hard_loss", "loss", "full_map_accuracy"]:
             if metric in training_metrics:
                 available_metrics.append(("training", metric, training_metrics[metric]))
 
     # Add evaluation metrics if available
     if eval_metrics:
         # In-distribution metrics
-        for metric in ["hard_accuracy", "accuracy", "hard_loss", "loss"]:
+        for metric in ["hard_accuracy", "accuracy", "hard_loss", "loss", "full_map_accuracy"]:
             eval_key = f"eval_ko_in/final_{metric}"
             if eval_key in eval_metrics:
                 available_metrics.append(("eval_ko_in", metric, eval_metrics[eval_key]))
 
         # Out-of-distribution metrics
-        for metric in ["hard_accuracy", "accuracy", "hard_loss", "loss"]:
+        for metric in ["hard_accuracy", "accuracy", "hard_loss", "loss", "full_map_accuracy"]:
             eval_key = f"eval_ko_out/final_{metric}"
             if eval_key in eval_metrics:
                 available_metrics.append(("eval_ko_out", metric, eval_metrics[eval_key]))
+
+        # No-damage metrics
+        for metric in ["hard_accuracy", "accuracy", "hard_loss", "loss", "full_map_accuracy"]:
+            eval_key = f"eval_no_damage/final_{metric}"
+            if eval_key in eval_metrics:
+                available_metrics.append(("eval_no_damage", metric, eval_metrics[eval_key]))
 
     # Filter metrics to track based on configuration
     if track_metrics is not None:

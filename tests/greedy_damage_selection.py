@@ -59,7 +59,7 @@ def _compute_hard_accuracy(logits, wires, x, y, loss_type: str) -> float:
 def _compute_all_metrics(logits, wires, x, y, loss_type: str):
     """Compute all metrics and return as a dictionary for diagnostic purposes."""
     loss, aux = get_loss_from_wires_logits(logits, wires, x, y, loss_type)
-    hard_loss, pred, pred_hard, accuracy, hard_accuracy, res, hard_res = aux
+    hard_loss, pred, pred_hard, accuracy, hard_accuracy, full_map_accuracy, res, hard_res = aux
     return {
         "loss": float(loss),
         "hard_loss": float(hard_loss),

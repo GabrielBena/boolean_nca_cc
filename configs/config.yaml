@@ -25,7 +25,7 @@ wandb:
 
 # Circuit configuration
 circuit:
-  task: "add"
+  task: "binary_multiply"
   input_bits: 8
   output_bits: 8
   arity: 4
@@ -146,20 +146,20 @@ logging:
 
 # Checkpoint configuration
 checkpoint:
-  enabled: false
+  enabled: true
   interval: 1031  # prime number 
   save_best: true  # Save best model based on metric
   best_metric: "hard_accuracy"  # Metric to track for best model
-  best_metric_source: "eval_ko_in"  # Source for best metric: "training", "eval" (auto-fallback), "eval_ko_in", or "eval_no_damage"
+  best_metric_source: "eval_no_damage"  # Source for best metric: "training", "eval" (auto-fallback), "eval_ko_in", "eval_ko_out", or "eval_no_damage"
   # "eval" will automatically use eval_no_damage when knockout_eval is disabled
   save_stable_states: false  # Save last stable state before NaN loss
 
 # Early stopping configuration
 early_stop:
-  enabled: false  # Enable early stopping based on accuracy threshold
+  enabled: true  # Enable early stopping based on accuracy threshold
   threshold: 1  # Accuracy threshold to trigger early stopping
   metric: "hard_accuracy"  # Metric to monitor: "loss", "hard_loss", "accuracy", "hard_accuracy"
-  source: "eval_no_damage"  # Source for early stopping metric: "training", "eval" (auto-fallback), "eval_ko_in", or "eval_no_damage"
+  source: "eval_no_damage"  # Source for early stopping metric: "training", "eval" (auto-fallback), "eval_ko_in", "eval_ko_out", or "eval_no_damage"
   # "eval" will automatically use eval_no_damage when knockout_eval is disabled
   patience: 2  # Number of evaluations above threshold before stopping (since eval runs every 1024 epochs)
   min_epochs: 3072  # Minimum epochs before early stopping can trigger

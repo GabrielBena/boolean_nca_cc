@@ -295,6 +295,7 @@ def run_knockout_periodic_evaluation(
             f"eval_ko_in{metric_suffix}/final_hard_loss": step_metrics_in["hard_loss"][-1],
             f"eval_ko_in{metric_suffix}/final_accuracy": step_metrics_in["soft_accuracy"][-1],
             f"eval_ko_in{metric_suffix}/final_hard_accuracy": step_metrics_in["hard_accuracy"][-1],
+            f"eval_ko_in{metric_suffix}/final_full_map_accuracy": step_metrics_in["full_map_accuracy"][-1],
             f"eval_ko_in{metric_suffix}/epoch": epoch,
         }
         
@@ -351,6 +352,7 @@ def run_knockout_periodic_evaluation(
             f"eval_ko_out{metric_suffix}/final_hard_loss": step_metrics_out["hard_loss"][-1],
             f"eval_ko_out{metric_suffix}/final_accuracy": step_metrics_out["soft_accuracy"][-1],
             f"eval_ko_out{metric_suffix}/final_hard_accuracy": step_metrics_out["hard_accuracy"][-1],
+            f"eval_ko_out{metric_suffix}/final_full_map_accuracy": step_metrics_out["full_map_accuracy"][-1],
             f"eval_ko_out{metric_suffix}/epoch": epoch,
         }
         
@@ -473,6 +475,7 @@ def run_knockout_periodic_evaluation(
                         f"eval_ko_in{metric_suffix}_steps/hard_loss": step_metrics_in["hard_loss"][step_idx],
                         f"eval_ko_in{metric_suffix}_steps/accuracy": step_metrics_in["soft_accuracy"][step_idx],
                         f"eval_ko_in{metric_suffix}_steps/hard_accuracy": step_metrics_in["hard_accuracy"][step_idx],
+                        f"eval_ko_in{metric_suffix}_steps/full_map_accuracy": step_metrics_in["full_map_accuracy"][step_idx],
                         f"eval_ko_in{metric_suffix}_steps/epoch": epoch,
                     }
                     # DEBUG: Add damage validation metrics if available
@@ -488,6 +491,7 @@ def run_knockout_periodic_evaluation(
                         f"eval_ko_out{metric_suffix}_steps/hard_loss": step_metrics_out["hard_loss"][step_idx],
                         f"eval_ko_out{metric_suffix}_steps/accuracy": step_metrics_out["soft_accuracy"][step_idx],
                         f"eval_ko_out{metric_suffix}_steps/hard_accuracy": step_metrics_out["hard_accuracy"][step_idx],
+                        f"eval_ko_out{metric_suffix}_steps/full_map_accuracy": step_metrics_out["full_map_accuracy"][step_idx],
                         f"eval_ko_out{metric_suffix}_steps/epoch": epoch,
                     }
                     # DEBUG: Add damage validation metrics if available
@@ -1161,7 +1165,7 @@ def train_model(
                 knockout_patterns=knockout_patterns,
             )
 
-            *_, hard_loss, _, _, accuracy, hard_accuracy, _, _ = aux
+            hard_loss, _, _, accuracy, hard_accuracy, full_map_accuracy, _, _ = aux
 
             # DEBUG BLOCK: PERMANENT DAMAGE VALIDATION (Vectorized)
             # Validate permanent damage after pool update (if enabled)
@@ -1471,18 +1475,24 @@ def train_model(
                 }
 
                 # Record metrics
-                losses.append(float(loss))
-                hard_losses.append(float(hard_loss))
-                accuracies.append(float(accuracy))
-                hard_accuracies.append(float(hard_accuracy))
+                # Ensure metrics are scalars (handle batched case)
+                loss_scalar = float(jp.mean(loss) if hasattr(loss, 'ndim') and loss.ndim > 0 else loss)
+                hard_loss_scalar = float(jp.mean(hard_loss) if hasattr(hard_loss, 'ndim') and hard_loss.ndim > 0 else hard_loss)
+                accuracy_scalar = float(jp.mean(accuracy) if hasattr(accuracy, 'ndim') and accuracy.ndim > 0 else accuracy)
+                hard_accuracy_scalar = float(jp.mean(hard_accuracy) if hasattr(hard_accuracy, 'ndim') and hard_accuracy.ndim > 0 else hard_accuracy)
+                
+                losses.append(loss_scalar)
+                hard_losses.append(hard_loss_scalar)
+                accuracies.append(accuracy_scalar)
+                hard_accuracies.append(hard_accuracy_scalar)
                 reset_steps.append(float(avg_steps_reset))
 
                 # Prepare training metrics for best model tracking
                 training_metrics = {
-                    "loss": float(loss),
-                    "hard_loss": float(hard_loss),
-                    "accuracy": float(accuracy),
-                    "hard_accuracy": float(hard_accuracy),
+                    "loss": loss_scalar,
+                    "hard_loss": hard_loss_scalar,
+                    "accuracy": accuracy_scalar,
+                    "hard_accuracy": hard_accuracy_scalar,
                 }
 
                 # Initialize evaluation metrics as None (will be set if periodic eval runs)
@@ -1711,6 +1721,7 @@ def train_model(
                             f"eval_no_damage{metric_suffix}/final_hard_loss": step_metrics["hard_loss"][-1],
                             f"eval_no_damage{metric_suffix}/final_accuracy": step_metrics["soft_accuracy"][-1],
                             f"eval_no_damage{metric_suffix}/final_hard_accuracy": step_metrics["hard_accuracy"][-1],
+                            f"eval_no_damage{metric_suffix}/final_full_map_accuracy": step_metrics["full_map_accuracy"][-1],
                             f"eval_no_damage{metric_suffix}/epoch": epoch,
                         }
                         
@@ -1729,6 +1740,7 @@ def train_model(
                                     f"eval_no_damage{metric_suffix}_steps/hard_loss": step_metrics["hard_loss"][step_idx],
                                     f"eval_no_damage{metric_suffix}_steps/accuracy": step_metrics["soft_accuracy"][step_idx],
                                     f"eval_no_damage{metric_suffix}_steps/hard_accuracy": step_metrics["hard_accuracy"][step_idx],
+                                    f"eval_no_damage{metric_suffix}_steps/full_map_accuracy": step_metrics["full_map_accuracy"][step_idx],
                                     f"eval_no_damage{metric_suffix}_steps/epoch": epoch,
                                 })
                         
@@ -1775,7 +1787,7 @@ def train_model(
                             training_metrics,
                             current_eval_metrics,
                         )
-                    elif (best_metric_source == "eval" or best_metric_source == "eval_ko_in") and current_eval_metrics is None:
+                    elif (best_metric_source == "eval" or best_metric_source == "eval_ko_in" or best_metric_source == "eval_no_damage") and current_eval_metrics is None:
                         # Evaluation is enabled but hasn't run yet this epoch, skip best model check
                         current_metric_value = None
                     else:

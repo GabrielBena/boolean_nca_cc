@@ -96,6 +96,32 @@ def compute_accuracy(y_pred, y_true):
     return accuracy
 
 
+@jax.jit
+def compute_full_map_accuracy(y_pred, y_true):
+    """
+    Compute the full-map accuracy: proportion of samples where ALL bits are correct.
+    
+    This is stricter than regular accuracy which measures bit-wise correctness.
+    A sample is considered correct only if every bit matches exactly.
+    
+    Args:
+        y_pred: Predicted outputs (probabilities in [0,1]), shape [n_samples, n_bits]
+        y_true: Target outputs (typically 0 or 1), shape [n_samples, n_bits]
+    
+    Returns:
+        Full-map accuracy value (scalar, between 0 and 1)
+    """
+    # Round predictions to nearest binary value
+    y_pred_rounded = jp.round(y_pred)
+    # Check element-wise equality for each sample
+    correct_bits = jp.equal(y_pred_rounded, y_true)  # Shape: [n_samples, n_bits]
+    # Check if ALL bits are correct for each sample (reduce along bit dimension)
+    fully_correct_samples = jp.all(correct_bits, axis=1)  # Shape: [n_samples]
+    # Compute proportion of fully correct samples
+    full_map_accuracy = jp.mean(fully_correct_samples)
+    return full_map_accuracy
+
+
 # Define loss functions for both types (L4 and BCE)
 def loss_f_l4(logits, wires, x, y0, gate_mask=None):
     """L4 loss function variant (for JIT compilation)"""

@@ -106,7 +106,7 @@ def test_preconfigure(cfg: DictConfig) -> None:
         )
         
         # Extract metrics from aux tuple
-        hard_loss, pred, pred_hard, accuracy, hard_accuracy, res, hard_res = aux
+        hard_loss, pred, pred_hard, accuracy, hard_accuracy, full_map_accuracy, res, hard_res = aux
         
         print("=" * 40)
         print("RESULTS:")
