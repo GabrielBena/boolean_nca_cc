@@ -12,7 +12,6 @@ Key evaluation functions:
 from boolean_nca_cc.training.checkpointing import configure_notebook_logging
 from boolean_nca_cc.training.evaluation import (
     StepResult,
-    evaluate_circuits_in_chunks,  # Deprecated but kept for backward compat
     evaluate_model_stepwise,
     evaluate_model_stepwise_batched,
     evaluate_model_stepwise_generator,

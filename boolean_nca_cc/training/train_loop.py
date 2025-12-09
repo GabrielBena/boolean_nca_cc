@@ -709,12 +709,7 @@ def run_unified_periodic_evaluation(
 
 def train_model(
     # Data parameters
-    x_train: jp.ndarray,
-    y_train: jp.ndarray,
-    x_test: jp.ndarray,
-    y_test: jp.ndarray,
-    x_total: jp.ndarray,
-    y_total: jp.ndarray,
+    data_dict: dict[str, jp.ndarray],
     data_fraction: float = 1.0,
     # Model architecture parameters
     layer_sizes: list[tuple[int, int]] | None = None,
@@ -820,10 +815,13 @@ def train_model(
 
     Args:
         layer_sizes: List of tuples (nodes, group_size) for each layer
-        x_train: Input data for training [num_train, input_bits]
-        y_train: Target output data [num_train, output_bits]
-        x_test: Input data for testing [num_test, input_bits]
-        y_test: Target output data [num_test, output_bits]
+        data_dict: Dictionary containing training and testing data
+            "x_train": Input data for training [num_train, input_bits]
+            "y_train": Target output data [num_train, output_bits]
+            "x_test": Input data for testing [num_test, input_bits]
+            "y_test": Target output data [num_test, output_bits]
+            "x_total": Input data for total [num_total, input_bits]
+            "y_total": Target output data [num_total, output_bits]
         data_fraction: Fraction of data to use for training
         arity: Number of inputs per gate
         circuit_hidden_dim: Dimension of hidden features
@@ -898,6 +896,9 @@ def train_model(
         loss_cfg = LOSS_L4
     elif isinstance(loss_cfg, dict):
         loss_cfg = LossConfig.from_dict(loss_cfg)
+
+    # Get data
+    x_train, y_train = data_dict["x_train"], data_dict["y_train"]
 
     # Initialize random key
     rng = jax.random.PRNGKey(key)
@@ -1613,14 +1614,7 @@ def train_model(
                     datasets=current_datasets,
                     pool=circuit_pool,
                     # Data
-                    data_dict={
-                        "x_train": x_train,
-                        "y_train": y_train,
-                        "x_test": x_test,
-                        "y_test": y_test,
-                        "x_total": x_total,
-                        "y_total": y_total,
-                    },
+                    data_dict=data_dict,
                     input_n=input_n,
                     arity=arity,
                     circuit_hidden_dim=circuit_hidden_dim,
