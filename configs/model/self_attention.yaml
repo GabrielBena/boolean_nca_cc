@@ -15,5 +15,5 @@ dropout_rate: 0.0
 re_zero_attn: false
 
 # Self-attention (among gates)
-num_self_attn_layers: 1
+num_self_attn_layers: 3
 use_attention_mask: true

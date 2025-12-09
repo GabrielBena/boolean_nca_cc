@@ -936,7 +936,9 @@ def main(cfg: DictConfig) -> None:
         # Wiring mode parameters
         wiring_mode=cfg.training.wiring_mode,
         meta_batch_size=cfg.training.meta_batch_size,
-        batch_chunk_size=cfg.training.batch_chunk_size,
+        # Multi-GPU data parallelism
+        multi_gpu_enabled=cfg.training.multi_gpu.enabled,
+        multi_gpu_num_devices=cfg.training.multi_gpu.num_devices,
         wiring_fixed_key=jax.random.PRNGKey(cfg.test_seed),
         # Pool parameters
         pool_size=cfg.pool.size,

@@ -20,7 +20,6 @@ from boolean_nca_cc.models.attention.base import (
     create_attention_mask,
     extract_node_features,
 )
-from boolean_nca_cc.utils.graph_builder import GraphGlobals
 
 
 class CircuitSelfAttention(nnx.Module):
