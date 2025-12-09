@@ -107,14 +107,29 @@ def _log_final_wandb_metrics(wandb_run, results: dict, epochs: int) -> None:
 
 
 def _log_pool_scatter(pool, epoch, wandb_run):
-    """Log pool scatterplot to wandb."""
+    """Log pool scatterplots to wandb (loss vs steps, loss vs damage)."""
     if wandb_run is None:
         return
 
-    all_loss, all_steps = pool.graphs.globals.loss, pool.graphs.globals.update_steps
+    all_loss = pool.graphs.globals.loss
+    all_steps = pool.graphs.globals.update_steps
+
+    # Loss vs Steps scatter
     data = list(zip(all_steps, all_loss, strict=False))
     table = wandb.Table(data=data, columns=["steps", "loss"])
-    wandb_run.log({"pool/scatter": wandb.plot.scatter(table, "steps", "loss")})
+    wandb_run.log({"pool/scatter_steps_vs_loss": wandb.plot.scatter(table, "steps", "loss")})
+
+    # Loss vs Faulty Gates scatter (if damage tracking available)
+    if pool.damage_count is not None:
+        damage_data = list(zip(pool.damage_count, all_loss, strict=False))
+        damage_table = wandb.Table(data=damage_data, columns=["faulty_gates", "loss"])
+        wandb_run.log(
+            {
+                "pool/scatter_damage_vs_loss": wandb.plot.scatter(
+                    damage_table, "faulty_gates", "loss"
+                )
+            }
+        )
 
 
 def _create_visualization_from_results(
@@ -175,7 +190,6 @@ def _create_visualization_from_results(
 
 def _create_single_circuit_visualization(
     wires_batch,
-    logits_batch,
     x_data,
     y_data,
     eval_type="eval_in",
@@ -261,8 +275,7 @@ def run_unified_periodic_evaluation(
     model,
     datasets: UnifiedEvaluationDatasets,
     pool,
-    x_data,
-    y_data,
+    data_dict: dict[str, jp.ndarray],
     input_n,
     arity,
     circuit_hidden_dim,
@@ -280,13 +293,10 @@ def run_unified_periodic_evaluation(
     optimizer=None,
     training_metrics: dict | None = None,
     track_metrics: list[str] | None = None,
-    x_plot: jp.ndarray | None = None,
-    y_plot: jp.ndarray | None = None,
-    # Train/test split for proper meta-learning evaluation
-    # Models like Perceiver condition on this data during optimization
-    x_train: jp.ndarray | None = None,
-    y_train: jp.ndarray | None = None,
-    # Damage parameters
+    # Probabilistic damage (for training-consistent evaluation)
+    p_fault: float | None = None,
+    faulty_value: float = -10.0,
+    # Discrete damage (for visualization with fixed steps)
     damage_steps=None,
     knockout_per_damage_step=1,
     damage_key=jax.random.PRNGKey(42),
@@ -299,12 +309,15 @@ def run_unified_periodic_evaluation(
     - eval_in_train, eval_in_test: IN-distribution circuits on train/test data
     - eval_out_train, eval_out_test: OUT-distribution circuits on train/test data
 
+    **Damage Modes:**
+    - Main evaluation uses p_fault (probabilistic) to match training conditions
+    - Visualization uses damage_steps (discrete) for clean, fixed damage markers
+
     Args:
         model: The model to evaluate
         datasets: UnifiedEvaluationDatasets object containing IN and OUT distribution circuits
         pool: GraphPool for logging scatter plot
-        x_data: Test input data (used as primary evaluation data)
-        y_data: Test target data
+        data_dict: Dictionary containing test input and target data
         input_n: Number of input nodes
         arity: Arity of gates
         circuit_hidden_dim: Hidden dimension
@@ -321,10 +334,11 @@ def run_unified_periodic_evaluation(
         optimizer: Optimizer to save with checkpoints (optional)
         training_metrics: Training metrics dict for tracking (optional)
         track_metrics: List of specific metrics to track and save (optional)
-        x_plot: Data for visualization (defaults to x_data if None)
-        y_plot: Target for visualization (defaults to y_data if None)
-        x_train: Training input data (if provided, runs separate train evaluation)
-        y_train: Training target data
+        p_fault: Per-gate-per-step failure probability for training-consistent evaluation
+        faulty_value: Value to set for failed gate logits
+        damage_steps: Fixed damage steps for visualization (discrete mode)
+        knockout_per_damage_step: Gates to knock out at each discrete damage step
+        damage_key: Random key for damage
 
     Returns:
         Dictionary with evaluation metrics from all evaluation scenarios
@@ -351,9 +365,17 @@ def run_unified_periodic_evaluation(
 
         # Define data scenarios: (suffix, x, y, description)
         # For meta-learning: models condition on data during optimization, so train/test must be separate
-        data_scenarios = [("test", x_data, y_data)]
-        if x_train is not None and y_train is not None:
-            data_scenarios.append(("train", x_train, y_train))
+        data_scenarios = [("test", data_dict["x_test"], data_dict["y_test"])]
+        if data_dict["x_train"] is not None and data_dict["y_train"] is not None:
+            data_scenarios.append(("train", data_dict["x_train"], data_dict["y_train"]))
+
+        mid_point = data_dict["x_total"][:].shape[0] // 2
+        x_plot = data_dict["x_total"][
+            min(mid_point - 128, 0) : min(mid_point + 128, data_dict["x_total"].shape[0])
+        ]
+        y_plot = data_dict["y_total"][
+            min(mid_point - 128, 0) : min(mid_point + 128, data_dict["y_total"].shape[0])
+        ]
 
         # Results storage: step_metrics[key] where key is e.g. "in_test", "out_train"
         step_metrics = {}
@@ -361,25 +383,19 @@ def run_unified_periodic_evaluation(
 
         # Helper to run evaluation and extract final metrics
         def run_eval(
-            wiring_key,
-            data_suffix,
-            wires,
-            logits,
-            batch_size,
-            x,
-            y,
-            wiring_desc,
-            with_damage=False,
+            wiring_key, data_suffix, wires, logits, batch_size, x, y, wiring_desc, with_damage=False
         ):
             if wires is None:
                 return None, None
 
-            # Build full key: e.g., "in_test", "out_train", "damaged_in_test"
-            full_key = f"{wiring_key}_{data_suffix}"
-            if with_damage:
-                full_key = f"damaged_{full_key}"
-
+            # Build full key: e.g., "in_test", "damaged_in_test"
+            full_key = (
+                f"damaged_{wiring_key}_{data_suffix}"
+                if with_damage
+                else f"{wiring_key}_{data_suffix}"
+            )
             damage_suffix = "DAMAGED " if with_damage else ""
+
             log.info(
                 f"Running {damage_suffix}{wiring_desc} ({data_suffix}) evaluation ({batch_size} circuits)..."
             )
@@ -398,11 +414,11 @@ def run_unified_periodic_evaluation(
                 n_message_steps=n_message_steps,
                 loss_cfg=loss_cfg,
                 layer_sizes=layer_sizes,
-                chunk_size=datasets.target_batch_size,
-                damage_steps=damage_steps if with_damage else None,
-                knockout_per_damage_step=knockout_per_damage_step if with_damage else 1,
-                damage_key=damage_key if with_damage else None,
-                return_first_circuit_details=True,
+                # Probabilistic damage for training-consistent metrics
+                p_fault=p_fault if with_damage else None,
+                faulty_value=faulty_value,
+                # Only return details for undamaged eval (used for viz)
+                return_first_circuit_details=not with_damage,
             )
 
             prefix = f"eval_{full_key}"
@@ -423,18 +439,11 @@ def run_unified_periodic_evaluation(
             for data_suffix, x, y in data_scenarios:
                 full_key = f"{wiring_key}_{data_suffix}"
                 step_metrics[full_key], final_metrics[full_key] = run_eval(
-                    wiring_key,
-                    data_suffix,
-                    wires,
-                    logits,
-                    batch_size,
-                    x,
-                    y,
-                    wiring_desc,
+                    wiring_key, data_suffix, wires, logits, batch_size, x, y, wiring_desc
                 )
 
-        # Run damaged evaluations if damage_steps is specified
-        if damage_steps is not None:
+        # Run damaged evaluations (uses p_fault for training-consistent metrics)
+        if p_fault is not None:
             for wiring_key, wires, logits, batch_size, wiring_desc in wiring_scenarios:
                 if wires is None:
                     continue
@@ -471,7 +480,8 @@ def run_unified_periodic_evaluation(
                 _log_pool_scatter(pool, epoch, wandb_run)
 
             # Create and log circuit visualizations
-            # Only create visualizations for test data (primary evaluation)
+            # Main plots use precomputed results (with p_fault, showing training conditions)
+            # Damaged plots need a SEPARATE clean run with fixed damage_steps (no p_fault)
             try:
                 import matplotlib.pyplot as plt
 
@@ -479,31 +489,56 @@ def run_unified_periodic_evaluation(
                     if wires is None:
                         continue
 
-                    # Use train and test data for visualizations
-                    for data_suffix, _, _ in data_scenarios:
+                    # Only visualize test data (cleaner logs)
+                    for data_suffix, x, y in data_scenarios:
+                        # if data_suffix != "test":
+                        #     continue
+
                         full_key = f"{wiring_key}_{data_suffix}"
                         if step_metrics.get(full_key) is None:
                             continue
 
-                        # Get pre-computed damage results if available
-                        damage_results = None
-                        damaged_metrics_key = f"damaged_{full_key}"  # Key in step_metrics dict
-                        damaged_wandb_prefix = f"eval_damaged_{full_key}"  # Wandb logging prefix
-                        if step_metrics.get(damaged_metrics_key) is not None:
-                            damage_results = step_metrics[damaged_metrics_key].get(
-                                "first_circuit_results"
+                        # Use precomputed results for main visualization
+                        # (these include p_fault effects, showing true training conditions)
+                        main_results = step_metrics[full_key].get("first_circuit_results")
+
+                        # For damaged visualization, run a separate clean evaluation
+                        # with fixed damage_steps (no p_fault) for nice predictable plots
+                        viz_damage_results = None
+                        damaged_wandb_prefix = f"eval_damaged_{full_key}"
+                        if damage_steps is not None:
+                            viz_wires = [w[:1] for w in wires]  # Just first circuit
+                            viz_logits = [log[:1] for log in logits]
+
+                            viz_damage_result = evaluate_model_stepwise_batched(
+                                model=model,
+                                batch_wires=viz_wires,
+                                batch_logits=viz_logits,
+                                x_data=x,
+                                y_data=y,
+                                input_n=input_n,
+                                arity=arity,
+                                circuit_hidden_dim=circuit_hidden_dim,
+                                n_message_steps=n_message_steps,
+                                loss_cfg=loss_cfg,
+                                layer_sizes=layer_sizes,
+                                damage_steps=damage_steps,
+                                knockout_per_damage_step=knockout_per_damage_step,
+                                damage_key=damage_key,
+                                p_fault=None,  # No probabilistic damage for viz
+                                return_first_circuit_details=True,
                             )
+                            viz_damage_results = viz_damage_result.get("first_circuit_results", [])
 
                         viz = _create_single_circuit_visualization(
                             wires_batch=wires,
-                            logits_batch=logits,
-                            x_data=x_plot if x_plot is not None else x_data,
-                            y_data=y_plot if y_plot is not None else y_data,
+                            x_data=x_plot,
+                            y_data=y_plot,
                             eval_type=f"eval_{full_key}",
                             circuit_idx=0,
                             log_stepwise=log_stepwise,
-                            precomputed_results=step_metrics[full_key].get("first_circuit_results"),
-                            precomputed_damage_results=damage_results,
+                            precomputed_results=main_results,
+                            precomputed_damage_results=viz_damage_results,
                             damage_steps=damage_steps,
                         )
 
@@ -765,6 +800,10 @@ def train_model(
     track_metrics: list[str] | None = None,
     # Damage parameters for resilience testing
     damage_enabled: bool = False,
+    damage_mode: str = "probabilistic",  # "probabilistic" or "discrete"
+    # Probabilistic damage (applied during scan at every step)
+    p_fault: float | None = None,  # Per-gate-per-step failure probability
+    # Discrete damage (applied between epochs on pool)
     damage_interval: int | None = None,  # Epochs between damage applications
     damage_fraction: float = 0.1,  # Fraction of pool to damage each interval
     knockouts_per_event: int = 1,  # Gates to knock out per damage event
@@ -843,9 +882,11 @@ def train_model(
                       ["eval_in_hard_accuracy", "eval_out_hard_accuracy"]). If None,
                       tracks all available metrics during evaluation.
         damage_enabled: Whether to enable gate damage during training
-        damage_interval: Epochs between damage applications
-        damage_fraction: Fraction of pool to damage each interval
-        knockouts_per_event: Number of gates to knock out per damage event
+        damage_mode: Damage mode - "probabilistic" (per-step, during scan) or "discrete" (between epochs)
+        p_fault: Per-gate-per-step failure probability for probabilistic mode (None = use auto-computed)
+        damage_interval: Epochs between damage applications (discrete mode)
+        damage_fraction: Fraction of pool to damage each interval (discrete mode)
+        knockouts_per_event: Number of gates to knock out per damage event (discrete mode)
         max_damage_per_circuit: Maximum knockouts per circuit (None = no limit)
         faulty_logit_value: Value for knocked-out gate logits (large negative)
         do_check_gradients: Whether to check gradients for zero values
@@ -985,6 +1026,9 @@ def train_model(
         loss_key: jax.random.PRNGKey,
         epoch: int,
         data_fraction: float = 1.0,
+        # Probabilistic damage parameters
+        p_fault: float | None = None,
+        faulty_value: float = -10.0,
     ):
         """
         Core loss and gradient computation logic.
@@ -1005,6 +1049,8 @@ def train_model(
             loss_key: Random key for loss computation
             epoch: Current epoch (used for beta loss step scheduling)
             data_fraction: Fraction of data to use for loss computation
+            p_fault: Per-gate-per-step failure probability (None = disabled)
+            faulty_value: Value to set for failed gate logits
 
         Returns:
             Tuple of (loss, aux, updated_graphs, updated_logits, loss_steps, grads)
@@ -1048,6 +1094,9 @@ def train_model(
                 data_fraction=data_fraction,
                 scan_key=scan_key,
                 gradient_checkpointing=gradient_checkpointing,
+                # Probabilistic damage during training
+                p_fault=p_fault,
+                faulty_value=faulty_value,
             )
 
             loss_step = get_loss_step(loss_key)
@@ -1142,6 +1191,8 @@ def train_model(
             "n_message_steps",
             "loss_cfg",
             "data_fraction",
+            "p_fault",
+            "faulty_value",
         ),
     )(_compute_loss_and_gradients)
 
@@ -1164,6 +1215,9 @@ def train_model(
         loss_key: jax.random.PRNGKey,
         epoch: int,
         data_fraction: float = 1.0,
+        # Probabilistic damage parameters
+        p_fault: float | None = None,
+        faulty_value: float = -10.0,
     ):
         """
         Single training step using graphs from the pool.
@@ -1185,6 +1239,8 @@ def train_model(
             loss_key: Random key for loss computation
             epoch: Current epoch
             data_fraction: Fraction of data to use for loss computation
+            p_fault: Per-gate-per-step failure probability (None = disabled)
+            faulty_value: Value to set for failed gate logits
 
         Returns:
             Tuple of (loss, (aux, updated_pool, loss_steps))
@@ -1204,6 +1260,8 @@ def train_model(
             loss_key=loss_key,
             epoch=epoch,
             data_fraction=data_fraction,
+            p_fault=p_fault,
+            faulty_value=faulty_value,
         )
 
         if do_check_gradients:
@@ -1211,8 +1269,16 @@ def train_model(
         # Update GNN parameters
         optimizer.update(model, grads)
 
-        # Update pool with the updated graphs and logits (wires stay the same)
-        updated_pool = pool.update(idxs, updated_graphs, batch_of_logits=updated_logits)
+        # Extract gate_masks from updated graphs (tracks probabilistic damage)
+        updated_gate_masks = updated_graphs.nodes["gate_knockout_mask"]
+
+        # Update pool with the updated graphs, logits, and gate_masks
+        updated_pool = pool.update(
+            idxs,
+            updated_graphs,
+            batch_of_logits=updated_logits,
+            batch_of_gate_masks=updated_gate_masks,
+        )
 
         return loss, (aux, updated_pool, loss_steps)
 
@@ -1223,6 +1289,8 @@ def train_model(
             "n_message_steps",
             "loss_cfg",
             "data_fraction",
+            "p_fault",
+            "faulty_value",
         ),
     )(_pool_train_step)
 
@@ -1319,6 +1387,9 @@ def train_model(
                 loss_key=loss_key,
                 epoch=epoch,
                 data_fraction=data_fraction,
+                # Probabilistic damage during training
+                p_fault=p_fault,
+                faulty_value=faulty_logit_value,
             )
 
             hard_loss = aux["hard_loss"]
@@ -1382,9 +1453,11 @@ def train_model(
                 last_reset_epoch = epoch
                 diversity = circuit_pool.get_wiring_diversity(layer_sizes)
 
-            # Apply damage to ongoing optimizations if enabled
+            # Apply damage to ongoing optimizations if enabled (DISCRETE MODE ONLY)
+            # In probabilistic mode, damage happens during the scan, so we skip pool-level damage
             if (
                 damage_enabled
+                and damage_mode == "discrete"
                 and damage_interval is not None
                 and should_reset_pool(epoch, damage_interval, last_damage_epoch)
             ):
@@ -1407,7 +1480,9 @@ def train_model(
                 )
 
                 last_damage_epoch = epoch
-                avg_damage_count = circuit_pool.get_average_damage_count()
+
+            # Track average damage count (works for both modes - reads from gate_knockout_mask)
+            avg_damage_count = circuit_pool.get_average_damage_count()
 
             # Record metrics
             losses.append(float(loss))
@@ -1516,7 +1591,6 @@ def train_model(
                 and epoch % periodic_eval_interval == 0
             ):
                 # Run enhanced evaluations: fixed seed, pool sample (if diversity > 1), and OOD
-                rng, eval_key = jax.random.split(rng)
 
                 # Use the same datasets created during initialization
                 # The pool evaluation circuits are recreated with the same logic as training
@@ -1534,21 +1608,19 @@ def train_model(
                     damage_steps = None
                     damage_key = None
 
-                mid_point = x_total.shape[0] // 2
-                x_plot = x_total[min(mid_point - 128, 0) : min(mid_point + 128, x_total.shape[0])]
-                y_plot = y_total[min(mid_point - 128, 0) : min(mid_point + 128, y_total.shape[0])]
-
                 eval_results = run_unified_periodic_evaluation(
                     model=model,
                     datasets=current_datasets,
                     pool=circuit_pool,
                     # Data
-                    x_train=x_train,
-                    y_train=y_train,
-                    x_data=x_test,
-                    y_data=y_test,
-                    x_plot=x_plot,
-                    y_plot=y_plot,
+                    data_dict={
+                        "x_train": x_train,
+                        "y_train": y_train,
+                        "x_test": x_test,
+                        "y_test": y_test,
+                        "x_total": x_total,
+                        "y_total": y_total,
+                    },
                     input_n=input_n,
                     arity=arity,
                     circuit_hidden_dim=circuit_hidden_dim,
@@ -1566,7 +1638,10 @@ def train_model(
                     optimizer=optimizer,
                     training_metrics=training_metrics,
                     track_metrics=track_metrics,
-                    # Damage parameters
+                    # Probabilistic damage (training-consistent evaluation)
+                    p_fault=p_fault,
+                    faulty_value=faulty_logit_value,
+                    # Discrete damage (for visualization)
                     damage_steps=damage_steps,
                     knockout_per_damage_step=knockouts_per_event,
                     damage_key=damage_key,

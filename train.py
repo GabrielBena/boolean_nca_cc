@@ -12,15 +12,17 @@ import os
 # To run on CPU only, set the below environment variable before JAX import.
 # You can set this via an environment variable or command line argument:
 #   $ JAX_PLATFORM_NAME=cpu python train.py
-# Or uncomment the following line to force CPU from script:
+
+# Or uncomment the following line to force CPU from script and create 8 virtual devices:
 # os.environ["JAX_PLATFORM_NAME"] = "cpu"
+# os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
 
 # Configure JAX/XLA memory allocation BEFORE importing JAX
 # Use "platform" allocator - slower but actually releases memory after pool resets
 # The default BFC allocator is faster but pools memory aggressively, causing OOM at pool resets
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
-os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
+# os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
+# os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
 
 
 import logging
@@ -647,6 +649,74 @@ def process_damage_configuration(cfg, expected_lifetime_epochs=None):
     return cfg
 
 
+def process_probabilistic_damage_configuration(cfg, layer_sizes):
+    """
+    Process probabilistic damage configuration to compute p_fault.
+
+    Uses the formula from compute_p_fault_from_expected:
+        p_fault = 1 - (1 - k/n)^(1/L)
+
+    Where:
+        k = expected_faulty_gates_at_reset
+        n = number of eligible gates (hidden layers)
+        L = expected circuit lifetime in steps (pool.expected_updates * n_message_steps)
+
+    Args:
+        cfg: Configuration object with damage and pool settings
+        layer_sizes: List of (gate_n, group_size) tuples for the circuit
+
+    Returns:
+        Computed p_fault value, or None if damage is disabled or mode is discrete
+    """
+    from boolean_nca_cc.training.pool.structural_perturbation import (
+        compute_p_fault_from_expected,
+        count_eligible_gates,
+    )
+
+    # Skip if damage disabled or mode is discrete
+    if not cfg.damage.enabled:
+        log.info("Damage system disabled, p_fault = None")
+        return None
+
+    damage_mode = cfg.damage.get("mode", "probabilistic")
+    if damage_mode != "probabilistic":
+        log.info(f"Damage mode is '{damage_mode}', not computing p_fault")
+        return None
+
+    # If p_fault is explicitly set, use it
+    if cfg.damage.get("p_fault") is not None:
+        p_fault = float(cfg.damage.p_fault)
+        log.info(f"Using explicit p_fault = {p_fault:.2e}")
+        return p_fault
+
+    # Auto-compute p_fault from expected_faulty_gates_at_reset
+    expected_faulty = cfg.damage.get("expected_faulty_gates_at_reset", 4)
+    if expected_faulty is None or expected_faulty <= 0:
+        log.info("expected_faulty_gates_at_reset not set or <= 0, p_fault = None")
+        return None
+
+    # Count eligible gates (hidden layers only)
+    n_eligible = count_eligible_gates(layer_sizes)
+    if n_eligible <= 0:
+        log.warning("No eligible gates for damage (no hidden layers?), p_fault = None")
+        return None
+
+    # Compute p_fault
+    p_fault = compute_p_fault_from_expected(
+        expected_faulty_gates=expected_faulty,
+        n_eligible_gates=n_eligible,
+        expected_lifetime_steps=cfg.pool.expected_updates,
+    )
+
+    log.info(
+        f"Computed p_fault = {p_fault:.2e} "
+        f"(target {expected_faulty} faulty gates, {n_eligible} eligible gates, "
+        f"{cfg.pool.expected_updates} updates lifetime)"
+    )
+
+    return p_fault
+
+
 @hydra.main(version_base=None, config_path="configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     """
@@ -701,19 +771,33 @@ def main(cfg: DictConfig) -> None:
 
     # Log damage configuration if enabled
     if cfg.damage.enabled:
-        damage_stats = calculate_expected_damages(
-            expected_updates=stats.expected_lifetime_epochs,
-            damage_interval=cfg.damage.damage_interval,
-            damage_fraction=cfg.damage.damage_fraction,
-            knockouts_per_event=cfg.damage.knockouts_per_event,
-        )
+        damage_mode = cfg.damage.mode
         log.info("Final Damage Configuration:")
-        log.info(f"  Damage Enabled: {cfg.damage.enabled}")
-        log.info(f"  Knockouts per Event: {cfg.damage.knockouts_per_event}")
-        log.info(f"  Damage Interval: {cfg.damage.damage_interval} epochs")
-        log.info(f"  Damage Fraction: {cfg.damage.damage_fraction:.4f}")
-        log.info(f"  Expected Damages per Circuit: {damage_stats.expected_damages:.2f}")
-        log.info(f"  Expected Total Knockouts: {damage_stats.expected_knockouts:.2f}")
+        log.info(f"  Mode: {damage_mode.upper()}")
+
+        if damage_mode == "probabilistic":
+            # p_fault will be computed later, but log the target
+            expected_faulty = cfg.damage.get("expected_faulty_gates_at_reset", 4)
+            log.info(f"  Expected Faulty Gates at Reset: {expected_faulty}")
+            log.info(
+                f"  Circuit Lifetime: {stats.expected_lifetime_epochs:.1f} epochs x {effective_n_message_steps} steps"
+            )
+            log.info(f"  (p_fault will be auto-computed before training)")
+        else:
+            # Discrete mode - log interval-based config
+            damage_stats = calculate_expected_damages(
+                expected_updates=stats.expected_lifetime_epochs,
+                damage_interval=cfg.damage.damage_interval,
+                damage_fraction=cfg.damage.damage_fraction,
+                knockouts_per_event=cfg.damage.knockouts_per_event,
+            )
+            log.info(f"  Knockouts per Event: {cfg.damage.knockouts_per_event}")
+            log.info(f"  Damage Interval: {cfg.damage.damage_interval} epochs")
+            log.info(f"  Damage Fraction: {cfg.damage.damage_fraction:.4f}")
+            log.info(f"  Expected Damages per Circuit: {damage_stats.expected_damages:.2f}")
+            log.info(f"  Expected Total Knockouts: {damage_stats.expected_knockouts:.2f}")
+
+        log.info(f"  Faulty Logit Value: {cfg.damage.faulty_logit_value}")
         if cfg.damage.max_damage_per_circuit is not None:
             log.info(f"  Max Damage per Circuit: {cfg.damage.max_damage_per_circuit}")
     else:
@@ -741,7 +825,7 @@ def main(cfg: DictConfig) -> None:
             group=cfg.wandb.group,
             reinit="finish_previous",
         )
-        wandb_run = wandb.run
+        wandb_run = wandb
 
     log.info(f"Output directory: {output_dir}")
 
@@ -819,6 +903,14 @@ def main(cfg: DictConfig) -> None:
         test_ratio=test_ratio,
         seed=cfg.seed,
     )
+    data_dict = {
+        "x_train": x_train,
+        "y_train": y_train,
+        "x_test": x_test,
+        "y_test": y_test,
+        "x_total": x_total,
+        "y_total": y_total,
+    }
 
     # Compute data fraction
     n_train = x_train.shape[0]
@@ -903,6 +995,9 @@ def main(cfg: DictConfig) -> None:
     # Get track_metrics configuration for training
     track_metrics = extract_track_metrics_config(cfg)
 
+    # Compute p_fault for probabilistic damage mode
+    p_fault = process_probabilistic_damage_configuration(cfg, layer_sizes)
+
     # Train model
     log.info(f"Starting {cfg.model.type.upper()} training")
     model_results = train_model(
@@ -910,12 +1005,7 @@ def main(cfg: DictConfig) -> None:
         key=cfg.seed,
         init_model=model,
         # Data parameters
-        x_train=x_train,
-        y_train=y_train,
-        x_test=x_test,
-        y_test=y_test,
-        x_total=x_total,
-        y_total=y_total,
+        data_dict=data_dict,
         data_fraction=data_fraction,
         # Model architecture parameters
         layer_sizes=layer_sizes,
@@ -986,6 +1076,8 @@ def main(cfg: DictConfig) -> None:
         track_metrics=track_metrics,
         # Damage parameters for resilience testing
         damage_enabled=cfg.damage.enabled,
+        damage_mode=cfg.damage.mode,
+        p_fault=p_fault,
         damage_interval=cfg.damage.damage_interval,
         damage_fraction=cfg.damage.damage_fraction,
         knockouts_per_event=cfg.damage.knockouts_per_event,
@@ -1046,8 +1138,14 @@ def main(cfg: DictConfig) -> None:
             model=model_results["model"],
             datasets=datasets,
             pool=model_results.get("pool", None),
-            x_data=x_test,
-            y_data=y_test,
+            data_dict={
+                "x_train": x_train,
+                "y_train": y_train,
+                "x_test": x_test,
+                "y_test": y_test,
+                "x_total": x_total,
+                "y_total": y_total,
+            },
             input_n=input_n,
             arity=arity,
             circuit_hidden_dim=cfg.model.circuit_hidden_dim,
@@ -1081,7 +1179,7 @@ def main(cfg: DictConfig) -> None:
     # Close wandb if enabled
     if cfg.wandb.enabled:
         cleanup_redundant_wandb_artifacts(
-            run_id=wandb_run.id,
+            run_id=wandb_run.run.id,
             dry_run=False,
             verbose=True,
             entity=cfg.wandb.entity,

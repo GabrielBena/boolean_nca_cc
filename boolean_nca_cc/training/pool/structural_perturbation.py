@@ -12,10 +12,24 @@ resilience and recovery capabilities of meta-learning models.
 - Represents hardware failure or permanent structural damage
 - Damaged gates can still send messages to neighbors (depending on strategy)
 
+**Two Damage Modes**:
+
+1. Discrete Mode (for visualization):
+   - Apply N knockouts at specific steps
+   - Functions: `create_knockout_pattern`, `apply_knockout_to_circuit`, `apply_knockout_to_batch`
+
+2. Probabilistic Mode (for training):
+   - Each gate has p_fault probability of failing at each step
+   - Realistic continuous failure model
+   - Functions: `apply_probabilistic_gate_failure`, `compute_p_fault_from_expected`
+
 Key Functions:
 - `create_knockout_pattern`: Generate random knockout masks for circuit layers
 - `create_faulty_gate_logits`: Set knocked-out gate logits to faulty values
 - `apply_knockout_to_batch`: Apply knockouts to a batch of circuits
+- `apply_probabilistic_gate_failure`: Per-step probabilistic gate failure
+- `compute_p_fault_from_expected`: Auto-compute p_fault from target failures
+- `create_eligible_gate_mask`: Create mask for damage-eligible gates
 """
 
 import jax
@@ -433,6 +447,179 @@ def apply_knockout_to_batch(
     batch_knockout_masks = batch_flat_to_layered_mask(batch_flat_masks, layer_sizes)
 
     return modified_batch_logits, batch_knockout_masks
+
+
+# =============================================================================
+# Probabilistic Gate Failure Functions
+# =============================================================================
+
+
+def create_eligible_gate_mask(
+    layer_sizes: tuple[tuple[int, int], ...] | list[tuple[int, int]],
+) -> jp.ndarray:
+    """
+    Create a flat mask indicating which gates are eligible for damage.
+
+    Eligible gates are in hidden layers only (not input or output).
+
+    Args:
+        layer_sizes: Tuple/list of (gate_n, group_size) for each layer.
+                    First is input layer, last is output layer.
+
+    Returns:
+        Flat mask with shape (total_gates,):
+        - 1.0 for hidden layer gates (eligible for damage)
+        - 0.0 for input/output layer gates (protected)
+
+    Example:
+        >>> layer_sizes = [(8, 1), (16, 2), (16, 2), (4, 1)]  # 8 in, 32 hidden, 4 out
+        >>> mask = create_eligible_gate_mask(layer_sizes)
+        >>> mask[:8].sum()  # Input layer: all protected
+        0.0
+        >>> mask[8:40].sum()  # Hidden layers: all eligible
+        32.0
+        >>> mask[40:].sum()  # Output layer: all protected
+        0.0
+    """
+    masks = []
+    n_layers = len(layer_sizes)
+    for i, (gate_n, _) in enumerate(layer_sizes):
+        if i == 0 or i == n_layers - 1:  # Input or output layer
+            masks.append(jp.zeros(gate_n, dtype=jp.float32))
+        else:  # Hidden layer
+            masks.append(jp.ones(gate_n, dtype=jp.float32))
+    return jp.concatenate(masks)
+
+
+def apply_probabilistic_gate_failure(
+    key: jax.random.PRNGKey,
+    logits: jp.ndarray,
+    gate_mask: jp.ndarray,
+    eligible_mask: jp.ndarray,
+    p_fault: float,
+    faulty_value: float = -10.0,
+) -> tuple[jp.ndarray, jp.ndarray]:
+    """
+    Apply probabilistic gate failure: each active eligible gate has p_fault
+    probability of permanent failure at this timestep.
+
+    This function is designed to be called at every optimization step within
+    a JAX scan loop. Damage accumulates permanently.
+
+    Args:
+        key: Random key for this step's failure sampling
+        logits: Gate logits with shape [n_gates, logit_dim] or [n_gates]
+        gate_mask: Current gate mask [n_gates], 1.0 = active, 0.0 = knocked out
+        eligible_mask: Eligibility mask [n_gates], 1.0 = can fail, 0.0 = protected
+        p_fault: Probability of failure per gate per step (typically very small)
+        faulty_value: Value to set for failed gate logits
+
+    Returns:
+        Tuple of (new_logits, new_gate_mask):
+        - new_logits: Updated logits with faulty values for newly failed gates
+        - new_gate_mask: Updated mask with newly failed gates set to 0.0
+
+    Example:
+        >>> key = jax.random.PRNGKey(0)
+        >>> logits = jp.zeros((44, 4))  # 44 gates, 4-entry LUT
+        >>> gate_mask = jp.ones(44)
+        >>> eligible_mask = create_eligible_gate_mask([(8, 1), (16, 2), (16, 2), (4, 1)])
+        >>> new_logits, new_mask = apply_probabilistic_gate_failure(
+        ...     key, logits, gate_mask, eligible_mask, p_fault=0.1
+        ... )
+        >>> # Some gates in hidden layers may now be knocked out
+        >>> (new_mask[:8] == 1.0).all()  # Input layer protected
+        True
+        >>> (new_mask[40:] == 1.0).all()  # Output layer protected
+        True
+    """
+    # Generate random values for each gate
+    rand = jax.random.uniform(key, gate_mask.shape)
+
+    # Only active + eligible gates can fail
+    can_fail = (gate_mask == 1.0) & (eligible_mask == 1.0)
+    fails_this_step = can_fail & (rand < p_fault)
+
+    # Update mask (accumulate damage - permanent)
+    new_mask = jp.where(fails_this_step, 0.0, gate_mask)
+
+    # Update logits for newly failed gates
+    if logits.ndim == 2:
+        new_logits = jp.where(fails_this_step[:, None], faulty_value, logits)
+    else:
+        new_logits = jp.where(fails_this_step, faulty_value, logits)
+
+    return new_logits, new_mask
+
+
+def compute_p_fault_from_expected(
+    expected_faulty_gates: float,
+    n_eligible_gates: int,
+    expected_lifetime_steps: int,
+) -> float:
+    """
+    Compute the per-gate-per-step failure probability to achieve a target
+    expected number of faulty gates over a circuit's lifetime.
+
+    Uses the formula for independent Bernoulli trials:
+        E[failures] = n * (1 - (1-p)^L)
+
+    For small p, this approximates to: p ≈ k / (n * L)
+
+    Args:
+        expected_faulty_gates: Target expected number of gates to fail (k)
+        n_eligible_gates: Number of gates that can fail (n)
+        expected_lifetime_steps: Expected number of steps before reset (L)
+
+    Returns:
+        Per-gate-per-step failure probability (p)
+
+    Raises:
+        ValueError: If inputs are invalid
+
+    Example:
+        >>> # Target 4 faulty gates, 32 eligible gates, 2000 step lifetime
+        >>> p = compute_p_fault_from_expected(4, 32, 2000)
+        >>> p  # Approximately 0.0000625
+        6.25e-05
+    """
+    if expected_faulty_gates <= 0:
+        return 0.0
+    if n_eligible_gates <= 0:
+        raise ValueError("n_eligible_gates must be positive")
+    if expected_lifetime_steps <= 0:
+        raise ValueError("expected_lifetime_steps must be positive")
+
+    # Ratio of expected failures to eligible gates
+    k_over_n = expected_faulty_gates / n_eligible_gates
+
+    if k_over_n >= 1.0:
+        # Can't expect more failures than gates - saturate
+        # Use approximate formula with k = n
+        return 1.0 / expected_lifetime_steps
+
+    # Exact formula: p = 1 - (1 - k/n)^(1/L)
+    # This inverts: k/n = 1 - (1-p)^L
+    p = 1.0 - (1.0 - k_over_n) ** (1.0 / expected_lifetime_steps)
+
+    return float(p)
+
+
+def count_eligible_gates(
+    layer_sizes: tuple[tuple[int, int], ...] | list[tuple[int, int]],
+) -> int:
+    """
+    Count the number of gates eligible for damage (hidden layers only).
+
+    Args:
+        layer_sizes: Tuple/list of (gate_n, group_size) for each layer
+
+    Returns:
+        Number of gates in hidden layers (excluding input and output)
+    """
+    if len(layer_sizes) <= 2:
+        return 0  # Only input and output layers
+    return sum(gate_n for gate_n, _ in layer_sizes[1:-1])
 
 
 def get_total_gates(layer_sizes: list[tuple[int, int]]) -> int:

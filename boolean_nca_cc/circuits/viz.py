@@ -561,7 +561,7 @@ def plot_wandb_stepwise_results(step_metrics, damage_steps=None, smooth=False):
     axes[0].set_ylabel("Loss")
     axes[0].legend()
     if damage_steps is not None:
-        [axes[0].axvline(i, color="r", linestyle="--") for i in damage_steps]
+        [axes[0].axvline(i - 1, color="r", linestyle="--") for i in damage_steps]
 
     # Plot Accuracy
     axes[1].plot(smooth_step_dict["accuracy"], label="Soft Accuracy")
@@ -571,7 +571,7 @@ def plot_wandb_stepwise_results(step_metrics, damage_steps=None, smooth=False):
     axes[1].set_ylabel("Accuracy")
     axes[1].legend()
     if damage_steps is not None:
-        [axes[1].axvline(i, color="r", linestyle="--") for i in damage_steps]
+        [axes[1].axvline(i - 1, color="r", linestyle="--") for i in damage_steps]
 
     fig.suptitle("Step-wise Results")
 

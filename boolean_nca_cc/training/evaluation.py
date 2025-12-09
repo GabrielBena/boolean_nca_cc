@@ -19,7 +19,11 @@ from boolean_nca_cc.circuits.train import (
     compute_loss_from_predictions,
 )
 from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention, PerceiverCircuitAttention
-from boolean_nca_cc.training.pool.structural_perturbation import apply_knockout_to_circuit
+from boolean_nca_cc.training.pool.structural_perturbation import (
+    apply_knockout_to_circuit,
+    apply_probabilistic_gate_failure,
+    create_eligible_gate_mask,
+)
 from boolean_nca_cc.utils import (
     extract_logits_from_graph,
     update_output_node_loss,
@@ -294,9 +298,12 @@ def run_model_scan_with_loss(
     data_fraction: float = 1.0,
     scan_key: jax.random.PRNGKey = None,
     gradient_checkpointing: bool = False,
-    # Damage parameters (optional)
+    # Discrete damage parameters (for visualization)
     damage_steps: jp.ndarray | None = None,
     knockout_per_damage_step: int = 1,
+    # Probabilistic damage parameters (for training)
+    p_fault: float | None = None,
+    faulty_value: float = -10.0,
 ):
     """
     Unified scan function for all model types with loss computation at each step.
@@ -305,6 +312,14 @@ def run_model_scan_with_loss(
     - run_gnn_scan_with_loss
     - run_self_attention_scan_with_loss
     - run_perceiver_scan_with_loss
+
+    Supports two damage modes (can be used together):
+
+    1. **Discrete mode** (damage_steps): Apply N knockouts at specific steps.
+       Good for visualization with visible damage markers.
+
+    2. **Probabilistic mode** (p_fault): Each gate has p_fault probability of
+       failing at each step. Realistic continuous failure model for training.
 
     Args:
         model: Any supported model (CircuitGNN, CircuitSelfAttention, PerceiverCircuitAttention)
@@ -319,8 +334,10 @@ def run_model_scan_with_loss(
         data_fraction: Fraction of data to use (for stochastic training)
         scan_key: Random key for data sampling and damage
         gradient_checkpointing: Whether to use gradient checkpointing (remat)
-        damage_steps: Array of step indices at which to apply damage (None = no damage)
-        knockout_per_damage_step: Number of gates to knock out at each damage step
+        damage_steps: Array of step indices at which to apply discrete damage (None = disabled)
+        knockout_per_damage_step: Number of gates to knock out at each discrete damage step
+        p_fault: Per-gate-per-step failure probability (None = disabled, 0.0 = no failures)
+        faulty_value: Value to set for failed gate logits (large negative for zero output)
 
     Returns:
         Tuple of (final_graph, step_outputs) where step_outputs contains
@@ -361,20 +378,35 @@ def run_model_scan_with_loss(
         layer_sizes,
     )
 
+    # === Discrete damage setup ===
     # Precompute damage keys for all potential damage steps
     # This avoids dynamic key splitting inside the scan
-    if damage_steps is not None:
+    if damage_steps is not None and len(damage_steps) > 0:
+        discrete_key, prob_key = jax.random.split(damage_key)
         n_damage = len(damage_steps)
-        damage_keys = jax.random.split(damage_key, n_damage)
+        discrete_damage_keys = jax.random.split(discrete_key, n_damage)
         # Convert damage_steps to array for JIT compatibility
         damage_steps_array = jp.asarray(damage_steps)
+        discrete_damage_enabled = True
     else:
-        damage_keys = None
+        prob_key = damage_key
+        discrete_damage_keys = None
         damage_steps_array = jp.array([], dtype=jp.int32)
+        discrete_damage_enabled = False
 
-    def apply_damage_if_needed(graph, step_idx, gate_mask):
+    # === Probabilistic damage setup ===
+    prob_damage_enabled = p_fault is not None and p_fault > 0.0
+    if prob_damage_enabled:
+        eligible_mask = create_eligible_gate_mask(layer_sizes)
+        # Pre-split keys for all steps (for reproducibility and JIT compatibility)
+        prob_damage_keys = jax.random.split(prob_key, num_steps)
+    else:
+        eligible_mask = None
+        prob_damage_keys = None
+
+    def apply_discrete_damage_if_needed(graph, step_idx, gate_mask):
         """Apply damage at specific steps using vectorized conditional."""
-        if damage_steps is None or len(damage_steps_array) == 0:
+        if not discrete_damage_enabled:
             return graph, gate_mask
 
         # Check if current step is a damage step
@@ -382,12 +414,12 @@ def run_model_scan_with_loss(
 
         # Get the damage key index (which damage event this is)
         damage_idx = jp.searchsorted(damage_steps_array, step_idx)
-        damage_idx = jp.clip(damage_idx, 0, len(damage_keys) - 1)
+        damage_idx = jp.clip(damage_idx, 0, len(discrete_damage_keys) - 1)
 
         def do_damage(_):
             # Apply knockout
             modified_logits, modified_gate_mask = apply_knockout_to_circuit(
-                damage_keys[damage_idx],
+                discrete_damage_keys[damage_idx],
                 graph.nodes["logits"],
                 layer_sizes,
                 num_knockouts=knockout_per_damage_step,
@@ -406,17 +438,51 @@ def run_model_scan_with_loss(
 
         return jax.lax.cond(is_damage_step, do_damage, no_damage, None)
 
+    def apply_probabilistic_damage(graph, step_idx, gate_mask):
+        """Apply probabilistic damage: each gate has p_fault chance of failure."""
+        if not prob_damage_enabled:
+            return graph, gate_mask
+
+        # Get the pre-split key for this step
+        step_key = prob_damage_keys[step_idx]
+
+        # Apply probabilistic failure
+        new_logits, new_mask = apply_probabilistic_gate_failure(
+            step_key,
+            graph.nodes["logits"],
+            gate_mask,
+            eligible_mask,
+            p_fault,
+            faulty_value,
+        )
+
+        # Update graph if any gates failed
+        # (always update to maintain consistent graph structure in traced code)
+        new_nodes = {
+            **graph.nodes,
+            "logits": new_logits,
+            "gate_knockout_mask": new_mask,
+        }
+        return graph._replace(nodes=new_nodes), new_mask
+
     def scan_step(carry, step_idx):
         current_graph, current_gate_mask = carry
 
-        # Apply damage if this is a damage step
-        current_graph, current_gate_mask = apply_damage_if_needed(
+        # 1. Apply probabilistic damage (happens every step if enabled)
+        current_graph, current_gate_mask = apply_probabilistic_damage(
             current_graph,
-            step_idx + 1,
-            current_gate_mask,  # +1 because scan starts at 0
+            step_idx,
+            current_gate_mask,
         )
 
-        # Apply model and compute loss using the unified step function
+        # 2. Apply discrete damage if this is a damage step
+        current_graph, current_gate_mask = apply_discrete_damage_if_needed(
+            current_graph,
+            step_idx + 1,  # +1 because damage_steps are 1-indexed
+            current_gate_mask,
+        )
+
+        # 3. Apply model and compute loss using the unified step function
         updated_graph, loss, current_logits, aux = apply_model_and_compute_loss(
             model_fn,
             current_graph,
@@ -749,18 +815,26 @@ def evaluate_model_stepwise_batched(
     loss_cfg=None,
     bidirectional_edges: bool = True,
     layer_sizes: list[tuple[int, int]] | None = None,
+    # Discrete damage (for visualization with fixed steps)
     damage_steps: jp.ndarray | None = None,
     knockout_per_damage_step: int = 1,
     damage_key: jax.random.PRNGKey = jax.random.PRNGKey(42),
-    chunk_size: int | None = None,
+    # Probabilistic damage (for training-consistent evaluation)
+    p_fault: float | None = None,
+    faulty_value: float = -10.0,
+    # Chunking and details
     return_first_circuit_details: bool = False,
 ) -> dict:
     """
     Vectorized evaluation of model performance on a batch of circuits.
 
     Uses the unified scan function (run_model_scan_with_loss) with vmap for
-    efficient batch processing. Supports damage steps and automatic chunking
-    for memory efficiency.
+    efficient batch processing. Supports both discrete and probabilistic damage
+    modes, plus automatic chunking for memory efficiency.
+
+    **Damage Modes:**
+    - Discrete (damage_steps): Fixed steps for clean visualization
+    - Probabilistic (p_fault): Per-gate-per-step failure, matches training conditions
 
     Args:
         model: Trained model (CircuitGNN, CircuitSelfAttention, or PerceiverCircuitAttention)
@@ -775,9 +849,11 @@ def evaluate_model_stepwise_batched(
         loss_cfg: Loss config dict (default: LOSS_L4)
         bidirectional_edges: Whether to use bidirectional edges
         layer_sizes: List of (nodes, group_size) tuples for each layer
-        damage_steps: Array of step indices at which to apply damage
-        knockout_per_damage_step: Number of gates to knock out at each damage step
+        damage_steps: Array of step indices at which to apply discrete damage (for visualization)
+        knockout_per_damage_step: Number of gates to knock out at each discrete damage step
         damage_key: Random key for damage
+        p_fault: Per-gate-per-step failure probability (for training-consistent evaluation)
+        faulty_value: Value to set for failed gate logits
         chunk_size: If provided, process circuits in chunks of this size for memory efficiency.
                    If None, process all circuits at once.
         return_first_circuit_details: If True, include detailed StepResult list for first circuit
@@ -791,53 +867,75 @@ def evaluate_model_stepwise_batched(
     if loss_cfg is None:
         loss_cfg = LOSS_L4
 
-    # Normalize layer_sizes to tuple for consistency
-    layer_sizes_tuple = tuple(layer_sizes) if layer_sizes else None
+    # Build initial graphs (vectorized)
+    vmap_build_graph = jax.vmap(
+        lambda logits, wires: build_graph(
+            logits,
+            wires,
+            input_n,
+            arity,
+            circuit_hidden_dim,
+            loss_value=0.0,
+            bidirectional_edges=bidirectional_edges,
+        )
+    )
+    batch_graphs = vmap_build_graph(batch_logits, batch_wires)
 
-    # Get total batch size
-    total_circuits = batch_logits[0].shape[0]
+    # Split damage keys for each batch element (use dummy key if no damage)
+    batch_size = batch_logits[0].shape[0]
+    if damage_key is None:
+        damage_key = jax.random.PRNGKey(0)  # Dummy key, won't be used if no damage_steps
+    damage_keys = jax.random.split(damage_key, batch_size)
 
-    # If chunking is requested and we have more circuits than chunk_size, process in chunks
-    if chunk_size is not None and total_circuits > chunk_size:
-        return _evaluate_batched_chunked(
+    # Run unified scan for each circuit in batch
+    def run_single_scan(graph, wires, logits, scan_key):
+        return run_model_scan_with_loss(
             model=model,
-            batch_wires=batch_wires,
-            batch_logits=batch_logits,
+            graph=graph,
+            num_steps=n_message_steps,
+            logits_original_shapes=[logit.shape for logit in logits],
+            wires=wires,
             x_data=x_data,
             y_data=y_data,
-            input_n=input_n,
-            arity=arity,
-            circuit_hidden_dim=circuit_hidden_dim,
-            n_message_steps=n_message_steps,
             loss_cfg=loss_cfg,
-            bidirectional_edges=bidirectional_edges,
-            layer_sizes=layer_sizes_tuple,
+            layer_sizes=layer_sizes,
+            data_fraction=1.0,
+            scan_key=scan_key,
+            gradient_checkpointing=False,
+            # Discrete damage (for visualization)
             damage_steps=damage_steps,
             knockout_per_damage_step=knockout_per_damage_step,
-            damage_key=damage_key,
-            chunk_size=chunk_size,
-            return_first_circuit_details=return_first_circuit_details,
+            # Probabilistic damage (for training-consistent evaluation)
+            p_fault=p_fault,
+            faulty_value=faulty_value,
         )
 
-    # Process all circuits at once
-    return _evaluate_batched_single_chunk(
-        model=model,
-        batch_wires=batch_wires,
-        batch_logits=batch_logits,
-        x_data=x_data,
-        y_data=y_data,
-        input_n=input_n,
-        arity=arity,
-        circuit_hidden_dim=circuit_hidden_dim,
-        n_message_steps=n_message_steps,
-        loss_cfg=loss_cfg,
-        bidirectional_edges=bidirectional_edges,
-        layer_sizes=layer_sizes_tuple,
-        damage_steps=damage_steps,
-        knockout_per_damage_step=knockout_per_damage_step,
-        damage_key=damage_key,
-        return_first_circuit_details=return_first_circuit_details,
+    # Vmap over batch
+    _, batch_step_outputs = nnx.vmap(run_single_scan)(
+        batch_graphs, batch_wires, batch_logits, damage_keys
     )
+
+    # Extract and average metrics
+    _, losses, _, aux_data = batch_step_outputs
+
+    # Average across batch dimension
+    step_metrics = {
+        "step": list(range(1, n_message_steps + 1)),
+        "loss": [float(jp.mean(losses[:, i])) for i in range(n_message_steps)],
+        "hard_loss": [float(jp.mean(aux_data["hard_loss"][:, i])) for i in range(n_message_steps)],
+        "accuracy": [float(jp.mean(aux_data["accuracy"][:, i])) for i in range(n_message_steps)],
+        "hard_accuracy": [
+            float(jp.mean(aux_data["hard_accuracy"][:, i])) for i in range(n_message_steps)
+        ],
+    }
+
+    # Optionally extract detailed results for first circuit (for visualization)
+    if return_first_circuit_details:
+        step_metrics["first_circuit_results"] = _extract_single_circuit_step_results(
+            batch_step_outputs, circuit_idx=0, n_message_steps=n_message_steps
+        )
+
+    return step_metrics
 
 
 def _extract_single_circuit_step_results(
@@ -878,214 +976,3 @@ def _extract_single_circuit_step_results(
         )
 
     return [make_step_result(s) for s in range(n_message_steps)]
-
-
-def _evaluate_batched_single_chunk(
-    model,
-    batch_wires,
-    batch_logits,
-    x_data,
-    y_data,
-    input_n,
-    arity,
-    circuit_hidden_dim,
-    n_message_steps,
-    loss_cfg,
-    bidirectional_edges,
-    layer_sizes,
-    damage_steps,
-    knockout_per_damage_step,
-    damage_key,
-    return_first_circuit_details: bool = False,
-) -> dict:
-    """
-    Internal function to evaluate a single chunk of circuits.
-
-    Args:
-        ... (same as before)
-        return_first_circuit_details: If True, also return detailed StepResult list for circuit 0
-
-    Returns:
-        Dictionary with averaged metrics. If return_first_circuit_details=True, also includes
-        'first_circuit_results' key with list of StepResult objects for visualization.
-    """
-    # Build initial graphs (vectorized)
-    vmap_build_graph = jax.vmap(
-        lambda logits, wires: build_graph(
-            logits,
-            wires,
-            input_n,
-            arity,
-            circuit_hidden_dim,
-            loss_value=0.0,
-            bidirectional_edges=bidirectional_edges,
-        )
-    )
-    batch_graphs = vmap_build_graph(batch_logits, batch_wires)
-
-    # Split damage keys for each batch element (use dummy key if no damage)
-    batch_size = batch_logits[0].shape[0]
-    if damage_key is None:
-        damage_key = jax.random.PRNGKey(0)  # Dummy key, won't be used if no damage_steps
-    damage_keys = jax.random.split(damage_key, batch_size)
-
-    # Run unified scan for each circuit in batch
-    def run_single_scan(graph, wires, logits, scan_key):
-        return run_model_scan_with_loss(
-            model=model,
-            graph=graph,
-            num_steps=n_message_steps,
-            logits_original_shapes=[logit.shape for logit in logits],
-            wires=wires,
-            x_data=x_data,
-            y_data=y_data,
-            loss_cfg=loss_cfg,
-            layer_sizes=layer_sizes,
-            data_fraction=1.0,
-            scan_key=scan_key,
-            gradient_checkpointing=False,
-            damage_steps=damage_steps,
-            knockout_per_damage_step=knockout_per_damage_step,
-        )
-
-    # Vmap over batch
-    _, batch_step_outputs = nnx.vmap(run_single_scan)(
-        batch_graphs, batch_wires, batch_logits, damage_keys
-    )
-
-    # Extract and average metrics
-    _, losses, _, aux_data = batch_step_outputs
-
-    # Average across batch dimension
-    step_metrics = {
-        "step": list(range(1, n_message_steps + 1)),
-        "loss": [float(jp.mean(losses[:, i])) for i in range(n_message_steps)],
-        "hard_loss": [float(jp.mean(aux_data["hard_loss"][:, i])) for i in range(n_message_steps)],
-        "accuracy": [float(jp.mean(aux_data["accuracy"][:, i])) for i in range(n_message_steps)],
-        "hard_accuracy": [
-            float(jp.mean(aux_data["hard_accuracy"][:, i])) for i in range(n_message_steps)
-        ],
-    }
-
-    # Optionally extract detailed results for first circuit (for visualization)
-    if return_first_circuit_details:
-        step_metrics["first_circuit_results"] = _extract_single_circuit_step_results(
-            batch_step_outputs, circuit_idx=0, n_message_steps=n_message_steps
-        )
-
-    return step_metrics
-
-
-def _evaluate_batched_chunked(
-    model,
-    batch_wires,
-    batch_logits,
-    x_data,
-    y_data,
-    input_n,
-    arity,
-    circuit_hidden_dim,
-    n_message_steps,
-    loss_cfg,
-    bidirectional_edges,
-    layer_sizes,
-    damage_steps,
-    knockout_per_damage_step,
-    damage_key,
-    chunk_size,
-    return_first_circuit_details: bool = False,
-) -> dict:
-    """Internal function to evaluate circuits in chunks for memory efficiency."""
-    total_circuits = batch_logits[0].shape[0]
-    num_chunks = (total_circuits + chunk_size - 1) // chunk_size
-    chunk_results = []
-
-    # Split damage key for each chunk
-    chunk_keys = jax.random.split(damage_key, num_chunks)
-
-    first_circuit_results = None
-
-    for chunk_idx in range(num_chunks):
-        start_idx = chunk_idx * chunk_size
-        end_idx = min(start_idx + chunk_size, total_circuits)
-
-        # Extract chunk
-        chunk_wires = [w[start_idx:end_idx] for w in batch_wires]
-        chunk_logits = [log[start_idx:end_idx] for log in batch_logits]
-
-        # Only request detailed results for first chunk (which contains circuit 0)
-        request_details = return_first_circuit_details and chunk_idx == 0
-
-        # Evaluate chunk
-        chunk_result = _evaluate_batched_single_chunk(
-            model=model,
-            batch_wires=chunk_wires,
-            batch_logits=chunk_logits,
-            x_data=x_data,
-            y_data=y_data,
-            input_n=input_n,
-            arity=arity,
-            circuit_hidden_dim=circuit_hidden_dim,
-            n_message_steps=n_message_steps,
-            loss_cfg=loss_cfg,
-            bidirectional_edges=bidirectional_edges,
-            layer_sizes=layer_sizes,
-            damage_steps=damage_steps,
-            knockout_per_damage_step=knockout_per_damage_step,
-            damage_key=chunk_keys[chunk_idx],
-            return_first_circuit_details=request_details,
-        )
-
-        # Extract first circuit details from first chunk
-        if request_details and "first_circuit_results" in chunk_result:
-            first_circuit_results = chunk_result.pop("first_circuit_results")
-
-        chunk_results.append(chunk_result)
-
-    # Average results across chunks (weighted by chunk size for correctness)
-    averaged_result = {"step": chunk_results[0]["step"]}
-
-    for key in ["loss", "hard_loss", "accuracy", "hard_accuracy"]:
-        # Average at each step across chunks
-        step_averages = []
-        for step_idx in range(len(chunk_results[0][key])):
-            step_values = [chunk[key][step_idx] for chunk in chunk_results]
-            step_averages.append(float(jp.mean(jp.array(step_values))))
-        averaged_result[key] = step_averages
-
-    # Include first circuit details if requested
-    if first_circuit_results is not None:
-        averaged_result["first_circuit_results"] = first_circuit_results
-
-    return averaged_result
-
-
-# Backwards compatibility alias - will be deprecated
-def evaluate_circuits_in_chunks(
-    eval_fn,
-    wires: list[jp.ndarray],
-    logits: list[jp.ndarray],
-    target_chunk_size: int,
-    **eval_kwargs,
-) -> dict:
-    """
-    DEPRECATED: Use evaluate_model_stepwise_batched with chunk_size parameter instead.
-
-    This function is kept for backward compatibility but will be removed.
-    """
-    import warnings
-
-    warnings.warn(
-        "evaluate_circuits_in_chunks is deprecated. "
-        "Use evaluate_model_stepwise_batched with chunk_size parameter instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-
-    # Call the batched function with chunking
-    return evaluate_model_stepwise_batched(
-        batch_wires=wires,
-        batch_logits=logits,
-        chunk_size=target_chunk_size,
-        **eval_kwargs,
-    )
