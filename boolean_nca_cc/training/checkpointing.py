@@ -428,20 +428,23 @@ def derive_checkpoint_metric_from_config(config: Any) -> tuple[str, str]:
         
     Returns:
         Tuple of (metric_name, prefer_metric) where:
-        - metric_name: Full metric name for wandb summary (e.g., "best/eval_ko_in_hard_accuracy")
-        - prefer_metric: Metric key for artifact selection (e.g., "eval_ko_in_hard_accuracy")
+        - metric_name: Full metric name for wandb summary (e.g., "best/eval_no_damage/final_hard_accuracy")
+        - prefer_metric: Metric key for artifact selection (e.g., "eval_no_damage_hard_accuracy")
     """
     # Get checkpoint settings from config
     best_metric = getattr(config.checkpoint, "best_metric", "hard_accuracy")
     best_metric_source = getattr(config.checkpoint, "best_metric_source", "eval_ko_in")
     
-    # Construct metric key (matches format used in train_loop.py: f"{best_metric_source}_{best_metric}")
-    metric_key = f"{best_metric_source}_{best_metric}"
+    # Construct prefer_metric key for artifact selection (format: {source}_{metric})
+    # This matches the format used in artifact names like "best_model_eval_no_damage_hard_accuracy"
+    prefer_metric = f"{best_metric_source}_{best_metric}"
     
-    # For wandb summary, use "best/" prefix
-    metric_name = f"best/{metric_key}"
+    # Construct metric_name for wandb summary lookup
+    # Metrics are logged as "{source}/final_{metric}" (e.g., "eval_no_damage/final_hard_accuracy")
+    # When saved as best, they become "best/{source}/final_{metric}"
+    metric_name = f"best/{best_metric_source}/final_{best_metric}"
     
-    return metric_name, metric_key
+    return metric_name, prefer_metric
 
 
 def load_config_from_wandb(
@@ -589,7 +592,17 @@ def load_config_from_wandb(
     for a in artifacts:
         log.info(f"  - {a.name}")
 
+    # Filter artifacts: prefer those matching the metric if prefer_metric is provided
     best_models = [a for a in artifacts if filename in a.name]
+    
+    # If prefer_metric is provided, prioritize artifacts that include the metric in their name
+    if prefer_metric and best_models:
+        metric_specific = [a for a in best_models if f"best_model_{prefer_metric}" in a.name]
+        if metric_specific:
+            log.info(f"Found {len(metric_specific)} artifacts matching prefer_metric '{prefer_metric}'")
+            best_models = metric_specific
+        else:
+            log.warning(f"No artifacts found matching prefer_metric '{prefer_metric}', using all '{filename}' artifacts")
 
     if not best_models:
         log.info(f"No artifacts found matching '{filename}'")
@@ -617,6 +630,9 @@ def load_config_from_wandb(
         if len(best_models) == 1:
             selected_artifact = best_models[0]
             log.info(f"Found single best model artifact: {selected_artifact.name}")
+            # Even with one artifact, verify it matches prefer_metric if provided
+            if prefer_metric and f"best_model_{prefer_metric}" not in selected_artifact.name:
+                log.warning(f"Single artifact '{selected_artifact.name}' does not match prefer_metric '{prefer_metric}'")
         else:
             log.info(f"Found {len(best_models)} best model artifacts:")
             for a in best_models:
@@ -1124,14 +1140,37 @@ def save_best_checkpoint(
 
         # Log to wandb if enabled
         if wandb_run:
-            wandb_run.log({f"best/{best_metric}": current_metric_value, "best/epoch": epoch})
+            # Parse best_metric (format: "{source}_{metric}") to reconstruct wandb summary format
+            # Metrics are logged as "{source}/final_{metric}" in evaluation, so best becomes "best/{source}/final_{metric}"
+            # Try to extract metric name by checking known metric suffixes
+            known_metrics = ["hard_accuracy", "accuracy", "hard_loss", "loss", "full_map_accuracy"]
+            metric_name = None
+            source_part = None
+            
+            for metric in known_metrics:
+                if best_metric.endswith(f"_{metric}"):
+                    metric_name = metric
+                    source_part = best_metric[:-len(f"_{metric}")]
+                    break
+            
+            if metric_name and source_part:
+                # Log in the format that matches evaluation metrics: "best/{source}/final_{metric}"
+                wandb_summary_key = f"best/{source_part}/final_{metric_name}"
+            else:
+                # Fallback: use the original format if parsing fails
+                wandb_summary_key = f"best/{best_metric}"
+            
+            wandb_run.log({wandb_summary_key: current_metric_value, "best/epoch": epoch})
 
             # Save the best model to wandb (will overwrite the previous best)
             wandb_run.save(os.path.join(checkpoint_path, best_filename))
 
             # Also log this as an artifact for better tracking in wandb
+            # Include metric in artifact name so it can be selected by _select_best_artifact
+            # Format: "best_model_{source}_{metric}" (e.g., "best_model_eval_no_damage_hard_accuracy")
+            artifact_name = f"best_model_{best_metric}"
             try:
-                artifact = wandb_run.Artifact("best_model", type="model")
+                artifact = wandb_run.Artifact(artifact_name, type="model")
                 artifact.add_file(os.path.join(checkpoint_path, best_filename))
                 wandb_run.log_artifact(artifact)
             except Exception as e:
@@ -1434,10 +1473,32 @@ def _select_best_artifact(artifacts: list, prefer_metric: str | None = None, run
 
     # If a specific metric is preferred, try to find it
     if prefer_metric:
+        matching_artifacts = []
         for artifact, metric in artifact_metrics:
             if metric == prefer_metric:
-                log.info(f"Found preferred metric '{prefer_metric}' in artifact: {artifact.name}")
-                return artifact
+                matching_artifacts.append(artifact)
+        
+        if matching_artifacts:
+            # Select the latest version (highest version number or most recent)
+            def get_version(artifact):
+                """Extract version number from artifact name or use version attribute."""
+                # Try version attribute first
+                if hasattr(artifact, 'version'):
+                    return artifact.version
+                # Parse from name (e.g., "best_model_metric:v2" -> 2)
+                if ':v' in artifact.name:
+                    try:
+                        return int(artifact.name.split(':v')[-1])
+                    except (ValueError, IndexError):
+                        pass
+                # Fallback: use creation time if available
+                if hasattr(artifact, 'created_at'):
+                    return artifact.created_at.timestamp()
+                return 0
+            
+            latest_artifact = max(matching_artifacts, key=get_version)
+            log.info(f"Found preferred metric '{prefer_metric}' in artifact: {latest_artifact.name} (selected latest version from {len(matching_artifacts)} versions)")
+            return latest_artifact
         log.warning(f"Preferred metric '{prefer_metric}' not found, using intelligent selection")
 
     # Intelligent selection priority:

@@ -39,6 +39,9 @@ def load_model_and_data(run_id: str, use_best_model: bool = True):
     print(f"Loading model from run_id: {run_id}")
     
     # 1. Load config and model
+    metric_name = None
+    prefer_metric = None
+    
     if use_best_model:
         # First, load config to get checkpoint settings (for metric derivation)
         temp_config, _, _ = load_config_from_wandb(
@@ -75,6 +78,42 @@ def load_model_and_data(run_id: str, use_best_model: bool = True):
         run_id=run_id,
         seed=0,
     )
+    
+    # Verify checkpoint epoch and compare with wandb summary
+    import wandb
+    api = wandb.Api()
+    run_obj = api.run(f"marcello-barylli-growai/boolean-nca-cc/{run_id}")
+    summary = run_obj.summary
+    
+    # Get epoch from loaded checkpoint
+    checkpoint_epoch = None
+    if "config" in loaded_dict:
+        checkpoint_config = loaded_dict["config"]
+        if isinstance(checkpoint_config, dict):
+            checkpoint_epoch = checkpoint_config.get("epoch")
+        else:
+            checkpoint_epoch = getattr(checkpoint_config, "epoch", None)
+    
+    # Get best epoch from wandb summary
+    best_epoch = summary.get("best/epoch")
+    
+    print(f"\n=== Checkpoint Verification ===")
+    if checkpoint_epoch is not None:
+        print(f"Loaded checkpoint epoch: {checkpoint_epoch}")
+    if best_epoch is not None:
+        print(f"Best epoch from wandb summary: {best_epoch}")
+    if checkpoint_epoch is not None and best_epoch is not None:
+        if checkpoint_epoch != best_epoch:
+            print(f"⚠️  WARNING: Loaded checkpoint (epoch {checkpoint_epoch}) does not match best epoch ({best_epoch})!")
+        else:
+            print(f"✓ Checkpoint epoch matches best epoch")
+    
+    # Also check the metric value
+    if use_best_model and metric_name:
+        metric_value = summary.get(metric_name)
+        if metric_value is not None:
+            print(f"Best metric value ({metric_name}): {metric_value}")
+    print("=" * 30)
     
     print("Model loaded successfully")
     

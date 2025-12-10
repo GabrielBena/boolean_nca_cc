@@ -94,7 +94,7 @@ def plot_eval_no_damage_stepwise(
     # Add horizontal line at perfect accuracy
     ax.axhline(y=1.0, color='green', linestyle=':', alpha=0.5, linewidth=1.5)
     
-    # Add statistics text box
+    # Add statistics text box (positioned in top-right to avoid curve overlap)
     if len(steps) > 0:
         stats_lines = []
         stats_lines.append(f'Full Map Acc: {full_map_accuracy[-1]:.4f}')
@@ -102,10 +102,11 @@ def plot_eval_no_damage_stepwise(
         stats_lines.append(f'Soft Acc: {accuracy[-1]:.4f}')
         stats_text = '\n'.join(stats_lines)
         ax.text(
-            0.02, 0.98, stats_text,
+            0.98, 0.98, stats_text,
             transform=ax.transAxes,
             fontsize=14,
             verticalalignment='top',
+            horizontalalignment='right',
             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8)
         )
     
@@ -200,7 +201,7 @@ def main():
     plot_eval_no_damage_stepwise(
         step_metrics=step_metrics_test,
         output_path=output_path,
-        title=f"Stepwise Evaluation Metrics (No Damage) - Test Data\nRun ID: {args.run_id}",
+        title="Boolean Function Discovery",
         dpi=300,
     )
     
@@ -222,7 +223,7 @@ def main():
         plot_eval_no_damage_stepwise(
             step_metrics=step_metrics_train,
             output_path=output_path_train,
-            title=f"Stepwise Evaluation Metrics (No Damage) - Train Data\nRun ID: {args.run_id}",
+            title="Boolean Function Discovery",
             dpi=300,
         )
 
