@@ -17,61 +17,65 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 from experiments.viz_base_checkpoint_test import load_model_and_data, run_eval_no_damage
 
 
-def plot_eval_no_damage_stepwise(
-    step_metrics,
+def plot_eval_no_damage_stepwise_comparison(
+    train_metrics,
+    test_metrics,
     output_path=None,
-    title="Stepwise Evaluation Metrics (No Damage)",
-    figsize=(10, 6),
+    title="Boolean Function Discovery",
+    figsize=(16, 6),
     dpi=300,
 ):
     """
-    Plot stepwise readout of eval_no_damage_steps for:
-    - full_map_accuracy
-    - hard_accuracy
-    - accuracy (soft_accuracy)
+    Plot 2-subplot comparison of NCA model performance on train and test splits.
     
     Args:
-        step_metrics: Dictionary with step-wise metrics from evaluation
-        output_path: Path to save the plot (if None, show instead)
-        title: Plot title
+        train_metrics: Dictionary with training stepwise metrics
+        test_metrics: Dictionary with test stepwise metrics
+        output_path: Path to save the plot
+        title: Figure title
         figsize: Figure size tuple
         dpi: Image resolution
     """
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+    
     # Extract step data
-    steps = np.array(step_metrics["step"])
-    full_map_accuracy = np.array(step_metrics["full_map_accuracy"])
-    hard_accuracy = np.array(step_metrics["hard_accuracy"])
-    accuracy = np.array(step_metrics["soft_accuracy"])  # soft_accuracy is the "accuracy" metric
+    steps_train = np.array(train_metrics["step"])
+    steps_test = np.array(test_metrics["step"])
     
-    # Create figure
-    fig, ax = plt.subplots(figsize=figsize)
+    full_map_acc_train = np.array(train_metrics["full_map_accuracy"])
+    hard_acc_train = np.array(train_metrics["hard_accuracy"])
+    soft_acc_train = np.array(train_metrics["soft_accuracy"])
     
-    # Plot the three curves with larger fonts and better styling
-    ax.plot(
-        steps,
-        full_map_accuracy,
+    full_map_acc_test = np.array(test_metrics["full_map_accuracy"])
+    hard_acc_test = np.array(test_metrics["hard_accuracy"])
+    soft_acc_test = np.array(test_metrics["soft_accuracy"])
+    
+    # Left subplot: Training performance
+    ax1.plot(
+        steps_train,
+        full_map_acc_train,
         color='#1f77b4',  # Blue
         linewidth=2.5,
         label='Full Map Accuracy',
         marker='o',
         markersize=5,
         alpha=0.9,
-        markevery=max(1, len(steps) // 20),  # Show markers every ~5% of points
+        markevery=max(1, len(steps_train) // 20),
     )
-    ax.plot(
-        steps,
-        hard_accuracy,
+    ax1.plot(
+        steps_train,
+        hard_acc_train,
         color='#d62728',  # Red
         linewidth=2.5,
         label='Hard Accuracy',
         marker='s',
         markersize=5,
         alpha=0.9,
-        markevery=max(1, len(steps) // 20),
+        markevery=max(1, len(steps_train) // 20),
     )
-    ax.plot(
-        steps,
-        accuracy,
+    ax1.plot(
+        steps_train,
+        soft_acc_train,
         color='#2ca02c',  # Green
         linewidth=2,
         linestyle='--',
@@ -79,47 +83,107 @@ def plot_eval_no_damage_stepwise(
         marker='^',
         markersize=4,
         alpha=0.8,
-        markevery=max(1, len(steps) // 20),
+        markevery=max(1, len(steps_train) // 20),
     )
     
-    # Formatting with larger fonts (matching figure1 style)
-    ax.set_xlabel('Step', fontsize=24)
-    ax.set_ylabel('Accuracy', fontsize=24)
-    ax.set_title(title, fontsize=28, fontweight='bold')
-    ax.tick_params(axis='both', which='major', labelsize=20)
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc='best', fontsize=18)
-    ax.set_ylim([0, 1.05])  # Slightly above 1.0 to show perfect accuracy clearly
+    ax1.set_xlabel('Step', fontsize=24)
+    ax1.set_ylabel('Accuracy', fontsize=24)
+    ax1.set_title('Training Performance', fontsize=24, fontweight='bold')
+    ax1.tick_params(axis='both', which='major', labelsize=20)
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(loc='best', fontsize=18)
+    ax1.set_ylim([0, 1.05])
+    ax1.axhline(y=1.0, color='green', linestyle=':', alpha=0.5, linewidth=1.5)
     
-    # Add horizontal line at perfect accuracy
-    ax.axhline(y=1.0, color='green', linestyle=':', alpha=0.5, linewidth=1.5)
-    
-    # Add statistics text box (positioned in top-right to avoid curve overlap)
-    if len(steps) > 0:
+    # Add statistics text box for training
+    if len(steps_train) > 0:
         stats_lines = []
-        stats_lines.append(f'Full Map Acc: {full_map_accuracy[-1]:.4f}')
-        stats_lines.append(f'Hard Acc: {hard_accuracy[-1]:.4f}')
-        stats_lines.append(f'Soft Acc: {accuracy[-1]:.4f}')
+        stats_lines.append(f'Full Map Acc: {full_map_acc_train[-1]:.4f}')
+        stats_lines.append(f'Hard Acc: {hard_acc_train[-1]:.4f}')
+        stats_lines.append(f'Soft Acc: {soft_acc_train[-1]:.4f}')
         stats_text = '\n'.join(stats_lines)
-        ax.text(
+        ax1.text(
             0.98, 0.98, stats_text,
-            transform=ax.transAxes,
+            transform=ax1.transAxes,
             fontsize=14,
             verticalalignment='top',
             horizontalalignment='right',
             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8)
         )
     
+    # Right subplot: Test performance
+    ax2.plot(
+        steps_test,
+        full_map_acc_test,
+        color='#1f77b4',  # Blue
+        linewidth=2.5,
+        label='Full Map Accuracy',
+        marker='o',
+        markersize=5,
+        alpha=0.9,
+        markevery=max(1, len(steps_test) // 20),
+    )
+    ax2.plot(
+        steps_test,
+        hard_acc_test,
+        color='#d62728',  # Red
+        linewidth=2.5,
+        label='Hard Accuracy',
+        marker='s',
+        markersize=5,
+        alpha=0.9,
+        markevery=max(1, len(steps_test) // 20),
+    )
+    ax2.plot(
+        steps_test,
+        soft_acc_test,
+        color='#2ca02c',  # Green
+        linewidth=2,
+        linestyle='--',
+        label='Accuracy (Soft)',
+        marker='^',
+        markersize=4,
+        alpha=0.8,
+        markevery=max(1, len(steps_test) // 20),
+    )
+    
+    ax2.set_xlabel('Step', fontsize=24)
+    ax2.set_ylabel('Accuracy', fontsize=24)
+    ax2.set_title('Unseen Performance', fontsize=24, fontweight='bold')
+    ax2.tick_params(axis='both', which='major', labelsize=20)
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(loc='best', fontsize=18)
+    ax2.set_ylim([0, 1.05])
+    ax2.axhline(y=1.0, color='green', linestyle=':', alpha=0.5, linewidth=1.5)
+    
+    # Add statistics text box for test
+    if len(steps_test) > 0:
+        stats_lines = []
+        stats_lines.append(f'Full Map Acc: {full_map_acc_test[-1]:.4f}')
+        stats_lines.append(f'Hard Acc: {hard_acc_test[-1]:.4f}')
+        stats_lines.append(f'Soft Acc: {soft_acc_test[-1]:.4f}')
+        stats_text = '\n'.join(stats_lines)
+        ax2.text(
+            0.98, 0.98, stats_text,
+            transform=ax2.transAxes,
+            fontsize=14,
+            verticalalignment='top',
+            horizontalalignment='right',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+        )
+    
+    # Overall title
+    fig.suptitle(title, fontsize=28, fontweight='bold', y=1.02)
+    
     plt.tight_layout()
     
     # Save or show
     if output_path:
-        # Create output directory if it doesn't exist
         os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
         plt.savefig(output_path, dpi=dpi, bbox_inches='tight')
         print(f"Saved plot to: {output_path}")
         
-        # Also save as PDF for better quality
+        # Also save as PDF
         if output_path.endswith('.png'):
             pdf_path = output_path.replace('.png', '.pdf')
         else:
@@ -193,20 +257,8 @@ def main():
         layer_sizes=layer_sizes,
     )
     
-    # Generate plot for test data
-    output_name = args.output_name if args.output_name else f"eval_no_damage_stepwise_{args.run_id}"
-    output_path = os.path.join(args.output_dir, f"{output_name}_test.png")
-    
-    print(f"\nGenerating stepwise plot...")
-    plot_eval_no_damage_stepwise(
-        step_metrics=step_metrics_test,
-        output_path=output_path,
-        title="Boolean Function Discovery",
-        dpi=300,
-    )
-    
-    # Optionally run on train data
-    if args.eval_on_train and config.eval.input_split_enabled:
+    # Run evaluation on train data (if split is enabled)
+    if config.eval.input_split_enabled:
         print("\nRunning evaluation on TRAIN data...")
         final_metrics_train, step_metrics_train = run_eval_no_damage(
             model=model,
@@ -217,15 +269,24 @@ def main():
             config=config,
             layer_sizes=layer_sizes,
         )
-        
-        # Generate plot for train data
-        output_path_train = os.path.join(args.output_dir, f"{output_name}_train.png")
-        plot_eval_no_damage_stepwise(
-            step_metrics=step_metrics_train,
-            output_path=output_path_train,
-            title="Boolean Function Discovery",
-            dpi=300,
-        )
+    else:
+        # If no split, use test metrics for both (all data is used for both)
+        print("\nNo data split - using same evaluation for both subplots")
+        step_metrics_train = step_metrics_test
+        final_metrics_train = final_metrics_test
+    
+    # Generate 2-subplot comparison figure
+    output_name = args.output_name if args.output_name else f"eval_no_damage_stepwise_{args.run_id}"
+    output_path = os.path.join(args.output_dir, f"{output_name}.png")
+    
+    print(f"\nGenerating 2-subplot comparison figure...")
+    plot_eval_no_damage_stepwise_comparison(
+        train_metrics=step_metrics_train,
+        test_metrics=step_metrics_test,
+        output_path=output_path,
+        title="Boolean Function Discovery",
+        dpi=300,
+    )
 
 
 if __name__ == "__main__":
