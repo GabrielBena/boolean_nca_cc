@@ -1,0 +1,75 @@
+# Statistical Robustness Sweep
+# This sweep varies the random seed to collect statistical data across multiple runs
+# for error bar computation in visualizations.
+
+# Program to run for the sweep (relative to project root where wandb sweep is run)
+program: train.py
+
+# Method for the sweep
+method: grid
+
+# Metric to track (not optimizing, just for comparison)
+metric:
+  goal: maximize
+  name: eval_no_damage/final_hard_accuracy
+
+# Parameters to sweep over
+parameters:
+  # Vary model initialization seed (primary source of stochasticity)
+  seed:
+    values:
+      - 34
+      - 42
+      - 123
+      - 456
+      - 789
+      - 101112
+      - 131415
+      - 161718
+      - 192021
+      - 222324
+      - 252627
+      - 282930
+      - 313233
+      - 343536
+      - 373839
+      - 404142
+      - 434445
+      - 464748
+      - 495051
+      - 525354
+      - 555657
+      - 585960
+      - 616263
+      - 646566
+      - 676869
+      - 707172
+      - 737475
+      - 767778
+      - 798081
+      - 828384
+      - 858687
+  # Keep these FIXED to isolate model variance:
+  # - test_seed: Fixed wire pattern (set in base config)
+  # - input_split_seed: Fixed data split (set in base config)
+  # - damage_seed: Fixed damage pattern generation (set in base config)
+  
+  # Ensure stepwise logging is enabled for statistical aggregation
+  eval.periodic_eval_log_stepwise:
+    value: true
+  
+  # Ensure no-damage evaluation runs (disable knockout eval)
+  pool.damage_pool_enabled:
+    value: false
+  
+  # Ensure input split is enabled for train/test comparison
+  eval.input_split_enabled:
+    value: true
+
+# Add this command block to format arguments correctly for Hydra
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args_no_hyphens}
+

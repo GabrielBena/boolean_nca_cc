@@ -1,4 +1,4 @@
-# Program to run for the sweep
+# Program to run for the sweep (relative to project root where wandb sweep is run)
 program: train.py
 
 # Method for the sweep

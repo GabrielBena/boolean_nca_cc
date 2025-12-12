@@ -96,20 +96,21 @@ def plot_eval_no_damage_stepwise_comparison(
     ax1.axhline(y=1.0, color='green', linestyle=':', alpha=0.5, linewidth=1.5)
     
     # Add statistics text box for training
-    if len(steps_train) > 0:
-        stats_lines = []
-        stats_lines.append(f'Full Map Acc: {full_map_acc_train[-1]:.4f}')
-        stats_lines.append(f'Hard Acc: {hard_acc_train[-1]:.4f}')
-        stats_lines.append(f'Soft Acc: {soft_acc_train[-1]:.4f}')
-        stats_text = '\n'.join(stats_lines)
-        ax1.text(
-            0.98, 0.98, stats_text,
-            transform=ax1.transAxes,
-            fontsize=14,
-            verticalalignment='top',
-            horizontalalignment='right',
-            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8)
-        )
+    # Commented out due to overlap with curves
+    # if len(steps_train) > 0:
+    #     stats_lines = []
+    #     stats_lines.append(f'Full Map Acc: {full_map_acc_train[-1]:.4f}')
+    #     stats_lines.append(f'Hard Acc: {hard_acc_train[-1]:.4f}')
+    #     stats_lines.append(f'Soft Acc: {soft_acc_train[-1]:.4f}')
+    #     stats_text = '\n'.join(stats_lines)
+    #     ax1.text(
+    #         0.98, 0.98, stats_text,
+    #         transform=ax1.transAxes,
+    #         fontsize=14,
+    #         verticalalignment='top',
+    #         horizontalalignment='right',
+    #         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+    #     )
     
     # Right subplot: Test performance
     ax2.plot(
@@ -157,20 +158,21 @@ def plot_eval_no_damage_stepwise_comparison(
     ax2.axhline(y=1.0, color='green', linestyle=':', alpha=0.5, linewidth=1.5)
     
     # Add statistics text box for test
-    if len(steps_test) > 0:
-        stats_lines = []
-        stats_lines.append(f'Full Map Acc: {full_map_acc_test[-1]:.4f}')
-        stats_lines.append(f'Hard Acc: {hard_acc_test[-1]:.4f}')
-        stats_lines.append(f'Soft Acc: {soft_acc_test[-1]:.4f}')
-        stats_text = '\n'.join(stats_lines)
-        ax2.text(
-            0.98, 0.98, stats_text,
-            transform=ax2.transAxes,
-            fontsize=14,
-            verticalalignment='top',
-            horizontalalignment='right',
-            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8)
-        )
+    # Commented out due to overlap with curves
+    # if len(steps_test) > 0:
+    #     stats_lines = []
+    #     stats_lines.append(f'Full Map Acc: {full_map_acc_test[-1]:.4f}')
+    #     stats_lines.append(f'Hard Acc: {hard_acc_test[-1]:.4f}')
+    #     stats_lines.append(f'Soft Acc: {soft_acc_test[-1]:.4f}')
+    #     stats_text = '\n'.join(stats_lines)
+    #     ax2.text(
+    #         0.98, 0.98, stats_text,
+    #         transform=ax2.transAxes,
+    #         fontsize=14,
+    #         verticalalignment='top',
+    #         horizontalalignment='right',
+    #         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+    #     )
     
     # Overall title
     fig.suptitle(title, fontsize=28, fontweight='bold', y=1.02)

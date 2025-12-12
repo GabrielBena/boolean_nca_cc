@@ -95,7 +95,7 @@ eval:
   # Periodic evaluation parameters
   periodic_eval_enabled: true
   periodic_eval_inner_steps: 200
-  periodic_eval_interval: 2048 # 16
+  periodic_eval_interval: 1024 # 16
   periodic_eval_test_seed: ${test_seed}
   periodic_eval_log_stepwise: true
   periodic_eval_batch_size: ${pool.damage_knockout_diversity}  # Batch size for knockout evaluation (should match knockout_diversity)
@@ -146,7 +146,7 @@ logging:
 
 # Checkpoint configuration
 checkpoint:
-  enabled: true
+  enabled: false
   interval: 1031  # prime number 
   save_best: true  # Save best model based on metric
   best_metric: "hard_accuracy"  # Metric to track for best model
