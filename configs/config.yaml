@@ -113,7 +113,7 @@ training:
 # Pool configuration for meta-learning
 pool:
   # size: 8192
-  size: 2048
+  size: 4096
   reset_fraction: 0.15  # Reduced from 0.25 - smaller resets = more stable training
   reset_interval: null
   reset_strategy: "uniform"
