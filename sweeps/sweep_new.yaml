@@ -4,7 +4,7 @@ defaults:
 
 sweep:
   grid:  # parameters to combine in all possible ways
-    model: [self-attention]
+    model: [self_attention]
     training.wiring_mode: [random, fixed]
     damage.enabled: [true]
     circuit: [add, binary_multiply, text, reverse]

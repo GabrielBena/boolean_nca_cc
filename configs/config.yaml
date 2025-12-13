@@ -47,7 +47,7 @@ training:
   # TRAIN/TEST SPLIT
   test_num: 256  # Fraction/absolute number of data to use for testing (from all input combinations)
   # BATCH SIZE
-  meta_batch_size: 576
+  meta_batch_size: 512
   
   # MULTI-GPU DATA PARALLELISM
   # Distributes batch across GPUs, each device processes batch_size/num_devices circuits
