@@ -3,7 +3,7 @@
 # Default parameters for experiment
 defaults:
   - model: self_attention  # Default model (gnn or self_attention or perceiver_attention)
-  - circuit: binary_multiply
+  - circuit: text
   - loss: bce  # Options: l2, l4, bce, bce_w3, focal, asym, focal_asym
   - _self_  # For self-overrides
 
@@ -34,8 +34,8 @@ graph:
 # Training parameters
 training:
   # WIRING MODE : "random" or "fixed"
-  wiring_mode: "random"  # Options: "fixed", "genetic", or "random"
-  initial_diversity: 1
+  wiring_mode: "fixed"  # Options: "fixed", "genetic", or "random"
+  initial_diversity: 256
   # INNER LOOP
   n_message_steps: 100  # Number of message passing steps per training iteration
   # DATA FRACTION
@@ -57,7 +57,7 @@ training:
     num_devices: null  # Number of devices to use (null = all available)
   
   # OPTIMIZATION
-  learning_rate: 3e-4
+  learning_rate: 1e-4
   weight_decay: 1e-5
   # LEARNING RATE SCHEDULER
   # Options: "constant", "exponential", "cosine", "linear_warmup", "adaptive", "reduce_on_plateau"
@@ -183,13 +183,14 @@ eval:
   interval: 1024  # Evaluate every N epochs
   inner_steps: ${pool.expected_updates}  # Number of message passing steps for inner loop evaluation
   log_stepwise: true  # Whether to log detailed step-by-step metrics to wandb
-  batch_size_in: null  # Batch size for IN-distribution evaluation (None means use initial_diversity)
-  batch_size_out: null  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
+  batch_size_in: ${training.meta_batch_size}  # Batch size for IN-distribution evaluation (None means use initial_diversity)
+  batch_size_out: ${training.meta_batch_size}  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
   log_pool_scatter: true
-  do_ood_evaluation: null # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
+  do_ood_evaluation: true # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
   damage_enabled: true # Whether to apply damage during evaluation (if damage.enabled is also true)
   n_damage_steps: 2 # Number of damage steps to apply during evaluation
-
+  get_all_wirings: true # Whether to get all wirings (True) or a subset (False)
+  
 # Early stopping based on accuracy
 stop_accuracy:
   enabled: true  # Whether to enable early stopping based on accuracy
@@ -207,17 +208,14 @@ checkpoint:
   save_latest: true  # Always save latest checkpoint
   # Save checkpoints on MNT storage (if available)
   save_on_mnt_storage: false
-  # Multi-metric best model tracking - specify which metrics to track and save
+  # Multi-metric best model tracking - filter which metrics to track
   track_best_metrics:
-    enabled: true  # Whether to enable multi-metric tracking
-    metrics:
-      # Format: "eval_{wiring}_{data}_{metric}" 
-      # wiring: 'in' or 'out', data: 'test' or 'train'
-      # metric: 'hard_accuracy', 'accuracy', 'hard_loss', or 'loss'
-      - "eval_in_test_hard_accuracy"     # IN-distribution on test data (generalization)
-      - "eval_in_train_hard_accuracy"    # IN-distribution on train data (fitting)
-      - "eval_out_test_hard_accuracy"    # OUT-distribution on test data (OOD generalization)
-      - "eval_out_train_hard_accuracy"   # OUT-distribution on train data (OOD fitting)
+    enabled: true
+    # Filters: omit or leave empty to include all options
+    metric: [hard_accuracy]  # Options: hard_accuracy, accuracy, hard_loss, loss
+    data: []                 # Options: test, train
+    wiring: []               # Options: in, out
+    damaged: []              # Options: true, false
   
 
 # Logging configuration

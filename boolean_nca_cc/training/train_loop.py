@@ -399,9 +399,6 @@ def run_unified_periodic_evaluation(
             log.info(
                 f"Running {damage_suffix}{wiring_desc} ({data_suffix}) evaluation ({batch_size} circuits)..."
             )
-            if batch_size is not None and batch_size > datasets.target_batch_size:
-                log.info(f"Using chunked evaluation (chunks of {datasets.target_batch_size})")
-
             result = evaluate_model_stepwise_batched(
                 model=model,
                 batch_wires=wires,
@@ -414,10 +411,9 @@ def run_unified_periodic_evaluation(
                 n_message_steps=n_message_steps,
                 loss_cfg=loss_cfg,
                 layer_sizes=layer_sizes,
-                # Probabilistic damage for training-consistent metrics
                 p_fault=p_fault if with_damage else None,
                 faulty_value=faulty_value,
-                # Only return details for undamaged eval (used for viz)
+                chunk_size=datasets.target_batch_size,
                 return_first_circuit_details=not with_damage,
             )
 
@@ -627,9 +623,9 @@ def run_unified_periodic_evaluation(
 
         log.info("\n".join(log_message_parts))
 
-        # Prepare evaluation metrics for best model tracking (all data splits)
+        # Prepare evaluation metrics for best model tracking (all data splits, including damaged)
         eval_metrics = {}
-        for key in ["in_test", "out_test", "in_train", "out_train"]:
+        for key in final_metrics:
             if final_metrics.get(key):
                 eval_metrics.update(final_metrics[key])
 
@@ -780,6 +776,7 @@ def train_model(
     periodic_eval_log_pool_scatter: bool = False,
     periodic_eval_damage_enabled: bool = False,
     periodic_eval_n_damage_steps: int = 1,
+    periodic_eval_get_all_wirings: bool = False,
     # Wandb parameters
     wandb_logging: bool = False,
     log_interval: int = 1,
@@ -867,6 +864,7 @@ def train_model(
         periodic_eval_batch_size_in: Batch size for IN-distribution evaluation (None means use initial_diversity)
         periodic_eval_batch_size_out: Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
         periodic_eval_do_ood_evaluation: Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
+        periodic_eval_get_all_wirings: Whether to get all wirings (True) or a subset (False)
         wandb_logging: Whether to log metrics to wandb
         log_interval: Interval for logging metrics
         wandb_run_config: Configuration to pass to wandb
@@ -1346,6 +1344,7 @@ def train_model(
             do_ood_evaluation=periodic_eval_do_ood_evaluation
             if periodic_eval_do_ood_evaluation is not None
             else wiring_mode == "random",
+            get_all_wirings=periodic_eval_get_all_wirings,
         )
 
         log.info(eval_datasets.get_summary())

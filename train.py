@@ -79,19 +79,40 @@ if os.path.exists("/mnt/storage/gb21"):
 
 def extract_track_metrics_config(cfg) -> list[str] | None:
     """
-    Extract track_metrics configuration from config.
+    Extract track_metrics configuration from config using filter-based approach.
+
+    Filters (omit or empty list = include all):
+    - metric: [hard_accuracy, accuracy, hard_loss, loss]
+    - data: [test, train]
+    - wiring: [in, out]
+    - damaged: [true, false]
 
     Returns:
-        List of metrics to track or None if not configured
+        List of metrics to track, or None to auto-detect all active evaluation metrics.
     """
-    if not cfg.checkpoint.get("track_best_metrics", {}).get("enabled", False):
+    track_cfg = cfg.checkpoint.get("track_best_metrics", {})
+    if not track_cfg.get("enabled", False):
         return None
 
-    metrics_config = cfg.checkpoint.get("track_best_metrics", {}).get("metrics", [])
-    if not metrics_config:
-        return None
+    # Get filters (empty list = include all)
+    metrics = track_cfg.get("metric", []) or ["hard_accuracy", "accuracy", "hard_loss", "loss"]
+    data_splits = track_cfg.get("data", []) or ["test", "train"]
+    wirings = track_cfg.get("wiring", []) or ["in", "out"]
+    damaged_opts = track_cfg.get("damaged", [])
+    if not damaged_opts:
+        damaged_prefixes = ["", "damaged_"]
+    else:
+        damaged_prefixes = ["damaged_" if d else "" for d in damaged_opts]
 
-    return list(metrics_config)
+    # Generate all metric keys from filter combinations
+    result = []
+    for dp in damaged_prefixes:
+        for w in wirings:
+            for d in data_splits:
+                for m in metrics:
+                    result.append(f"eval_{dp}{w}_{d}_{m}")
+
+    return result if result else None
 
 
 def run_backpropagation_training(cfg, x_data, y_data, loss_cfg=None):
@@ -1060,6 +1081,7 @@ def main(cfg: DictConfig) -> None:
         periodic_eval_n_damage_steps=cfg.eval.n_damage_steps
         if cfg.eval.damage_enabled and cfg.damage.enabled
         else None,
+        periodic_eval_get_all_wirings=cfg.eval.get_all_wirings,
         # WandB parameters
         wandb_logging=cfg.wandb.enabled,
         log_interval=cfg.logging.log_interval,
@@ -1133,6 +1155,7 @@ def main(cfg: DictConfig) -> None:
             do_ood_evaluation=cfg.eval.do_ood_evaluation
             if cfg.eval.do_ood_evaluation is not None
             else cfg.training.wiring_mode == "random",
+            get_all_wirings=cfg.eval.get_all_wirings,
         )
         eval_results = run_unified_periodic_evaluation(
             model=model_results["model"],

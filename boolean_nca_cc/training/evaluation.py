@@ -5,6 +5,7 @@ This module provides functions for evaluating the performance of GNN
 models on optimizing boolean circuits.
 """
 
+import logging
 from collections.abc import Generator
 from typing import NamedTuple
 
@@ -802,6 +803,9 @@ def evaluate_model_stepwise(
     return step_results
 
 
+log = logging.getLogger(__name__)
+
+
 def evaluate_model_stepwise_batched(
     model: CircuitGNN | CircuitSelfAttention | PerceiverCircuitAttention,
     batch_wires: list[jp.ndarray],  # Shape: [batch_size, ...original_wire_shape...]
@@ -823,6 +827,7 @@ def evaluate_model_stepwise_batched(
     p_fault: float | None = None,
     faulty_value: float = -10.0,
     # Chunking and details
+    chunk_size: int | None = None,
     return_first_circuit_details: bool = False,
 ) -> dict:
     """
@@ -864,6 +869,47 @@ def evaluate_model_stepwise_batched(
         If return_first_circuit_details=True, also includes 'first_circuit_results' key
         with list of StepResult objects for visualization.
     """
+    batch_size = batch_logits[0].shape[0]
+
+    # Handle chunking for large batches
+    if chunk_size is not None and batch_size > chunk_size:
+        log.info(f"Using chunked evaluation (chunks of {chunk_size})")
+        chunks = []
+        for i in range(0, batch_size, chunk_size):
+            end = min(i + chunk_size, batch_size)
+            chunk_res = evaluate_model_stepwise_batched(
+                model=model,
+                batch_wires=[w[i:end] for w in batch_wires],
+                batch_logits=[lg[i:end] for lg in batch_logits],
+                x_data=x_data,
+                y_data=y_data,
+                input_n=input_n,
+                arity=arity,
+                circuit_hidden_dim=circuit_hidden_dim,
+                n_message_steps=n_message_steps,
+                loss_cfg=loss_cfg,
+                bidirectional_edges=bidirectional_edges,
+                layer_sizes=layer_sizes,
+                damage_steps=damage_steps,
+                knockout_per_damage_step=knockout_per_damage_step,
+                damage_key=damage_key,
+                p_fault=p_fault,
+                faulty_value=faulty_value,
+                chunk_size=None,  # Don't recurse further
+                return_first_circuit_details=return_first_circuit_details and (i == 0),
+            )
+            chunks.append((end - i, chunk_res))
+        # Weighted average across chunks
+        total = sum(w for w, _ in chunks)
+        result = {"step": chunks[0][1]["step"]}
+        for k in ["loss", "hard_loss", "accuracy", "hard_accuracy"]:
+            result[k] = [
+                sum(w * r[k][s] for w, r in chunks) / total for s in range(n_message_steps)
+            ]
+        if "first_circuit_results" in chunks[0][1]:
+            result["first_circuit_results"] = chunks[0][1]["first_circuit_results"]
+        return result
+
     if loss_cfg is None:
         loss_cfg = LOSS_L4
 

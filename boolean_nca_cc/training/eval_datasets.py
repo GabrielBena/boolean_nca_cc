@@ -83,6 +83,7 @@ def create_unified_evaluation_datasets(
     eval_batch_size_in: int,
     eval_batch_size_out: int,
     do_ood_evaluation: bool = True,
+    get_all_wirings: bool = False,
 ) -> UnifiedEvaluationDatasets:
     """
     Create unified evaluation datasets that properly match training patterns.
@@ -100,7 +101,7 @@ def create_unified_evaluation_datasets(
         eval_batch_size_in: Number of circuits in each IN-distribution evaluation set
         eval_batch_size_out: Number of circuits in each OUT-of-distribution evaluation set
         do_ood_evaluation: Whether to create OUT-of-distribution evaluation circuits
-
+        get_all_wirings: Whether to get all wirings (True) or a subset (False)
     Returns:
         UnifiedEvaluationDatasets object containing IN and OUT distribution circuits
     """
@@ -124,6 +125,7 @@ def create_unified_evaluation_datasets(
                 batch_size=eval_batch_size_in,
                 wiring_mode=training_wiring_mode,
                 initial_diversity=training_initial_diversity,
+                get_all_wirings=get_all_wirings,
             )
         )
     else:
@@ -283,30 +285,3 @@ def _create_circuit_batch_with_pattern(
         actual_batch_size = batch_size
 
     return batch_wires, batch_logits, actual_batch_size
-
-
-# DEPRECATED: evaluate_circuits_in_chunks has been moved to evaluation.py
-# Import for backwards compatibility
-def evaluate_circuits_in_chunks(
-    eval_fn,
-    wires: list[jp.ndarray],
-    logits: list[jp.ndarray],
-    target_chunk_size: int,
-    **eval_kwargs,
-) -> dict:
-    """
-    DEPRECATED: Use evaluate_model_stepwise_batched with chunk_size parameter instead.
-
-    This function is provided for backward compatibility and will be removed in a future version.
-    """
-    import warnings
-
-    from boolean_nca_cc.training.evaluation import evaluate_circuits_in_chunks as _eval_chunks
-
-    warnings.warn(
-        "evaluate_circuits_in_chunks from eval_datasets is deprecated. "
-        "Use evaluate_model_stepwise_batched with chunk_size parameter from evaluation.py instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return _eval_chunks(eval_fn, wires, logits, target_chunk_size, **eval_kwargs)
