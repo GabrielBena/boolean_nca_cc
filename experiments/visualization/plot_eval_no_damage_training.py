@@ -32,7 +32,10 @@ def plot_sweep_eval_no_damage_hard_accuracy(
     alpha_individual: float = 0.3,
 ):
     """
-    Plot eval_no_damage/hard_accuracy across training epochs for all runs in a sweep.
+    Plot eval_no_damage/final_hard_accuracy across training epochs for all runs in a sweep.
+    
+    Uses eval_no_damage_raw/* metrics which are logged without step_metric grouping,
+    providing direct access to all logged evaluation epochs without WandB's grouping/aggregation.
     
     Args:
         sweep_id: WandB sweep ID
@@ -47,96 +50,32 @@ def plot_sweep_eval_no_damage_hard_accuracy(
         alpha_individual: Transparency for individual run lines
     """
     # Load metrics from all runs in the sweep
-    # NOTE: The WandB panel shows 8 data points. The diagnostics revealed:
-    # - eval_no_damage/epoch only has 3 epochs (1024, 4096, 5120) in history due to step_metric grouping
-    # - eval_no_damage_steps/epoch has all 8 epochs (0, 1024, 2048, 3072, 4096, 5120, 6144, 7168)
-    # The panel is likely showing eval_no_damage_steps/hard_accuracy at the final step per epoch
-    # OR it's showing eval_no_damage/final_hard_accuracy but WandB UI aggregates it differently
-    # We'll try both approaches and see which matches the panel better
-    
+    # Use eval_no_damage_raw/* metrics which are logged without step_metric grouping
+    # This provides direct access to all logged values without WandB's grouping/aggregation
     print(f"Loading metrics from sweep {sweep_id}...")
+    print("Using eval_no_damage_raw/* metrics (no step_metric grouping)...")
     
-    # Approach 1: Try to get eval_no_damage/final_hard_accuracy with all epochs
-    # (even though history() only shows 3, maybe we can get more by checking stepwise epochs)
-    print("Attempting to load eval_no_damage/final_hard_accuracy...")
-    df_final = load_sweep_metrics(
+    df = load_sweep_metrics(
         sweep_id=sweep_id,
-        x_metric="eval_no_damage/epoch",
-        y_metric="eval_no_damage/final_hard_accuracy",
-        project=project,
-        entity=entity,
-        include_config=True,
-        config_keys=["seed"],
-    )
-    
-    # Approach 2: Load stepwise metrics and get final step
-    print("Loading stepwise metrics (which have all 8 epochs)...")
-    df_steps = load_sweep_metrics(
-        sweep_id=sweep_id,
-        x_metric="eval_no_damage_steps/epoch",
-        y_metric="eval_no_damage_steps/hard_accuracy",
+        x_metric="eval_no_damage_raw/epoch",
+        y_metric="eval_no_damage_raw/final_hard_accuracy",
         project=project,
         entity=entity,
         include_config=True,
         config_keys=["seed"],  # Include seed to distinguish runs
     )
     
-    # Check what we got
-    print(f"\nApproach 1 (eval_no_damage/final_hard_accuracy):")
-    if not df_final.empty:
-        epochs_final = sorted(df_final['eval_no_damage/epoch'].unique())
-        print(f"  {len(df_final)} points, {len(epochs_final)} unique epochs: {epochs_final}")
-    else:
-        print(f"  No data found")
+    if df.empty:
+        print(f"No eval_no_damage_raw metrics found in sweep {sweep_id}")
+        print("Note: Raw metrics are only available for runs logged after implementing Option 3.")
+        print("For older runs, you may need to use eval_no_damage_steps/* metrics.")
+        return None
     
-    print(f"\nApproach 2 (eval_no_damage_steps/hard_accuracy):")
-    if df_steps.empty:
-        print(f"  No eval_no_damage_steps metrics found in sweep {sweep_id}")
-        if df_final.empty:
-            return None
-        # Fall back to df_final
-        df = df_final
-        x_col = "eval_no_damage/epoch"
-        y_col = "eval_no_damage/final_hard_accuracy"
-        print(f"\nUsing final metrics (fallback): {len(df)} points from {df['run_id'].nunique()} runs")
-    else:
-        print(f"  {len(df_steps)} stepwise data points from {df_steps['run_id'].nunique()} runs")
+    print(f"Loaded {len(df)} data points from {df['run_id'].nunique()} runs")
     
-        # Filter to only the final step per epoch per run
-        # The stepwise metrics log at every message passing step (0, 1, 2, ..., n_message_steps)
-        # We want the LAST step, which should be step = periodic_eval_inner_steps (typically 200)
-        step_col = "eval_no_damage_steps/step"
-        if step_col not in df_steps.columns:
-            # If no step column, assume the last row per epoch is the final step
-            print("Warning: No step column found, using last row per epoch as final step")
-            df = df_steps.groupby(['run_id', 'eval_no_damage_steps/epoch']).tail(1).reset_index(drop=True)
-        else:
-            # Diagnostic: Check step values for a sample run/epoch
-            sample_run = df_steps['run_id'].iloc[0]
-            sample_epoch = df_steps['eval_no_damage_steps/epoch'].iloc[0]
-            sample_data = df_steps[(df_steps['run_id'] == sample_run) & 
-                                   (df_steps['eval_no_damage_steps/epoch'] == sample_epoch)]
-            if len(sample_data) > 0:
-                steps = sorted(sample_data[step_col].unique())
-                print(f"Sample: Run {sample_run[:8]}, Epoch {sample_epoch}: {len(steps)} steps, range {steps[0]}-{steps[-1]}")
-                print(f"  Step values: {steps[:10]}{'...' if len(steps) > 10 else ''}")
-                print(f"  Expected final step should be around 200 (periodic_eval_inner_steps)")
-            
-            # Sort by step descending, then take the first (highest) step for each (run_id, epoch)
-            df_steps_sorted = df_steps.sort_values(['run_id', 'eval_no_damage_steps/epoch', step_col], 
-                                                    ascending=[True, True, False])
-            df = df_steps_sorted.groupby(['run_id', 'eval_no_damage_steps/epoch']).head(1).reset_index(drop=True)
-            print(f"Filtered to final step per epoch: {len(df)} data points")
-            
-            # Verify we got the right steps
-            if len(df) > 0:
-                final_steps = sorted(df[step_col].unique())
-                print(f"Final step values in filtered data: {final_steps[:10]}{'...' if len(final_steps) > 10 else ''}")
-        
-        # Set column names for stepwise approach (always set, regardless of which branch we took)
-        x_col = "eval_no_damage_steps/epoch"
-        y_col = "eval_no_damage_steps/hard_accuracy"
-        print(f"\nUsing stepwise metrics: {len(df)} points from {df['run_id'].nunique()} runs")
+    # Set column names
+    x_col = "eval_no_damage_raw/epoch"
+    y_col = "eval_no_damage_raw/final_hard_accuracy"
     
     # Check what epochs we actually have per run
     print(f"\nDetailed epoch breakdown per run:")

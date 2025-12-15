@@ -97,6 +97,8 @@ def _init_wandb(wandb_logging: bool, wandb_run_config: dict | None = None) -> An
             wandb.define_metric("eval_no_damage/*", step_metric="eval_no_damage/epoch")
             # eval_no_damage_steps/* intentionally has no metric definition (like eval_ko_in_steps/*)
             # This ensures WandB uses its default step counter, giving each log call its own x-axis position
+            # eval_no_damage_raw/* intentionally has no metric definition - used for direct data loading
+            # without step_metric grouping, allowing access to all logged values
             wandb.define_metric("model/*", step_metric="training/epoch")
             wandb.define_metric("scheduler/*", step_metric="training/epoch")
 
@@ -812,7 +814,9 @@ def train_model(
             optax.zero_nans(),
             optax.adamw(learning_rate=schedule, weight_decay=weight_decay),
         )
-        optimizer = nnx.Optimizer(model, opt_fn)
+        # As of Flax 0.11.0, nnx.Optimizer requires wrt argument
+        # Since nnx.value_and_grad optimizes all parameters by default, use Everything()
+        optimizer = nnx.Optimizer(model, opt_fn, wrt=nnx.Everything())
     else:
         # Use the provided optimizer
         optimizer = init_optimizer
@@ -1040,7 +1044,8 @@ def train_model(
         )
 
         # Update GNN parameters
-        optimizer.update(grads)
+        # As of Flax 0.11.0, update() requires both model and grads arguments
+        optimizer.update(model, grads)
 
         # Update pool with the updated graphs and logits (wires stay the same)
         updated_pool = pool.update(idxs, updated_graphs, batch_of_logits=updated_logits)
@@ -1725,11 +1730,30 @@ def train_model(
                             f"eval_no_damage{metric_suffix}/epoch": epoch,
                         }
                         
+                        # Also log raw metrics without step_metric grouping for direct data access
+                        # These are identical values but without step_metric definition, so history() returns all logged values
+                        raw_metrics = {
+                            f"eval_no_damage_raw{metric_suffix}/final_loss": step_metrics["soft_loss"][-1],
+                            f"eval_no_damage_raw{metric_suffix}/final_hard_loss": step_metrics["hard_loss"][-1],
+                            f"eval_no_damage_raw{metric_suffix}/final_accuracy": step_metrics["soft_accuracy"][-1],
+                            f"eval_no_damage_raw{metric_suffix}/final_hard_accuracy": step_metrics["hard_accuracy"][-1],
+                            f"eval_no_damage_raw{metric_suffix}/final_full_map_accuracy": step_metrics["full_map_accuracy"][-1],
+                            f"eval_no_damage_raw{metric_suffix}/epoch": epoch,
+                        }
+                        
                         # Add to all_eval_metrics for best model tracking
                         all_eval_metrics.update(final_metrics)
                         
                         if wandb_run:
                             wandb_run.log(final_metrics)
+                            # Log raw metrics separately (without step_metric grouping)
+                            # Use explicit step with small offset to ensure unique steps per epoch.
+                            # Without this, consecutive log() calls (test + train) may share the same
+                            # auto-incremented step, causing one to overwrite the other.
+                            # Offset of 1000 avoids conflicts with initialization (step 0) while
+                            # keeping steps reasonable (not causing upload issues like 10000 did).
+                            raw_step = int(epoch) + 1000
+                            wandb_run.log(raw_metrics, step=raw_step)
                         
                         # Log stepwise if enabled (for both test and train sets)
                         if periodic_eval_log_stepwise and wandb_run:
