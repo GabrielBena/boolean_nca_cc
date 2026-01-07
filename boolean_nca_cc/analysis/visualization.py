@@ -50,22 +50,26 @@ def plot_accuracy_vs_distance(
         gnn_data = summary_df[summary_df['method'] == 'gnn']
         bp_data = summary_df[summary_df['method'] == 'bp']
         
+        has_gnn = len(gnn_data) > 0
+        has_bp = len(bp_data) > 0
+        
         # Plot GNN data
-        if len(gnn_data) > 0:
+        if has_gnn:
             ax.scatter(gnn_data['overall_bitwise_fraction_diff'], 
                       gnn_data['final_hard_accuracy'], 
                       c='red', marker='o', s=100, alpha=0.7, 
                       edgecolors='black', linewidth=0.5, label='GNN')
         
         # Plot BP data
-        if len(bp_data) > 0:
+        if has_bp:
             ax.scatter(bp_data['overall_bitwise_fraction_diff'], 
                       bp_data['final_hard_accuracy'], 
                       c='blue', marker='s', s=100, alpha=0.7, 
                       edgecolors='black', linewidth=0.5, label='BP')
         
-        # Add legend with font size matching Figure 3
-        ax.legend(loc='lower right', fontsize=16)
+        # Only add legend if at least one method has data
+        if has_gnn or has_bp:
+            ax.legend(loc='lower right', fontsize=16)
     else:
         # Fallback to single color if no method column or color_by_method is False
         ax.scatter(summary_df['overall_bitwise_fraction_diff'], 

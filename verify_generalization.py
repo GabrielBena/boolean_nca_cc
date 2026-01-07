@@ -50,8 +50,17 @@ def verify_generalization():
     
     # Generate data
     n_cases = 1 << input_bits
-    # Limit cases if too large for memory (though 12 bits = 4096 is fine)
-    x_data, y_data = get_task_data(task_name, n_cases, input_bits=input_bits, output_bits=output_bits)
+    # Limit cases if too large for memory (capping handled by get_task_data)
+    max_samples = getattr(config.circuit, 'max_task_samples', 100000) if hasattr(config, 'circuit') else 100000
+    sample_seed = getattr(config, 'test_seed', 42) if hasattr(config, 'test_seed') else 42
+    x_data, y_data = get_task_data(
+        task_name, 
+        n_cases, 
+        max_samples=max_samples,
+        sample_seed=sample_seed,
+        input_bits=input_bits, 
+        output_bits=output_bits
+    )
     
     # Split train/test (80/20)
     input_train_fraction = 0.8

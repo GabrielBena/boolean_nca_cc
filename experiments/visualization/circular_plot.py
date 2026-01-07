@@ -77,16 +77,9 @@ def plot_accuracy_vs_distance(
     ax.grid(True, alpha=0.3)
     ax.set_ylim(0.6, 1.02)
     
-    # Add baseline point at (0, 1) if available
-    # if 'final_hard_accuracy' in summary_df.columns:
-    #     baseline_acc = 1.0  # Assuming baseline achieves perfect accuracy
-    #     ax.scatter([0], [baseline_acc], c='green', s=200, marker='*', 
-    #               edgecolors='black', linewidth=2, zorder=5)
-    #     ax.annotate('Baseline', (0, baseline_acc), xytext=(10, 10), 
-    #                textcoords='offset points', fontsize=10, fontweight='bold', color='green')
-    
     plt.tight_layout()
     plt.savefig(output_path, dpi=dpi, bbox_inches='tight')
     plt.close()
     
     return output_path
+

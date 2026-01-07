@@ -90,6 +90,8 @@ def wiring_seed_preconfigure(cfg: DictConfig) -> None:
     x_data, y_data = get_task_data(
         task_name=cfg.circuit.task,
         case_n=case_n,
+        max_samples=cfg.circuit.get("max_task_samples", 100000),
+        sample_seed=cfg.test_seed,
         input_bits=cfg.circuit.input_bits,
         output_bits=cfg.circuit.output_bits
     )

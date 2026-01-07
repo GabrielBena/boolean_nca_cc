@@ -18,7 +18,7 @@ from boolean_nca_cc import generate_layer_sizes
 # Configure logging
 log = logging.getLogger(__name__)
 
-@hydra.main(version_base=None, config_path="configs", config_name="config")
+@hydra.main(version_base=None, config_path="../configs", config_name="config")
 def test_preconfigure(cfg: DictConfig) -> None:
     """
     Test preconfigure function with config settings and print hard accuracy.
@@ -58,6 +58,8 @@ def test_preconfigure(cfg: DictConfig) -> None:
     x_data, y_data = get_task_data(
         task_name=cfg.circuit.task,
         case_n=case_n,
+        max_samples=cfg.circuit.get("max_task_samples", 100000),
+        sample_seed=cfg.test_seed,
         input_bits=cfg.circuit.input_bits,
         output_bits=cfg.circuit.output_bits
     )

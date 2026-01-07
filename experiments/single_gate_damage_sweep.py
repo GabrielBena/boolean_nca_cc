@@ -100,7 +100,14 @@ def main(cfg: DictConfig) -> None:
     input_n = cfg.circuit.input_bits
     output_n = cfg.circuit.output_bits
     case_n = 1 << input_n
-    x_data, y_data = get_task_data(cfg.circuit.task, case_n, input_bits=input_n, output_bits=output_n)
+    x_data, y_data = get_task_data(
+        cfg.circuit.task, 
+        case_n, 
+        max_samples=cfg.circuit.get("max_task_samples", 100000),
+        sample_seed=cfg.test_seed,
+        input_bits=input_n, 
+        output_bits=output_n
+    )
 
     # Fix wiring seed; use cfg.test_seed for wiring determinism
     wiring_key = jax.random.PRNGKey(cfg.test_seed)

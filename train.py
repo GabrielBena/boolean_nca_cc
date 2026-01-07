@@ -249,7 +249,12 @@ def main(cfg: DictConfig) -> None:
     # Get task data
     case_n = 1 << input_n
     x, y0 = get_task_data(
-        cfg.circuit.task, case_n, input_bits=input_n, output_bits=output_n
+        cfg.circuit.task, 
+        case_n, 
+        max_samples=cfg.circuit.get("max_task_samples", 100000),
+        sample_seed=cfg.test_seed,
+        input_bits=input_n, 
+        output_bits=output_n
     )
 
     # Generate knockout vocabulary for backprop training if enabled

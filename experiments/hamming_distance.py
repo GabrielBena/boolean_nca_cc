@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Experiment: GNN vs Backprop comparison under knockout patterns, and LUT truth-table distances.
 
@@ -49,6 +50,7 @@ from boolean_nca_cc.training.checkpointing import (
     load_best_model_from_wandb,
     load_checkpoint,
     instantiate_model_from_config,
+    load_config_from_wandb,
 )
 from boolean_nca_cc.training.evaluation import (
     get_loss_from_wires_logits,
@@ -382,30 +384,48 @@ def main():
     parser.add_argument("--n-message-steps", type=int, default=100)
     args = parser.parse_args()
 
-    # Load GNN first to get the authoritative config
+    # Parse methods selection early to determine what needs to be loaded
+    methods_str = (args.methods or "gnn").lower()
+    if methods_str == "both":
+        methods = {"bp", "gnn"}
+    else:
+        methods = set(m.strip() for m in methods_str.split(","))
+
+    # Load config first (always needed for circuit parameters, even for BP-only runs)
+    # This ensures BP baseline and analysis use identical parameters to GNN training
     if args.checkpoint is not None:
         loaded = load_checkpoint(args.checkpoint)
-        gnn_cfg = OmegaConf.create(loaded.get("config", {}))
-        gnn_model = instantiate_model_from_config(gnn_cfg, seed=gnn_cfg.get("seed", 0))
-        from flax import nnx as _nnx
-        _nnx.update(gnn_model, loaded["model"])
-        gnn_hidden_dim = int(gnn_cfg.model.get("circuit_hidden_dim", 16))
-        gnn_training_config = gnn_cfg
+        cfg = OmegaConf.create(loaded.get("config", {}))
+        gnn_training_config = cfg
     else:
-        # Use standard artifact filename
+        # Load config from WandB (without loading the model yet)
+        # Use standard artifact filename to get config
         filename_to_load = "best_model_eval_ko_hard_accuracy"
-
-        gnn_model, _loaded_dict, gnn_cfg = load_best_model_from_wandb(
+        cfg, _, _ = load_config_from_wandb(
             run_id=args.run_id,
-            seed=0,  # Use default seed, will be overridden by GNN config
             filename=filename_to_load,
+            select_by_best_metric=False,  # Just get config, not necessarily best model
         )
-        gnn_hidden_dim = int(gnn_cfg.model.get("circuit_hidden_dim", 16))
-        gnn_training_config = gnn_cfg
+        gnn_training_config = cfg
 
-    # Use GNN config as the authoritative source for everything
-    # This ensures BP baseline and analysis use identical parameters to GNN training
-    cfg = gnn_cfg
+    # Only load GNN model if GNN is in the methods
+    gnn_model = None
+    gnn_hidden_dim = None
+    if "gnn" in methods:
+        if args.checkpoint is not None:
+            loaded = load_checkpoint(args.checkpoint)
+            gnn_model = instantiate_model_from_config(cfg, seed=cfg.get("seed", 0))
+            from flax import nnx as _nnx
+            _nnx.update(gnn_model, loaded["model"])
+            gnn_hidden_dim = int(cfg.model.get("circuit_hidden_dim", 16))
+        else:
+            # Load the actual model now
+            gnn_model, _loaded_dict, _ = load_best_model_from_wandb(
+                run_id=args.run_id,
+                seed=0,  # Use default seed, will be overridden by GNN config
+                filename=filename_to_load,
+            )
+            gnn_hidden_dim = int(cfg.model.get("circuit_hidden_dim", 16))
 
     # Set output directory with f-string if not provided
     if args.output is None:
@@ -424,20 +444,14 @@ def main():
 
     # Data
     case_n = 1 << input_n
-    x, y0 = get_task_data(cfg.circuit.task, case_n, input_bits=input_n, output_bits=output_n)
-
-    # Methods selection
-    methods_str = (args.methods or "gnn").lower()
-    if methods_str == "both":
-        methods = {"bp", "gnn"}
-    else:
-        methods = set(m.strip() for m in methods_str.split(","))
-
-    # GNN model is already loaded above, now check if methods include GNN
-    if "gnn" not in methods:
-        gnn_model = None
-        gnn_hidden_dim = None
-        gnn_training_config = None
+    x, y0 = get_task_data(
+        cfg.circuit.task, 
+        case_n, 
+        max_samples=cfg.circuit.get("max_task_samples", 100000),
+        sample_seed=cfg.test_seed,
+        input_bits=input_n, 
+        output_bits=output_n
+    )
 
     # Loss type from GNN config
     loss_type = cfg.training.loss_type
