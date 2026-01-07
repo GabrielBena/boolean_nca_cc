@@ -20,7 +20,7 @@ import numpy as np
 import jax
 import jax.numpy as jp
 import optax
-from collections import deque
+from collections import deque, defaultdict
 import pickle
 import json
 from datetime import datetime
@@ -1102,6 +1102,52 @@ def _execute_dfs_phase(
     return total_perturbations, functional_recoveries
 
 
+def compute_per_depth_statistics(exploration_results: List[Dict]) -> Dict[int, Dict]:
+    """
+    Compute per-depth statistics from exploration results.
+    
+    Args:
+        exploration_results: List of exploration result dictionaries
+        
+    Returns:
+        Dictionary mapping depth -> {
+            "total_attempts": int,
+            "functional_recoveries": int,
+            "failed_attempts": int,
+            "success_rate": float
+        }
+    """
+    depth_stats = defaultdict(lambda: {
+        "total_attempts": 0,
+        "functional_recoveries": 0,
+        "failed_attempts": 0,
+    })
+    
+    for result in exploration_results:
+        depth = result.get("depth")
+        if depth is None:
+            # Skip results without depth (e.g., random_walk)
+            continue
+        
+        depth_stats[depth]["total_attempts"] += 1
+        if result.get("is_functional", False):
+            depth_stats[depth]["functional_recoveries"] += 1
+        else:
+            depth_stats[depth]["failed_attempts"] += 1
+    
+    # Compute success rates and convert to regular dict
+    per_depth_stats = {}
+    for depth in sorted(depth_stats.keys()):
+        stats = depth_stats[depth]
+        stats["success_rate"] = (
+            stats["functional_recoveries"] / stats["total_attempts"]
+            if stats["total_attempts"] > 0 else 0.0
+        )
+        per_depth_stats[depth] = stats
+    
+    return per_depth_stats
+
+
 def explore_degenerate_solutions(
     root_wires: List[jp.ndarray],
     root_logits: List[jp.ndarray],
@@ -1321,6 +1367,7 @@ def explore_degenerate_solutions(
                             "unique_solutions": len(unique_solutions_dict),
                             "perturbation_efficiency": perturbation_efficiency,
                             "strategy": exploration_config.get("exploration_strategy", "phases"),
+                            "per_depth_stats": compute_per_depth_statistics(exploration_results_list),
                         },
                         "root_hash": kwargs.get("root_hash", root_hash),
                     }
@@ -1844,6 +1891,9 @@ def explore_degenerate_solutions(
     num_unique_solutions = len(unique_solutions)
     perturbation_efficiency = num_unique_solutions / total_perturbations if total_perturbations > 0 else 0.0
     
+    # Compute per-depth statistics
+    per_depth_stats = compute_per_depth_statistics(exploration_results)
+    
     log.info("\n" + "=" * 80)
     log.info("Exploration Summary")
     log.info("=" * 80)
@@ -1855,6 +1905,19 @@ def explore_degenerate_solutions(
     log.info(f"Perturbation efficiency: {perturbation_efficiency:.4f} (unique/total)")
     log.info(f"Exploration graph edges: {len(edges)}")
     log.info(f"Exploration graph nodes: {len(exploration_graph)}")
+    
+    # Log per-depth statistics if available
+    if per_depth_stats:
+        log.info("\nPer-Depth Statistics:")
+        for depth in sorted(per_depth_stats.keys()):
+            stats = per_depth_stats[depth]
+            log.info(
+                f"  Depth {depth}: {stats['total_attempts']} attempts, "
+                f"{stats['functional_recoveries']} functional, "
+                f"{stats['failed_attempts']} failed "
+                f"(success rate: {stats['success_rate']:.2%})"
+            )
+    
     log.info("=" * 80)
     
     return {
@@ -1869,6 +1932,7 @@ def explore_degenerate_solutions(
             "unique_solutions": num_unique_solutions,
             "perturbation_efficiency": perturbation_efficiency,
             "strategy": exploration_strategy,
+            "per_depth_stats": per_depth_stats,
         },
         "root_hash": root_hash,
     }
@@ -1878,23 +1942,32 @@ def generate_exploration_name(
     exploration_strategy: str,
     phases: Optional[List[Tuple[str, int, int, str, Optional[int]]]] = None,
     phases_string: Optional[str] = None,
+    recovery_mode: str = "backprop",
 ) -> str:
     """
-    Generate a descriptive name for the exploration run based on strategy and phases.
+    Generate a descriptive name for the exploration run based on strategy, phases, and recovery mode.
     
     Examples:
-        - "dfs:50:3:root" -> "DFS_50_3_ROOT"
-        - "bfs:2:100:root,dfs:5:1:frontier" -> "BFS_2_100_ROOT_DFS_5_1_FRONTIER"
-        - "hybrid" -> "HYBRID"
+        - "dfs:50:3:root" with backprop -> "DFS_50_3_ROOT_BACKPROP"
+        - "bfs:2:100:root,dfs:5:1:frontier" with self_attention -> "BFS_2_100_ROOT_DFS_5_1_FRONTIER_SA"
+        - "hybrid" with backprop -> "HYBRID_BACKPROP"
     
     Args:
         exploration_strategy: Strategy name ("phases", "hybrid", "bfs", etc.)
         phases: List of phase tuples (if available)
         phases_string: Original phases string (if phases not parsed yet)
+        recovery_mode: Recovery mode ("backprop" or "self_attention", default: "backprop")
         
     Returns:
         Descriptive name string
     """
+    # Map recovery mode to display name
+    recovery_name_map = {
+        "backprop": "BACKPROP",
+        "self_attention": "SA",  # Self-Attention
+    }
+    recovery_suffix = recovery_name_map.get(recovery_mode, recovery_mode.upper())
+    
     if exploration_strategy == "phases" and phases is not None:
         # Generate name from phases
         phase_parts = []
@@ -1904,18 +1977,19 @@ def generate_exploration_name(
             if max_frontier_nodes is not None:
                 start_name = f"{start_name}_{max_frontier_nodes}"
             phase_parts.append(f"{phase_name}_{depth_limit}_{perturbations_per_node}_{start_name}")
-        return "_".join(phase_parts)
+        base_name = "_".join(phase_parts)
+        return f"{base_name}_{recovery_suffix}"
     elif exploration_strategy == "phases" and phases_string is not None:
         # Parse phases_string to generate name
         try:
             parsed_phases = parse_phase_specification(phases_string)
-            return generate_exploration_name(exploration_strategy, parsed_phases, None)
+            return generate_exploration_name(exploration_strategy, parsed_phases, None, recovery_mode)
         except:
             # Fallback to strategy name if parsing fails
-            return exploration_strategy.upper()
+            return f"{exploration_strategy.upper()}_{recovery_suffix}"
     else:
         # Use strategy name for non-phase strategies
-        return exploration_strategy.upper()
+        return f"{exploration_strategy.upper()}_{recovery_suffix}"
 
 
 def main():
@@ -2189,7 +2263,7 @@ def main():
     root_loss, root_aux = get_loss_from_wires_logits(
         logits, wires, x_data, y_data, loss_type=args.loss_type
     )
-    root_hard_loss, _, _, root_accuracy, root_hard_accuracy, _, _ = root_aux
+    root_hard_loss, _, _, root_accuracy, root_hard_accuracy, _, _, _ = root_aux
     
     log.info("=" * 80)
     log.info("Root Circuit Assessment")
@@ -2372,11 +2446,12 @@ def main():
     if save_results:
         if args.output_dir is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            # Generate descriptive name from exploration strategy and phases
+            # Generate descriptive name from exploration strategy, phases, and recovery mode
             exploration_name = generate_exploration_name(
                 exploration_strategy=args.exploration_strategy,
                 phases=phases,
                 phases_string=args.phases if args.exploration_strategy == "phases" else None,
+                recovery_mode=args.recovery_mode,
             )
             output_dir = workspace_root / "exploration_results" / f"{exploration_name}_{timestamp}"
         else:

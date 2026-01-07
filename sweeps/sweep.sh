@@ -3,7 +3,7 @@
 # This script launches 5 W&B agents in parallel on different GPUs
 # for the specified sweep.
 
-SWEEP_ID="marcello-barylli-growai/boolean-nca-cc/143rzf7h"
+SWEEP_ID="marcello-barylli-growai/boolean-nca-cc/8z0rbg56"
 
 echo "Starting agents for sweep: $SWEEP_ID"
 
@@ -13,7 +13,7 @@ echo "Starting agents for sweep: $SWEEP_ID"
 # CUDA_VISIBLE_DEVICES=2 wandb agent $SWEEP_ID &
 
 # squadron 2
-CUDA_VISIBLE_DEVICES=3 wandb agent $SWEEP_ID &
+# CUDA_VISIBLE_DEVICES=3 wandb agent $SWEEP_ID &
 CUDA_VISIBLE_DEVICES=4 wandb agent $SWEEP_ID &
 CUDA_VISIBLE_DEVICES=5 wandb agent $SWEEP_ID &
 CUDA_VISIBLE_DEVICES=6 wandb agent $SWEEP_ID &

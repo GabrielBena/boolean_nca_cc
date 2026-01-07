@@ -93,3 +93,4 @@ def _hamming_distance_tables(
         counted_bits_total=int(total_count),
         counted_gates_total=len(per_gate_scores),
     )
+

@@ -400,6 +400,18 @@ def main():
         default="backprop_discovery",
         help="Output filename (without extension, default: backprop_discovery)",
     )
+    parser.add_argument(
+        "--input_bits",
+        type=int,
+        default=None,
+        help="Override input_bits from config (optional)",
+    )
+    parser.add_argument(
+        "--output_bits",
+        type=int,
+        default=None,
+        help="Override output_bits from config (optional)",
+    )
     
     args = parser.parse_args()
     
@@ -423,13 +435,20 @@ def main():
     
     print("Loaded config")
     
+    # Override input_bits and output_bits from command-line if provided
+    input_bits = args.input_bits if args.input_bits is not None else config.circuit.input_bits
+    output_bits = args.output_bits if args.output_bits is not None else config.circuit.output_bits
+    
+    if args.input_bits is not None or args.output_bits is not None:
+        print(f"Overriding config values: input_bits={input_bits}, output_bits={output_bits}")
+    
     # Generate data and splits
     print("Generating task data...")
     x_data, y_data = get_task_data(
         task_name=config.circuit.task,
-        case_n=2**config.circuit.input_bits,
-        input_bits=config.circuit.input_bits,
-        output_bits=config.circuit.output_bits,
+        case_n=2**input_bits,
+        input_bits=input_bits,
+        output_bits=output_bits,
     )
     
     # Split if enabled
@@ -452,8 +471,8 @@ def main():
     # Generate layer sizes
     if config.circuit.layer_sizes is None:
         layer_sizes = generate_layer_sizes(
-            input_n=config.circuit.input_bits,
-            output_n=config.circuit.output_bits,
+            input_n=input_bits,
+            output_n=output_bits,
             arity=config.circuit.arity,
             layer_n=config.circuit.num_layers,
         )

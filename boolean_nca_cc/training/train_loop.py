@@ -55,12 +55,13 @@ from boolean_nca_cc.training.pool.structural_perturbation import    (
 from functools import partial
 from boolean_nca_cc.circuits.train import create_gate_mask_from_knockout_pattern
 from boolean_nca_cc.circuits.data_split import split_input_combinations
-from boolean_nca_cc.analysis.hamming_distance import (
+from boolean_nca_cc.analysis.hamming_utils import (
     _hard_truth_tables_from_logits,
     _active_gate_mask_from_knockout,
     _hamming_distance_tables,
 )
-from boolean_nca_cc.analysis.visualization import plot_accuracy_vs_distance, plot_combined_bp_sa_stepwise_performance
+# Optional imports for visualization - imported lazily when needed
+# These are only used conditionally and may not be available in all environments
 import json
 import os
 import pandas as pd
@@ -97,8 +98,8 @@ def _init_wandb(wandb_logging: bool, wandb_run_config: dict | None = None) -> An
             wandb.define_metric("eval_no_damage/*", step_metric="eval_no_damage/epoch")
             # eval_no_damage_steps/* intentionally has no metric definition (like eval_ko_in_steps/*)
             # This ensures WandB uses its default step counter, giving each log call its own x-axis position
-            # eval_no_damage_raw/* intentionally has no metric definition - used for direct data loading
-            # without step_metric grouping, allowing access to all logged values
+            # Note: Raw metrics are no longer logged to WandB - they are saved locally instead
+            # See boolean_nca_cc.utils.metrics_storage for local metrics storage
             wandb.define_metric("model/*", step_metric="training/epoch")
             wandb.define_metric("scheduler/*", step_metric="training/epoch")
 
@@ -423,16 +424,43 @@ def run_knockout_periodic_evaluation(
                     plot_filename = f"accuracy_vs_distance_epoch_{epoch:04d}.png"
                     plot_path = os.path.join(hamming_analysis_dir, plot_filename)
                     
-                    plot_accuracy_vs_distance(
-                        summary_df=df,
-                        output_path=plot_path,
-                        color_by_method=True
-                    )
+                    # Import visualization function locally (may not be available in all environments)
+                    try:
+                        # Try direct import first (works when project root is in path)
+                        from experiments.visualization.plot_accuracy_vs_distance import plot_accuracy_vs_distance  # type: ignore
+                        
+                        plot_accuracy_vs_distance(
+                            summary_df=df,
+                            output_path=plot_path,
+                            color_by_method=True
+                        )
+                    except ImportError:
+                        # Fallback: add project root to path if direct import fails
+                        try:
+                            import sys
+                            import os as os_module
+                            project_root = os_module.path.dirname(os_module.path.dirname(os_module.path.dirname(__file__)))
+                            if project_root not in sys.path:
+                                sys.path.insert(0, project_root)
+                            from experiments.visualization.plot_accuracy_vs_distance import plot_accuracy_vs_distance  # type: ignore
+                            
+                            plot_accuracy_vs_distance(
+                                summary_df=df,
+                                output_path=plot_path,
+                                color_by_method=True
+                            )
+                        except (ImportError, Exception) as e:
+                            log.warning(f"Could not generate plot: {e}. Skipping plot generation.")
+                            plot_path = None
+                    except Exception as e:
+                        log.warning(f"Error generating plot: {e}. Skipping plot generation.")
+                        plot_path = None
                 
-                    log.info(f"Hamming distance analysis plot saved to: {plot_path}")
+                    if plot_path:
+                        log.info(f"Hamming distance analysis plot saved to: {plot_path}")
                     
                     # Log plot to wandb if enabled
-                    if wandb_run:
+                    if wandb_run and plot_path:
                         try:
                             import wandb
                             
@@ -1730,30 +1758,46 @@ def train_model(
                             f"eval_no_damage{metric_suffix}/epoch": epoch,
                         }
                         
-                        # Also log raw metrics without step_metric grouping for direct data access
-                        # These are identical values but without step_metric definition, so history() returns all logged values
-                        raw_metrics = {
-                            f"eval_no_damage_raw{metric_suffix}/final_loss": step_metrics["soft_loss"][-1],
-                            f"eval_no_damage_raw{metric_suffix}/final_hard_loss": step_metrics["hard_loss"][-1],
-                            f"eval_no_damage_raw{metric_suffix}/final_accuracy": step_metrics["soft_accuracy"][-1],
-                            f"eval_no_damage_raw{metric_suffix}/final_hard_accuracy": step_metrics["hard_accuracy"][-1],
-                            f"eval_no_damage_raw{metric_suffix}/final_full_map_accuracy": step_metrics["full_map_accuracy"][-1],
-                            f"eval_no_damage_raw{metric_suffix}/epoch": epoch,
-                        }
-                        
                         # Add to all_eval_metrics for best model tracking
                         all_eval_metrics.update(final_metrics)
                         
                         if wandb_run:
                             wandb_run.log(final_metrics)
-                            # Log raw metrics separately (without step_metric grouping)
-                            # Use explicit step with small offset to ensure unique steps per epoch.
-                            # Without this, consecutive log() calls (test + train) may share the same
-                            # auto-incremented step, causing one to overwrite the other.
-                            # Offset of 1000 avoids conflicts with initialization (step 0) while
-                            # keeping steps reasonable (not causing upload issues like 10000 did).
-                            raw_step = int(epoch) + 1000
-                            wandb_run.log(raw_metrics, step=raw_step)
+                        
+                        # Save metrics locally for reliable data access (avoids WandB step grouping issues)
+                        # This replaces the need for raw metrics in WandB
+                        try:
+                            from boolean_nca_cc.utils.metrics_storage import save_eval_metrics_locally
+                            import time
+                            # Get run ID and sweep_id: wandb_run is the wandb module, so use wandb.run.id
+                            sweep_id = None
+                            if wandb_run and hasattr(wandb_run, 'run') and wandb_run.run:
+                                run_id = wandb_run.run.id
+                                # Get sweep_id if available
+                                if hasattr(wandb_run.run, 'sweep_id') and wandb_run.run.sweep_id:
+                                    sweep_id = str(wandb_run.run.sweep_id)
+                            else:
+                                run_id = f"local_{int(time.time())}"
+                            
+                            # Extract task from wandb_run_config if available
+                            task = None
+                            if wandb_run_config and isinstance(wandb_run_config, dict):
+                                circuit_config = wandb_run_config.get("circuit", {})
+                                if isinstance(circuit_config, dict):
+                                    task = circuit_config.get("task")
+                            
+                            save_eval_metrics_locally(
+                                metrics=final_metrics,
+                                epoch=epoch,
+                                split="test" if metric_suffix == "" else "train",
+                                run_id=run_id,
+                                sweep_id=sweep_id,
+                                metrics_dir="results/metrics",
+                                format="jsonl",
+                                task=task
+                            )
+                        except Exception as e:
+                            log.warning(f"Failed to save metrics locally: {e}")
                         
                         # Log stepwise if enabled (for both test and train sets)
                         if periodic_eval_log_stepwise and wandb_run:
@@ -1925,9 +1969,12 @@ def train_model(
     _log_final_wandb_metrics(wandb_run, result, epochs)
     
     # Create final Figure 1: Training progress tracking (complete dataset)
-    if accumulated_pattern_data:
+    # NOTE: create_eval_plot_prog was commented out in the original visualization.py
+    # and has not been moved to the new location. This functionality is disabled.
+    if False and accumulated_pattern_data:  # Disabled until create_eval_plot_prog is reimplemented
         try:
-            from boolean_nca_cc.analysis.visualization import create_eval_plot_prog
+            # from experiments.visualization.plot_trajectory import create_eval_plot_prog  # Not yet implemented
+            pass
             
             # Compute backpropagation results for reference line (reuse across figures)
             bp_results = None
@@ -2053,7 +2100,24 @@ def train_model(
             # Create Figure 3 with BP reference line (show_bp_trajectory=False)
             # Reuse bp_results from Figure 1 if available, otherwise compute new ones
             # Use test data for evaluation/plotting (training is complete)
-            fig3 = plot_combined_bp_sa_stepwise_performance(
+            try:
+                # Try direct import first (works when project root is in path)
+                from experiments.visualization.plot_trajectory import plot_combined_bp_sa_stepwise_performance  # type: ignore
+            except ImportError:
+                # Fallback: add project root to path if direct import fails
+                try:
+                    import sys
+                    import os as os_module
+                    project_root = os_module.path.dirname(os_module.path.dirname(os_module.path.dirname(__file__)))
+                    if project_root not in sys.path:
+                        sys.path.insert(0, project_root)
+                    from experiments.visualization.plot_trajectory import plot_combined_bp_sa_stepwise_performance  # type: ignore
+                except ImportError as e:
+                    log.warning(f"Could not import plot_combined_bp_sa_stepwise_performance: {e}. Skipping figure generation.")
+                    plot_combined_bp_sa_stepwise_performance = None
+            
+            if plot_combined_bp_sa_stepwise_performance is not None:
+                fig3 = plot_combined_bp_sa_stepwise_performance(
                 cfg=mock_cfg,
                 x_data=x_test,
                 y_data=y_test,

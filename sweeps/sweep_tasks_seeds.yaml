@@ -1,6 +1,7 @@
-# Statistical Robustness Sweep
-# This sweep varies the random seed to collect statistical data across multiple runs
-# for error bar computation in visualizations.
+# Task and Seed Sweep
+# This sweep varies both the task and random seed to collect performance data
+# across different tasks and multiple seeds for statistical robustness.
+# Useful for comparing model performance across tasks and computing error bars.
 
 # Program to run for the sweep (relative to project root where wandb sweep is run)
 program: train.py
@@ -23,36 +24,21 @@ parameters:
       - 123
       - 456
       - 789
-      - 101112
-      - 131415
-      - 161718
-      - 192021
-      - 222324
-      - 252627
-      - 282930
-      - 313233
-      - 343536
-      - 373839
-      - 404142
-      - 434445
-      - 464748
-      - 495051
-      - 525354
-      - 555657
-      - 585960
-      - 616263
-      - 646566
-      - 676869
-      - 707172
-      - 737475
-      - 767778
-      - 798081
-      - 828384
-      # - 858687
-  # Keep these FIXED to isolate model variance:
-  # - test_seed: Fixed wire pattern (set in base config)
-  # - input_split_seed: Fixed data split (set in base config)
-  # - damage_seed: Fixed damage pattern generation (set in base config)
+  
+  # Vary the boolean circuit task
+  circuit.task:
+    values:
+      - "add"              # Binary addition
+      - "xor"              # Bitwise XOR
+      # - "parity"           # Parity (odd/even number of 1s)
+      - "binary_multiply"  # Binary multiplication
+      - "and"              # Bitwise AND
+      # Uncomment additional tasks if desired:
+      # - "identity"        # Identity function
+      - "reverse"         # Reverse bits
+      # - "copy"            # Copy (same as identity)
+      # - "gray"            # Gray code conversion
+      # - "popcount"        # Population count (count 1s)
   
   # Ensure stepwise logging is enabled for statistical aggregation
   eval.periodic_eval_log_stepwise:

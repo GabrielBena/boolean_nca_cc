@@ -7,7 +7,7 @@ defaults:
 
 # Random seed for reproducibility
 seed: ${test_seed}
-test_seed: 34
+test_seed: 33
 damage_seed: 481  # Independent seed for damage pattern generation
 
 # Output configuration
@@ -57,7 +57,7 @@ training:
     exponent: 1
     alpha: 1e-1 # final lr = 1% of initial lr
   # NUMBER OF EPOCHS
-  epochs: 2049 # 32 #6144 (2049 ensures evaluation at epoch 2048 when interval=1024)
+  epochs: 8193 # 32 #6144 (8193 ensures evaluation at epoch 8192 when interval=1024)
   # USE SCAN
   use_scan: false
 
@@ -107,7 +107,7 @@ eval:
   # Input combination train/test split
   input_split_enabled: true       # Enable train/test split on input combinations
   input_train_fraction: 0.8       # Fraction of combinations for training (0.8 = 80% train, 20% test)
-  input_split_seed: ${test_seed}  # Seed for reproducible split
+  input_split_seed: ${seed}  # Seed for reproducible split
   
   # Knockout evaluation
   knockout_eval:
@@ -157,7 +157,7 @@ checkpoint:
 
 # Early stopping configuration
 early_stop:
-  enabled: true  # Enable early stopping based on accuracy threshold
+  enabled: false  # Enable early stopping based on accuracy threshold
   threshold: 1  # Accuracy threshold to trigger early stopping
   metric: "hard_accuracy"  # Metric to monitor: "loss", "hard_loss", "accuracy", "hard_accuracy"
   source: "eval_no_damage"  # Source for early stopping metric: "training", "eval" (auto-fallback), "eval_ko_in", "eval_ko_out", or "eval_no_damage"

@@ -59,90 +59,11 @@ from boolean_nca_cc.training.evaluation import (
 from boolean_nca_cc.utils.graph_builder import build_graph
 from boolean_nca_cc.utils.extraction import extract_logits_from_graph
 from boolean_nca_cc.training.preconfigure import preconfigure_circuit_logits
-
-
-def _hard_truth_tables_from_logits(logits_per_layer: List[jp.ndarray]) -> List[jp.ndarray]:
-    """
-    Convert per-layer logits to hard LUT truth tables {0,1}.
-
-    Returns list of arrays with shape (num_gates, table_size) per layer beyond input.
-    """
-    hard_tables_per_layer: List[jp.ndarray] = []
-    for lgt in logits_per_layer:
-        # lgt shape: (group_n, group_size, 2^arity)
-        probs = jax.nn.sigmoid(lgt)
-        hard = jp.round(probs)  # {0,1}
-        hard = hard.reshape(-1, hard.shape[-1])  # (num_gates, 2^arity)
-        hard_tables_per_layer.append(hard)
-    return hard_tables_per_layer
-
-
-def _active_gate_mask_from_knockout(layer_sizes: List[List[int]], knockout_pattern) -> List[jp.ndarray]:
-    """
-    Build a per-layer boolean mask for active gates aligned to logits layers.
-    Returns list matching logits_per_layer (i.e., excludes input layer).
-    """
-    full_gate_masks = create_gate_mask_from_knockout_pattern(knockout_pattern, layer_sizes)
-    # Drop input layer mask; keep masks for layers with logits
-    return [jp.array(mask, dtype=jp.bool_) for mask in full_gate_masks[1:]]
-
-
-def _hamming_distance_tables(
-    baseline_tables: List[jp.ndarray],
-    perturbed_tables: List[jp.ndarray],
-    perturbed_active_masks: List[jp.ndarray],
-) -> Dict[str, Any]:
-    """
-    Compute distances between baseline and perturbed hard truth tables.
-
-    Only counts gates where perturbed_active_masks is True (knocked-out gates excluded).
-
-    Returns:
-      - overall_bitwise_fraction_diff: fraction of differing bits across all counted entries
-      - per_layer_bitwise_fraction_diff: list per layer
-      - per_gate_mean_hamming: mean over gates of per-table Hamming normalized by table size
-      - counted_bits_total, counted_gates_total
-    """
-    assert len(baseline_tables) == len(perturbed_tables) == len(perturbed_active_masks)
-
-    per_layer_bitwise_fraction: List[float] = []
-    total_diff = 0.0
-    total_count = 0.0
-    per_gate_scores: List[float] = []
-
-    for layer_idx, (base_layer, pert_layer, active_mask) in enumerate(
-        zip(baseline_tables, perturbed_tables, perturbed_active_masks)
-    ):
-        # base_layer, pert_layer: (num_gates, table_size)
-        table_size = base_layer.shape[-1]
-        # select active gates only
-        active_idx = jp.where(active_mask > 0.5)[0]
-        if active_idx.size == 0:
-            per_layer_bitwise_fraction.append(0.0)
-            continue
-        base_sel = base_layer[active_idx]
-        pert_sel = pert_layer[active_idx]
-        diffs = jp.not_equal(base_sel, pert_sel).astype(jp.float32)
-        # per-gate normalized hamming (mean across table bits)
-        per_gate = jp.mean(diffs, axis=1)
-        per_gate_scores.extend(list(jax.device_get(per_gate)))
-        # layer bitwise fraction
-        layer_diff = jp.sum(diffs)
-        layer_count = diffs.size
-        per_layer_bitwise_fraction.append(float(layer_diff / layer_count))
-        total_diff += float(layer_diff)
-        total_count += float(layer_count)
-
-    overall = float(total_diff / total_count) if total_count > 0 else 0.0
-    per_gate_mean = float(jp.mean(jp.array(per_gate_scores))) if per_gate_scores else 0.0
-
-    return dict(
-        overall_bitwise_fraction_diff=overall,
-        per_layer_bitwise_fraction_diff=per_layer_bitwise_fraction,
-        per_gate_mean_hamming=per_gate_mean,
-        counted_bits_total=int(total_count),
-        counted_gates_total=len(per_gate_scores),
-    )
+from boolean_nca_cc.analysis.hamming_utils import (
+    _hard_truth_tables_from_logits,
+    _active_gate_mask_from_knockout,
+    _hamming_distance_tables,
+)
 
 
 def _run_bp_single(cfg, x_data, y_data, loss_type: str):
@@ -184,7 +105,7 @@ def _run_bp_single(cfg, x_data, y_data, loss_type: str):
     return dict(params=state.params, wires=wires, final_loss=float(final_loss))
 
 
-def _run_bp_with_knockouts(cfg, x_data, y_data, loss_type: str, knockout_patterns, layer_sizes, baseline_params, baseline_wires):
+def _run_bp_with_knockouts(cfg, x_data, y_data, loss_type: str, knockout_patterns, layer_sizes, baseline_params, baseline_wires, damage_behavior="permanent", reversible_bias=-10.0):
     # Use baseline optimized circuit instead of generating fresh
     wires = baseline_wires
     logits = baseline_params  # Start from optimized baseline, not NOPs
@@ -208,7 +129,7 @@ def _run_bp_with_knockouts(cfg, x_data, y_data, loss_type: str, knockout_pattern
     for pattern in tqdm(knockout_patterns, desc="Training knockout patterns"):
         state = TrainState(params=logits, opt_state=opt.init(logits))
 
-        def _step(st):
+        def _step(st, step_count):
             return train_step(
                 state=st,
                 opt=opt,
@@ -219,17 +140,25 @@ def _run_bp_with_knockouts(cfg, x_data, y_data, loss_type: str, knockout_pattern
                 do_train=True,
                 knockout_pattern=pattern,
                 layer_sizes=cfg.circuit.layer_sizes,
+                damage_behavior=damage_behavior,
+                reversible_bias=reversible_bias,
+                step_count=step_count,
             )
 
-        for _ in range(cfg.backprop.epochs):
-            _, _, state = _step(state)
+        for step_count in range(cfg.backprop.epochs):
+            _, _, state = _step(state, step_count)
 
         # Final evaluation with knockout pattern applied
         loss_fn = loss_f_l4 if loss_type == "l4" else loss_f_bce
-        final_loss, final_aux = loss_fn(
-            state.params, wires, x_data, y_data,
-            gate_mask=create_gate_mask_from_knockout_pattern(pattern, layer_sizes)
-        )
+        # For final evaluation, use gate_mask for permanent, or evaluate normally for reversible
+        if damage_behavior == "permanent":
+            final_loss, final_aux = loss_fn(
+                state.params, wires, x_data, y_data,
+                gate_mask=create_gate_mask_from_knockout_pattern(pattern, layer_sizes)
+            )
+        else:
+            # For reversible, evaluate without mask (damage was applied via bias)
+            final_loss, final_aux = loss_fn(state.params, wires, x_data, y_data)
         final_hard_accuracy = float(final_aux["hard_accuracy"])
         final_hard_loss = float(final_aux["hard_loss"])
 
@@ -375,13 +304,29 @@ def _evaluate_gnn_single_pattern(
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=str, default=None)
-    # Core analysis control - GNN run ID determines everything else
-    parser.add_argument("--run-id", type=str, default="oxlper1c", help="WandB run id for GNN load")
-    parser.add_argument("--checkpoint", type=str, default=None, help="Local checkpoint path .pkl for GNN")
-    # Analysis method selection only
-    parser.add_argument("--methods", type=str, default="both", help="gnn,bp,both")
+    # Config loading - optional, defaults to configs/config.yaml
+    parser.add_argument("--config", type=str, default="configs/config.yaml", 
+                        help="Path to config YAML file (default: configs/config.yaml)")
+    parser.add_argument("--run-id", type=str, default=None, 
+                        help="WandB run id for GNN model load (optional, only needed if --methods includes 'gnn')")
+    parser.add_argument("--checkpoint", type=str, default=None, 
+                        help="Local checkpoint path .pkl for GNN model (optional, only needed if --methods includes 'gnn')")
+    # Analysis method selection
+    parser.add_argument("--methods", type=str, default="bp", help="gnn,bp,both (default: bp)")
     # GNN evaluation parameters
-    parser.add_argument("--n-message-steps", type=int, default=100)
+    parser.add_argument("--n-message-steps", type=int, default=None,
+                        help="Number of message passing steps for GNN evaluation (default: from config)")
+    # Knockout size variation
+    parser.add_argument("--knockout-sizes", type=str, default=None, 
+                        help="Comma-separated list of knockout sizes (e.g., '1,10,20,40'). If not provided, uses damage_prob from config.")
+    parser.add_argument("--patterns-per-size", type=int, default=None,
+                        help="Number of patterns to generate per knockout size. If not provided, uses vocabulary_size from config.")
+    # Damage behavior control
+    parser.add_argument("--damage-behavior", type=str, default=None, 
+                        choices=["permanent", "reversible"],
+                        help="Damage behavior mode: permanent (gate masking) or reversible (logit bias). Default: from config or 'permanent'")
+    parser.add_argument("--reversible-bias", type=float, default=None,
+                        help="Bias value for reversible damage mode (default: from config or -10.0)")
     args = parser.parse_args()
 
     # Parse methods selection early to determine what needs to be loaded
@@ -429,18 +374,22 @@ def main():
 
     # Set output directory with f-string if not provided
     if args.output is None:
-        vocab_size = cfg.backprop.knockout_vocabulary.size
-        damage_prob = cfg.backprop.knockout_vocabulary.damage_prob
-        args.output = f"results/knockout_lut_distance_vocab{vocab_size}_damage{damage_prob}"
+        ko_sizes_str = "_".join(map(str, knockout_sizes))
+        args.output = f"results/knockout_lut_distance_sizes{ko_sizes_str}_p{patterns_per_size}_{damage_behavior}"
+    log.info(f"Output directory: {args.output}")
 
     # Ensure layer_sizes are present
-    input_n, output_n = cfg.circuit.input_bits, cfg.circuit.output_bits
-    arity = cfg.circuit.arity
-    if cfg.circuit.layer_sizes is None:
-        layer_sizes = generate_layer_sizes(input_n, output_n, arity, layer_n=cfg.circuit.num_layers)
-        cfg.circuit.layer_sizes = layer_sizes
+    circuit_cfg = cfg.get("circuit", {})
+    input_n = circuit_cfg.get("input_bits", 12)
+    output_n = circuit_cfg.get("output_bits", 12)
+    arity = circuit_cfg.get("arity", 4)
+    num_layers = circuit_cfg.get("num_layers", 3)
+    
+    layer_sizes = circuit_cfg.get("layer_sizes", None)
+    if layer_sizes is None:
+        layer_sizes = generate_layer_sizes(input_n, output_n, arity, layer_n=num_layers)
     else:
-        layer_sizes = cfg.circuit.layer_sizes
+        layer_sizes = layer_sizes
 
     # Data
     case_n = 1 << input_n
@@ -453,8 +402,8 @@ def main():
         output_bits=output_n
     )
 
-    # Loss type from GNN config
-    loss_type = cfg.training.loss_type
+    # Loss type from config
+    loss_type = cfg.get("training", {}).get("loss_type", "l4")
 
     # Baseline circuit creation - use preconfigured if GNN was trained in repair mode
     if "gnn" in methods and gnn_training_config is not None:
@@ -495,18 +444,61 @@ def main():
         else:
             # GNN was trained in growth mode - use standard BP baseline
             log.info("GNN was trained in growth mode - using standard BP baseline")
-            bp_baseline = _run_bp_single(cfg, x, y0, loss_type=loss_type)
+            # Create a mock config object for backprop training
+            from types import SimpleNamespace
+            backprop_cfg = cfg.get("backprop", {})
+            mock_cfg = SimpleNamespace(
+                backprop=SimpleNamespace(
+                    optimizer=backprop_cfg.get("optimizer", "adam"),
+                    learning_rate=backprop_cfg.get("learning_rate", 1.0),
+                    beta1=backprop_cfg.get("beta1", 0.9),
+                    beta2=backprop_cfg.get("beta2", 0.999),
+                    weight_decay=backprop_cfg.get("weight_decay", 0.0),
+                    epochs=backprop_cfg.get("epochs", 200),
+                ),
+                circuit=SimpleNamespace(
+                    layer_sizes=layer_sizes,
+                    arity=arity,
+                ),
+                test_seed=cfg.get("test_seed", seed),
+            )
+            bp_baseline = _run_bp_single(mock_cfg, x, y0, loss_type=loss_type)
     else:
         # No GNN or no training config - use standard BP baseline
-        bp_baseline = _run_bp_single(cfg, x, y0, loss_type=loss_type)
+        from types import SimpleNamespace
+        backprop_cfg = cfg.get("backprop", {})
+        mock_cfg = SimpleNamespace(
+            backprop=SimpleNamespace(
+                optimizer=backprop_cfg.get("optimizer", "adam"),
+                learning_rate=backprop_cfg.get("learning_rate", 1.0),
+                beta1=backprop_cfg.get("beta1", 0.9),
+                beta2=backprop_cfg.get("beta2", 0.999),
+                weight_decay=backprop_cfg.get("weight_decay", 0.0),
+                epochs=backprop_cfg.get("epochs", 200),
+            ),
+            circuit=SimpleNamespace(
+                layer_sizes=layer_sizes,
+                arity=arity,
+            ),
+            test_seed=cfg.get("test_seed", seed),
+        )
+        bp_baseline = _run_bp_single(mock_cfg, x, y0, loss_type=loss_type)
 
-    # Damage modes from GNN config
-    damage_modes = [cfg.backprop.knockout_vocabulary.get("mode", "shotgun") if hasattr(cfg.backprop, "knockout_vocabulary") else "shotgun"]
-
-
+    # Damage modes from config
+    damage_mode = cfg.get("pool", {}).get("damage_mode", "shotgun")
+    if hasattr(cfg, "backprop") and hasattr(cfg.backprop, "knockout_vocabulary"):
+        damage_mode = cfg.backprop.knockout_vocabulary.get("mode", damage_mode)
+    damage_modes = [damage_mode]
 
     # Truth tables
     baseline_tables = _hard_truth_tables_from_logits(bp_baseline["params"])  # per-layer
+    
+    # Compute baseline circuit performance metrics
+    loss_fn = loss_f_l4 if loss_type == "l4" else loss_f_bce
+    baseline_loss, baseline_aux = loss_fn(bp_baseline["params"], bp_baseline["wires"], x, y0)
+    baseline_hard_accuracy = float(baseline_aux["hard_accuracy"])
+    baseline_hard_loss = float(baseline_aux["hard_loss"])
+    log.info(f"Baseline circuit performance: accuracy={baseline_hard_accuracy:.4f}, loss={baseline_hard_loss:.4f}")
 
     # Storage
     os.makedirs(args.output, exist_ok=True)
@@ -514,100 +506,128 @@ def main():
     last_method_ko_tables: List[List[jp.ndarray]] = []
     last_method_active_masks: List[List[jp.ndarray]] = []
 
-    # Loop over damage modes
-    rng = jax.random.PRNGKey(cfg.seed)
+    # Loop over damage modes and knockout sizes
+    seed = cfg.get("seed", cfg.get("test_seed", 42))
+    rng = jax.random.PRNGKey(seed)
     for damage_mode in damage_modes:
-        rng, vocab_key = jax.random.split(rng)
-        vocab = create_knockout_vocabulary(
-            rng=vocab_key,
-            vocabulary_size=cfg.backprop.knockout_vocabulary.size,
-            layer_sizes=layer_sizes,
-            damage_prob=cfg.backprop.knockout_vocabulary.damage_prob,
-            damage_mode=damage_mode,
-        )
-
-        # BP method
-        if "bp" in methods:
-            bp_knockouts = _run_bp_with_knockouts(
-                cfg,
-                x,
-                y0,
-                loss_type=loss_type,
-                knockout_patterns=vocab,
+        for ko_size in knockout_sizes:
+            log.info(f"Processing knockout size {ko_size} with damage_mode {damage_mode}, damage_behavior {damage_behavior}")
+            rng, vocab_key = jax.random.split(rng)
+            vocab = create_knockout_vocabulary(
+                rng=vocab_key,
+                vocabulary_size=patterns_per_size,
                 layer_sizes=layer_sizes,
-                baseline_params=bp_baseline["params"],
-                baseline_wires=bp_baseline["wires"],
+                damage_prob=ko_size,  # Use varying knockout size
+                damage_mode=damage_mode,
             )
 
-            method_ko_tables: List[List[jp.ndarray]] = []
-            method_active_masks: List[List[jp.ndarray]] = []
-            for idx, item in enumerate(bp_knockouts["per_pattern"]):
-                pattern = item["pattern"]
-                pert_tables = _hard_truth_tables_from_logits(item["params"])  # per-layer
-                active_masks = _active_gate_mask_from_knockout(layer_sizes, pattern)
-                metrics = _hamming_distance_tables(baseline_tables, pert_tables, active_masks)
-
-                row = {
-                    "pattern_idx": idx,
-                    "damage_mode": damage_mode,
-                    "method": "bp",
-                    "overall_bitwise_fraction_diff": metrics["overall_bitwise_fraction_diff"],
-                    "per_gate_mean_hamming": metrics["per_gate_mean_hamming"],
-                    "counted_bits_total": metrics["counted_bits_total"],
-                    "counted_gates_total": metrics["counted_gates_total"],
-                    "final_hard_accuracy": item["final_hard_accuracy"],
-                    "final_hard_loss": item["final_hard_loss"],
-                }
-                row["per_layer_bitwise_fraction_diff"] = json.dumps(metrics["per_layer_bitwise_fraction_diff"])
-                summary_rows.append(row)
-                method_ko_tables.append(pert_tables)
-                method_active_masks.append(active_masks)
-
-            last_method_ko_tables = method_ko_tables
-            last_method_active_masks = method_active_masks
-
-        # GNN method
-        if "gnn" in methods and gnn_model is not None:
-            method_ko_tables: List[List[jp.ndarray]] = []
-            method_active_masks: List[List[jp.ndarray]] = []
-            for idx, pattern in enumerate(vocab):
-                eval_res = _evaluate_gnn_single_pattern(
-                    model=gnn_model,
-                    wires=bp_baseline["wires"],
-                    baseline_logits=bp_baseline["params"],
-                    x_data=x,
-                    y_data=y0,
-                    input_n=input_n,
-                    arity=arity,
-                    circuit_hidden_dim=gnn_hidden_dim or 16,
-                    n_message_steps=args.n_message_steps,
+            # BP method
+            if "bp" in methods:
+                # Create a mock config object for backprop training
+                from types import SimpleNamespace
+                backprop_cfg = cfg.get("backprop", {})
+                mock_cfg = SimpleNamespace(
+                    backprop=SimpleNamespace(
+                        optimizer=backprop_cfg.get("optimizer", "adam"),
+                        learning_rate=backprop_cfg.get("learning_rate", 1.0),
+                        beta1=backprop_cfg.get("beta1", 0.9),
+                        beta2=backprop_cfg.get("beta2", 0.999),
+                        weight_decay=backprop_cfg.get("weight_decay", 0.0),
+                        epochs=backprop_cfg.get("epochs", 200),
+                    ),
+                    circuit=SimpleNamespace(
+                        layer_sizes=layer_sizes,
+                        arity=arity,
+                    ),
+                    test_seed=cfg.get("test_seed", seed),
+                )
+                
+                bp_knockouts = _run_bp_with_knockouts(
+                    mock_cfg,
+                    x,
+                    y0,
                     loss_type=loss_type,
+                    knockout_patterns=vocab,
                     layer_sizes=layer_sizes,
-                    knockout_pattern=pattern,
+                    baseline_params=bp_baseline["params"],
+                    baseline_wires=bp_baseline["wires"],
+                    damage_behavior=damage_behavior,
+                    reversible_bias=reversible_bias,
                 )
 
-                pert_tables = _hard_truth_tables_from_logits(eval_res["logits"])  # per-layer
-                active_masks = _active_gate_mask_from_knockout(layer_sizes, pattern)
-                metrics = _hamming_distance_tables(baseline_tables, pert_tables, active_masks)
+                method_ko_tables: List[List[jp.ndarray]] = []
+                method_active_masks: List[List[jp.ndarray]] = []
+                for idx, item in enumerate(bp_knockouts["per_pattern"]):
+                    pattern = item["pattern"]
+                    pert_tables = _hard_truth_tables_from_logits(item["params"])  # per-layer
+                    active_masks = _active_gate_mask_from_knockout(layer_sizes, pattern)
+                    metrics = _hamming_distance_tables(baseline_tables, pert_tables, active_masks)
 
-                row = {
-                    "pattern_idx": idx,
-                    "damage_mode": damage_mode,
-                    "method": "gnn",
-                    "overall_bitwise_fraction_diff": metrics["overall_bitwise_fraction_diff"],
-                    "per_gate_mean_hamming": metrics["per_gate_mean_hamming"],
-                    "counted_bits_total": metrics["counted_bits_total"],
-                    "counted_gates_total": metrics["counted_gates_total"],
-                    "final_hard_accuracy": eval_res["final_hard_accuracy"],
-                    "final_hard_loss": eval_res["final_hard_loss"],
-                }
-                row["per_layer_bitwise_fraction_diff"] = json.dumps(metrics["per_layer_bitwise_fraction_diff"])
-                summary_rows.append(row)
-                method_ko_tables.append(pert_tables)
-                method_active_masks.append(active_masks)
+                    row = {
+                        "pattern_idx": idx,
+                        "knockout_size": ko_size,
+                        "damage_mode": damage_mode,
+                        "damage_behavior": damage_behavior,
+                        "method": "bp",
+                        "overall_bitwise_fraction_diff": metrics["overall_bitwise_fraction_diff"],
+                        "per_gate_mean_hamming": metrics["per_gate_mean_hamming"],
+                        "counted_bits_total": metrics["counted_bits_total"],
+                        "counted_gates_total": metrics["counted_gates_total"],
+                        "final_hard_accuracy": item["final_hard_accuracy"],
+                        "final_hard_loss": item["final_hard_loss"],
+                    }
+                    row["per_layer_bitwise_fraction_diff"] = json.dumps(metrics["per_layer_bitwise_fraction_diff"])
+                    summary_rows.append(row)
+                    method_ko_tables.append(pert_tables)
+                    method_active_masks.append(active_masks)
 
-            last_method_ko_tables = method_ko_tables
-            last_method_active_masks = method_active_masks
+                last_method_ko_tables = method_ko_tables
+                last_method_active_masks = method_active_masks
+
+            # GNN method
+            if "gnn" in methods and gnn_model is not None:
+                method_ko_tables: List[List[jp.ndarray]] = []
+                method_active_masks: List[List[jp.ndarray]] = []
+                for idx, pattern in enumerate(vocab):
+                    eval_res = _evaluate_gnn_single_pattern(
+                        model=gnn_model,
+                        wires=bp_baseline["wires"],
+                        baseline_logits=bp_baseline["params"],
+                        x_data=x,
+                        y_data=y0,
+                        input_n=input_n,
+                        arity=arity,
+                        circuit_hidden_dim=gnn_hidden_dim or 16,
+                        n_message_steps=n_message_steps,
+                        loss_type=loss_type,
+                        layer_sizes=layer_sizes,
+                        knockout_pattern=pattern,
+                    )
+
+                    pert_tables = _hard_truth_tables_from_logits(eval_res["logits"])  # per-layer
+                    active_masks = _active_gate_mask_from_knockout(layer_sizes, pattern)
+                    metrics = _hamming_distance_tables(baseline_tables, pert_tables, active_masks)
+
+                    row = {
+                        "pattern_idx": idx,
+                        "knockout_size": ko_size,
+                        "damage_mode": damage_mode,
+                        "damage_behavior": damage_behavior,  # GNN uses model's damage_behavior, but track for consistency
+                        "method": "gnn",
+                        "overall_bitwise_fraction_diff": metrics["overall_bitwise_fraction_diff"],
+                        "per_gate_mean_hamming": metrics["per_gate_mean_hamming"],
+                        "counted_bits_total": metrics["counted_bits_total"],
+                        "counted_gates_total": metrics["counted_gates_total"],
+                        "final_hard_accuracy": eval_res["final_hard_accuracy"],
+                        "final_hard_loss": eval_res["final_hard_loss"],
+                    }
+                    row["per_layer_bitwise_fraction_diff"] = json.dumps(metrics["per_layer_bitwise_fraction_diff"])
+                    summary_rows.append(row)
+                    method_ko_tables.append(pert_tables)
+                    method_active_masks.append(active_masks)
+
+                last_method_ko_tables = method_ko_tables
+                last_method_active_masks = method_active_masks
 
     # Save CSV
     import pandas as pd
@@ -643,22 +663,47 @@ def main():
 
     # Generate visualizations
     try:
-        from visualization.circular_plot import plot_accuracy_vs_distance
+        # Import visualization functions - add project root to path if needed
+        import sys
+        import os as os_module
+        # Get project root (parent of experiments directory)
+        script_dir = os_module.path.dirname(os_module.path.abspath(__file__))
+        project_root = os_module.path.dirname(script_dir)
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        
+        from experiments.visualization.plot_accuracy_vs_distance import (
+            plot_accuracy_vs_distance,
+            plot_damage_size_vs_hamming,
+        )  # type: ignore
         
         # Accuracy vs distance scatter plot
-        if 'final_hard_accuracy' in df.columns:
+        if 'final_hard_accuracy' in df.columns and 'overall_bitwise_fraction_diff' in df.columns:
             accuracy_plot_path = os.path.join(args.output, "accuracy_vs_distance.png")
             plot_accuracy_vs_distance(df, accuracy_plot_path, color_by_method=True)
             print(f"Accuracy plot saved to: {accuracy_plot_path}")
-            
-            # Add plot path to report
             report["accuracy_plot_path"] = os.path.abspath(accuracy_plot_path)
+        
+        # Damage size vs hamming distance plot
+        if 'knockout_size' in df.columns and 'per_gate_mean_hamming' in df.columns:
+            damage_plot_path = os.path.join(args.output, "damage_size_vs_hamming.png")
+            plot_damage_size_vs_hamming(
+                df, 
+                damage_plot_path, 
+                color_by_method=True,
+                baseline_accuracy=baseline_hard_accuracy,
+                baseline_loss=baseline_hard_loss
+            )
+            print(f"Damage size vs hamming plot saved to: {damage_plot_path}")
+            report["damage_size_plot_path"] = os.path.abspath(damage_plot_path)
             
     except ImportError as e:
         print(f"Warning: Could not import visualization module: {e}")
         print("Plots will not be generated.")
     except Exception as e:
         print(f"Warning: Error generating plots: {e}")
+        import traceback
+        traceback.print_exc()
         print("Continuing without visualization...")
 
     # Print concise report
