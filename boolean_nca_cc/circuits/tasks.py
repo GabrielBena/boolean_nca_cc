@@ -282,7 +282,7 @@ def get_task_data(task_name, case_n, train_test_split=False, test_ratio=0.2, see
 
     # No train/test split for text task (pattern based)
     if not train_test_split or task_name == "text":
-        return (x, y0), (x, y0), (x, y0)
+        return (x, y0), (None, None), (x, y0)
 
     # Perform train/test split
     if seed is not None:

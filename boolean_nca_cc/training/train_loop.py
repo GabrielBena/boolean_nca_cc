@@ -365,7 +365,9 @@ def run_unified_periodic_evaluation(
 
         # Define data scenarios: (suffix, x, y, description)
         # For meta-learning: models condition on data during optimization, so train/test must be separate
-        data_scenarios = [("test", data_dict["x_test"], data_dict["y_test"])]
+        data_scenarios = []
+        if data_dict["x_test"] is not None and data_dict["y_test"] is not None:
+            data_scenarios.append(("test", data_dict["x_test"], data_dict["y_test"]))
         if data_dict["x_train"] is not None and data_dict["y_train"] is not None:
             data_scenarios.append(("train", data_dict["x_train"], data_dict["y_train"]))
 

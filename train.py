@@ -529,11 +529,8 @@ def process_damage_configuration(cfg, expected_lifetime_epochs=None):
     Raises:
         ValueError: If configuration is invalid or underspecified
     """
-    # Skip if damage is disabled
-    if not cfg.damage.enabled:
-        log.info("Damage system disabled (damage.enabled=false)")
-        return cfg
 
+    # Compute knockouts_per_event if not specified (needed for eval)
     if cfg.damage.knockouts_per_event is None:
         assert cfg.damage.random_knockouts_per_event, (
             "random_knockouts_per_event must be set to True"
@@ -544,6 +541,12 @@ def process_damage_configuration(cfg, expected_lifetime_epochs=None):
         ) / 2
 
         log.info(f"Computed knockouts_per_event = {cfg.damage.knockouts_per_event}")
+
+    # Skip if damage is disabled
+    if not cfg.damage.enabled:
+        log.info("Damage system disabled (damage.enabled=false)")
+        return cfg
+
     if expected_lifetime_epochs is None:
         # Ensure pool configuration is processed (we need expected_updates)
         expected_updates = cfg.pool.expected_updates
@@ -945,7 +948,14 @@ def main(cfg: DictConfig) -> None:
 
     log.info(f"Data Fraction: {data_fraction:.4f}")
     if test_ratio is not None:
-        log.info(f"Test Ratio: {test_ratio:.4f} | Sizes = {x_train.shape[0]}, {x_test.shape[0]}")
+        if x_test is not None:
+            log.info(
+                f"Test Ratio: {test_ratio:.4f} | Sizes = {x_train.shape[0]}, {x_test.shape[0]}, {x_total.shape[0]}"
+            )
+        else:
+            log.info(
+                f"Test Ratio: {test_ratio:.4f} | Sizes = {x_train.shape[0]}, {x_total.shape[0]}"
+            )
 
     # Run backpropagation training for comparison if enabled
     bp_results = None
@@ -1077,10 +1087,8 @@ def main(cfg: DictConfig) -> None:
         periodic_eval_batch_size_out=cfg.eval.batch_size_out,
         periodic_eval_do_ood_evaluation=cfg.eval.do_ood_evaluation,
         periodic_eval_log_pool_scatter=cfg.eval.log_pool_scatter,
-        periodic_eval_damage_enabled=cfg.eval.damage_enabled and cfg.damage.enabled,
-        periodic_eval_n_damage_steps=cfg.eval.n_damage_steps
-        if cfg.eval.damage_enabled and cfg.damage.enabled
-        else None,
+        periodic_eval_damage_enabled=cfg.eval.damage_enabled,
+        periodic_eval_n_damage_steps=cfg.eval.n_damage_steps,
         periodic_eval_get_all_wirings=cfg.eval.get_all_wirings,
         # WandB parameters
         wandb_logging=cfg.wandb.enabled,
