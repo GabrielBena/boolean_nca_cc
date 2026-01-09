@@ -1,5 +1,4 @@
 ---
-description: conda activate metabool
-globs:
 alwaysApply: true
 ---
+**IMPORTANT**: Before executing any terminal command, always ensure the conda environment 'metabool' is activated. If a command doesn't already include conda activation, prepend it with: `conda activate metabool && `

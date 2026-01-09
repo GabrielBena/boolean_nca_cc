@@ -7,7 +7,7 @@ defaults:
 
 # Random seed for reproducibility
 seed: ${test_seed}
-test_seed: 33
+test_seed: 14  # Perfect preconfiguration seed (hard_accuracy=1.0)
 damage_seed: 481  # Independent seed for damage pattern generation
 
 # Output configuration
@@ -26,8 +26,8 @@ wandb:
 # Circuit configuration
 circuit:
   task: "add"
-  input_bits: 50
-  output_bits: 50
+  input_bits: 12
+  output_bits: 12
   arity: 4
   num_layers: 3
   layer_sizes: null  # Auto-generate if null 
@@ -37,7 +37,7 @@ circuit:
 # Training parameters
 training:
   # TRAINING MODE
-  training_mode: "growth"  # Options: "growth" (nops -> configured) or "repair" (configured -> damaged -> recovery)
+  training_mode: "repair"  # Options: "growth" (nops -> configured) or "repair" (configured -> damaged -> recovery)
   # INNER LOOP
   n_message_steps: 5  # Number of message passing steps per training iteration
   # MESSAGE PASSING GRAPH AUGMENTATION
@@ -69,7 +69,7 @@ pool:
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
 
   # Sample-based damage (applied post-step, independent of resets)
-  damage_pool_enabled: false
+  damage_pool_enabled: true
   damage_pool_interval: 128
   damage_pool_fraction: 0.15
   damage_strategy: "loss_biased"
@@ -105,7 +105,7 @@ eval:
   blind_mode: true  # If true, zeros out loss signal to test "Architect" vs "Technician" hypothesis
   
   # Input combination train/test split
-  input_split_enabled: true       # Enable train/test split on input combinations
+  input_split_enabled: false       # Enable train/test split on input combinations
   input_train_fraction: 0.8       # Fraction of combinations for training (0.8 = 80% train, 20% test)
   input_split_seed: ${seed}  # Seed for reproducible split
   
@@ -147,7 +147,7 @@ logging:
 
 # Checkpoint configuration
 checkpoint:
-  enabled: false
+  enabled: true
   interval: 1031  # prime number 
   save_best: true  # Save best model based on metric
   best_metric: "hard_accuracy"  # Metric to track for best model

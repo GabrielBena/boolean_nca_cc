@@ -1630,3 +1630,4 @@ def _select_best_artifact(artifacts: list, prefer_metric: str | None = None, run
         log.info(f"Selected artifact with metric '{selected_metric}' using intelligent priority: {selected_artifact.name}")
 
     return selected_artifact
+
