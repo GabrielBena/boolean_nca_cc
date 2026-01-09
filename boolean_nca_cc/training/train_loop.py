@@ -923,7 +923,7 @@ def train_model(
         preconfig_loss, preconfig_aux = get_loss_from_wires_logits(
             base_logits_preconfig, base_wires_preconfig, x_data, y_data, loss_type
         )
-        preconfig_hard_loss, _, _, preconfig_accuracy, preconfig_hard_accuracy, _, _ = preconfig_aux
+        preconfig_hard_loss, _, _, preconfig_accuracy, preconfig_hard_accuracy, _, _, _ = preconfig_aux
         log.info(
             f"Preconfigured circuit metrics: "
             f"loss={float(preconfig_loss):.6f}, "
