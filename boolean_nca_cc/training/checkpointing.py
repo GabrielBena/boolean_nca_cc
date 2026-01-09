@@ -17,236 +17,28 @@ from boolean_nca_cc.utils.graph_builder import build_graph
 log = logging.getLogger(__name__)
 
 
-def load_checkpoint_with_compatibility_working(checkpoint_path):
+def load_checkpoint(checkpoint_path):
     """
-    Working compatibility loader that handles Flax and JAX version issues.
-
-    This loader handles:
-    - flax.nnx.nnx -> flax.nnx module remapping
-    - Missing _var_metadata attributes in VariableState objects
-    - JAX version compatibility (MainTrace location changes)
-    """
-    log.info(f"Loading checkpoint with compatibility handling: {checkpoint_path}")
-
-    try:
-
-        class WorkingCompatibilityUnpickler(pickle.Unpickler):
-            def find_class(self, module, name):
-                # Handle flax.nnx.nnx -> flax.nnx remapping
-                if module.startswith("flax.nnx.nnx"):
-                    log.debug(f"Remapping {module}.{name}")
-
-                    if name == "State":
-                        # Return a custom State class that can handle the old format
-                        class CompatibleState(dict):
-                            def __init__(self, *args, **kwargs):
-                                super().__init__()
-                                if args and isinstance(args[0], dict):
-                                    self.update(args[0])
-                                if kwargs:
-                                    self.update(kwargs)
-
-                            def __setstate__(self, state):
-                                if isinstance(state, dict):
-                                    self.clear()
-                                    self.update(state)
-
-                        return CompatibleState
-
-                    elif name == "VariableState":
-                        # Return a custom VariableState that can handle missing _var_metadata
-                        class CompatibleVariableState:
-                            def __init__(self, *args, **kwargs):
-                                self.type = kwargs.get("type", nnx.Param)
-                                self.value = kwargs.get("value")
-                                for key, value in kwargs.items():
-                                    if key not in ["_var_metadata"] and not hasattr(self, key):
-                                        setattr(self, key, value)
-
-                            def __setstate__(self, state):
-                                if isinstance(state, dict):
-                                    for key, value in state.items():
-                                        if key != "_var_metadata":
-                                            setattr(self, key, value)
-
-                            def __getattr__(self, name):
-                                if name == "_var_metadata":
-                                    return None
-                                raise AttributeError(
-                                    f"'{self.__class__.__name__}' object has no attribute '{name}'"
-                                )
-
-                        return CompatibleVariableState
-
-                    elif name == "Param":
-                        # Return a custom Param class
-                        class CompatibleParam:
-                            def __init__(self, *args, **kwargs):
-                                if args:
-                                    self.value = args[0]
-                                else:
-                                    self.value = kwargs.get("value", None)
-                                for key, value in kwargs.items():
-                                    if key not in ["_var_metadata"] and key != "value":
-                                        setattr(self, key, value)
-
-                            def __setstate__(self, state):
-                                if isinstance(state, dict):
-                                    for key, value in state.items():
-                                        if key != "_var_metadata":
-                                            setattr(self, key, value)
-
-                        return CompatibleParam
-
-                    else:
-                        # Generic compatible class
-                        class CompatibleGeneric:
-                            def __init__(self, *args, **kwargs):
-                                for key, value in kwargs.items():
-                                    if key != "_var_metadata":
-                                        setattr(self, key, value)
-
-                            def __setstate__(self, state):
-                                if isinstance(state, dict):
-                                    for key, value in state.items():
-                                        if key != "_var_metadata":
-                                            setattr(self, key, value)
-
-                        return CompatibleGeneric
-
-                # Handle JAX compatibility issues
-                if "jax" in module and name == "MainTrace":
-                    log.debug(f"Handling JAX compatibility for {module}.{name}")
-                    try:
-                        import jax
-
-                        if hasattr(jax._src.core, "MainTrace"):
-                            return jax._src.core.MainTrace
-                        else:
-
-                            class CompatibleMainTrace:
-                                def __init__(self, *args, **kwargs):
-                                    pass
-
-                            return CompatibleMainTrace
-                    except Exception:
-
-                        class CompatibleMainTrace:
-                            def __init__(self, *args, **kwargs):
-                                pass
-
-                        return CompatibleMainTrace
-
-                return super().find_class(module, name)
-
-        with open(checkpoint_path, "rb") as f:
-            unpickler = WorkingCompatibilityUnpickler(f)
-            checkpoint = unpickler.load()
-
-        log.info("Successfully loaded checkpoint with working compatibility loader")
-
-        # Convert compatible objects back to real nnx objects
-        if "model" in checkpoint:
-            checkpoint["model"] = convert_compatible_to_nnx(checkpoint["model"])
-            log.info("Converted compatible objects to nnx format")
-
-        return checkpoint
-
-    except Exception as e:
-        log.error(f"Working compatibility loading failed: {e}")
-        raise
-
-
-def convert_compatible_to_nnx(obj):
-    """
-    Convert compatible objects created during loading back to real nnx objects.
-
-    This ensures that the loaded state can be properly used to update the model.
-    """
-    if hasattr(obj, "__class__") and "Compatible" in obj.__class__.__name__:
-        class_name = obj.__class__.__name__.replace("Compatible", "")
-
-        if class_name == "VariableState":
-            # Convert to real VariableState
-            try:
-                var_type = getattr(obj, "type", nnx.Param)
-                value = getattr(obj, "value", None)
-                if value is not None:
-                    return nnx.VariableState(type=var_type, value=value)
-                else:
-                    # Return as dict if we can't create the proper object
-                    return {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
-            except Exception as e:
-                log.warning(f"Could not convert VariableState: {e}")
-                return {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
-
-        elif class_name == "Param":
-            # Convert to real Param
-            try:
-                value = getattr(obj, "value", None)
-                if value is not None:
-                    return nnx.Param(value)
-                else:
-                    return getattr(obj, "value", None)
-            except Exception as e:
-                log.warning(f"Could not convert Param: {e}")
-                return getattr(obj, "value", None)
-
-        elif class_name == "State":
-            # Convert State (usually a dict-like collection)
-            if isinstance(obj, dict):
-                return {k: convert_compatible_to_nnx(v) for k, v in obj.items()}
-            else:
-                return {
-                    k: convert_compatible_to_nnx(v)
-                    for k, v in obj.__dict__.items()
-                    if not k.startswith("_")
-                }
-
-        else:
-            # Generic conversion - return as dict
-            return {
-                k: convert_compatible_to_nnx(v)
-                for k, v in obj.__dict__.items()
-                if not k.startswith("_")
-            }
-
-    elif isinstance(obj, dict):
-        # Recursively convert dictionary values
-        return {k: convert_compatible_to_nnx(v) for k, v in obj.items()}
-
-    elif isinstance(obj, (list, tuple)):
-        # Recursively convert list/tuple items
-        converted = [convert_compatible_to_nnx(item) for item in obj]
-        return type(obj)(converted)
-
-    else:
-        # Return as-is for regular objects
-        return obj
-
-
-def load_checkpoint_with_compatibility(checkpoint_path):
-    """
-    Load a checkpoint with backward compatibility for older Flax versions.
-
-    This uses the working compatibility loader that handles:
-    - flax.nnx.nnx -> flax.nnx module remapping
-    - Missing _var_metadata attributes
-    - JAX version compatibility issues
-
+    Load a checkpoint from a file (Flax 0.12 format).
+    
     Args:
         checkpoint_path: Path to the checkpoint file
-
+        
     Returns:
-        Dictionary containing the checkpoint data
+        Dictionary containing the checkpoint data with keys:
+        - model: Model state (from nnx.state)
+        - optimizer: Optimizer state (from nnx.state)
+        - metrics: Training metrics dictionary
+        - config: Configuration object
+        - step: Training step number
     """
-    return load_checkpoint_with_compatibility_working(checkpoint_path)
-
-
-# Removed old manual reconstruction code - no longer needed
-
-
-# Removed old state conversion function - no longer needed with working loader
+    log.info(f"Loading checkpoint: {checkpoint_path}")
+    
+    with open(checkpoint_path, "rb") as f:
+        checkpoint = pickle.load(f)
+    
+    log.info("Successfully loaded checkpoint")
+    return checkpoint
 
 
 def configure_notebook_logging(level=logging.INFO):
@@ -404,18 +196,15 @@ def save_checkpoint(model, optimizer, metrics, cfg, step, output_dir, filename=N
     return checkpoint_path
 
 
-# Removed old load_old_checkpoint_safe - functionality integrated into main loader
-
-
-def load_checkpoint(checkpoint_path):
-    """Load a checkpoint from a file with backward compatibility."""
-    return load_checkpoint_with_compatibility(checkpoint_path)
-
-
 def load_checkpoint_legacy(checkpoint_path):
-    """Load a checkpoint from a file using standard pickle (legacy method)."""
-    with open(checkpoint_path, "rb") as f:
-        return pickle.load(f)
+    """
+    Legacy checkpoint loader (deprecated - use load_checkpoint instead).
+    
+    This function is kept for backwards compatibility but should not be used
+    for new code. Use load_checkpoint() instead.
+    """
+    log.warning("load_checkpoint_legacy is deprecated. Use load_checkpoint() instead.")
+    return load_checkpoint(checkpoint_path)
 
 
 # WandB integration functions
@@ -492,10 +281,75 @@ def load_config_from_wandb(
     api = wandb.Api()
 
     # Find the run
+    run = None
     if run_id:
         log.info(f"Looking for run with ID: {run_id}")
-        run = api.run(f"{entity}/{project}/{run_id}")
-        log.info(f"Found run: {run.name}")
+        try:
+            run = api.run(f"{entity}/{project}/{run_id}")
+            log.info(f"Found run: {run.name}")
+        except Exception as e:
+            # Workaround for WandB bug when run is part of a sweep (JSON serialization error)
+            # Try using api.runs() with a filter instead
+            if "not JSON serializable" in str(e) or isinstance(e, wandb.errors.CommError):
+                log.warning(f"Error loading run directly (likely sweep-related bug): {e}")
+                log.info("Trying alternative method: using api.runs() with filter...")
+                try:
+                    # Try to get the run using filters
+                    runs = api.runs(f"{entity}/{project}", filters={"display_name": run_id})
+                    if runs:
+                        run = runs[0]
+                        log.info(f"Found run using filter method: {run.name}")
+                    else:
+                        # Try with ID filter
+                        runs = api.runs(f"{entity}/{project}", filters={"id": run_id})
+                        if runs:
+                            run = runs[0]
+                            log.info(f"Found run using ID filter: {run.name}")
+                        else:
+                            raise ValueError(f"Could not find run {run_id} using filter method")
+                except Exception as e2:
+                    log.warning(f"Filter method also failed: {e2}")
+                    # Last resort: create a minimal run object and load config from checkpoint
+                    log.info("Creating minimal run object - will load config from checkpoint file...")
+                    class MinimalRun:
+                        def __init__(self, run_id_val, api_instance, entity_val, project_val, filename_val):
+                            self.id = run_id_val
+                            self.name = f"run-{run_id_val}"
+                            self.config = None
+                            self._api = api_instance
+                            self._entity = entity_val
+                            self._project = project_val
+                            self._filename = filename_val
+                        
+                        def logged_artifacts(self):
+                            # Try to get artifacts using direct API calls
+                            # Construct artifact paths manually
+                            artifacts = []
+                            try:
+                                # Try common artifact name patterns
+                                artifact_names = [
+                                    self._filename,
+                                    f"run-{self.id}-{self._filename}",
+                                    f"best_model_eval_ko_hard_accuracy",
+                                    f"best_model",
+                                ]
+                                for art_name in artifact_names:
+                                    try:
+                                        art = self._api.artifact(f"{self._entity}/{self._project}/{art_name}:latest")
+                                        if art:
+                                            artifacts.append(art)
+                                            log.info(f"Found artifact via MinimalRun: {art.name}")
+                                            break
+                                    except:
+                                        continue
+                            except Exception as e:
+                                log.warning(f"Error in MinimalRun.logged_artifacts(): {e}")
+                            return artifacts
+                    
+                    run = MinimalRun(run_id, api, entity, project, filename)
+                    log.info("Using minimal run object - config will be loaded from checkpoint file")
+            else:
+                raise
     else:
         if not filters:
             filters = {}
@@ -585,7 +439,35 @@ def load_config_from_wandb(
 
     # Get artifacts and find best model
     log.info("Retrieving artifacts...")
-    artifacts = run.logged_artifacts()
+    try:
+        artifacts = run.logged_artifacts()
+    except Exception as e:
+        log.warning(f"Error getting artifacts from run object: {e}")
+        artifacts = []
+    
+    # If we got no artifacts (e.g., from MinimalRun), try to get them directly
+    if not artifacts:
+        log.info("No artifacts from run.logged_artifacts(), trying direct artifact access...")
+        try:
+            # Try common artifact naming patterns
+            artifact_candidates = [
+                f"{filename}",
+                f"run-{run_id}-{filename}",
+                f"best_model_eval_ko_hard_accuracy",
+                f"best_model",
+            ]
+            for art_name in artifact_candidates:
+                try:
+                    # Try to get artifact by name
+                    art = api.artifact(f"{entity}/{project}/{art_name}:latest")
+                    if art:
+                        artifacts.append(art)
+                        log.info(f"Found artifact: {art.name}")
+                        break
+                except:
+                    continue
+        except Exception as e:
+            log.warning(f"Could not get artifacts directly: {e}")
 
     # Print all available artifacts for debugging
     log.info("Available artifacts:")
@@ -720,10 +602,23 @@ def load_config_from_wandb(
     
     log.info(f"Using checkpoint file at: {checkpoint_path}")
 
-    # Get config from run
-    config = OmegaConf.create(run.config)
+    # Get config from run, or from checkpoint file if run loading failed
+    try:
+        if hasattr(run, 'config') and run.config is not None:
+            config = OmegaConf.create(run.config)
+        else:
+            # Fallback: load config from checkpoint file
+            log.info("Loading config from checkpoint file...")
+            loaded = load_checkpoint(checkpoint_path)
+            config = OmegaConf.create(loaded.get("config", {}))
+    except Exception as e:
+        # If we can't get config from run, try loading from checkpoint file
+        log.warning(f"Could not get config from run object: {e}")
+        log.info("Loading config from checkpoint file instead...")
+        loaded = load_checkpoint(checkpoint_path)
+        config = OmegaConf.create(loaded.get("config", {}))
 
-    return config, checkpoint_path, run.id
+    return config, checkpoint_path, run.id if hasattr(run, 'id') else run_id
 
 
 def load_model_from_config_and_checkpoint(
@@ -749,10 +644,10 @@ def load_model_from_config_and_checkpoint(
         and full loaded state
     """
 
-    # Load the saved state using unified loading
+    # Load the saved state
     log.info(f"Loading model from {checkpoint_path}")
     try:
-        loaded_dict = load_checkpoint_with_compatibility(checkpoint_path)
+        loaded_dict = load_checkpoint(checkpoint_path)
     except Exception as e:
         log.error(f"Error loading checkpoint from {checkpoint_path}: {e}")
         raise
@@ -760,7 +655,7 @@ def load_model_from_config_and_checkpoint(
     # Instantiate model using the reusable function
     model = instantiate_model_from_config(config, seed=seed)
 
-    # Update model with loaded state (compatibility handled during loading)
+    # Update model with loaded state
     nnx.update(model, loaded_dict["model"])
 
     # Ensure essential keys are present in loaded_dict

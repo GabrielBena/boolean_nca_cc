@@ -121,7 +121,7 @@ eval:
     greedy_window_size: ${pool.greedy_window_size}  # Reuse pool's window size
     greedy_injection_recover_steps: 30     # N recovery steps between injections
     # Damage start offset (warm-up period before first damage)
-    damage_start_offset: 15  # Number of steps to run before first damage injection (0 = damage at step 1)
+    damage_start_offset: 5  # Number of steps to run before first damage injection (0 = damage at step 1)
     damage_start_offset_random: false  # If true, randomize offset per circuit (0 to damage_start_offset)
     damage_start_offset_seed: ${test_seed}  # Seed for random offset generation
     # Note: Greedy ordered indices are defined once under pool.greedy_ordered_indices

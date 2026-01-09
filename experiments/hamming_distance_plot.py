@@ -54,10 +54,8 @@ from boolean_nca_cc.training.checkpointing import (
 )
 from boolean_nca_cc.training.evaluation import (
     get_loss_from_wires_logits,
-    get_loss_and_update_graph,
+    evaluate_model_stepwise_batched,
 )
-from boolean_nca_cc.utils.graph_builder import build_graph
-from boolean_nca_cc.utils.extraction import extract_logits_from_graph
 from boolean_nca_cc.training.preconfigure import preconfigure_circuit_logits
 from boolean_nca_cc.analysis.hamming_utils import (
     _hard_truth_tables_from_logits,
@@ -105,7 +103,17 @@ def _run_bp_single(cfg, x_data, y_data, loss_type: str):
     return dict(params=state.params, wires=wires, final_loss=float(final_loss))
 
 
-def _run_bp_with_knockouts(cfg, x_data, y_data, loss_type: str, knockout_patterns, layer_sizes, baseline_params, baseline_wires, damage_behavior="permanent", reversible_bias=-10.0):
+def _run_bp_with_knockouts(cfg, x_data, y_data, loss_type: str, knockout_patterns, layer_sizes, baseline_params, baseline_wires, damage_behavior="permanent", reversible_bias=-10.0, damage_start_offset=0):
+    """
+    Run backprop training with knockout patterns.
+    
+    Damage injection strategy (aligned with training):
+    - For permanent damage: Damage is applied starting at step (damage_start_offset + 1) and persists
+    - For reversible damage: Damage is applied once at step (damage_start_offset + 1) via bias, then recovery
+    
+    Args:
+        damage_start_offset: Number of steps to run before first damage injection (0 = damage at step 1)
+    """
     # Use baseline optimized circuit instead of generating fresh
     wires = baseline_wires
     logits = baseline_params  # Start from optimized baseline, not NOPs
@@ -129,7 +137,33 @@ def _run_bp_with_knockouts(cfg, x_data, y_data, loss_type: str, knockout_pattern
     for pattern in tqdm(knockout_patterns, desc="Training knockout patterns"):
         state = TrainState(params=logits, opt_state=opt.init(logits))
 
+        # Damage injection step: damage_start_offset + 1 (e.g., offset=15 means damage at step 16)
+        damage_injection_step = damage_start_offset + 1
+        
         def _step(st, step_count):
+            # Determine if damage should be applied at this step
+            # step_count is 0-indexed, so step_count=0 is the first step
+            # damage_injection_step is 1-indexed (e.g., offset=15 means step 16)
+            # So we check: step_count == (damage_injection_step - 1)
+            apply_damage_now = (step_count == (damage_injection_step - 1))
+            
+            # For permanent damage: apply once at injection step, then it persists via gate_mask
+            # For reversible damage: apply once at injection step via bias (handled in train_step)
+            knockout_pattern_for_step = pattern if apply_damage_now else None
+            
+            # Special handling for permanent damage: once applied, we need to keep using the pattern
+            # But train_step with permanent mode uses gate_mask, which is computed from pattern
+            # So we pass the pattern if damage should be active (either now or already applied)
+            if damage_behavior == "permanent":
+                # For permanent: if we've reached or passed the injection step, always apply
+                if step_count >= (damage_injection_step - 1):
+                    knockout_pattern_for_step = pattern
+                else:
+                    knockout_pattern_for_step = None
+            else:  # reversible
+                # For reversible: only apply at the exact injection step
+                knockout_pattern_for_step = pattern if apply_damage_now else None
+            
             return train_step(
                 state=st,
                 opt=opt,
@@ -138,7 +172,7 @@ def _run_bp_with_knockouts(cfg, x_data, y_data, loss_type: str, knockout_pattern
                 y0=y_data,
                 loss_type=loss_type,
                 do_train=True,
-                knockout_pattern=pattern,
+                knockout_pattern=knockout_pattern_for_step,
                 layer_sizes=cfg.circuit.layer_sizes,
                 damage_behavior=damage_behavior,
                 reversible_bias=reversible_bias,
@@ -148,7 +182,7 @@ def _run_bp_with_knockouts(cfg, x_data, y_data, loss_type: str, knockout_pattern
         for step_count in range(cfg.backprop.epochs):
             _, _, state = _step(state, step_count)
 
-        # Final evaluation with knockout pattern applied
+        # Final evaluation with knockout pattern applied (for permanent, always evaluate with mask)
         loss_fn = loss_f_l4 if loss_type == "l4" else loss_f_bce
         # For final evaluation, use gate_mask for permanent, or evaluate normally for reversible
         if damage_behavior == "permanent":
@@ -157,7 +191,7 @@ def _run_bp_with_knockouts(cfg, x_data, y_data, loss_type: str, knockout_pattern
                 gate_mask=create_gate_mask_from_knockout_pattern(pattern, layer_sizes)
             )
         else:
-            # For reversible, evaluate without mask (damage was applied via bias)
+            # For reversible, evaluate without mask (damage was applied via bias, may have recovered)
             final_loss, final_aux = loss_fn(state.params, wires, x_data, y_data)
         final_hard_accuracy = float(final_aux["hard_accuracy"])
         final_hard_loss = float(final_aux["hard_loss"])
@@ -209,96 +243,6 @@ def _pairwise_hamming_between_knockouts(
     return matrix
 
 
-def _evaluate_gnn_single_pattern(
-    model,
-    wires,
-    baseline_logits,
-    x_data,
-    y_data,
-    input_n: int,
-    arity: int,
-    circuit_hidden_dim: int,
-    n_message_steps: int,
-    loss_type: str,
-    layer_sizes,
-    knockout_pattern,
-):
-    """
-    Run GNN evaluation for a single knockout pattern starting from the BP-optimized baseline logits.
-    Returns final logits and metrics.
-    """
-    # Initial loss and residuals for graph seeding
-    initial_loss, (
-        initial_hard_loss,
-        initial_pred,
-        initial_pred_hard,
-        initial_accuracy,
-        initial_hard_accuracy,
-        initial_res,
-        initial_hard_res,
-    ) = get_loss_from_wires_logits(baseline_logits, wires, x_data, y_data, loss_type)
-
-    # Build initial graph and set loss features
-    graph = build_graph(
-        logits=baseline_logits,
-        wires=wires,
-        input_n=input_n,
-        arity=arity,
-        circuit_hidden_dim=circuit_hidden_dim,
-        loss_value=initial_loss,
-        bidirectional_edges=True,
-    )
-
-    # Update per-output loss features
-    from boolean_nca_cc.utils import update_output_node_loss
-
-    graph = update_output_node_loss(graph, layer_sizes, initial_res.mean(axis=0))
-
-    logits_original_shapes = [l.shape for l in baseline_logits]
-
-    current_graph = graph
-    current_logits = baseline_logits
-    current_aux = (
-        initial_hard_loss,
-        initial_pred,
-        initial_pred_hard,
-        initial_accuracy,
-        initial_hard_accuracy,
-        initial_res,
-        initial_hard_res,
-    )
-
-    for _ in range(max(0, int(n_message_steps))):
-        # Apply one step with knockout pattern
-        updated_graph = model(current_graph, knockout_pattern=knockout_pattern)
-        # Recompute loss and update loss features
-        updated_graph, loss, current_logits, current_aux = get_loss_and_update_graph(
-            updated_graph,
-            logits_original_shapes,
-            wires,
-            x_data,
-            y_data,
-            loss_type,
-            layer_sizes,
-        )
-        current_graph = updated_graph
-
-    # Metrics from final aux
-    (
-        final_hard_loss,
-        _pred,
-        _pred_hard,
-        _acc,
-        final_hard_accuracy,
-        _res,
-        _hard_res,
-    ) = current_aux
-
-    return dict(
-        logits=current_logits,
-                    final_hard_accuracy=float(final_hard_accuracy),
-        final_hard_loss=float(final_hard_loss),
-    )
 
 
 def main():
@@ -315,7 +259,7 @@ def main():
     parser.add_argument("--methods", type=str, default="bp", help="gnn,bp,both (default: bp)")
     # GNN evaluation parameters
     parser.add_argument("--n-message-steps", type=int, default=None,
-                        help="Number of message passing steps for GNN evaluation (default: from config)")
+                        help="Number of message passing steps for GNN evaluation (default: 26, or from config if available, CLI override takes precedence)")
     # Knockout size variation
     parser.add_argument("--knockout-sizes", type=str, default=None, 
                         help="Comma-separated list of knockout sizes (e.g., '1,10,20,40'). If not provided, uses damage_prob from config.")
@@ -326,7 +270,9 @@ def main():
                         choices=["permanent", "reversible"],
                         help="Damage behavior mode: permanent (gate masking) or reversible (logit bias). Default: from config or 'permanent'")
     parser.add_argument("--reversible-bias", type=float, default=None,
-                        help="Bias value for reversible damage mode (default: from config or -10.0)")
+                        help="Bias value for reversible damage mode (default: -10.0)")
+    parser.add_argument("--damage-start-offset", type=int, default=None,
+                        help="Number of steps before damage injection (default: 5, damage at step 6)")
     args = parser.parse_args()
 
     # Parse methods selection early to determine what needs to be loaded
@@ -353,6 +299,52 @@ def main():
         )
         gnn_training_config = cfg
 
+    # Parse and set all configuration variables from args or config
+    # Seed for random operations
+    seed = cfg.get("seed", cfg.get("test_seed", 42))
+    
+    # Knockout sizes: parse from args or use config default
+    if args.knockout_sizes is not None:
+        knockout_sizes = [int(x.strip()) for x in args.knockout_sizes.split(",")]
+    else:
+        # Use damage_prob from config as single value, or default
+        damage_prob = cfg.get("pool", {}).get("damage_prob", cfg.get("backprop", {}).get("knockout_vocabulary", {}).get("damage_prob", 10))
+        knockout_sizes = [damage_prob]
+    
+    # Patterns per size: parse from args or use config default
+    if args.patterns_per_size is not None:
+        patterns_per_size = args.patterns_per_size
+    else:
+        patterns_per_size = cfg.get("pool", {}).get("vocabulary_size", cfg.get("backprop", {}).get("knockout_vocabulary", {}).get("vocabulary_size", 10))
+    
+    # Damage behavior: Priority: CLI override > Script default
+    if args.damage_behavior is not None:
+        damage_behavior = args.damage_behavior
+    else:
+        damage_behavior = "permanent"  # Default
+    
+    # Reversible bias: Priority: CLI override > Script default
+    if args.reversible_bias is not None:
+        reversible_bias = args.reversible_bias
+    else:
+        reversible_bias = -10.0  # Default
+    
+    # N message steps: Priority: CLI override > Script default (26)
+    # Script defaults take precedence over config for simplicity
+    if args.n_message_steps is not None:
+        n_message_steps = args.n_message_steps
+    else:
+        n_message_steps = 26  # Default for this experiment
+    
+    # Damage start offset: Priority: CLI override > Script default (5)
+    # Script defaults take precedence over config for simplicity
+    if args.damage_start_offset is not None:
+        damage_start_offset = args.damage_start_offset
+    else:
+        damage_start_offset = 5  # Default: damage at step 6, 20 recovery steps (with 26 total)
+    
+    
+
     # Only load GNN model if GNN is in the methods
     gnn_model = None
     gnn_hidden_dim = None
@@ -363,14 +355,44 @@ def main():
             from flax import nnx as _nnx
             _nnx.update(gnn_model, loaded["model"])
             gnn_hidden_dim = int(cfg.model.get("circuit_hidden_dim", 16))
+            
+            # Extract and display epoch/step information
+            step = loaded.get("step")
+            checkpoint_config = loaded.get("config", {})
+            if isinstance(checkpoint_config, dict):
+                epoch = checkpoint_config.get("epoch")
+            else:
+                epoch = getattr(checkpoint_config, "epoch", None)
+            
+            if step is not None:
+                print(f"Loaded checkpoint at step: {step}")
+            if epoch is not None:
+                print(f"Loaded checkpoint at epoch: {epoch}")
+            if step is None and epoch is None:
+                print("Warning: Could not determine checkpoint epoch/step from loaded data")
         else:
             # Load the actual model now
-            gnn_model, _loaded_dict, _ = load_best_model_from_wandb(
+            gnn_model, loaded_dict, _ = load_best_model_from_wandb(
                 run_id=args.run_id,
                 seed=0,  # Use default seed, will be overridden by GNN config
                 filename=filename_to_load,
             )
             gnn_hidden_dim = int(cfg.model.get("circuit_hidden_dim", 16))
+            
+            # Extract and display epoch/step information
+            step = loaded_dict.get("step")
+            checkpoint_config = loaded_dict.get("config", {})
+            if isinstance(checkpoint_config, dict):
+                epoch = checkpoint_config.get("epoch")
+            else:
+                epoch = getattr(checkpoint_config, "epoch", None)
+            
+            if step is not None:
+                print(f"Loaded checkpoint at step: {step}")
+            if epoch is not None:
+                print(f"Loaded checkpoint at epoch: {epoch}")
+            if step is None and epoch is None:
+                print("Warning: Could not determine checkpoint epoch/step from loaded data")
 
     # Set output directory with f-string if not provided
     if args.output is None:
@@ -507,7 +529,7 @@ def main():
     last_method_active_masks: List[List[jp.ndarray]] = []
 
     # Loop over damage modes and knockout sizes
-    seed = cfg.get("seed", cfg.get("test_seed", 42))
+    # seed is already defined earlier
     rng = jax.random.PRNGKey(seed)
     for damage_mode in damage_modes:
         for ko_size in knockout_sizes:
@@ -553,6 +575,7 @@ def main():
                     baseline_wires=bp_baseline["wires"],
                     damage_behavior=damage_behavior,
                     reversible_bias=reversible_bias,
+                    damage_start_offset=damage_start_offset,
                 )
 
                 method_ko_tables: List[List[jp.ndarray]] = []
@@ -588,38 +611,110 @@ def main():
             if "gnn" in methods and gnn_model is not None:
                 method_ko_tables: List[List[jp.ndarray]] = []
                 method_active_masks: List[List[jp.ndarray]] = []
-                for idx, pattern in enumerate(vocab):
-                    eval_res = _evaluate_gnn_single_pattern(
-                        model=gnn_model,
-                        wires=bp_baseline["wires"],
-                        baseline_logits=bp_baseline["params"],
-                        x_data=x,
-                        y_data=y0,
-                        input_n=input_n,
-                        arity=arity,
-                        circuit_hidden_dim=gnn_hidden_dim or 16,
-                        n_message_steps=n_message_steps,
-                        loss_type=loss_type,
-                        layer_sizes=layer_sizes,
-                        knockout_pattern=pattern,
+                
+                log.info(f"Evaluating {len(vocab)} GNN patterns in batch for KO size {ko_size}")
+                
+                # Batch baseline wires and logits for all patterns
+                batch_wires = jax.tree.map(
+                    lambda x: jp.repeat(x[None, ...], patterns_per_size, axis=0),
+                    bp_baseline["wires"]
+                )
+                batch_logits = jax.tree.map(
+                    lambda x: jp.repeat(x[None, ...], patterns_per_size, axis=0),
+                    bp_baseline["params"]
+                )
+                
+                # Ensure vocab is a JAX array with correct shape [patterns_per_size, total_nodes]
+                if isinstance(vocab, list):
+                    vocab_array = jp.stack(vocab)
+                else:
+                    vocab_array = vocab
+                
+                # Run batched evaluation - this matches wandb evaluation exactly
+                eval_results = evaluate_model_stepwise_batched(
+                    model=gnn_model,
+                    batch_wires=batch_wires,
+                    batch_logits=batch_logits,
+                    x_data=x,
+                    y_data=y0,
+                    input_n=input_n,
+                    arity=arity,
+                    circuit_hidden_dim=gnn_hidden_dim or 16,
+                    n_message_steps=n_message_steps,
+                    loss_type=loss_type,
+                    bidirectional_edges=True,
+                    layer_sizes=layer_sizes,
+                    knockout_patterns=vocab_array,
+                    return_per_pattern=True,  # Get per-pattern metrics
+                    damage_injection_mode="single",  # One damage per circuit
+                    damage_start_offset=damage_start_offset,
+                    damage_mode="shotgun",  # Static patterns (not periodic)
+                    greedy_window_size=ko_size,  # Number of gates to knock out (matches knockout size)
+                )
+                
+                # Extract per-pattern results
+                per_pattern = eval_results.get("per_pattern", {})
+                final_logits_list = per_pattern.get("pattern_logits", [])
+                final_hard_accuracies = per_pattern.get("pattern_hard_accuracies", None)
+                
+                # Get final step logits (last element in the list)
+                if final_logits_list:
+                    final_step_logits = final_logits_list[-1]  # [batch_size, ...logit_shapes...]
+                else:
+                    raise ValueError("No per-pattern logits returned from evaluation")
+                
+                # Get final hard accuracies (last step)
+                # final_hard_accuracies shape: [n_steps, batch_size] (JAX array)
+                if final_hard_accuracies is not None:
+                    if isinstance(final_hard_accuracies, jp.ndarray) and final_hard_accuracies.shape[0] > 0:
+                        final_hard_accuracies_array = final_hard_accuracies[-1]  # [batch_size] - last step
+                    elif isinstance(final_hard_accuracies, list) and len(final_hard_accuracies) > 0:
+                        final_hard_accuracies_array = final_hard_accuracies[-1]  # [batch_size] - last step
+                    else:
+                        final_hard_accuracies_array = None
+                else:
+                    final_hard_accuracies_array = None
+                
+                # Process each pattern result
+                for idx in range(patterns_per_size):
+                    # Extract logits for this pattern (unbatch from tree structure)
+                    pattern_final_logits = jax.tree.map(lambda x: x[idx], final_step_logits)
+                    
+                    # Compute final metrics for this pattern
+                    pattern_loss, pattern_aux = get_loss_from_wires_logits(
+                        pattern_final_logits,
+                        bp_baseline["wires"],  # Use original wires (not batched)
+                        x,
+                        y0,
+                        loss_type
                     )
-
-                    pert_tables = _hard_truth_tables_from_logits(eval_res["logits"])  # per-layer
+                    pattern_final_hard_accuracy = float(pattern_aux[4])  # hard_accuracy is index 4
+                    pattern_final_hard_loss = float(pattern_aux[0])  # hard_loss is index 0
+                    
+                    # Use per-pattern accuracy if available, otherwise computed
+                    if final_hard_accuracies_array is not None:
+                        pattern_final_hard_accuracy = float(final_hard_accuracies_array[idx])
+                    
+                    # Get pattern from vocab
+                    pattern = vocab_array[idx] if hasattr(vocab_array, '__getitem__') else vocab[idx]
+                    
+                    # Compute hamming distance
+                    pert_tables = _hard_truth_tables_from_logits(pattern_final_logits)  # per-layer
                     active_masks = _active_gate_mask_from_knockout(layer_sizes, pattern)
                     metrics = _hamming_distance_tables(baseline_tables, pert_tables, active_masks)
-
+                    
                     row = {
                         "pattern_idx": idx,
                         "knockout_size": ko_size,
                         "damage_mode": damage_mode,
-                        "damage_behavior": damage_behavior,  # GNN uses model's damage_behavior, but track for consistency
+                        "damage_behavior": damage_behavior,
                         "method": "gnn",
                         "overall_bitwise_fraction_diff": metrics["overall_bitwise_fraction_diff"],
                         "per_gate_mean_hamming": metrics["per_gate_mean_hamming"],
                         "counted_bits_total": metrics["counted_bits_total"],
                         "counted_gates_total": metrics["counted_gates_total"],
-                        "final_hard_accuracy": eval_res["final_hard_accuracy"],
-                        "final_hard_loss": eval_res["final_hard_loss"],
+                        "final_hard_accuracy": pattern_final_hard_accuracy,
+                        "final_hard_loss": pattern_final_hard_loss,
                     }
                     row["per_layer_bitwise_fraction_diff"] = json.dumps(metrics["per_layer_bitwise_fraction_diff"])
                     summary_rows.append(row)

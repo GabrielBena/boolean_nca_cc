@@ -26,8 +26,6 @@ from boolean_nca_cc.circuits.train import (
     compute_full_map_accuracy,
 )
 from boolean_nca_cc.training.pool.structural_perturbation import (
-    create_group_greedy_pattern,
-    create_greedy_subset_random_pattern,
     create_reproducible_knockout_pattern,
 )
 
@@ -196,6 +194,7 @@ def evaluate_model_stepwise_generator(
             initial_pred_hard,
             initial_accuracy,
             initial_hard_accuracy,
+            initial_full_map_accuracy,
             initial_res,
             initial_hard_res,
         ),
@@ -239,6 +238,7 @@ def evaluate_model_stepwise_generator(
         hard_loss=float(initial_hard_loss),
         accuracy=float(initial_accuracy),
         hard_accuracy=float(initial_hard_accuracy),
+        full_map_accuracy=float(initial_full_map_accuracy),
         predictions=initial_pred,
         hard_predictions=initial_pred_hard,
         logits=logits,
@@ -749,32 +749,10 @@ def _evaluate_with_loop(
         lambda graph: extract_logits_from_graph(graph, logits_original_shapes)
     )
 
-    # Prepare periodic injection schedule for applicable damage modes
+    # Prepare injection schedule
     batch_size = batch_wires[0].shape[0]
-    eval_perturb_counter = None
-    # Enable periodic injections for greedy modes AND shotgun mode (damage_mode controls behavior)
-    # BUT only if the required data is available:
-    # - "greedy" mode requires greedy_ordered_indices
-    # - "greedy_vocabulary" mode requires greedy_ordered_indices OR knockout_vocabulary
-    # - "shotgun" mode works without greedy_ordered_indices
-    has_greedy_indices = greedy_ordered_indices is not None and len(greedy_ordered_indices) > 0
-    periodic_injections_enabled = (
-        damage_mode in ["greedy", "greedy_vocabulary", "shotgun"]
-        and (
-            damage_mode == "shotgun"  # Shotgun doesn't need greedy indices
-            or has_greedy_indices  # Greedy modes need greedy indices
-            or (damage_mode == "greedy_vocabulary" and knockout_vocabulary is not None)  # Vocab mode can use vocabulary
-        )
-    )
-    if periodic_injections_enabled:
-        eval_perturb_counter = jp.zeros((batch_size,), dtype=jp.int32)
-        # Only needed for greedy modes, but safe to compute
-        if has_greedy_indices:
-            window = max(1, int(greedy_window_size))
-            greedy_len = int(len(greedy_ordered_indices))
-        else:
-            window = 1
-            greedy_len = 1  # Fallback for shotgun mode
+    eval_perturb_counter = jp.zeros((batch_size,), dtype=jp.int32)
+    damage_prob = max(1, int(greedy_window_size))  # Number of gates to knock out
     
     # Compute per-circuit damage start offsets
     if damage_start_offset_random:
@@ -814,151 +792,75 @@ def _evaluate_with_loop(
         prev_node_hidden = current_graphs.nodes["hidden"].copy()
 
     for step in range(1, n_message_steps + 1):
-        # Apply model to all graphs in batch
-        # Determine per-step knockout patterns (dynamic greedy schedule or static patterns)
-        step_knockout_patterns = knockout_patterns
-        inject_now_mask = None
-        if eval_perturb_counter is not None:
-            # Injection schedule: after offset, then every (recover_steps + 1) steps
-            recover_steps = int(max(0, greedy_injection_recover_steps))
-            # First damage after offset: step == (offset + 1)
-            # Subsequent damages: step == offset + 1 + n*(recover_steps + 1) for n >= 1
-            # Which simplifies to: (step - offset - 1) > 0 and (step - offset - 1) % (recover_steps + 1) == 0
-            steps_since_first_damage = step - per_circuit_offsets - 1
-            first_damage = (steps_since_first_damage == 0)
-            subsequent_damage = (steps_since_first_damage > 0) & ((steps_since_first_damage % (recover_steps + 1)) == 0)
-            inject_now = first_damage | subsequent_damage
-            inject_now_mask = inject_now
+        # Determine if damage should be injected at this step
+        recover_steps = int(max(0, greedy_injection_recover_steps))
+        steps_since_first_damage = step - per_circuit_offsets - 1
+        first_damage = (steps_since_first_damage == 0)
+        subsequent_damage = (steps_since_first_damage > 0) & ((steps_since_first_damage % (recover_steps + 1)) == 0)
+        inject_now = first_damage | subsequent_damage
+        
+        # Respect maximum number of injections per circuit
+        can_inject_mask = eval_perturb_counter < max_damage_per_circuit
+        inject_now_mask = inject_now & can_inject_mask
 
-            # Respect maximum number of injections per circuit
-            can_inject_mask = eval_perturb_counter < max_damage_per_circuit
-            inject_now_mask = inject_now_mask & can_inject_mask
+        # Always generate fresh patterns when injecting
+        pattern_keys = jax.random.split(
+            jax.random.PRNGKey(step + int(jp.sum(eval_perturb_counter)) + 1000),
+            batch_size
+        )
+        vm_create_pattern = jax.vmap(
+            lambda k: create_reproducible_knockout_pattern(
+                k, layer_sizes, damage_prob
+            )
+        )
+        generated_patterns = vm_create_pattern(pattern_keys)
+        
+        # Apply patterns only to circuits that should inject this step
+        step_knockout_patterns = jp.where(
+            inject_now_mask[:, None], generated_patterns, jp.zeros((batch_size, total_nodes), dtype=jp.bool_)
+        )
 
-            # Generate patterns based on damage mode
-            if damage_mode == "greedy":
-                # Legacy rolling window mode
-                starts = ((eval_perturb_counter * window) % greedy_len).astype(jp.int32)
-                vm_build = jax.vmap(
-                    lambda s: create_group_greedy_pattern(
-                        greedy_ordered_indices, layer_sizes, s, window
-                    )
-                )
-                dynamic_patterns = vm_build(starts)
-                # Apply patterns only for circuits injecting this step; others get no damage
-                step_knockout_patterns = jp.where(
-                    inject_now_mask[:, None], dynamic_patterns, jp.zeros_like(dynamic_patterns)
-                )
-            elif damage_mode == "greedy_vocabulary":
-                # Vocabulary-based mode with statistical robustness
-                total_nodes = sum(total_gates for total_gates, _ in layer_sizes)
-                
-                # Generate patterns for all circuits in batch, but only apply to injecting ones
-                damage_prob = greedy_window_size  # Use window size as damage amount
-                
-                if knockout_vocabulary is None:
-                    # Generate fresh patterns from greedy indices (unseen)
-                    # Generate one pattern per circuit (even non-injecting ones for simpler JAX operations)
-                    pattern_keys = jax.random.split(
-                        jax.random.PRNGKey(step + int(jp.sum(eval_perturb_counter)) + 1000),  # Offset for unseen patterns
-                        batch_size
-                    )
-                    
-                    # Generate patterns using vectorized function
-                    vm_create_pattern = jax.vmap(
-                        lambda k: create_greedy_subset_random_pattern(
-                            k, layer_sizes, damage_prob, greedy_ordered_indices
-                        )
-                    )
-                    generated_patterns = vm_create_pattern(pattern_keys)
-                    
-                else:
-                    # Sample from vocabulary (seen)
-                    vocab_size = knockout_vocabulary.shape[0]
-                    
-                    # Sample vocabulary indices for each circuit in batch
-                    vocab_keys = jax.random.split(
-                        jax.random.PRNGKey(step + int(jp.sum(eval_perturb_counter))),  # No offset for seen patterns
-                        batch_size
-                    )
-                    
-                    vm_sample_vocab = jax.vmap(
-                        lambda k: jax.random.choice(k, vocab_size, shape=(), replace=True)
-                    )
-                    vocab_indices = vm_sample_vocab(vocab_keys)
-                    
-                    # Get patterns from vocabulary
-                    generated_patterns = knockout_vocabulary[vocab_indices]
-                
-                # Apply patterns only to circuits that should inject this step
-                step_knockout_patterns = jp.where(
-                    inject_now_mask[:, None], generated_patterns, jp.zeros_like(generated_patterns)
-                )
-            elif damage_mode == "shotgun":
-                # Shotgun mode: sample from vocabulary or generate fresh patterns
-                total_nodes = sum(total_gates for total_gates, _ in layer_sizes)
-                damage_prob = greedy_window_size  # Use window size as damage amount (matches greedy_vocabulary)
-                
-                if knockout_vocabulary is not None:
-                    # Sample from vocabulary (seen patterns)
-                    vocab_size = knockout_vocabulary.shape[0]
-                    vocab_keys = jax.random.split(
-                        jax.random.PRNGKey(step + int(jp.sum(eval_perturb_counter))),
-                        batch_size
-                    )
-                    vm_sample_vocab = jax.vmap(
-                        lambda k: jax.random.choice(k, vocab_size, shape=(), replace=True)
-                    )
-                    vocab_indices = vm_sample_vocab(vocab_keys)
-                    generated_patterns = knockout_vocabulary[vocab_indices]
-                else:
-                    # Generate fresh random patterns (unseen)
-                    pattern_keys = jax.random.split(
-                        jax.random.PRNGKey(step + int(jp.sum(eval_perturb_counter)) + 1000),
-                        batch_size
-                    )
-                    vm_create_pattern = jax.vmap(
-                        lambda k: create_reproducible_knockout_pattern(
-                            k, layer_sizes, damage_prob
-                        )
-                    )
-                    generated_patterns = vm_create_pattern(pattern_keys)
-                
-                # Apply patterns only to circuits that should inject this step
-                step_knockout_patterns = jp.where(
-                    inject_now_mask[:, None], generated_patterns, jp.zeros_like(generated_patterns)
-                )
-            else:
-                # Default: no patterns for unknown modes
-                total_nodes = sum(total_gates for total_gates, _ in layer_sizes)
-                step_knockout_patterns = jp.zeros((batch_size, total_nodes), dtype=jp.bool_)
+        # For reversible mode, force one-shot bias by zeroing step counters on injection steps
+        if damage_behavior == "reversible":
+            steps_before = current_graphs.globals[:, 1]
+            steps_after = jp.where(inject_now_mask, jp.zeros_like(steps_before), steps_before)
+            current_graphs = current_graphs._replace(
+                globals=jp.stack([current_graphs.globals[:, 0], steps_after], axis=1)
+            )
 
-            # For reversible mode, force one-shot bias by zeroing step counters on injection steps
-            if damage_behavior == "reversible":
-                steps_before = current_graphs.globals[:, 1]
-                steps_after = jp.where(inject_now_mask, jp.zeros_like(steps_before), steps_before)
-                current_graphs = current_graphs._replace(
-                    globals=jp.stack([current_graphs.globals[:, 0], steps_after], axis=1)
-                )
-
-            # Increment eval_perturb_counter AFTER using it to compute starts (only on injection steps)
-            eval_perturb_counter = jp.where(inject_now_mask, eval_perturb_counter + 1, eval_perturb_counter)
+        # Increment eval_perturb_counter (only on injection steps)
+        eval_perturb_counter = jp.where(inject_now_mask, eval_perturb_counter + 1, eval_perturb_counter)
+        
+        # For permanent damage: accumulate patterns using logical OR
+        if damage_behavior == "permanent":
+            cumulative_knockout_patterns = cumulative_knockout_patterns | step_knockout_patterns
             
-            # For permanent damage: accumulate patterns using logical OR
-            # This ensures previously damaged nodes remain damaged
-            if damage_behavior == "permanent" and step_knockout_patterns is not None:
-                cumulative_knockout_patterns = cumulative_knockout_patterns | step_knockout_patterns
-                
-                # DEBUG: Track first damage event for validation (single damage mode)
-                if track_damage_validation and damage_validation_tracking["first_damage_step"] is None:
-                    if jp.any(step_knockout_patterns):
-                        damage_validation_tracking["first_damage_step"] = step
-                        damage_validation_tracking["damage_pattern"] = cumulative_knockout_patterns.copy()
+            # DEBUG: Track first damage event for validation
+            if track_damage_validation and damage_validation_tracking["first_damage_step"] is None:
+                if jp.any(step_knockout_patterns):
+                    damage_validation_tracking["first_damage_step"] = step
+                    damage_validation_tracking["damage_pattern"] = cumulative_knockout_patterns.copy()
 
         # For permanent damage, use cumulative patterns; for reversible, use step patterns
         effective_knockout_patterns = (
             cumulative_knockout_patterns if damage_behavior == "permanent" 
             else step_knockout_patterns
         )
+
+        # DEBUG: Log damage injection timing and pattern counts
+        if jp.any(inject_now_mask):
+            n_injecting = int(jp.sum(inject_now_mask))
+            n_damaged_gates = int(jp.sum(step_knockout_patterns))
+            n_damaged_per_circuit = jp.sum(step_knockout_patterns, axis=1)
+            avg_damaged = float(jp.mean(n_damaged_per_circuit))
+            print(f"  Step {step}: INJECTING damage into {n_injecting}/{batch_size} circuits, "
+                  f"total gates damaged: {n_damaged_gates}, avg per circuit: {avg_damaged:.1f}")
+        elif jp.any(effective_knockout_patterns):
+            # Damage is active but not injecting new damage this step
+            n_active_circuits = int(jp.sum(jp.any(effective_knockout_patterns, axis=1)))
+            n_damaged_gates = int(jp.sum(effective_knockout_patterns))
+            print(f"  Step {step}: Damage ACTIVE in {n_active_circuits}/{batch_size} circuits, "
+                  f"total gates damaged: {n_damaged_gates}")
 
         # Apply model with per-step patterns if available
         if effective_knockout_patterns is not None and jp.any(effective_knockout_patterns):

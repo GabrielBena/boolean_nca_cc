@@ -114,22 +114,33 @@ def plot_damage_size_vs_hamming(
     # Clamp to [0, 1] to handle any values outside this range
     accuracies_clamped = np.clip(accuracies, 0, 1)
     
-    # Use a colormap: green (high accuracy) to red (low accuracy)
-    # 'RdYlGn' goes from red (low) to yellow to green (high), reversed for our use
+    # Use viridis colormap: dark purple (low accuracy) to yellow (high accuracy)
     from matplotlib.colors import Normalize
     from matplotlib.lines import Line2D
-    colormap = plt.cm.get_cmap('RdYlGn_r')  # Reversed: green (high) -> yellow -> red (low)
+    colormap = plt.cm.get_cmap('viridis')  # Dark purple (low) -> blue -> green -> yellow (high)
     
     if color_by_method and 'method' in summary_df.columns:
+        # Calculate small offset for jittering points (BP left, GNN right)
+        # Use a small fraction of the x-axis range to ensure points stay near their tick
+        x_range = summary_df['knockout_size'].max() - summary_df['knockout_size'].min()
+        if x_range > 0:
+            jitter_amount = x_range * 0.01  # 2% of range - small but visible
+        else:
+            # Fallback if all values are the same
+            jitter_amount = 0.5
+        
         # Plot each method separately with different markers but same color gradient
-        for method, marker in [('gnn', 'o'), ('bp', 's')]:
+        for method, marker, offset in [('gnn', 'o', jitter_amount), ('bp', 's', -jitter_amount)]:
             method_data = summary_df[summary_df['method'] == method]
             if len(method_data) > 0:
                 method_acc = method_data['final_hard_accuracy'].values
                 method_acc_clamped = np.clip(method_acc, 0, 1)
                 method_colors = colormap(method_acc_clamped)
                 
-                scatter = ax.scatter(method_data['knockout_size'], 
+                # Apply offset to x-coordinates: GNN shifts right (+), BP shifts left (-)
+                x_coords = method_data['knockout_size'].values + offset
+                
+                scatter = ax.scatter(x_coords, 
                               method_data['per_gate_mean_hamming'],
                               c=method_acc_clamped,
                               cmap=colormap,

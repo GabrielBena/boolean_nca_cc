@@ -24,6 +24,7 @@ from collections import deque, defaultdict
 import pickle
 import json
 from datetime import datetime
+import yaml
 
 from boolean_nca_cc.circuits.model import run_circuit
 from boolean_nca_cc.circuits.train import compute_accuracy, TrainState, train_step, loss_f_l4, loss_f_bce
@@ -39,8 +40,15 @@ from boolean_nca_cc.training.evaluation import evaluate_model_stepwise_generator
 from boolean_nca_cc.models.self_attention import CircuitSelfAttention
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(levelname)s:%(name)s:%(message)s',
+    force=True  # Force reconfiguration if already configured
+)
 log = logging.getLogger(__name__)
+# Ensure logs are flushed immediately
+import sys
+logging.getLogger().handlers[0].stream = sys.stdout
 
 
 def hash_circuit_logits(logits: List[jp.ndarray]) -> str:
@@ -466,6 +474,7 @@ def _perturb_and_recover_single(
     arity: int = 2,
     max_steps: int = 15,
     damage_behavior: str = "reversible",
+    context: Optional[str] = None,  # Optional context string for logging
 ) -> Optional[Dict]:
     """
     Helper function to perturb and recover a single circuit.
@@ -527,6 +536,13 @@ def _perturb_and_recover_single(
                 # Infer from layer_sizes
                 input_n = layer_sizes[0][0] if layer_sizes else 8
             
+            # Log context if provided
+            context_prefix = f"[{context}] " if context else ""
+            
+            # Log start of recovery (always log, even without context)
+            num_damaged = int(jp.sum(knockout_pattern))
+            log.info(f"{context_prefix}=== Starting recovery: {num_damaged} gates damaged, max_steps={max_steps}, threshold={functional_threshold:.4f} ===")
+            
             # Create generator with knockout pattern
             generator = evaluate_model_stepwise_generator(
                 model=model,
@@ -547,23 +563,46 @@ def _perturb_and_recover_single(
             )
             
             # Consume initial state (step 0)
-            initial_result = next(generator)
+            try:
+                initial_result = next(generator)
+                log.info(f"{context_prefix}Recovery step 0/{max_steps}: hard_accuracy={initial_result.hard_accuracy:.4f}, loss={initial_result.loss:.6f}")
+            except StopIteration:
+                log.error(f"{context_prefix}Generator yielded no initial state!")
+                return None
             
             # Iterate through steps, checking hard_accuracy at each step
             final_result = initial_result
             steps_taken = 0
             
-            for step_result in generator:
-                steps_taken += 1
-                final_result = step_result
-                
-                # Check if we've reached functional threshold
-                if final_result.hard_accuracy >= functional_threshold:
-                    log.debug(
-                        f"Early stopping at step {steps_taken}: "
-                        f"hard_accuracy={final_result.hard_accuracy:.4f} >= {functional_threshold}"
+            try:
+                for step_result in generator:
+                    steps_taken += 1
+                    final_result = step_result
+                    
+                    # Log progress at each step
+                    log.info(
+                        f"{context_prefix}Recovery step {steps_taken}/{max_steps}: "
+                        f"hard_accuracy={final_result.hard_accuracy:.4f}, "
+                        f"loss={final_result.loss:.6f}"
                     )
-                    break
+                    
+                    # Check if we've reached functional threshold
+                    if final_result.hard_accuracy >= functional_threshold:
+                        log.info(
+                            f"{context_prefix}✓ Early stopping at step {steps_taken}: "
+                            f"hard_accuracy={final_result.hard_accuracy:.4f} >= {functional_threshold}"
+                        )
+                        break
+            except StopIteration:
+                log.info(f"{context_prefix}Generator exhausted after {steps_taken} steps")
+            
+            # Log final result if we didn't reach threshold
+            if final_result.hard_accuracy < functional_threshold:
+                log.info(
+                    f"{context_prefix}Recovery completed {steps_taken}/{max_steps} steps: "
+                    f"final hard_accuracy={final_result.hard_accuracy:.4f} "
+                    f"(threshold={functional_threshold:.4f})"
+                )
             
             # Extract logits from final graph state
             from boolean_nca_cc.training.evaluation import get_loss_and_update_graph
@@ -588,7 +627,9 @@ def _perturb_and_recover_single(
             raise ValueError(f"Unknown recovery_mode: {recovery_mode}")
     
     except Exception as e:
-        log.debug(f"Error during perturbation-recovery: {e}")
+        log.error(f"Error during perturbation-recovery: {e}")
+        import traceback
+        log.error(f"Traceback: {traceback.format_exc()}")
         return None
 
 
@@ -734,7 +775,7 @@ def _execute_bfs_phase(
         for pattern_idx in pattern_indices:
             knockout_pattern = knockout_vocabulary[pattern_idx]
             total_perturbations += 1
-            
+
             result = _perturb_and_recover_single(
                 initial_logits=circuit_logits,
                 knockout_pattern=knockout_pattern,
@@ -754,6 +795,7 @@ def _execute_bfs_phase(
                 arity=arity,
                 max_steps=max_steps,
                 damage_behavior=damage_behavior,
+                context=f"{phase_name} depth={depth} pattern={pattern_idx}",
             )
             
             if result is None:
@@ -931,6 +973,7 @@ def _execute_dfs_phase(
                 arity=arity,
                 max_steps=max_steps,
                 damage_behavior=damage_behavior,
+                context=f"{phase_name} depth={depth} pattern={pattern_idx}",
             )
             
             if result is None:
@@ -1007,7 +1050,7 @@ def _execute_dfs_phase(
                 for retry_idx, pattern_idx in enumerate(retry_pattern_indices):
                     knockout_pattern = knockout_vocabulary[pattern_idx]
                     total_perturbations += 1
-                    
+
                     result = _perturb_and_recover_single(
                         initial_logits=circuit_logits,
                         knockout_pattern=knockout_pattern,
@@ -1027,6 +1070,7 @@ def _execute_dfs_phase(
                         arity=arity,
                         max_steps=max_steps,
                         damage_behavior=damage_behavior,
+                        context=f"{phase_name} depth={depth} pattern={pattern_idx} retry={retry_idx+1}",
                     )
                     
                     if result is None:
@@ -1589,7 +1633,7 @@ def explore_degenerate_solutions(
             for pattern_idx in pattern_indices:
                 knockout_pattern = knockout_vocabulary[pattern_idx]
                 total_perturbations += 1
-                
+
                 result = _perturb_and_recover_single(
                     initial_logits=circuit_logits,
                     knockout_pattern=knockout_pattern,
@@ -1609,6 +1653,7 @@ def explore_degenerate_solutions(
                     arity=arity,
                     max_steps=max_steps,
                     damage_behavior=damage_behavior,
+                    context=f"BFS depth={depth} pattern={pattern_idx}",
                 )
                 
                 if result is None:
@@ -1735,6 +1780,7 @@ def explore_degenerate_solutions(
                 arity=arity,
                 max_steps=max_steps,
                 damage_behavior=damage_behavior,
+                context=f"RandomWalk iter={iteration} pattern={pattern_idx}",
             )
             
             if result is None:
@@ -1837,6 +1883,7 @@ def explore_degenerate_solutions(
                 arity=arity,
                 max_steps=max_steps,
                 damage_behavior=damage_behavior,
+                context=f"SingleRoot pattern={pattern_idx}",
             )
             
             if result is None:
@@ -1992,44 +2039,218 @@ def generate_exploration_name(
         return f"{exploration_strategy.upper()}_{recovery_suffix}"
 
 
+def load_config_from_yaml(config_path: Optional[Path] = None) -> Dict:
+    """
+    Load configuration from config.yaml file.
+    
+    Args:
+        config_path: Path to config.yaml file. If None, uses default location.
+    
+    Returns:
+        Dictionary with config values that can be used to override argparse defaults.
+    """
+    if config_path is None:
+        workspace_root = Path(__file__).parent.parent
+        config_path = workspace_root / "configs" / "config.yaml"
+    
+    config_values = {}
+    
+    try:
+        with open(config_path, "r") as f:
+            cfg = yaml.safe_load(f)
+        
+        # Circuit configuration
+        circuit_cfg = cfg.get("circuit", {})
+        if "task" in circuit_cfg:
+            config_values["task"] = circuit_cfg["task"]
+        if "input_bits" in circuit_cfg:
+            config_values["input_bits"] = circuit_cfg["input_bits"]
+        if "output_bits" in circuit_cfg:
+            config_values["output_bits"] = circuit_cfg["output_bits"]
+        if "arity" in circuit_cfg:
+            config_values["arity"] = circuit_cfg["arity"]
+        if "circuit_hidden_dim" in circuit_cfg:
+            config_values["circuit_hidden_dim"] = circuit_cfg["circuit_hidden_dim"]
+        
+        # Pool configuration (damage settings)
+        pool_cfg = cfg.get("pool", {})
+        if "damage_prob" in pool_cfg:
+            config_values["damage_prob"] = pool_cfg["damage_prob"]
+        
+        # Training configuration
+        training_cfg = cfg.get("training", {})
+        if "loss_type" in training_cfg:
+            config_values["loss_type"] = training_cfg["loss_type"]
+        if "n_message_steps" in training_cfg:
+            config_values["max_steps"] = training_cfg["n_message_steps"]
+        
+        # Eval configuration (for max_steps fallback)
+        eval_cfg = cfg.get("eval", {})
+        if "periodic_eval_inner_steps" in eval_cfg and "max_steps" not in config_values:
+            config_values["max_steps"] = eval_cfg["periodic_eval_inner_steps"]
+        
+        # Early stopping configuration (for functional_threshold)
+        early_stop_cfg = cfg.get("early_stop", {})
+        if early_stop_cfg.get("enabled", False) and "threshold" in early_stop_cfg:
+            config_values["functional_threshold"] = early_stop_cfg["threshold"]
+        
+        # Backprop configuration
+        backprop_cfg = cfg.get("backprop", {})
+        if "epochs" in backprop_cfg:
+            config_values["epochs"] = backprop_cfg["epochs"]
+        if "learning_rate" in backprop_cfg:
+            config_values["learning_rate"] = backprop_cfg["learning_rate"]
+        if "weight_decay" in backprop_cfg:
+            config_values["weight_decay"] = backprop_cfg["weight_decay"]
+        if "optimizer" in backprop_cfg:
+            config_values["optimizer"] = backprop_cfg["optimizer"]
+        if "beta1" in backprop_cfg:
+            config_values["beta1"] = backprop_cfg["beta1"]
+        if "beta2" in backprop_cfg:
+            config_values["beta2"] = backprop_cfg["beta2"]
+        
+        # Seeds
+        if "test_seed" in cfg:
+            config_values["wiring_seed"] = cfg["test_seed"]
+        
+        log.info(f"Loaded config from {config_path}")
+        log.debug(f"Config values extracted: {list(config_values.keys())}")
+        
+    except FileNotFoundError:
+        log.warning(f"Config file not found at {config_path}, using argparse defaults")
+    except Exception as e:
+        log.warning(f"Error loading config from {config_path}: {e}, using argparse defaults")
+    
+    return config_values
+
+
+def apply_config_to_args(args, config_values: Dict, wandb_config=None):
+    """
+    Apply config values to argparse arguments, with wandb_config taking precedence.
+    
+    Args:
+        args: Parsed argparse arguments (will be modified in place)
+        config_values: Dictionary of config values from config.yaml
+        wandb_config: Optional wandb config object (takes precedence over config.yaml)
+    """
+    # Helper to safely get nested config values
+    def get_wandb_value(path: str, default=None):
+        """Get value from wandb config using dot-separated path."""
+        if wandb_config is None:
+            return default
+        parts = path.split(".")
+        value = wandb_config
+        for part in parts:
+            if hasattr(value, part):
+                value = getattr(value, part)
+            elif isinstance(value, dict) and part in value:
+                value = value[part]
+            else:
+                return default
+        return value
+    
+    # Special handling for functional_threshold (from early_stop.threshold)
+    if wandb_config is not None:
+        wandb_early_stop = get_wandb_value("early_stop")
+        if wandb_early_stop:
+            if getattr(wandb_early_stop, "enabled", False):
+                wandb_threshold = getattr(wandb_early_stop, "threshold", None)
+                if wandb_threshold is not None:
+                    args.functional_threshold = float(wandb_threshold)
+                    log.info(f"Using functional_threshold from wandb config: {args.functional_threshold}")
+    
+    # Special handling for max_steps (can come from training.n_message_steps or eval.periodic_eval_inner_steps)
+    if wandb_config is not None:
+        wandb_max_steps = get_wandb_value("training.n_message_steps")
+        if wandb_max_steps is None:
+            wandb_max_steps = get_wandb_value("eval.periodic_eval_inner_steps")
+        if wandb_max_steps is not None:
+            args.max_steps = int(wandb_max_steps)
+            log.info(f"Using max_steps from wandb config: {args.max_steps}")
+    
+    # Special handling for circuit_hidden_dim (can come from circuit.circuit_hidden_dim or model.hidden_dim)
+    if wandb_config is not None:
+        wandb_hidden_dim = get_wandb_value("circuit.circuit_hidden_dim")
+        if wandb_hidden_dim is None:
+            wandb_hidden_dim = get_wandb_value("model.hidden_dim")
+        if wandb_hidden_dim is not None:
+            args.circuit_hidden_dim = int(wandb_hidden_dim)
+            log.info(f"Using circuit_hidden_dim from wandb config: {args.circuit_hidden_dim}")
+    
+    # Map of arg names to (config_key, wandb_path) tuples
+    config_map = {
+        "task": ("task", "circuit.task"),
+        "input_bits": ("input_bits", "circuit.input_bits"),
+        "output_bits": ("output_bits", "circuit.output_bits"),
+        "arity": ("arity", "circuit.arity"),
+        "damage_prob": ("damage_prob", "pool.damage_prob"),
+        "loss_type": ("loss_type", "training.loss_type"),
+        "epochs": ("epochs", "backprop.epochs"),
+        "learning_rate": ("learning_rate", "backprop.learning_rate"),
+        "weight_decay": ("weight_decay", "backprop.weight_decay"),
+        "optimizer": ("optimizer", "backprop.optimizer"),
+        "beta1": ("beta1", "backprop.beta1"),
+        "beta2": ("beta2", "backprop.beta2"),
+        "wiring_seed": ("wiring_seed", "test_seed"),
+    }
+    
+    # Apply other config values (wandb takes precedence)
+    for arg_name, (config_key, wandb_path) in config_map.items():
+        # Try wandb first
+        if wandb_config is not None:
+            wandb_value = get_wandb_value(wandb_path)
+            if wandb_value is not None:
+                # Convert to appropriate type
+                current_value = getattr(args, arg_name)
+                if isinstance(current_value, int):
+                    wandb_value = int(wandb_value)
+                elif isinstance(current_value, float):
+                    wandb_value = float(wandb_value)
+                elif isinstance(current_value, str):
+                    wandb_value = str(wandb_value)
+                setattr(args, arg_name, wandb_value)
+                log.info(f"Set {arg_name}={wandb_value} from wandb config (was {current_value})")
+
+
 def main():
+    # Load config.yaml first to use as defaults
+    workspace_root = Path(__file__).parent.parent
+    config_values = load_config_from_yaml(workspace_root / "configs" / "config.yaml")
+    
     parser = argparse.ArgumentParser(
         description="Explore degenerate circuit solution spaces"
     )
-    # Default paths to preconfigured circuits (relative to workspace root)
-    workspace_root = Path(__file__).parent.parent
-    default_logits_file = workspace_root / "preconfigured_circuits" / "preconfigured_logits_20251112_linux.npz"
-    default_wires_file = workspace_root / "preconfigured_circuits" / "wires_20251112_linux.npz"
-    
+    # Default: always generate fresh preconfigured circuits using current configs
+    # Users can explicitly provide --logits-file and --wires-file to load from files instead
     parser.add_argument(
         "--logits-file",
         type=str,
-        default=str(default_logits_file) if default_logits_file.exists() else None,
-        help=f"Path to preconfigured logits NPZ file (default: {default_logits_file})",
+        default=None,
+        help="Path to preconfigured logits NPZ file (default: None, generates fresh circuit using current configs)",
     )
     parser.add_argument(
         "--wires-file",
         type=str,
-        default=str(default_wires_file) if default_wires_file.exists() else None,
-        help=f"Path to preconfigured wires NPZ file (default: {default_wires_file})",
+        default=None,
+        help="Path to preconfigured wires NPZ file (default: None, generates fresh circuit using current configs)",
     )
     parser.add_argument(
         "--task",
         type=str,
-        default="binary_multiply",
-        help="Task name (default: binary_multiply, matching config.yaml)",
+        default=config_values.get("task", "binary_multiply"),
+        help=f"Task name (default: {config_values.get('task', 'binary_multiply')} from config.yaml)",
     )
     parser.add_argument(
         "--input-bits",
         type=int,
-        default=8,
-        help="Number of input bits (default: 8)",
+        default=config_values.get("input_bits", 8),
+        help=f"Number of input bits (default: {config_values.get('input_bits', 8)} from config.yaml)",
     )
     parser.add_argument(
         "--output-bits",
         type=int,
-        default=8,
-        help="Number of output bits (default: 8, matching config.yaml)",
+        default=config_values.get("output_bits", 8),
+        help=f"Number of output bits (default: {config_values.get('output_bits', 8)} from config.yaml)",
     )
     parser.add_argument(
         "--num-perturbations",
@@ -2040,57 +2261,59 @@ def main():
     parser.add_argument(
         "--damage-prob",
         type=float,
-        default=20.0,
-        help="Number of gates to damage per perturbation (default: 20.0, matching config.yaml)",
+        default=config_values.get("damage_prob", 20.0),
+        help=f"Number of gates to damage per perturbation (default: {config_values.get('damage_prob', 20.0)} from config.yaml)",
     )
     parser.add_argument(
         "--epochs",
         type=int,
-        default=200,
-        help="Number of recovery epochs (default: 200)",
+        default=config_values.get("epochs", 200),
+        help=f"Number of recovery epochs (default: {config_values.get('epochs', 200)} from config.yaml)",
     )
     parser.add_argument(
         "--learning-rate",
         type=float,
-        default=1.0,
-        help="Learning rate for recovery (default: 1.0, matching config.yaml)",
+        default=config_values.get("learning_rate", 1.0),
+        help=f"Learning rate for recovery (default: {config_values.get('learning_rate', 1.0)} from config.yaml)",
     )
     parser.add_argument(
         "--optimizer",
         type=str,
-        default="adamw",
+        default=config_values.get("optimizer", "adamw"),
         choices=["adamw", "adam"],
-        help="Optimizer type (default: adamw)",
+        help=f"Optimizer type (default: {config_values.get('optimizer', 'adamw')} from config.yaml)",
     )
     parser.add_argument(
         "--weight-decay",
         type=float,
-        default=1e-1,
-        help="Weight decay for optimizer (default: 1e-1)",
+        default=config_values.get("weight_decay", 1e-1),
+        help=f"Weight decay for optimizer (default: {config_values.get('weight_decay', 1e-1)} from config.yaml)",
     )
     parser.add_argument(
         "--beta1",
         type=float,
-        default=0.8,
-        help="Beta1 parameter for optimizer (default: 0.8)",
+        default=config_values.get("beta1", 0.8),
+        help=f"Beta1 parameter for optimizer (default: {config_values.get('beta1', 0.8)} from config.yaml)",
     )
     parser.add_argument(
         "--beta2",
         type=float,
-        default=0.8,
-        help="Beta2 parameter for optimizer (default: 0.8)",
+        default=config_values.get("beta2", 0.8),
+        help=f"Beta2 parameter for optimizer (default: {config_values.get('beta2', 0.8)} from config.yaml)",
     )
     parser.add_argument(
         "--wiring-seed",
         type=int,
-        default=33,
-        help="Random seed for wiring generation (default: 33, matching config.yaml test_seed)",
+        default=config_values.get("wiring_seed", 33),
+        help=f"Random seed for wiring generation (default: {config_values.get('wiring_seed', 33)} from config.yaml)",
     )
+    # functional_threshold: use early_stop.threshold if enabled, otherwise default
+    functional_threshold_default = config_values.get("functional_threshold", 0.999)
     parser.add_argument(
         "--functional-threshold",
         type=float,
-        default=0.999,
-        help="Minimum accuracy to consider circuit functional (default: 0.999)",
+        default=functional_threshold_default,
+        help=f"Minimum accuracy to consider circuit functional (default: {functional_threshold_default} from config.yaml early_stop.threshold if enabled, else 0.999)",
     )
     parser.add_argument(
         "--recovery-mode",
@@ -2109,20 +2332,20 @@ def main():
     parser.add_argument(
         "--circuit-hidden-dim",
         type=int,
-        default=64,
-        help="Hidden dimension for circuit graph (self_attention mode, default: 64, matching config.yaml)",
+        default=config_values.get("circuit_hidden_dim", 64),
+        help=f"Hidden dimension for circuit graph (self_attention mode, default: {config_values.get('circuit_hidden_dim', 64)} from config.yaml)",
     )
     parser.add_argument(
         "--arity",
         type=int,
-        default=4,
-        help="Gate arity (self_attention mode, default: 4, matching config.yaml)",
+        default=config_values.get("arity", 4),
+        help=f"Gate arity (self_attention mode, default: {config_values.get('arity', 4)} from config.yaml)",
     )
     parser.add_argument(
         "--max-steps",
         type=int,
-        default=15,
-        help="Maximum message passing steps for self-attention recovery (default: 15)",
+        default=config_values.get("max_steps", 15),
+        help=f"Maximum message passing steps for self-attention recovery (default: {config_values.get('max_steps', 15)} from config.yaml training.n_message_steps or eval.periodic_eval_inner_steps)",
     )
     parser.add_argument(
         "--damage-behavior",
@@ -2140,9 +2363,9 @@ def main():
     parser.add_argument(
         "--loss-type",
         type=str,
-        default="l4",
+        default=config_values.get("loss_type", "l4"),
         choices=["l4", "l2", "bce"],
-        help="Loss function type (default: l4, matching config.yaml)",
+        help=f"Loss function type (default: {config_values.get('loss_type', 'l4')} from config.yaml)",
     )
     parser.add_argument(
         "--exploration-strategy",
@@ -2216,6 +2439,15 @@ def main():
     
     args = parser.parse_args()
     
+    # Log config source summary
+    log.info("=" * 80)
+    log.info("Configuration Summary")
+    log.info("=" * 80)
+    log.info(f"Config values loaded from config.yaml: {len(config_values)} parameters")
+    if config_values:
+        log.debug(f"  Parameters: {', '.join(config_values.keys())}")
+    log.info("=" * 80)
+    
     # Generate task data
     case_n = 1 << args.input_bits
     x_data, y_data = get_task_data(
@@ -2235,27 +2467,62 @@ def main():
     log.info(f"Layer sizes: {layer_sizes}")
     
     # Load or generate preconfigured circuit (using same optimizer settings as recovery)
+    # Always generate fresh circuit using current configs unless explicitly loading from files
+    # This ensures the circuit matches the current task and configuration
     wiring_key = jax.random.PRNGKey(args.wiring_seed)
-    wires, logits, actual_layer_sizes = load_preconfigured_circuit(
-        logits_file=args.logits_file,
-        wires_file=args.wires_file,
-        wiring_key=wiring_key,
-        layer_sizes=layer_sizes,
-        arity=args.arity,
-        x_data=x_data,
-        y_data=y_data,
-        loss_type=args.loss_type,
-        preconfig_lr=args.learning_rate,
-        preconfig_optimizer=args.optimizer,
-        preconfig_weight_decay=args.weight_decay,
-        preconfig_beta1=args.beta1,
-        preconfig_beta2=args.beta2,
-    )
     
-    # Use actual layer_sizes from loaded circuit (may differ from generated ones)
+    # If files are explicitly provided, try to load them
+    # But we'll validate they work with current config
     if args.logits_file is not None and args.wires_file is not None:
+        log.info(f"Attempting to load preconfigured circuit from files:")
+        log.info(f"  Logits: {args.logits_file}")
+        log.info(f"  Wires: {args.wires_file}")
+        wires, logits, actual_layer_sizes = load_preconfigured_circuit(
+            logits_file=args.logits_file,
+            wires_file=args.wires_file,
+            wiring_key=wiring_key,
+            layer_sizes=layer_sizes,
+            arity=args.arity,
+            x_data=x_data,
+            y_data=y_data,
+            loss_type=args.loss_type,
+            preconfig_steps=args.epochs,  # Use epochs from config for validation
+            preconfig_lr=args.learning_rate,
+            preconfig_optimizer=args.optimizer,
+            preconfig_weight_decay=args.weight_decay,
+            preconfig_beta1=args.beta1,
+            preconfig_beta2=args.beta2,
+        )
         log.info(f"Using layer_sizes inferred from loaded circuit: {actual_layer_sizes}")
         layer_sizes = actual_layer_sizes
+    else:
+        # Generate fresh preconfigured circuit using current configs
+        log.info("Generating fresh preconfigured circuit using current configs")
+        log.info(f"  Task: {args.task}")
+        log.info(f"  Wiring seed: {args.wiring_seed}")
+        log.info(f"  Preconfig steps: {args.epochs} (from backprop.epochs)")
+        log.info(f"  Learning rate: {args.learning_rate}")
+        log.info(f"  Optimizer: {args.optimizer}")
+        log.info(f"  Weight decay: {args.weight_decay}")
+        log.info(f"  Beta1: {args.beta1}, Beta2: {args.beta2}")
+        log.info(f"  Loss type: {args.loss_type}")
+        
+        wires, logits, actual_layer_sizes = load_preconfigured_circuit(
+            logits_file=None,  # Force generation
+            wires_file=None,  # Force generation
+            wiring_key=wiring_key,
+            layer_sizes=layer_sizes,
+            arity=args.arity,
+            x_data=x_data,
+            y_data=y_data,
+            loss_type=args.loss_type,
+            preconfig_steps=args.epochs,  # Use epochs from config.yaml backprop.epochs
+            preconfig_lr=args.learning_rate,
+            preconfig_optimizer=args.optimizer,
+            preconfig_weight_decay=args.weight_decay,
+            preconfig_beta1=args.beta1,
+            preconfig_beta2=args.beta2,
+        )
     
     # Assess root circuit: compute loss and hard accuracy
     from boolean_nca_cc.training.evaluation import get_loss_from_wires_logits
@@ -2274,12 +2541,50 @@ def main():
     log.info(f"Hard Accuracy: {float(root_hard_accuracy):.4f}")
     log.info(f"Functional Threshold: {args.functional_threshold}")
     
+    # If loaded circuit doesn't meet functional threshold, regenerate using current configs
     if root_hard_accuracy < args.functional_threshold:
-        log.warning(
-            f"⚠️  Root circuit hard accuracy ({root_hard_accuracy:.4f}) is below functional threshold "
-            f"({args.functional_threshold})"
-        )
-        log.warning("  This may indicate preconfiguration issues or circuit loading problems.")
+        if args.logits_file is not None and args.wires_file is not None:
+            log.warning(
+                f"⚠️  Loaded circuit hard accuracy ({root_hard_accuracy:.4f}) is below functional threshold "
+                f"({args.functional_threshold})"
+            )
+            log.warning("  This likely means the loaded circuit was created with different configs/task.")
+            log.info("  Regenerating preconfigured circuit using current configs...")
+            
+            # Regenerate using current configs
+            wires, logits, actual_layer_sizes = load_preconfigured_circuit(
+                logits_file=None,  # Force generation
+                wires_file=None,  # Force generation
+                wiring_key=wiring_key,
+                layer_sizes=layer_sizes,
+                arity=args.arity,
+                x_data=x_data,
+                y_data=y_data,
+                loss_type=args.loss_type,
+                preconfig_steps=args.epochs,
+                preconfig_lr=args.learning_rate,
+                preconfig_optimizer=args.optimizer,
+                preconfig_weight_decay=args.weight_decay,
+                preconfig_beta1=args.beta1,
+                preconfig_beta2=args.beta2,
+            )
+            layer_sizes = actual_layer_sizes
+            
+            # Re-assess the regenerated circuit
+            root_loss, root_aux = get_loss_from_wires_logits(
+                logits, wires, x_data, y_data, loss_type=args.loss_type
+            )
+            root_hard_loss, _, _, root_accuracy, root_hard_accuracy, _, _, _ = root_aux
+            log.info(f"Regenerated circuit - Hard Accuracy: {float(root_hard_accuracy):.4f}")
+        
+        if root_hard_accuracy < args.functional_threshold:
+            log.warning(
+                f"⚠️  Root circuit hard accuracy ({root_hard_accuracy:.4f}) is still below functional threshold "
+                f"({args.functional_threshold}) after regeneration"
+            )
+            log.warning("  This may indicate preconfiguration issues or circuit loading problems.")
+        else:
+            log.info("✓ Root circuit meets functional threshold")
     else:
         log.info("✓ Root circuit meets functional threshold")
     log.info("=" * 80)
@@ -2309,10 +2614,10 @@ def main():
             
             if is_file_path:
                 # Load from local file
-                from boolean_nca_cc.training.checkpointing import load_checkpoint_with_compatibility
-                
+                from boolean_nca_cc.training.checkpointing import load_checkpoint
+
                 log.info(f"Loading model from local file: {model_path_or_run_id}")
-                loaded_dict = load_checkpoint_with_compatibility(model_path_or_run_id)
+                loaded_dict = load_checkpoint(model_path_or_run_id)
                 
                 # Create model instance with defaults (we need config for proper initialization)
                 input_n = args.input_bits
@@ -2382,25 +2687,9 @@ def main():
                 
                 log.info("Model loaded successfully from WandB")
                 
-                # Extract circuit_hidden_dim from loaded config if available
-                if hasattr(loaded_config, "model") and hasattr(loaded_config.model, "hidden_dim"):
-                    extracted_hidden_dim = loaded_config.model.hidden_dim
-                    if args.circuit_hidden_dim != extracted_hidden_dim:
-                        log.info(
-                            f"Updating circuit_hidden_dim from {args.circuit_hidden_dim} "
-                            f"to {extracted_hidden_dim} (from loaded config)"
-                        )
-                        args.circuit_hidden_dim = extracted_hidden_dim
-                elif hasattr(loaded_config, "circuit") and hasattr(
-                    loaded_config.circuit, "circuit_hidden_dim"
-                ):
-                    extracted_hidden_dim = loaded_config.circuit.circuit_hidden_dim
-                    if args.circuit_hidden_dim != extracted_hidden_dim:
-                        log.info(
-                            f"Updating circuit_hidden_dim from {args.circuit_hidden_dim} "
-                            f"to {extracted_hidden_dim} (from loaded config)"
-                        )
-                        args.circuit_hidden_dim = extracted_hidden_dim
+                # Apply all config values from wandb (takes precedence over config.yaml and argparse defaults)
+                log.info("Applying config values from WandB run (overriding config.yaml defaults)")
+                apply_config_to_args(args, config_values, wandb_config=loaded_config)
         
         except Exception as e:
             log.error(f"Error loading model: {e}")
