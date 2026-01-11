@@ -753,6 +753,19 @@ def _evaluate_with_loop(
     batch_size = batch_wires[0].shape[0]
     eval_perturb_counter = jp.zeros((batch_size,), dtype=jp.int32)
     damage_prob = max(1, int(greedy_window_size))  # Number of gates to knock out
+
+    # Optional: use caller-provided patterns instead of generating per-step
+    provided_knockout_patterns = None
+    if knockout_patterns is not None:
+        provided_knockout_patterns = (
+            jp.stack(knockout_patterns)
+            if isinstance(knockout_patterns, (list, tuple))
+            else knockout_patterns
+        )
+        if provided_knockout_patterns.shape[0] != batch_size:
+            raise ValueError(
+                f"knockout_patterns batch mismatch: got {provided_knockout_patterns.shape[0]}, expected {batch_size}"
+            )
     
     # Compute per-circuit damage start offsets
     if damage_start_offset_random:
@@ -803,17 +816,20 @@ def _evaluate_with_loop(
         can_inject_mask = eval_perturb_counter < max_damage_per_circuit
         inject_now_mask = inject_now & can_inject_mask
 
-        # Always generate fresh patterns when injecting
-        pattern_keys = jax.random.split(
-            jax.random.PRNGKey(step + int(jp.sum(eval_perturb_counter)) + 1000),
-            batch_size
-        )
-        vm_create_pattern = jax.vmap(
-            lambda k: create_reproducible_knockout_pattern(
-                k, layer_sizes, damage_prob
+        # Either reuse provided patterns or generate on the fly
+        if provided_knockout_patterns is not None:
+            generated_patterns = provided_knockout_patterns
+        else:
+            pattern_keys = jax.random.split(
+                jax.random.PRNGKey(step + int(jp.sum(eval_perturb_counter)) + 1000),
+                batch_size
             )
-        )
-        generated_patterns = vm_create_pattern(pattern_keys)
+            vm_create_pattern = jax.vmap(
+                lambda k: create_reproducible_knockout_pattern(
+                    k, layer_sizes, damage_prob
+                )
+            )
+            generated_patterns = vm_create_pattern(pattern_keys)
         
         # Apply patterns only to circuits that should inject this step
         step_knockout_patterns = jp.where(
