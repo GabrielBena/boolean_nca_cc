@@ -41,11 +41,15 @@ def _hamming_distance_tables(
     baseline_tables: List[jp.ndarray],
     perturbed_tables: List[jp.ndarray],
     perturbed_active_masks: List[jp.ndarray],
+    include_all_gates: bool = False,
 ) -> Dict[str, Any]:
     """
     Compute distances between baseline and perturbed hard truth tables.
 
-    Only counts gates where perturbed_active_masks is True (knocked-out gates excluded).
+    Args:
+        include_all_gates: If True, include all gates in the calculation (ignores active_mask).
+                          If False, only counts gates where perturbed_active_masks is True 
+                          (knocked-out gates excluded). Default: False.
 
     Returns:
       - overall_bitwise_fraction_diff: fraction of differing bits across all counted entries
@@ -65,13 +69,20 @@ def _hamming_distance_tables(
     ):
         # base_layer, pert_layer: (num_gates, table_size)
         table_size = base_layer.shape[-1]
-        # select active gates only
-        active_idx = jp.where(active_mask > 0.5)[0]
-        if active_idx.size == 0:
-            per_layer_bitwise_fraction.append(0.0)
-            continue
-        base_sel = base_layer[active_idx]
-        pert_sel = pert_layer[active_idx]
+        
+        if include_all_gates:
+            # Include all gates (simplified index selection for reversible mode)
+            base_sel = base_layer
+            pert_sel = pert_layer
+        else:
+            # select active gates only
+            active_idx = jp.where(active_mask > 0.5)[0]
+            if active_idx.size == 0:
+                per_layer_bitwise_fraction.append(0.0)
+                continue
+            base_sel = base_layer[active_idx]
+            pert_sel = pert_layer[active_idx]
+        
         diffs = jp.not_equal(base_sel, pert_sel).astype(jp.float32)
         # per-gate normalized hamming (mean across table bits)
         per_gate = jp.mean(diffs, axis=1)

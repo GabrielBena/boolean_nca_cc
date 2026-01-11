@@ -173,6 +173,7 @@ def _run_bp_with_knockouts(
                 damage_behavior="reversible",
                 reversible_bias=reversible_bias,
                 step_count=step_count,
+                apply_damage_now=apply_damage_now,
             )
 
         for step_count in range(cfg.backprop.epochs):
@@ -561,7 +562,8 @@ def main():
                 pattern = item["pattern"]
                 pert_tables = _hard_truth_tables_from_logits(item["params"])  # per-layer
                 active_masks = _active_gate_mask_from_knockout(layer_sizes, pattern)
-                metrics = _hamming_distance_tables(baseline_tables, pert_tables, active_masks)
+                # For reversible mode, include all gates in hamming distance calculation
+                metrics = _hamming_distance_tables(baseline_tables, pert_tables, active_masks, include_all_gates=True)
 
                 row = {
                     "pattern_idx": idx,
@@ -677,7 +679,8 @@ def main():
                 # Compute hamming distance
                 pert_tables = _hard_truth_tables_from_logits(pattern_final_logits)  # per-layer
                 active_masks = _active_gate_mask_from_knockout(layer_sizes, pattern)
-                metrics = _hamming_distance_tables(baseline_tables, pert_tables, active_masks)
+                # For reversible mode, include all gates in hamming distance calculation
+                metrics = _hamming_distance_tables(baseline_tables, pert_tables, active_masks, include_all_gates=True)
                 
                 row = {
                     "pattern_idx": idx,

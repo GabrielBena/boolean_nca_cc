@@ -302,9 +302,21 @@ def update_params(grad, opt_state, opt, logits):
     return new_logits, new_opt_state
 
 
-def train_step(state, opt, wires, x, y0, loss_type="l4", do_train=True, 
-               knockout_pattern=None, layer_sizes=None, damage_behavior="permanent",
-               reversible_bias=-10.0, step_count=0):
+def train_step(
+    state,
+    opt,
+    wires,
+    x,
+    y0,
+    loss_type="l4",
+    do_train=True,
+    knockout_pattern=None,
+    layer_sizes=None,
+    damage_behavior="permanent",
+    reversible_bias=-10.0,
+    step_count=0,
+    apply_damage_now=None,
+):
     """
     Unified training step that handles both masked and unmasked training.
 
@@ -327,8 +339,18 @@ def train_step(state, opt, wires, x, y0, loss_type="l4", do_train=True,
     """
     logits, opt_state = state
 
-    # Apply reversible bias on first step only (one-shot injection)
-    if damage_behavior == "reversible" and knockout_pattern is not None and step_count == 0:
+    # Apply reversible bias when explicitly requested (one-shot injection)
+    # Fallback to legacy behavior (step_count == 0) if apply_damage_now is not provided.
+    should_apply_damage = (
+        damage_behavior == "reversible"
+        and knockout_pattern is not None
+        and (
+            apply_damage_now
+            if apply_damage_now is not None
+            else step_count == 0
+        )
+    )
+    if should_apply_damage:
         logits = apply_reversible_bias_to_logits(logits, knockout_pattern, layer_sizes, reversible_bias)
 
     # Create gate_mask only for permanent mode
