@@ -2102,7 +2102,16 @@ def train_model(
             # Use test data for evaluation/plotting (training is complete)
             try:
                 # Try direct import first (works when project root is in path)
-                from experiments.visualization.plot_trajectory import plot_combined_bp_sa_stepwise_performance  # type: ignore
+                from experiments.visualization.plot_trajectory import (
+                    plot_inner_loop_trajectory,
+                    build_evaluation_params,
+                    run_sa_evaluation,
+                    generate_ood_patterns,
+                )
+                from boolean_nca_cc.training.evaluation import (
+                    evaluate_model_stepwise_batched,
+                    get_loss_from_wires_logits,
+                )
             except ImportError:
                 # Fallback: add project root to path if direct import fails
                 try:
@@ -2111,43 +2120,135 @@ def train_model(
                     project_root = os_module.path.dirname(os_module.path.dirname(os_module.path.dirname(__file__)))
                     if project_root not in sys.path:
                         sys.path.insert(0, project_root)
-                    from experiments.visualization.plot_trajectory import plot_combined_bp_sa_stepwise_performance  # type: ignore
+                    from experiments.visualization.plot_trajectory import (
+                        plot_inner_loop_trajectory,
+                        build_evaluation_params,
+                        run_sa_evaluation,
+                        generate_ood_patterns,
+                    )
+                    from boolean_nca_cc.training.evaluation import (
+                        evaluate_model_stepwise_batched,
+                        get_loss_from_wires_logits,
+                    )
                 except ImportError as e:
-                    log.warning(f"Could not import plot_combined_bp_sa_stepwise_performance: {e}. Skipping figure generation.")
-                    plot_combined_bp_sa_stepwise_performance = None
+                    log.warning(f"Could not import trajectory plotting functions: {e}. Skipping figure generation.")
+                    plot_inner_loop_trajectory = None
             
-            if plot_combined_bp_sa_stepwise_performance is not None:
-                fig3 = plot_combined_bp_sa_stepwise_performance(
-                cfg=mock_cfg,
-                x_data=x_test,
-                y_data=y_test,
-                loss_type=loss_type,
-                knockout_patterns=knockout_vocabulary,
-                model=result["model"],
-                base_circuit=knockout_eval_base_circuit,
-                n_message_steps=periodic_eval_inner_steps,
-                layer_sizes=layer_sizes,
-                input_n=input_n,
-                arity=arity,
-                circuit_hidden_dim=circuit_hidden_dim,
-                bp_results=bp_results,  # Reuse BP results from Figure 1
-                show_bp_trajectory=False,  # Figure 3 mode: BP as reference line
-                periodic_eval_test_seed=periodic_eval_test_seed,
-                knockout_config=knockout_eval,
-                show_ood_trajectory=True,  # Enable OOD trajectory plotting
-                # Multi-damage support parameters
-                damage_mode=knockout_eval.get("damage_mode", "greedy"),
-                damage_injection_mode=knockout_eval.get("damage_injection_mode", "multi"),
-                max_damage_per_circuit=int(knockout_eval.get("max_damage_per_circuit", 10)),
-                greedy_ordered_indices=greedy_ordered_indices,
-                greedy_window_size=int(knockout_eval.get("greedy_window_size", 1)),
-                greedy_injection_recover_steps=int(knockout_eval.get("greedy_injection_recover_steps", 10)),
-                damage_start_offset=int(knockout_eval.get("damage_start_offset", 0)),
-                damage_start_offset_random=knockout_eval.get("damage_start_offset_random", False),
-                damage_start_offset_seed=int(knockout_eval.get("damage_start_offset_seed", 42)),
-                knockout_vocabulary=knockout_vocabulary,
-                training_mode=training_mode,  # Add this line
-            )
+            if plot_inner_loop_trajectory is not None:
+                # Extract parameters from knockout_eval config
+                damage_mode = knockout_eval.get("damage_mode", "greedy")
+                damage_injection_mode = knockout_eval.get("damage_injection_mode", "multi")
+                max_damage_per_circuit = int(knockout_eval.get("max_damage_per_circuit", 10))
+                greedy_window_size = int(knockout_eval.get("greedy_window_size", 1))
+                greedy_injection_recover_steps = int(knockout_eval.get("greedy_injection_recover_steps", 10))
+                damage_start_offset = int(knockout_eval.get("damage_start_offset", 0))
+                damage_start_offset_random = knockout_eval.get("damage_start_offset_random", False)
+                damage_start_offset_seed = int(knockout_eval.get("damage_start_offset_seed", 42))
+                
+                # Determine batch size and evaluation approach based on damage mode
+                if damage_mode in ["greedy", "greedy_vocabulary"] and damage_injection_mode == "multi":
+                    if damage_mode == "greedy" and greedy_ordered_indices is None:
+                        log.warning("greedy_ordered_indices is None but required for damage_mode='greedy'. Skipping figure generation.")
+                        plot_inner_loop_trajectory = None
+                    else:
+                        eval_batch_size = max(10, len(knockout_vocabulary) if knockout_vocabulary is not None else 10)
+                        knockout_patterns_for_eval = None
+                else:
+                    if knockout_vocabulary is None:
+                        log.warning("knockout_vocabulary is None but required for static damage modes. Skipping figure generation.")
+                        plot_inner_loop_trajectory = None
+                    else:
+                        eval_batch_size = len(knockout_vocabulary)
+                        knockout_patterns_for_eval = knockout_vocabulary
+                
+                if plot_inner_loop_trajectory is not None:
+                    # Build evaluation parameters
+                    eval_params = build_evaluation_params(
+                        model=result["model"],
+                        x_data=x_test,
+                        y_data=y_test,
+                        input_n=input_n,
+                        arity=arity,
+                        circuit_hidden_dim=circuit_hidden_dim,
+                        n_message_steps=periodic_eval_inner_steps,
+                        loss_type=loss_type,
+                        layer_sizes=layer_sizes,
+                        layer_neighbors=layer_neighbors,
+                        return_per_pattern=True,
+                        damage_mode=damage_mode,
+                        damage_injection_mode=damage_injection_mode,
+                        max_damage_per_circuit=max_damage_per_circuit,
+                        greedy_ordered_indices=greedy_ordered_indices,
+                        greedy_window_size=greedy_window_size,
+                        greedy_injection_recover_steps=greedy_injection_recover_steps,
+                        damage_start_offset=damage_start_offset,
+                        damage_start_offset_random=damage_start_offset_random,
+                        damage_start_offset_seed=damage_start_offset_seed,
+                        knockout_vocabulary=knockout_vocabulary,
+                    )
+                    
+                    # Run SA evaluation on IN-distribution patterns
+                    base_wires, base_logits = knockout_eval_base_circuit
+                    sa_step_metrics_in = run_sa_evaluation(
+                        eval_fn=evaluate_model_stepwise_batched,
+                        base_wires=base_wires,
+                        base_logits=base_logits,
+                        knockout_patterns=knockout_patterns_for_eval,
+                        target_chunk_size=eval_batch_size,
+                        eval_params=eval_params,
+                    )
+                    
+                    # Run SA evaluation on OUT-of-distribution patterns if requested
+                    sa_step_metrics_out = None
+                    if knockout_eval is not None:
+                        if damage_mode in ["greedy", "greedy_vocabulary"] and damage_injection_mode == "multi":
+                            ood_knockout_patterns = None
+                            ood_batch_size = eval_batch_size
+                        else:
+                            ood_knockout_patterns = generate_ood_patterns(
+                                knockout_patterns=knockout_vocabulary,
+                                layer_sizes=layer_sizes,
+                                damage_prob=knockout_eval["damage_prob"],
+                                periodic_eval_test_seed=periodic_eval_test_seed,
+                            )
+                            ood_batch_size = len(ood_knockout_patterns)
+                        
+                        # Build OOD evaluation parameters (force unseen by not providing vocabulary)
+                        ood_eval_params = eval_params.copy()
+                        ood_eval_params['knockout_vocabulary'] = None
+                        
+                        # Run SA evaluation on OOD patterns
+                        sa_step_metrics_out = run_sa_evaluation(
+                            eval_fn=evaluate_model_stepwise_batched,
+                            base_wires=base_wires,
+                            base_logits=base_logits,
+                            knockout_patterns=ood_knockout_patterns,
+                            target_chunk_size=ood_batch_size,
+                            eval_params=ood_eval_params,
+                        )
+                    
+                    # Get pre-damage accuracy
+                    _, base_aux = get_loss_from_wires_logits(base_logits, base_wires, x_test, y_test, loss_type)
+                    pre_damage_accuracy = float(base_aux[4])
+                    
+                    # Plot damage response trajectory
+                    fig3 = plot_inner_loop_trajectory(
+                        trajectory_type="damage_response",
+                        sa_step_metrics_in=sa_step_metrics_in,
+                        sa_step_metrics_out=sa_step_metrics_out,
+                        bp_results=bp_results,  # Reuse BP results from Figure 1 (not shown when show_bp_trajectory=False)
+                        show_bp_trajectory=False,  # Figure 3 mode: BP as reference line
+                        show_ood_trajectory=True,  # Enable OOD trajectory plotting
+                        damage_injection_mode=damage_injection_mode,
+                        damage_start_offset=damage_start_offset,
+                        max_damage_per_circuit=max_damage_per_circuit,
+                        greedy_injection_recover_steps=greedy_injection_recover_steps,
+                        training_mode=training_mode,
+                        pre_damage_accuracy=pre_damage_accuracy,
+                        output_path=None,
+                        title=None,
+                        figsize=None,
+                    )
             
             # Save Figure 3 locally
             fig3_path = f"reports/figures/damage_recovery_trajectories_{training_mode}.png"

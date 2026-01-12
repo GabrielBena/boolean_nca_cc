@@ -1,21 +1,18 @@
 """
-Greedy multi-gate damage selection: iteratively select gate indices whose removal
-maximizes immediate hard-accuracy drop from a preconfigured circuit.
+Single-gate knockout test: test each gate individually to see which gates affect accuracy.
 
 - Fix wiring seed for reproducible circuit wiring
 - Preconfigure logits via backprop (no structure change)
 - Build eligible flat indices (skip input and output layers)
-- Greedily select indices: at each step, add the index that yields the largest
-  hard-accuracy drop when combined with already selected indices
+- For each eligible gate, knock it out individually and check accuracy drop
 
 Outputs CSV with columns:
-  step,num_gates,selected_index,hard_accuracy_damaged,hard_accuracy_drop,cumulative_indices
+  gate_index,hard_accuracy_damaged,hard_accuracy_drop,is_used
 
 Usage:
-  python -m experiments.greedy_damage_selection \
+  python tests/single_gate_knockout_test.py \
     --config-name config \
-    greedy.max_gates=5 \
-    --output results/greedy_damage_indices.csv
+    --output results/single_gate_knockout_results.csv
 
 Respects Hydra config at configs/config.yaml for task/circuit/loss parameters.
 """
@@ -138,11 +135,9 @@ def main(cfg: DictConfig) -> None:
     wiring_key = jax.random.PRNGKey(wiring_seed)
 
     # Preconfigure logits on fixed wiring
-    # Match wiring_seed_preconfigure.py: use backprop.* parameters directly
     bp_cfg = cfg.backprop if hasattr(cfg, "backprop") else {}
     training_cfg = cfg.training if hasattr(cfg, "training") else {}
     
-    # Use backprop.* parameters (matching wiring_seed_preconfigure.py)
     pre_steps = bp_cfg.get("epochs", 200)
     pre_lr = bp_cfg.get("learning_rate", 1)
     pre_optimizer = bp_cfg.get("optimizer", "adam")
@@ -150,16 +145,8 @@ def main(cfg: DictConfig) -> None:
     pre_beta1 = float(bp_cfg.get("beta1", 0.8))
     pre_beta2 = float(bp_cfg.get("beta2", 0.8))
     
-    # Check if training.preconfig_* exists (for comparison)
-    has_preconfig_steps = "preconfig_steps" in training_cfg
-    has_preconfig_lr = "preconfig_lr" in training_cfg
-    alt_steps = training_cfg.get("preconfig_steps", pre_steps) if has_preconfig_steps else pre_steps
-    alt_lr = training_cfg.get("preconfig_lr", pre_lr) if has_preconfig_lr else pre_lr
-    params_differ = (has_preconfig_steps and alt_steps != pre_steps) or (has_preconfig_lr and alt_lr != pre_lr)
-
-    # Print diagnostic information header
     print("=" * 80)
-    print("GREEDY DAMAGE SELECTION - PRECONFIGURATION DIAGNOSTICS")
+    print("SINGLE-GATE KNOCKOUT TEST")
     print("=" * 80)
     print(f"\nTask Configuration:")
     print(f"  - Task: {cfg.circuit.task}")
@@ -169,28 +156,6 @@ def main(cfg: DictConfig) -> None:
     print(f"  - Loss type: {cfg.training.loss_type}")
     print(f"  - Arity: {cfg.circuit.arity}")
     print(f"  - Layer sizes: {layer_sizes}")
-    print(f"  - Data shapes: x_data={x_data.shape}, y_data={y_data.shape}")
-    
-    print(f"\nWiring Configuration:")
-    print(f"  - Wiring seed: {wiring_seed}")
-    print(f"  - Wiring key: {wiring_key}")
-    
-    print(f"\nPreconfiguration Parameters:")
-    print(f"  - Steps: {pre_steps} (from backprop.epochs)")
-    print(f"  - Learning rate: {pre_lr} (from backprop.learning_rate)")
-    print(f"  - Optimizer: {pre_optimizer} (from backprop.optimizer)")
-    print(f"  - Weight decay: {pre_weight_decay} (from backprop.weight_decay)")
-    print(f"  - Beta1: {pre_beta1} (from backprop.beta1)")
-    print(f"  - Beta2: {pre_beta2} (from backprop.beta2)")
-    if params_differ:
-        print(f"\n  ⚠ WARNING: training.preconfig_* parameters differ from backprop.*:")
-        if has_preconfig_steps:
-            print(f"    - training.preconfig_steps = {alt_steps} (not used, using backprop.epochs = {pre_steps})")
-        if has_preconfig_lr:
-            print(f"    - training.preconfig_lr = {alt_lr} (not used, using backprop.learning_rate = {pre_lr})")
-        print(f"    This script matches wiring_seed_preconfigure.py (uses backprop.* directly)")
-    else:
-        print(f"\n  ✓ Parameters match wiring_seed_preconfigure.py (uses backprop.* directly)")
     
     print(f"\nRunning preconfiguration...")
     pre_wires, pre_logits = preconfigure_circuit_logits(
@@ -208,107 +173,74 @@ def main(cfg: DictConfig) -> None:
         beta2=pre_beta2,
     )
 
-    # Compute all metrics for diagnostic output
+    # Compute baseline metrics
     baseline_metrics = _compute_all_metrics(pre_logits, pre_wires, x_data, y_data, cfg.training.loss_type)
     baseline_hard_acc = baseline_metrics["hard_accuracy"]
     
-    # Eligible indices (skip input and output layers) - compute before printing
+    # Eligible indices (skip input and output layers)
     eligible = list(map(int, list(_eligible_flat_indices(layer_sizes))))
 
     # Total nodes
     total_nodes = sum(total_gates for total_gates, _ in layer_sizes)
-
-    # Greedy settings
-    max_gates_default = 160
-    # Allow override via cfg.greedy.max_gates if present
-    max_gates = int(getattr(getattr(cfg, "greedy", {}), "max_gates", max_gates_default))
-    max_gates = max(0, min(max_gates, len(eligible)))
     
-    print(f"\nPreconfigured Circuit Metrics:")
-    print(f"  - Loss: {baseline_metrics['loss']:.6f}")
-    print(f"  - Hard loss: {baseline_metrics['hard_loss']:.6f}")
-    print(f"  - Accuracy: {baseline_metrics['accuracy']:.6f}")
-    print(f"  - Hard accuracy: {baseline_metrics['hard_accuracy']:.6f}")
-    if baseline_metrics['hard_accuracy'] == 1.0:
-        print(f"  ✓ PERFECT PRECONFIGURATION (hard_accuracy == 1.0)")
-    else:
-        print(f"  ⚠ NOT PERFECT (hard_accuracy < 1.0)")
-        print(f"    This may explain discrepancy with training loop results.")
-    
-    print(f"\nGreedy Selection Configuration:")
+    print(f"\nBaseline Metrics:")
+    print(f"  - Hard accuracy: {baseline_hard_acc:.6f}")
     print(f"  - Eligible gate indices: {len(eligible)} (skipping input/output layers)")
     print(f"  - Total nodes: {total_nodes}")
-    print(f"  - Max gates to select: {max_gates}")
     print("=" * 80)
     print()
 
     # Output path
-    output_csv = hydra.utils.to_absolute_path(os.environ.get("GREEDY_DAMAGE_OUTPUT", "results/greedy_damage_indices.csv"))
+    output_csv = hydra.utils.to_absolute_path(os.environ.get("SINGLE_GATE_OUTPUT", "results/single_gate_knockout_results.csv"))
     os.makedirs(os.path.dirname(output_csv), exist_ok=True)
 
-    selected: List[int] = []
     results_rows = []
 
-    # Pre-allocate a zero mask for speed in Python
-    for step in tqdm(range(1, max_gates + 1), desc="Greedy selection", unit="gate"):
-        best_idx = None
-        best_drop = -1.0
-        best_hard_acc = baseline_hard_acc
+    # Test each gate individually
+    for gate_idx in tqdm(eligible, desc="Testing gates", unit="gate"):
+        # Create mask with only this gate knocked out
+        mask = jp.zeros(total_nodes, dtype=jp.bool_)
+        mask = mask.at[gate_idx].set(True)
 
-        for candidate in tqdm(eligible, desc=f"Step {step}: evaluating candidates", leave=False, disable=len(eligible) < 10):
-            if candidate in selected:
-                continue
-
-            mask = jp.zeros(total_nodes, dtype=jp.bool_)
-            if selected:
-                mask = mask.at[jp.array(selected)].set(True)
-            mask = mask.at[candidate].set(True)
-
-            damaged_logits = _apply_knockout_to_logits(pre_logits, mask, layer_sizes)
-            damaged_hard_acc = _compute_hard_accuracy(damaged_logits, pre_wires, x_data, y_data, cfg.training.loss_type)
-            drop = baseline_hard_acc - damaged_hard_acc
-
-            if drop > best_drop:
-                best_drop = drop
-                best_hard_acc = damaged_hard_acc
-                best_idx = candidate
-
-        if best_idx is None:
-            break
-
-        selected.append(best_idx)
-        cumulative_indices = ",".join(map(str, selected))
-        results_rows.append((step, len(selected), best_idx, best_hard_acc, best_drop, cumulative_indices))
+        # Apply knockout and compute accuracy
+        damaged_logits = _apply_knockout_to_logits(pre_logits, mask, layer_sizes)
+        damaged_hard_acc = _compute_hard_accuracy(damaged_logits, pre_wires, x_data, y_data, cfg.training.loss_type)
+        drop = baseline_hard_acc - damaged_hard_acc
         
-        # Live print of results
-        print(f"Step {step}: Selected gate {best_idx} | "
-              f"Hard accuracy: {best_hard_acc:.6f} | "
-              f"Drop: {best_drop:.6f} | "
-              f"Total gates: {len(selected)}")
+        # Gate is "used" if knocking it out causes any accuracy drop
+        is_used = drop > 0.0
+        
+        results_rows.append((gate_idx, damaged_hard_acc, drop, is_used))
+        
+        # Live print
+        status = "USED" if is_used else "unused"
+        print(f"Gate {gate_idx:4d}: Hard accuracy: {damaged_hard_acc:.6f} | "
+              f"Drop: {drop:.6f} | {status}")
 
     # Write CSV
     with open(output_csv, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(("step", "num_gates", "selected_index", "hard_accuracy_damaged", "hard_accuracy_drop", "cumulative_indices"))
+        writer.writerow(("gate_index", "hard_accuracy_damaged", "hard_accuracy_drop", "is_used"))
         writer.writerows(results_rows)
 
+    # Summary statistics
+    used_gates = [row[0] for row in results_rows if row[3]]
+    unused_gates = [row[0] for row in results_rows if not row[3]]
+    
     print()
     print("=" * 80)
-    print("GREEDY SELECTION COMPLETE")
+    print("SINGLE-GATE KNOCKOUT TEST COMPLETE")
     print("=" * 80)
-    print(f"Selected {len(selected)} gate indices")
-    print(f"Baseline hard accuracy: {baseline_hard_acc:.6f}")
-    if results_rows:
-        final_row = results_rows[-1]
-        final_hard_acc = final_row[3]
-        total_drop = baseline_hard_acc - final_hard_acc
-        print(f"Final hard accuracy (after {len(selected)} gates): {final_hard_acc:.6f}")
-        print(f"Total accuracy drop: {total_drop:.6f}")
-    print(f"Results written to: {output_csv}")
+    print(f"Total gates tested: {len(eligible)}")
+    print(f"Used gates (cause accuracy drop): {len(used_gates)}")
+    print(f"Unused gates (no accuracy drop): {len(unused_gates)}")
+    if used_gates:
+        print(f"\nUsed gate indices: {used_gates[:20]}{'...' if len(used_gates) > 20 else ''}")
+    if unused_gates:
+        print(f"\nUnused gate indices: {unused_gates[:20]}{'...' if len(unused_gates) > 20 else ''}")
+    print(f"\nResults written to: {output_csv}")
     print("=" * 80)
 
 
 if __name__ == "__main__":
     main()
-
-

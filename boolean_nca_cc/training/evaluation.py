@@ -448,6 +448,8 @@ def evaluate_model_stepwise_batched(
     blind_mode: bool = False,  # If True, force loss feedback to zero (ablation study)
     # Permanent damage validation tracking
     track_damage_validation: bool = False,  # Enable detailed tracking for permanent damage validation
+    # DEBUG: Track pre-update accuracy at damage injection
+    track_pre_update_accuracy: bool = False,  # DEBUG: Enable tracking of accuracy before model updates
 ) -> Dict:
     """
     Evaluate GNN performance on a batch of circuits by running message passing steps
@@ -591,6 +593,7 @@ def evaluate_model_stepwise_batched(
         knockout_vocabulary=knockout_vocabulary,
         blind_mode=blind_mode,
         track_damage_validation=track_damage_validation,
+        track_pre_update_accuracy=track_pre_update_accuracy,  # DEBUG
     )
 
 def evaluate_circuits_in_chunks(
@@ -709,6 +712,8 @@ def _evaluate_with_loop(
     blind_mode: bool = False,
     # Permanent damage validation tracking
     track_damage_validation: bool = False,  # Enable detailed tracking for permanent damage validation
+    # DEBUG: Track pre-update accuracy at damage injection
+    track_pre_update_accuracy: bool = False,  # DEBUG: Enable tracking of accuracy before model updates
 ) -> Dict:
     """
     Evaluate using loop mode (original behavior).
@@ -784,6 +789,16 @@ def _evaluate_with_loop(
     total_nodes = sum(total_gates for total_gates, _ in layer_sizes)
     cumulative_knockout_patterns = jp.zeros((batch_size, total_nodes), dtype=jp.bool_)
     
+    # DEBUG: Pre-update accuracy tracking initialization
+    # Tracks accuracy AFTER damage is applied but BEFORE model updates (raw damage impact)
+    pre_update_tracking = None
+    if track_pre_update_accuracy:
+        pre_update_tracking = {
+            "steps": [],  # Steps where damage was injected
+            "pre_update_hard_accuracy": [],  # Accuracy after damage bias, before model update
+            "post_update_hard_accuracy": [],  # Accuracy after model update (for comparison)
+        }
+
     # DEBUG: Damage validation tracking initialization for single-damage permanent mode
     # Just tracks: when damage happened, which nodes, and validates permanence
     damage_validation_tracking = None
@@ -877,6 +892,54 @@ def _evaluate_with_loop(
             n_damaged_gates = int(jp.sum(effective_knockout_patterns))
             print(f"  Step {step}: Damage ACTIVE in {n_active_circuits}/{batch_size} circuits, "
                   f"total gates damaged: {n_damaged_gates}")
+
+        # DEBUG: Measure pre-update accuracy (after damage bias, before model updates)
+        # This captures the "raw damage" impact before the SA model can compensate
+        if track_pre_update_accuracy and pre_update_tracking is not None and jp.any(inject_now_mask):
+            # Extract current logits from graphs
+            current_batch_logits_pre = vmap_extract_logits(current_graphs)
+            
+            # Apply damage bias to logits (same logic as reversible mode in model)
+            # The model applies: current_logits + (apply_bias * bias_mask)
+            # where bias_mask = knockout_pattern[:, None] * reversible_bias
+            reversible_bias = getattr(model, "reversible_bias", -10.0)
+            
+            def apply_damage_bias_to_logits(logits_list, patterns, bias_value):
+                """Apply damage bias to logits for circuits that are being damaged."""
+                # logits_list is a list of arrays, one per layer
+                # patterns is [batch_size, total_nodes] boolean mask
+                # We need to split patterns by layer and apply bias
+                damaged_logits = []
+                node_offset = 0
+                for layer_idx, layer_logits in enumerate(logits_list):
+                    # layer_logits shape: [batch_size, n_nodes_in_layer, ...] (may have extra dims)
+                    n_nodes_layer = layer_logits.shape[1]
+                    layer_pattern = patterns[:, node_offset:node_offset + n_nodes_layer]
+                    # Apply bias where pattern is True
+                    # Expand bias_mask to match all trailing dimensions of layer_logits
+                    bias_mask = layer_pattern * bias_value  # [batch, nodes]
+                    # Add trailing dimensions to broadcast with layer_logits
+                    for _ in range(layer_logits.ndim - 2):
+                        bias_mask = bias_mask[..., None]
+                    damaged_layer = layer_logits + bias_mask
+                    damaged_logits.append(damaged_layer)
+                    node_offset += n_nodes_layer
+                return damaged_logits
+            
+            # Apply damage bias to get "raw damaged" logits
+            damaged_logits_pre = apply_damage_bias_to_logits(
+                current_batch_logits_pre, step_knockout_patterns, reversible_bias
+            )
+            
+            # Compute accuracy on damaged-but-not-updated logits
+            pre_update_losses, pre_update_aux = vmap_get_loss(damaged_logits_pre, batch_wires)
+            pre_update_hard_accuracies = pre_update_aux[4]  # hard_accuracy is index 4
+            
+            # Store pre-update metrics
+            pre_update_tracking["steps"].append(step)
+            pre_update_tracking["pre_update_hard_accuracy"].append(float(jp.mean(pre_update_hard_accuracies)))
+            
+            print(f"  Step {step}: DEBUG pre-update hard_accuracy = {float(jp.mean(pre_update_hard_accuracies)):.4f}")
 
         # Apply model with per-step patterns if available
         if effective_knockout_patterns is not None and jp.any(effective_knockout_patterns):
@@ -1013,6 +1076,11 @@ def _evaluate_with_loop(
             globals=jp.stack([current_losses, current_steps], axis=1)
         )
 
+        # DEBUG: Track post-update accuracy at damage injection step (for comparison with pre-update)
+        if track_pre_update_accuracy and pre_update_tracking is not None and jp.any(inject_now_mask):
+            pre_update_tracking["post_update_hard_accuracy"].append(float(jp.mean(current_hard_accuracies)))
+            print(f"  Step {step}: DEBUG post-update hard_accuracy = {float(jp.mean(current_hard_accuracies)):.4f}")
+
         # Always store individual pattern metrics first (single source of truth)
         per_pattern_metrics["pattern_hard_accuracies"].append(current_hard_accuracies)
         per_pattern_metrics["pattern_logits"].append(current_batch_logits)
@@ -1039,6 +1107,22 @@ def _evaluate_with_loop(
     
     if return_per_pattern:
         step_metrics["per_pattern"] = step_metrics_per_pattern
+
+    # DEBUG: Add pre-update accuracy tracking results
+    if track_pre_update_accuracy and pre_update_tracking is not None:
+        step_metrics["pre_update_tracking"] = {
+            "damage_injection_steps": pre_update_tracking["steps"],
+            "pre_update_hard_accuracy": pre_update_tracking["pre_update_hard_accuracy"],
+            "post_update_hard_accuracy": pre_update_tracking["post_update_hard_accuracy"],
+        }
+        # Log summary
+        if pre_update_tracking["steps"]:
+            for i, step_num in enumerate(pre_update_tracking["steps"]):
+                pre_acc = pre_update_tracking["pre_update_hard_accuracy"][i]
+                post_acc = pre_update_tracking["post_update_hard_accuracy"][i]
+                delta = post_acc - pre_acc
+                print(f"DEBUG: Step {step_num} - Pre-update: {pre_acc:.4f}, Post-update: {post_acc:.4f}, "
+                      f"Delta: {delta:+.4f} ({'recovery' if delta > 0 else 'degradation'})")
 
     # DEBUG: Add damage validation summary if enabled
     if track_damage_validation and damage_validation_tracking is not None:

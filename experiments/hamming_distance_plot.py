@@ -258,6 +258,8 @@ def main():
                         help="Bias value for reversible damage mode (default: -10.0)")
     parser.add_argument("--damage-start-offset", type=int, default=None,
                         help="Number of steps before damage injection (default: 5, damage at step 6)")
+    parser.add_argument("--exclude-knocked-out-gates", action="store_true", default=False,
+                        help="Exclude knocked-out gates from hamming distance calculation (default: False, i.e., include all gates).")
     args = parser.parse_args()
 
     # Parse methods selection early to determine what needs to be loaded
@@ -325,6 +327,8 @@ def main():
     else:
         damage_start_offset = 5  # Default: damage at step 6, 20 recovery steps (with 26 total)
     
+    # Include all gates mode: Default is True (include all gates), unless --exclude-knocked-out-gates is set
+    include_all_gates = not args.exclude_knocked_out_gates
     
 
     # Only load GNN model if GNN is in the methods
@@ -379,8 +383,10 @@ def main():
     # Set output directory with f-string if not provided
     if args.output is None:
         ko_sizes_str = "_".join(map(str, knockout_sizes))
-        args.output = f"results/knockout_lut_distance_sizes{ko_sizes_str}_p{patterns_per_size}_{damage_behavior}"
+        gates_mode = "allgates" if include_all_gates else "activeonly"
+        args.output = f"results/hamming_scaled{ko_sizes_str}_p{patterns_per_size}_{damage_behavior}_{gates_mode}"
     log.info(f"Output directory: {args.output}")
+    log.info(f"Hamming distance mode: {'include all gates' if include_all_gates else 'exclude knocked-out gates'}")
 
     # Ensure layer_sizes are present
     circuit_cfg = cfg.get("circuit", {})
@@ -562,8 +568,8 @@ def main():
                 pattern = item["pattern"]
                 pert_tables = _hard_truth_tables_from_logits(item["params"])  # per-layer
                 active_masks = _active_gate_mask_from_knockout(layer_sizes, pattern)
-                # For reversible mode, include all gates in hamming distance calculation
-                metrics = _hamming_distance_tables(baseline_tables, pert_tables, active_masks, include_all_gates=True)
+                # Use include_all_gates setting from command line
+                metrics = _hamming_distance_tables(baseline_tables, pert_tables, active_masks, include_all_gates=include_all_gates)
 
                 row = {
                     "pattern_idx": idx,
@@ -628,8 +634,50 @@ def main():
                 damage_start_offset=damage_start_offset,
                 damage_mode="shotgun",  # Static patterns (not periodic)
                 greedy_window_size=ko_size,  # Number of gates to knock out (matches knockout size)
+                track_pre_update_accuracy=True,  # DEBUG: Track accuracy before/after model updates
             )
             
+            # DEBUG: Print pre-update tracking summary
+            pre_update_tracking = eval_results.get("pre_update_tracking", {})
+            if pre_update_tracking:
+                damage_steps = pre_update_tracking.get("damage_injection_steps", [])
+                pre_acc = pre_update_tracking.get("pre_update_hard_accuracy", [])
+                post_acc = pre_update_tracking.get("post_update_hard_accuracy", [])
+                log.info(f"DEBUG: Pre-update tracking results for ko_size={ko_size}:")
+                for i, step_num in enumerate(damage_steps):
+                    delta = post_acc[i] - pre_acc[i] if i < len(post_acc) else 0
+                    log.info(f"  Step {step_num}: Pre={pre_acc[i]:.4f}, Post={post_acc[i]:.4f}, Delta={delta:+.4f}")
+
+            # Access step-by-step metrics for ALL message passing steps
+            # These are already stored in eval_results as lists (one entry per step)
+            steps = eval_results.get("step", [])  # [0, 1, 2, ..., n_message_steps]
+            hard_accuracies = eval_results.get("hard_accuracy", [])  # One per step
+            soft_accuracies = eval_results.get("soft_accuracy", [])
+            hard_losses = eval_results.get("hard_loss", [])
+            soft_losses = eval_results.get("soft_loss", [])
+            
+            print(f"\n{'='*60}")
+            print(f"Step-by-step performance for ko_size={ko_size}:")
+            print(f"{'='*60}")
+            print(f"{'Step':<6} {'Hard Acc':<10} {'Soft Acc':<10} {'Hard Loss':<12} {'Soft Loss':<12}")
+            print(f"{'-'*60}")
+            for i, step_num in enumerate(steps):
+                print(f"{step_num:<6} {hard_accuracies[i]:<10.4f} {soft_accuracies[i]:<10.4f} "
+                      f"{hard_losses[i]:<12.6f} {soft_losses[i]:<12.6f}")
+            print(f"{'='*60}\n")
+            
+            # You can also access per-pattern step-by-step metrics:
+            per_pattern = eval_results.get("per_pattern", {})
+            pattern_hard_accuracies = per_pattern.get("pattern_hard_accuracies", None)
+            # shape: [n_steps, batch_size] - each row is one step, each column is one pattern
+            if pattern_hard_accuracies is not None:
+                print(f"Per-pattern step-by-step accuracies shape: {pattern_hard_accuracies.shape}")
+                # Example: Get accuracy at step 6 for all patterns
+                damage_step_idx = damage_start_offset + 1  # Step where damage is injected
+                if damage_step_idx < len(steps):
+                    acc_at_damage = pattern_hard_accuracies[damage_step_idx]  # [batch_size]
+                    print(f"  Accuracies at damage step {damage_step_idx}: {acc_at_damage}")
+
             # Extract per-pattern results
             per_pattern = eval_results.get("per_pattern", {})
             final_logits_list = per_pattern.get("pattern_logits", [])
@@ -679,8 +727,8 @@ def main():
                 # Compute hamming distance
                 pert_tables = _hard_truth_tables_from_logits(pattern_final_logits)  # per-layer
                 active_masks = _active_gate_mask_from_knockout(layer_sizes, pattern)
-                # For reversible mode, include all gates in hamming distance calculation
-                metrics = _hamming_distance_tables(baseline_tables, pert_tables, active_masks, include_all_gates=True)
+                # Use include_all_gates setting from command line
+                metrics = _hamming_distance_tables(baseline_tables, pert_tables, active_masks, include_all_gates=include_all_gates)
                 
                 row = {
                     "pattern_idx": idx,
