@@ -7,6 +7,9 @@ handling both boolean discovery (no damage) and damage response trajectories.
 Supports both:
 1. Pure plotting from pre-computed metrics (plot_inner_loop_trajectory)
 2. Checkpoint loading + evaluation + plotting (plot_trajectory_from_checkpoint)
+
+The evaluation wrappers are designed to wrap evaluate_with_loop (via evaluate_model_stepwise_batched),
+allowing checkpoint loading and different evaluation modes (reversible/permanent, growth/repair, single/multi-damage).
 """
 
 import numpy as np
@@ -17,6 +20,7 @@ import jax
 import jax.numpy as jp
 import os
 from omegaconf import OmegaConf
+from functools import partial
 
 from .figure_config import (
     setup_style,
@@ -57,27 +61,27 @@ def replicate_circuit(base_wires, base_logits, batch_size):
     return batch_wires, batch_logits
 
 
-def generate_ood_patterns(
-    knockout_patterns: Optional[jp.ndarray],
+def generate_knockout_vocabulary(
     layer_sizes: List[Tuple[int, int]],
-    damage_prob: float,
-    periodic_eval_test_seed: int,
-    batch_size: Optional[int] = None,
+    damage_prob: int,
+    vocabulary_size: int,
+    seed: int,
 ) -> jp.ndarray:
     """
-    Generate out-of-distribution knockout patterns for evaluation.
+    Generate a vocabulary of knockout patterns matching training configuration.
+    
+    This generates patterns using the same logic as training, ensuring ID/OOD
+    evaluation uses patterns consistent with how the model was trained.
     
     Args:
-        knockout_patterns: IN-distribution patterns (used to determine count if batch_size is None)
         layer_sizes: Circuit layer sizes
-        damage_prob: Damage probability for pattern generation
-        periodic_eval_test_seed: Seed for reproducible pattern generation
-        batch_size: Number of patterns to generate (uses len(knockout_patterns) if None)
+        damage_prob: Number of gates to knock out per pattern
+        vocabulary_size: Number of patterns in vocabulary
+        seed: Seed for reproducible pattern generation
     
     Returns:
-        Array of OOD knockout patterns
+        Array of knockout patterns [vocabulary_size, total_nodes]
     """
-    from functools import partial
     from boolean_nca_cc.training.pool.structural_perturbation import create_reproducible_knockout_pattern
     
     pattern_creator_fn = partial(
@@ -86,16 +90,96 @@ def generate_ood_patterns(
         damage_prob=damage_prob,
     )
     
-    num_patterns = batch_size if batch_size is not None else len(knockout_patterns)
-    ood_rng = jax.random.PRNGKey(periodic_eval_test_seed + 1)
-    out_pattern_keys = jax.random.split(ood_rng, num_patterns)
-    out_knockout_patterns = jax.vmap(pattern_creator_fn)(out_pattern_keys)
+    vocab_rng = jax.random.PRNGKey(seed)
+    vocab_pattern_keys = jax.random.split(vocab_rng, vocabulary_size)
+    vocabulary = jax.vmap(pattern_creator_fn)(vocab_pattern_keys)
     
-    return out_knockout_patterns
+    return vocabulary
 
 
-def build_evaluation_params(
+def sample_id_patterns(
+    knockout_vocabulary: Optional[jp.ndarray],
+    layer_sizes: List[Tuple[int, int]],
+    damage_prob: int,
+    batch_size: int,
+    periodic_eval_test_seed: int,
+) -> jp.ndarray:
+    """
+    Sample IN-distribution knockout patterns.
+    
+    If vocabulary is provided, samples from it (seen patterns).
+    Otherwise, generates fresh patterns using the training seed (unseen but same distribution).
+    
+    Args:
+        knockout_vocabulary: Optional vocabulary of patterns (if None, generates fresh)
+        layer_sizes: Circuit layer sizes
+        damage_prob: Number of gates to knock out per pattern
+        batch_size: Number of patterns to sample/generate
+        periodic_eval_test_seed: Seed for evaluation
+    
+    Returns:
+        Array of IN-distribution knockout patterns [batch_size, total_nodes]
+    """
+    if knockout_vocabulary is not None:
+        # Sample from vocabulary (seen patterns)
+        id_rng = jax.random.PRNGKey(periodic_eval_test_seed)
+        pattern_indices = jax.random.choice(
+            id_rng, len(knockout_vocabulary), shape=(batch_size,), replace=True
+        )
+        return knockout_vocabulary[pattern_indices]
+    else:
+        # Generate fresh patterns (unseen but same distribution as training)
+        from boolean_nca_cc.training.pool.structural_perturbation import create_reproducible_knockout_pattern
+        
+        pattern_creator_fn = partial(
+            create_reproducible_knockout_pattern,
+            layer_sizes=layer_sizes,
+            damage_prob=damage_prob,
+        )
+        
+        id_rng = jax.random.PRNGKey(periodic_eval_test_seed)
+        in_pattern_keys = jax.random.split(id_rng, batch_size)
+        return jax.vmap(pattern_creator_fn)(in_pattern_keys)
+
+
+def generate_ood_patterns(
+    layer_sizes: List[Tuple[int, int]],
+    damage_prob: int,
+    batch_size: int,
+    periodic_eval_test_seed: int,
+) -> jp.ndarray:
+    """
+    Generate OUT-of-distribution knockout patterns.
+    
+    Always generates fresh patterns using test_seed + 1 to ensure they are
+    different from any training patterns.
+    
+    Args:
+        layer_sizes: Circuit layer sizes
+        damage_prob: Number of gates to knock out per pattern
+        batch_size: Number of patterns to generate
+        periodic_eval_test_seed: Seed for evaluation (OOD uses seed + 1)
+    
+    Returns:
+        Array of OOD knockout patterns [batch_size, total_nodes]
+    """
+    from boolean_nca_cc.training.pool.structural_perturbation import create_reproducible_knockout_pattern
+    
+    pattern_creator_fn = partial(
+        create_reproducible_knockout_pattern,
+        layer_sizes=layer_sizes,
+        damage_prob=damage_prob,
+    )
+    
+    ood_rng = jax.random.PRNGKey(periodic_eval_test_seed + 1)
+    out_pattern_keys = jax.random.split(ood_rng, batch_size)
+    return jax.vmap(pattern_creator_fn)(out_pattern_keys)
+
+
+def evaluate_with_damage(
     model,
+    base_wires,
+    base_logits,
     x_data: jp.ndarray,
     y_data: jp.ndarray,
     input_n: int,
@@ -105,7 +189,11 @@ def build_evaluation_params(
     loss_type: str,
     layer_sizes: List[Tuple[int, int]],
     layer_neighbors: bool = False,
+    knockout_patterns: Optional[jp.ndarray] = None,
+    knockout_vocabulary: Optional[jp.ndarray] = None,
+    eval_batch_size: int = 256,
     return_per_pattern: bool = True,
+    # Damage control parameters
     damage_mode: str = "greedy",
     damage_injection_mode: str = "single",
     max_damage_per_circuit: int = 10,
@@ -115,81 +203,242 @@ def build_evaluation_params(
     damage_start_offset: int = 0,
     damage_start_offset_random: bool = False,
     damage_start_offset_seed: int = 42,
-    knockout_vocabulary: Optional[jp.ndarray] = None,
+    blind_mode: bool = False,
 ) -> Dict:
     """
-    Build common evaluation parameters dictionary to reduce repetition.
+    Wrapper around evaluate_with_loop (via evaluate_model_stepwise_batched) for damage evaluation.
     
-    Returns:
-        Dictionary of evaluation parameters ready to be unpacked into evaluate_circuits_in_chunks
-    """
-    return {
-        'model': model,
-        'x_data': x_data,
-        'y_data': y_data,
-        'input_n': input_n,
-        'arity': arity,
-        'circuit_hidden_dim': circuit_hidden_dim,
-        'n_message_steps': n_message_steps,
-        'loss_type': loss_type,
-        'layer_sizes': layer_sizes,
-        'return_per_pattern': return_per_pattern,
-        'layer_neighbors': layer_neighbors,
-        'damage_mode': damage_mode,
-        'damage_injection_mode': damage_injection_mode,
-        'max_damage_per_circuit': max_damage_per_circuit,
-        'greedy_ordered_indices': greedy_ordered_indices,
-        'greedy_window_size': greedy_window_size,
-        'greedy_injection_recover_steps': greedy_injection_recover_steps,
-        'damage_start_offset': damage_start_offset,
-        'damage_start_offset_random': damage_start_offset_random,
-        'damage_start_offset_seed': damage_start_offset_seed,
-        'knockout_vocabulary': knockout_vocabulary,
-    }
-
-
-def run_sa_evaluation(
-    eval_fn,
-    base_wires,
-    base_logits,
-    knockout_patterns: Optional[jp.ndarray],
-    target_chunk_size: int,
-    eval_params: Dict,
-) -> Dict:
-    """
-    Unified SA evaluation function that handles both static and multi-damage modes.
+    This function handles checkpoint loading, circuit replication, and calls the evaluation
+    function with appropriate parameters. It supports all damage modes and injection strategies.
     
     Args:
-        eval_fn: Evaluation function (e.g., evaluate_model_stepwise_batched)
+        model: Trained model to evaluate
         base_wires: Single circuit wires
         base_logits: Single circuit logits
-        knockout_patterns: Pre-generated patterns (None for multi-damage mode)
-        target_chunk_size: Batch size for evaluation
-        eval_params: Evaluation parameters dict (from build_evaluation_params)
+        x_data: Input data
+        y_data: Target data
+        input_n: Number of inputs
+        arity: Circuit arity
+        circuit_hidden_dim: Circuit hidden dimension
+        n_message_steps: Number of message passing steps
+        loss_type: Loss function type
+        layer_sizes: Circuit layer sizes
+        layer_neighbors: Whether to use layer neighbors
+        knockout_patterns: Pre-generated patterns (None for dynamic generation)
+        knockout_vocabulary: Vocabulary for seen patterns (None for unseen)
+        eval_batch_size: Batch size for evaluation
+        return_per_pattern: Whether to return per-pattern metrics
+        damage_mode: Pattern type ("greedy", "greedy_vocabulary", "shotgun", "strip")
+        damage_injection_mode: "single" or "multi"
+        max_damage_per_circuit: Maximum damage events per circuit
+        greedy_ordered_indices: Ordered indices for greedy damage
+        greedy_window_size: Window size for greedy patterns (damage injection timing only)
+        greedy_injection_recover_steps: Recovery steps between injections
+        damage_start_offset: Steps before first damage
+        damage_start_offset_random: Randomize offset per circuit
+        damage_start_offset_seed: Seed for random offset
+        blind_mode: Zero out loss feedback (ablation)
     
     Returns:
-        Step metrics dictionary
+        Dictionary with step-wise metrics
     """
-    from boolean_nca_cc.training.evaluation import evaluate_circuits_in_chunks
+    from boolean_nca_cc.training.evaluation import (
+        evaluate_model_stepwise_batched,
+        evaluate_circuits_in_chunks,
+    )
     
     # Determine batch size
     if knockout_patterns is not None:
         batch_size = len(knockout_patterns)
     else:
-        batch_size = target_chunk_size
+        batch_size = eval_batch_size
     
-    # Replicate circuit
+    # Replicate circuit for batch
     batch_wires, batch_logits = replicate_circuit(base_wires, base_logits, batch_size)
     
     # Run evaluation
     return evaluate_circuits_in_chunks(
-        eval_fn=eval_fn,
+        eval_fn=evaluate_model_stepwise_batched,
         wires=batch_wires,
         logits=batch_logits,
         knockout_patterns=knockout_patterns,
-        target_chunk_size=target_chunk_size,
-        **eval_params,
+        target_chunk_size=eval_batch_size,
+        model=model,
+        x_data=x_data,
+        y_data=y_data,
+        input_n=input_n,
+        arity=arity,
+        circuit_hidden_dim=circuit_hidden_dim,
+        n_message_steps=n_message_steps,
+        loss_type=loss_type,
+        layer_sizes=layer_sizes,
+        return_per_pattern=return_per_pattern,
+        layer_neighbors=layer_neighbors,
+        damage_mode=damage_mode,
+        damage_injection_mode=damage_injection_mode,
+        max_damage_per_circuit=max_damage_per_circuit,
+        greedy_ordered_indices=greedy_ordered_indices,
+        greedy_window_size=greedy_window_size,
+        greedy_injection_recover_steps=greedy_injection_recover_steps,
+        damage_start_offset=damage_start_offset,
+        damage_start_offset_random=damage_start_offset_random,
+        damage_start_offset_seed=damage_start_offset_seed,
+        knockout_vocabulary=knockout_vocabulary,
+        blind_mode=blind_mode,
     )
+
+
+def evaluate_id_ood(
+    model,
+    base_wires,
+    base_logits,
+    x_data: jp.ndarray,
+    y_data: jp.ndarray,
+    input_n: int,
+    arity: int,
+    circuit_hidden_dim: int,
+    n_message_steps: int,
+    loss_type: str,
+    layer_sizes: List[Tuple[int, int]],
+    layer_neighbors: bool = False,
+    knockout_vocabulary: Optional[jp.ndarray] = None,
+    damage_prob: int = 40,
+    eval_batch_size: int = 256,
+    periodic_eval_test_seed: int = 42,
+    return_per_pattern: bool = True,
+    # Damage control parameters (from knockout_config)
+    damage_mode: str = "greedy",
+    damage_injection_mode: str = "single",
+    max_damage_per_circuit: int = 10,
+    greedy_ordered_indices: Optional[List[int]] = None,
+    greedy_window_size: int = 1,
+    greedy_injection_recover_steps: int = 10,
+    damage_start_offset: int = 0,
+    damage_start_offset_random: bool = False,
+    damage_start_offset_seed: int = 42,
+    blind_mode: bool = False,
+) -> Tuple[Dict, Dict]:
+    """
+    Evaluate model on IN-distribution and OUT-of-distribution damage patterns.
+    
+    This follows the exact pattern from run_knockout_periodic_evaluation:
+    - IN: Uses vocabulary if provided (seen), otherwise generates fresh with training seed
+    - OUT: Always generates fresh patterns with test_seed + 1 (unseen)
+    
+    Args:
+        model: Trained model to evaluate
+        base_wires: Single circuit wires
+        base_logits: Single circuit logits
+        x_data: Input data
+        y_data: Target data
+        input_n: Number of inputs
+        arity: Circuit arity
+        circuit_hidden_dim: Circuit hidden dimension
+        n_message_steps: Number of message passing steps
+        loss_type: Loss function type
+        layer_sizes: Circuit layer sizes
+        layer_neighbors: Whether to use layer neighbors
+        knockout_vocabulary: Vocabulary of seen patterns (None for unseen)
+        damage_prob: Number of gates to knock out per pattern
+        eval_batch_size: Batch size for evaluation
+        periodic_eval_test_seed: Seed for evaluation
+        return_per_pattern: Whether to return per-pattern metrics
+        damage_mode: Pattern type
+        damage_injection_mode: "single" or "multi"
+        max_damage_per_circuit: Maximum damage events per circuit
+        greedy_ordered_indices: Ordered indices for greedy damage
+        greedy_window_size: Window size for greedy patterns
+        greedy_injection_recover_steps: Recovery steps between injections
+        damage_start_offset: Steps before first damage
+        damage_start_offset_random: Randomize offset per circuit
+        damage_start_offset_seed: Seed for random offset
+        blind_mode: Zero out loss feedback (ablation)
+    
+    Returns:
+        Tuple of (id_metrics, ood_metrics) dictionaries
+    """
+    # Generate IN-distribution patterns
+    log.info(f"Generating IN-distribution patterns (batch_size={eval_batch_size})...")
+    id_patterns = sample_id_patterns(
+        knockout_vocabulary=knockout_vocabulary,
+        layer_sizes=layer_sizes,
+        damage_prob=damage_prob,
+        batch_size=eval_batch_size,
+        periodic_eval_test_seed=periodic_eval_test_seed,
+    )
+    
+    # Evaluate IN-distribution
+    log.info("Evaluating IN-distribution patterns...")
+    id_metrics = evaluate_with_damage(
+        model=model,
+        base_wires=base_wires,
+        base_logits=base_logits,
+        x_data=x_data,
+        y_data=y_data,
+        input_n=input_n,
+        arity=arity,
+        circuit_hidden_dim=circuit_hidden_dim,
+        n_message_steps=n_message_steps,
+        loss_type=loss_type,
+        layer_sizes=layer_sizes,
+        layer_neighbors=layer_neighbors,
+        knockout_patterns=id_patterns,
+        knockout_vocabulary=knockout_vocabulary,  # Pass vocabulary for seen patterns
+        eval_batch_size=eval_batch_size,
+        return_per_pattern=return_per_pattern,
+        damage_mode=damage_mode,
+        damage_injection_mode=damage_injection_mode,
+        max_damage_per_circuit=max_damage_per_circuit,
+        greedy_ordered_indices=greedy_ordered_indices,
+        greedy_window_size=greedy_window_size,
+        greedy_injection_recover_steps=greedy_injection_recover_steps,
+        damage_start_offset=damage_start_offset,
+        damage_start_offset_random=damage_start_offset_random,
+        damage_start_offset_seed=damage_start_offset_seed,
+        blind_mode=blind_mode,
+    )
+    
+    # Generate OUT-of-distribution patterns
+    log.info(f"Generating OUT-of-distribution patterns (batch_size={eval_batch_size})...")
+    ood_patterns = generate_ood_patterns(
+        layer_sizes=layer_sizes,
+        damage_prob=damage_prob,
+        batch_size=eval_batch_size,
+        periodic_eval_test_seed=periodic_eval_test_seed,
+    )
+    
+    # Evaluate OUT-of-distribution (force unseen by not providing vocabulary)
+    log.info("Evaluating OUT-of-distribution patterns...")
+    ood_metrics = evaluate_with_damage(
+        model=model,
+        base_wires=base_wires,
+        base_logits=base_logits,
+        x_data=x_data,
+        y_data=y_data,
+        input_n=input_n,
+        arity=arity,
+        circuit_hidden_dim=circuit_hidden_dim,
+        n_message_steps=n_message_steps,
+        loss_type=loss_type,
+        layer_sizes=layer_sizes,
+        layer_neighbors=layer_neighbors,
+        knockout_patterns=ood_patterns,
+        knockout_vocabulary=None,  # Force unseen patterns
+        eval_batch_size=eval_batch_size,
+        return_per_pattern=return_per_pattern,
+        damage_mode=damage_mode,
+        damage_injection_mode=damage_injection_mode,
+        max_damage_per_circuit=max_damage_per_circuit,
+        greedy_ordered_indices=greedy_ordered_indices,
+        greedy_window_size=greedy_window_size,
+        greedy_injection_recover_steps=greedy_injection_recover_steps,
+        damage_start_offset=damage_start_offset,
+        damage_start_offset_random=damage_start_offset_random,
+        damage_start_offset_seed=damage_start_offset_seed,
+        blind_mode=blind_mode,
+    )
+    
+    return id_metrics, ood_metrics
 
 
 def get_bp_results(
@@ -359,7 +608,6 @@ def plot_inner_loop_trajectory(
                 alpha=LINE_STYLES['alpha_mean'],
                 markevery=max(1, len(steps_test) // 20),
             )
-            # ax.axhline(y=1.0, color=COLORS['reference'], linestyle=':', alpha=0.5, linewidth=1.5)
             
             format_axis(
                 ax,
@@ -502,16 +750,6 @@ def plot_inner_loop_trajectory(
                 color=COLORS['full_map'],
                 alpha=LINE_STYLES['alpha_std'],
             )
-        # elif pre_damage_accuracy is not None and training_mode == "repair":
-        #     # Show pre-damage reference line in repair mode
-        #     ax.axhline(
-        #         y=pre_damage_accuracy,
-        #         color=COLORS['reference'],
-        #         linestyle='--',
-        #         linewidth=LINE_STYLES['linewidth_thick'],
-        #         alpha=0.8,
-        #         label='Pre-damage Performance',
-        #     )
         
         # Add damage region shading
         if damage_injection_mode == "single":
@@ -596,13 +834,10 @@ def plot_trajectory_from_checkpoint(
     greedy_injection_recover_steps: int = 10,
     greedy_ordered_indices: Optional[List[int]] = None,
     greedy_window_size: int = 1,
-    knockout_vocabulary: Optional[jp.ndarray] = None,
-    knockout_patterns: Optional[jp.ndarray] = None,  # For static damage modes
-    knockout_config: Optional[Dict] = None,  # For OOD pattern generation
     # Evaluation parameters
     n_message_steps: Optional[int] = None,  # Override config default
     eval_batch_size: Optional[int] = None,  # Override config default
-    periodic_eval_test_seed: int = 42,
+    periodic_eval_test_seed: Optional[int] = None,  # Override config default
     # Output parameters
     output_path: Optional[str] = None,
     title: Optional[str] = None,
@@ -620,6 +855,11 @@ def plot_trajectory_from_checkpoint(
     This function provides a complete workflow: checkpoint loading → evaluation → plotting.
     Supports all trajectory modulations (reversible/permanent, single/multi damage, etc.).
     
+    For ID/OOD evaluation, this follows the pattern from run_knockout_periodic_evaluation:
+    - Generates vocabulary matching training configuration (damage_prob from config, seeds from config)
+    - IN: Uses vocabulary (seen patterns)
+    - OUT: Generates fresh patterns with test_seed + 1 (unseen patterns)
+    
     Args:
         run_id: WandB run ID to load model from (mutually exclusive with checkpoint_path)
         checkpoint_path: Local checkpoint path (.pkl file) (mutually exclusive with run_id)
@@ -634,19 +874,17 @@ def plot_trajectory_from_checkpoint(
         max_damage_per_circuit: Maximum damage events per circuit (for multi mode)
         greedy_injection_recover_steps: Recovery steps between damage injections
         greedy_ordered_indices: Ordered indices for greedy damage patterns (required for damage_mode="greedy")
-        greedy_window_size: Window size for greedy patterns
-        knockout_vocabulary: Vocabulary of patterns for seen evaluation (None for unseen)
-        knockout_patterns: Pre-generated patterns for static damage modes
-        knockout_config: Configuration for knockout evaluation (needed for OOD pattern generation)
+        greedy_window_size: Window size for greedy patterns (damage injection timing only)
         n_message_steps: Override number of message passing steps (uses config default if None)
         eval_batch_size: Override evaluation batch size (uses config default if None)
-        periodic_eval_test_seed: Seed for generating OOD patterns
+        periodic_eval_test_seed: Override evaluation seed (uses config default if None)
         output_path: Path to save figure
         title: Figure title
         figsize: Custom figure size
         dpi: Image resolution
         project: WandB project name
         entity: WandB entity/username
+        force_damage_behavior: Override model's damage_behavior ("reversible" or "permanent")
     
     Returns:
         matplotlib Figure object
@@ -662,10 +900,7 @@ def plot_trajectory_from_checkpoint(
     from boolean_nca_cc.circuits.data_split import split_input_combinations
     from boolean_nca_cc.circuits.model import gen_circuit, generate_layer_sizes
     from boolean_nca_cc.training.preconfigure import preconfigure_circuit_logits
-    from boolean_nca_cc.training.evaluation import (
-        evaluate_model_stepwise_batched,
-        get_loss_from_wires_logits,
-    )
+    from boolean_nca_cc.training.evaluation import get_loss_from_wires_logits
     
     # Validate inputs
     if run_id is None and checkpoint_path is None:
@@ -679,6 +914,23 @@ def plot_trajectory_from_checkpoint(
         log.info(f"Loading model from local checkpoint: {checkpoint_path}")
         loaded = load_checkpoint(checkpoint_path)
         config = OmegaConf.create(loaded.get("config", {}))
+        
+        # Extract and log checkpoint metadata
+        step = loaded.get("step")
+        epoch = loaded.get("epoch")
+        if epoch is None:
+            # Try to get from config
+            if isinstance(config, dict):
+                epoch = config.get("epoch")
+            else:
+                epoch = getattr(config, "epoch", None)
+        
+        if step is not None:
+            log.info(f"DEBUG: Loaded checkpoint at step: {step}")
+        if epoch is not None:
+            log.info(f"DEBUG: Loaded checkpoint at epoch: {epoch}")
+        if step is None and epoch is None:
+            log.warning("DEBUG: Could not determine checkpoint epoch/step from loaded data")
         
         # Instantiate and load model
         model = instantiate_model_from_config(config, seed=config.get("seed", 0))
@@ -734,6 +986,24 @@ def plot_trajectory_from_checkpoint(
             run_id=run_id,
             seed=0,
         )
+        
+        # Extract and log checkpoint metadata (load_model_from_config_and_checkpoint already logs this,
+        # but we'll also log it here for consistency and visibility)
+        step = loaded_dict.get("step")
+        epoch = loaded_dict.get("epoch")
+        if epoch is None:
+            checkpoint_config = loaded_dict.get("config", {})
+            if isinstance(checkpoint_config, dict):
+                epoch = checkpoint_config.get("epoch")
+            else:
+                epoch = getattr(checkpoint_config, "epoch", None)
+        
+        if step is not None:
+            log.info(f"DEBUG: Loaded checkpoint at step: {step}")
+        if epoch is not None:
+            log.info(f"DEBUG: Loaded checkpoint at epoch: {epoch}")
+        if step is None and epoch is None:
+            log.warning("DEBUG: Could not determine checkpoint epoch/step from loaded data")
         
         log.info("Model loaded successfully")
     
@@ -823,16 +1093,19 @@ def plot_trajectory_from_checkpoint(
     # Get evaluation parameters (use overrides if provided, otherwise from config)
     n_steps = n_message_steps if n_message_steps is not None else config.eval.periodic_eval_inner_steps
     batch_size = eval_batch_size if eval_batch_size is not None else config.eval.periodic_eval_batch_size
+    test_seed = periodic_eval_test_seed if periodic_eval_test_seed is not None else config.eval.periodic_eval_test_seed
     
     # Determine trajectory type and run appropriate evaluation
     if trajectory_type == "boolean_discovery":
         # Boolean discovery: No damage, evaluate on train/test splits
         log.info("Running boolean discovery evaluation (no damage)")
         
-        # Build evaluation parameters (no damage)
-        eval_params = build_evaluation_params(
+        # Evaluate on test split
+        step_metrics_test = evaluate_with_damage(
             model=model,
-            x_data=x_test,  # Will override per split
+            base_wires=base_wires,
+            base_logits=base_logits,
+            x_data=x_test,
             y_data=y_test,
             input_n=config.circuit.input_bits,
             arity=config.circuit.arity,
@@ -841,38 +1114,38 @@ def plot_trajectory_from_checkpoint(
             loss_type=config.training.loss_type,
             layer_sizes=layer_sizes,
             layer_neighbors=config.training.layer_neighbors,
+            knockout_patterns=None,  # No damage
+            knockout_vocabulary=None,
+            eval_batch_size=batch_size,
             return_per_pattern=False,
             damage_mode="greedy",  # Won't matter (no damage)
             damage_injection_mode="single",
             max_damage_per_circuit=1,
         )
         
-        # Evaluate on test split
-        test_eval_params = eval_params.copy()
-        test_eval_params['x_data'] = x_test
-        test_eval_params['y_data'] = y_test
-        step_metrics_test = run_sa_evaluation(
-            eval_fn=evaluate_model_stepwise_batched,
-            base_wires=base_wires,
-            base_logits=base_logits,
-            knockout_patterns=None,  # No damage
-            target_chunk_size=batch_size,
-            eval_params=test_eval_params,
-        )
-        
         # Evaluate on train split if requested
         if eval_on_train and config.eval.input_split_enabled:
             log.info("Running evaluation on train split")
-            train_eval_params = eval_params.copy()
-            train_eval_params['x_data'] = x_train
-            train_eval_params['y_data'] = y_train
-            step_metrics_train = run_sa_evaluation(
-                eval_fn=evaluate_model_stepwise_batched,
+            step_metrics_train = evaluate_with_damage(
+                model=model,
                 base_wires=base_wires,
                 base_logits=base_logits,
+                x_data=x_train,
+                y_data=y_train,
+                input_n=config.circuit.input_bits,
+                arity=config.circuit.arity,
+                circuit_hidden_dim=config.circuit.circuit_hidden_dim,
+                n_message_steps=n_steps,
+                loss_type=config.training.loss_type,
+                layer_sizes=layer_sizes,
+                layer_neighbors=config.training.layer_neighbors,
                 knockout_patterns=None,  # No damage
-                target_chunk_size=batch_size,
-                eval_params=train_eval_params,
+                knockout_vocabulary=None,
+                eval_batch_size=batch_size,
+                return_per_pattern=False,
+                damage_mode="greedy",  # Won't matter (no damage)
+                damage_injection_mode="single",
+                max_damage_per_circuit=1,
             )
         else:
             # Use test metrics for both if no train split
@@ -897,100 +1170,123 @@ def plot_trajectory_from_checkpoint(
         _, base_aux = get_loss_from_wires_logits(base_logits, base_wires, x_data, y_data, config.training.loss_type)
         pre_damage_accuracy = float(base_aux[4])  # hard_accuracy is index 4
         
-        # Determine batch size and evaluation approach based on damage mode
-        if damage_mode in ["greedy", "greedy_vocabulary"] and damage_injection_mode == "multi":
-            # Multi-damage mode: Use dynamic evaluation
-            if damage_mode == "greedy" and greedy_ordered_indices is None:
-                raise ValueError(
-                    "greedy_ordered_indices is None but required for damage_mode='greedy'. "
-                    "Either provide greedy_ordered_indices or use a different damage_mode."
-                )
-            eval_batch = max(10, len(knockout_patterns) if knockout_patterns is not None else batch_size)
-            knockout_patterns_for_eval = None  # Let evaluation system handle dynamic patterns
-        else:
-            # Static damage mode: Use pre-generated patterns
-            if knockout_patterns is None:
-                raise ValueError("knockout_patterns must be provided for static damage modes")
-            eval_batch = len(knockout_patterns)
-            knockout_patterns_for_eval = knockout_patterns
+        # Get knockout configuration from config
+        knockout_config = config.eval.knockout_eval if hasattr(config.eval, 'knockout_eval') else {}
+        damage_prob = knockout_config.get("damage_prob", config.pool.damage_prob)
         
-        # Build evaluation parameters
-        eval_params = build_evaluation_params(
-            model=model,
-            x_data=x_data,
-            y_data=y_data,
-            input_n=config.circuit.input_bits,
-            arity=config.circuit.arity,
-            circuit_hidden_dim=config.circuit.circuit_hidden_dim,
-            n_message_steps=n_steps,
-            loss_type=config.training.loss_type,
-            layer_sizes=layer_sizes,
-            layer_neighbors=config.training.layer_neighbors,
-            return_per_pattern=True,
-            damage_mode=damage_mode,
-            damage_injection_mode=damage_injection_mode,
-            max_damage_per_circuit=max_damage_per_circuit,
-            greedy_ordered_indices=greedy_ordered_indices,
-            greedy_window_size=greedy_window_size,
-            greedy_injection_recover_steps=greedy_injection_recover_steps,
-            damage_start_offset=damage_start_offset,
-            damage_start_offset_random=False,
-            damage_start_offset_seed=42,
-            knockout_vocabulary=knockout_vocabulary,
-        )
-        
-        # Run SA evaluation on IN-distribution patterns
-        log.info("Running SA evaluation on IN-distribution patterns")
-        sa_step_metrics_in = run_sa_evaluation(
-            eval_fn=evaluate_model_stepwise_batched,
-            base_wires=base_wires,
-            base_logits=base_logits,
-            knockout_patterns=knockout_patterns_for_eval,
-            target_chunk_size=eval_batch,
-            eval_params=eval_params,
-        )
-        
-        # Run SA evaluation on OUT-of-distribution patterns if requested
-        sa_step_metrics_out = None
-        if show_ood_trajectory and knockout_config is not None:
-            log.info("Running SA evaluation on OUT-of-distribution patterns")
-            
-            # Generate OOD patterns
-            if knockout_patterns is not None:
-                ood_batch_size = len(knockout_patterns)
-            else:
-                ood_batch_size = eval_batch
-            
-            out_knockout_patterns = generate_ood_patterns(
-                knockout_patterns=knockout_patterns,
+        # Generate vocabulary matching training configuration
+        # This ensures ID evaluation uses patterns consistent with training
+        knockout_vocabulary = None
+        if hasattr(config.pool, 'damage_knockout_diversity') and config.pool.damage_knockout_diversity > 0:
+            vocab_size = config.pool.damage_knockout_diversity
+            # Use damage_seed from config for vocabulary generation (matches training)
+            vocab_seed = config.get("damage_seed", config.get("test_seed", 42))
+            log.info(f"Generating knockout vocabulary (size={vocab_size}, damage_prob={damage_prob}, seed={vocab_seed})")
+            knockout_vocabulary = generate_knockout_vocabulary(
                 layer_sizes=layer_sizes,
-                damage_prob=knockout_config["damage_prob"],
-                periodic_eval_test_seed=periodic_eval_test_seed,
-                batch_size=ood_batch_size,
+                damage_prob=damage_prob,
+                vocabulary_size=vocab_size,
+                seed=vocab_seed,
             )
-            
-            # Build OOD evaluation parameters (force unseen by not providing vocabulary)
-            ood_eval_params = eval_params.copy()
-            ood_eval_params['knockout_vocabulary'] = None  # Force unseen patterns
-            
-            # Run SA evaluation on OOD patterns
-            sa_step_metrics_out = run_sa_evaluation(
-                eval_fn=evaluate_model_stepwise_batched,
+        
+        # Get damage control parameters from config or use defaults
+        knockout_config_params = {
+            "damage_mode": knockout_config.get("damage_mode", config.pool.get("damage_mode", "greedy")),
+            "damage_injection_mode": knockout_config.get("damage_injection_mode", "single"),
+            "max_damage_per_circuit": knockout_config.get("max_damage_per_circuit", 1),
+            "greedy_ordered_indices": config.pool.get("greedy_ordered_indices", None),
+            "greedy_window_size": knockout_config.get("greedy_window_size", config.pool.get("greedy_window_size", 1)),
+            "greedy_injection_recover_steps": knockout_config.get("greedy_injection_recover_steps", 30),
+            "damage_start_offset": knockout_config.get("damage_start_offset", 5),
+            "damage_start_offset_random": knockout_config.get("damage_start_offset_random", False),
+            "damage_start_offset_seed": knockout_config.get("damage_start_offset_seed", test_seed),
+        }
+        
+        # Override with user-provided parameters if specified
+        if damage_mode != "greedy" or damage_injection_mode != "single":
+            knockout_config_params["damage_mode"] = damage_mode
+            knockout_config_params["damage_injection_mode"] = damage_injection_mode
+        if max_damage_per_circuit != 10:
+            knockout_config_params["max_damage_per_circuit"] = max_damage_per_circuit
+        if greedy_ordered_indices is not None:
+            knockout_config_params["greedy_ordered_indices"] = greedy_ordered_indices
+        if greedy_window_size != 1:
+            knockout_config_params["greedy_window_size"] = greedy_window_size
+        if greedy_injection_recover_steps != 10:
+            knockout_config_params["greedy_injection_recover_steps"] = greedy_injection_recover_steps
+        if damage_start_offset != 0:
+            knockout_config_params["damage_start_offset"] = damage_start_offset
+        
+        # Evaluate ID and OOD patterns
+        if show_ood_trajectory:
+            log.info("Running ID/OOD evaluation...")
+            sa_step_metrics_in, sa_step_metrics_out = evaluate_id_ood(
+                model=model,
                 base_wires=base_wires,
                 base_logits=base_logits,
-                knockout_patterns=out_knockout_patterns,
-                target_chunk_size=len(out_knockout_patterns),
-                eval_params=ood_eval_params,
+                x_data=x_data,
+                y_data=y_data,
+                input_n=config.circuit.input_bits,
+                arity=config.circuit.arity,
+                circuit_hidden_dim=config.circuit.circuit_hidden_dim,
+                n_message_steps=n_steps,
+                loss_type=config.training.loss_type,
+                layer_sizes=layer_sizes,
+                layer_neighbors=config.training.layer_neighbors,
+                knockout_vocabulary=knockout_vocabulary,
+                damage_prob=damage_prob,
+                eval_batch_size=batch_size,
+                periodic_eval_test_seed=test_seed,
+                return_per_pattern=True,
+                blind_mode=config.eval.get("blind_mode", False),
+                **knockout_config_params,
             )
+        else:
+            # Only evaluate ID patterns
+            log.info("Running ID evaluation only...")
+            id_patterns = sample_id_patterns(
+                knockout_vocabulary=knockout_vocabulary,
+                layer_sizes=layer_sizes,
+                damage_prob=damage_prob,
+                batch_size=batch_size,
+                periodic_eval_test_seed=test_seed,
+            )
+            sa_step_metrics_in = evaluate_with_damage(
+                model=model,
+                base_wires=base_wires,
+                base_logits=base_logits,
+                x_data=x_data,
+                y_data=y_data,
+                input_n=config.circuit.input_bits,
+                arity=config.circuit.arity,
+                circuit_hidden_dim=config.circuit.circuit_hidden_dim,
+                n_message_steps=n_steps,
+                loss_type=config.training.loss_type,
+                layer_sizes=layer_sizes,
+                layer_neighbors=config.training.layer_neighbors,
+                knockout_patterns=id_patterns,
+                knockout_vocabulary=knockout_vocabulary,
+                eval_batch_size=batch_size,
+                return_per_pattern=True,
+                blind_mode=config.eval.get("blind_mode", False),
+                **knockout_config_params,
+            )
+            sa_step_metrics_out = None
         
         # Run BP evaluation if requested
         bp_results = None
         if show_bp_trajectory:
             log.info("Running backpropagation training for comparison")
-            if knockout_patterns is None:
-                raise ValueError("knockout_patterns required for BP trajectory")
+            # Use ID patterns for BP training
+            id_patterns = sample_id_patterns(
+                knockout_vocabulary=knockout_vocabulary,
+                layer_sizes=layer_sizes,
+                damage_prob=damage_prob,
+                batch_size=batch_size,
+                periodic_eval_test_seed=test_seed,
+            )
             bp_results = get_bp_results(
-                config, x_data, y_data, config.training.loss_type, knockout_patterns, None
+                config, x_data, y_data, config.training.loss_type, id_patterns, None
             )
         
         # Plot damage response trajectory
@@ -1001,10 +1297,10 @@ def plot_trajectory_from_checkpoint(
             bp_results=bp_results,
             show_bp_trajectory=show_bp_trajectory,
             show_ood_trajectory=show_ood_trajectory,
-            damage_injection_mode=damage_injection_mode,
-            damage_start_offset=damage_start_offset,
-            max_damage_per_circuit=max_damage_per_circuit,
-            greedy_injection_recover_steps=greedy_injection_recover_steps,
+            damage_injection_mode=knockout_config_params["damage_injection_mode"],
+            damage_start_offset=knockout_config_params["damage_start_offset"],
+            max_damage_per_circuit=knockout_config_params["max_damage_per_circuit"],
+            greedy_injection_recover_steps=knockout_config_params["greedy_injection_recover_steps"],
             training_mode=config.training.training_mode,
             pre_damage_accuracy=pre_damage_accuracy,
             output_path=output_path,
@@ -1016,4 +1312,3 @@ def plot_trajectory_from_checkpoint(
         raise ValueError(f"Unknown trajectory_type: {trajectory_type}. Must be 'boolean_discovery' or 'damage_response'")
     
     return fig
-

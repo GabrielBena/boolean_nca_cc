@@ -6,71 +6,26 @@ Provides command-line interface for generating trajectory plots from checkpoints
 Supports:
 - Reversible/permanent damage
 - Single/multi damage injection
-- Vocabulary loading vs on-the-fly pattern generation
+- Vocabulary is automatically generated from config to match training
 """
 
 import argparse
 import os
 import sys
-import pickle
 from pathlib import Path
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
-import jax
-import jax.numpy as jp
-from omegaconf import OmegaConf
-
 from experiments.visualization.plot_trajectory import plot_trajectory_from_checkpoint
 from boolean_nca_cc.training.pool.structural_perturbation import (
     DEFAULT_GREEDY_ORDERED_INDICES,
-    create_knockout_vocabulary,
 )
 from boolean_nca_cc.training.checkpointing import (
     load_config_from_wandb,
     load_checkpoint,
 )
-
-
-def load_vocabulary_from_file(vocab_path: str) -> jp.ndarray:
-    """Load knockout vocabulary from a pickle file."""
-    with open(vocab_path, 'rb') as f:
-        data = pickle.load(f)
-        if isinstance(data, dict):
-            # Try common keys
-            if 'vocabulary' in data:
-                return jp.array(data['vocabulary'])
-            elif 'knockout_vocabulary' in data:
-                return jp.array(data['knockout_vocabulary'])
-            elif 'patterns' in data:
-                return jp.array(data['patterns'])
-            else:
-                raise ValueError(f"Vocabulary file must contain 'vocabulary', 'knockout_vocabulary', or 'patterns' key. Found keys: {list(data.keys())}")
-        elif isinstance(data, (list, tuple)):
-            return jp.array(data)
-        else:
-            return jp.array(data)
-
-
-def generate_vocabulary_on_the_fly(
-    layer_sizes,
-    vocabulary_size: int,
-    damage_prob: float,
-    damage_mode: str,
-    greedy_ordered_indices: list,
-    seed: int = 42,
-) -> jp.ndarray:
-    """Generate knockout vocabulary on the fly."""
-    rng = jax.random.PRNGKey(seed)
-    return create_knockout_vocabulary(
-        rng=rng,
-        vocabulary_size=vocabulary_size,
-        layer_sizes=layer_sizes,
-        damage_prob=damage_prob,
-        damage_mode=damage_mode,
-        ordered_indices=greedy_ordered_indices,
-    )
+from omegaconf import OmegaConf
 
 
 def main():
@@ -157,8 +112,8 @@ def main():
         "--damage-mode",
         type=str,
         choices=["greedy", "greedy_vocabulary", "shotgun", "strip"],
-        default="greedy",
-        help="Damage pattern type",
+        default="shotgun",
+        help="Damage pattern type (default: shotgun - random sampling from all eligible gates)",
     )
     parser.add_argument(
         "--damage-start-offset",
@@ -191,52 +146,6 @@ def main():
         help="Comma-separated list of gate indices for greedy mode (e.g., '48,17,52,146'). If not provided, uses config or default.",
     )
     
-    # Vocabulary/Pattern generation
-    vocab_group = parser.add_mutually_exclusive_group()
-    vocab_group.add_argument(
-        "--vocab-file",
-        type=str,
-        default=None,
-        help="Path to pickle file containing knockout vocabulary (mutually exclusive with --generate-vocab)",
-    )
-    vocab_group.add_argument(
-        "--generate-vocab",
-        action="store_true",
-        help="Generate vocabulary on the fly (mutually exclusive with --vocab-file)",
-    )
-    parser.add_argument(
-        "--vocab-size",
-        type=int,
-        default=None,
-        help="Vocabulary size for on-the-fly generation (default: from config or 10)",
-    )
-    parser.add_argument(
-        "--damage-prob",
-        type=float,
-        default=None,
-        help="Damage probability (number of gates to knock out) for vocabulary generation (default: from config)",
-    )
-    parser.add_argument(
-        "--vocab-seed",
-        type=int,
-        default=42,
-        help="Random seed for vocabulary generation",
-    )
-    
-    # Static patterns (for single injection mode with static damage modes)
-    parser.add_argument(
-        "--static-patterns-file",
-        type=str,
-        default=None,
-        help="Path to pickle file containing static knockout patterns (for single injection with static damage modes)",
-    )
-    parser.add_argument(
-        "--num-static-patterns",
-        type=int,
-        default=None,
-        help="Number of static patterns to generate on the fly (for single injection with static damage modes)",
-    )
-    
     # Evaluation parameters
     parser.add_argument(
         "--n-message-steps",
@@ -253,8 +162,8 @@ def main():
     parser.add_argument(
         "--periodic-eval-test-seed",
         type=int,
-        default=42,
-        help="Seed for generating OOD patterns",
+        default=None,
+        help="Seed for generating OOD patterns (default: from config)",
     )
     
     # Output parameters
@@ -301,133 +210,36 @@ def main():
     if args.force_reversible and args.force_permanent:
         parser.error("Cannot specify both --force-reversible and --force-permanent")
     
-    # Load config first to get defaults
-    if args.checkpoint:
-        loaded = load_checkpoint(args.checkpoint)
-        config = OmegaConf.create(loaded.get("config", {}))
-    elif args.run_id:
-        config, _, _ = load_config_from_wandb(
-            run_id=args.run_id,
-            filename="latest_checkpoint",
-            select_by_best_metric=False,
-            project=args.project,
-            entity=args.entity,
-        )
-    else:
-        config = None
-    
     # Parse greedy_ordered_indices
     greedy_ordered_indices = None
     if args.greedy_ordered_indices:
         greedy_ordered_indices = [int(x.strip()) for x in args.greedy_ordered_indices.split(",")]
-    elif config:
-        # Try to get from config
-        pool_config = config.get("pool", {})
-        greedy_ordered_indices = pool_config.get("greedy_ordered_indices", None)
-        if greedy_ordered_indices is None:
-            greedy_ordered_indices = config.get("greedy_ordered_indices", None)
-    
-    # Fall back to default if still None
-    if greedy_ordered_indices is None:
-        print(f"Warning: greedy_ordered_indices not found in config, using default")
-        greedy_ordered_indices = DEFAULT_GREEDY_ORDERED_INDICES
-    
-    # Get layer sizes for vocabulary generation
-    layer_sizes = None
-    if config:
-        if config.circuit.layer_sizes is None:
-            from boolean_nca_cc.circuits.model import generate_layer_sizes
-            layer_sizes = generate_layer_sizes(
-                input_n=config.circuit.input_bits,
-                output_n=config.circuit.output_bits,
-                arity=config.circuit.arity,
-                layer_n=config.circuit.num_layers,
+    else:
+        # Try to load config to get defaults
+        config = None
+        if args.checkpoint:
+            loaded = load_checkpoint(args.checkpoint)
+            config = OmegaConf.create(loaded.get("config", {}))
+        elif args.run_id:
+            config, _, _ = load_config_from_wandb(
+                run_id=args.run_id,
+                filename="latest_checkpoint",
+                select_by_best_metric=False,
+                project=args.project,
+                entity=args.entity,
             )
-        else:
-            layer_sizes = config.circuit.layer_sizes
-    
-    # Handle vocabulary/pattern loading
-    knockout_vocabulary = None
-    knockout_patterns = None
-    knockout_config = None
-    
-    if args.trajectory_type == "damage_response":
-        # For multi-damage mode with greedy/greedy_vocabulary, vocabulary is used
-        if args.damage_injection_mode == "multi" and args.damage_mode in ["greedy", "greedy_vocabulary"]:
-            if args.vocab_file:
-                print(f"Loading vocabulary from file: {args.vocab_file}")
-                knockout_vocabulary = load_vocabulary_from_file(args.vocab_file)
-            elif args.generate_vocab or args.vocab_file is None:
-                # Generate on the fly
-                if layer_sizes is None:
-                    parser.error("Cannot generate vocabulary: layer_sizes not available. Provide --vocab-file or ensure config is loaded.")
-                
-                vocab_size = args.vocab_size
-                if vocab_size is None and config:
-                    vocab_size = config.get("pool", {}).get("damage_knockout_diversity", 
-                                                             config.get("pool", {}).get("vocabulary_size", 10))
-                if vocab_size is None:
-                    vocab_size = 10
-                
-                damage_prob = args.damage_prob
-                if damage_prob is None and config:
-                    damage_prob = config.get("pool", {}).get("damage_prob", 10)
-                if damage_prob is None:
-                    damage_prob = 10
-                
-                print(f"Generating vocabulary on the fly: size={vocab_size}, damage_prob={damage_prob}, mode={args.damage_mode}")
-                knockout_vocabulary = generate_vocabulary_on_the_fly(
-                    layer_sizes=layer_sizes,
-                    vocabulary_size=vocab_size,
-                    damage_prob=damage_prob,
-                    damage_mode=args.damage_mode,
-                    greedy_ordered_indices=greedy_ordered_indices,
-                    seed=args.vocab_seed,
-                )
         
-        # For single injection mode or static damage modes, use knockout_patterns
-        elif args.damage_injection_mode == "single" or args.damage_mode in ["shotgun", "strip"]:
-            if args.static_patterns_file:
-                print(f"Loading static patterns from file: {args.static_patterns_file}")
-                knockout_patterns = load_vocabulary_from_file(args.static_patterns_file)
-            elif args.num_static_patterns or args.static_patterns_file is None:
-                # Generate on the fly
-                if layer_sizes is None:
-                    parser.error("Cannot generate patterns: layer_sizes not available. Provide --static-patterns-file or ensure config is loaded.")
-                
-                num_patterns = args.num_static_patterns
-                if num_patterns is None and config:
-                    num_patterns = config.get("pool", {}).get("vocabulary_size", 10)
-                if num_patterns is None:
-                    num_patterns = 10
-                
-                damage_prob = args.damage_prob
-                if damage_prob is None and config:
-                    damage_prob = config.get("pool", {}).get("damage_prob", 10)
-                if damage_prob is None:
-                    damage_prob = 10
-                
-                print(f"Generating static patterns on the fly: num={num_patterns}, damage_prob={damage_prob}, mode={args.damage_mode}")
-                from boolean_nca_cc.training.pool.structural_perturbation import create_reproducible_knockout_pattern
-                from functools import partial
-                
-                pattern_creator_fn = partial(
-                    create_reproducible_knockout_pattern,
-                    layer_sizes=layer_sizes,
-                    damage_prob=damage_prob,
-                )
-                pattern_keys = jax.random.split(jax.random.PRNGKey(args.vocab_seed), num_patterns)
-                knockout_patterns = jax.vmap(pattern_creator_fn)(pattern_keys)
+        if config:
+            # Try to get from config
+            pool_config = config.get("pool", {})
+            greedy_ordered_indices = pool_config.get("greedy_ordered_indices", None)
+            if greedy_ordered_indices is None:
+                greedy_ordered_indices = config.get("greedy_ordered_indices", None)
         
-        # Set knockout_config for OOD pattern generation
-        if not args.no_ood:
-            damage_prob = args.damage_prob
-            if damage_prob is None and config:
-                damage_prob = config.get("pool", {}).get("damage_prob", 10)
-            if damage_prob is None:
-                damage_prob = 10
-            
-            knockout_config = {"damage_prob": damage_prob}
+        # Fall back to default if still None
+        if greedy_ordered_indices is None:
+            print(f"Warning: greedy_ordered_indices not found in config, using default")
+            greedy_ordered_indices = DEFAULT_GREEDY_ORDERED_INDICES
     
     # Determine output path if not provided
     output_path = args.output
@@ -465,10 +277,7 @@ def main():
             print(f"Damage behavior: FORCED PERMANENT")
         else:
             print(f"Damage behavior: from model (auto)")
-        if knockout_vocabulary is not None:
-            print(f"Vocabulary: {len(knockout_vocabulary)} patterns")
-        if knockout_patterns is not None:
-            print(f"Static patterns: {len(knockout_patterns)} patterns")
+        print(f"Note: Vocabulary will be generated from config to match training")
     print(f"Output: {output_path}")
     print("=" * 40)
     
@@ -495,9 +304,6 @@ def main():
         greedy_injection_recover_steps=args.greedy_injection_recover_steps if args.greedy_injection_recover_steps is not None else 10,
         greedy_ordered_indices=greedy_ordered_indices,
         greedy_window_size=args.greedy_window_size if args.greedy_window_size is not None else 1,
-        knockout_vocabulary=knockout_vocabulary,
-        knockout_patterns=knockout_patterns,
-        knockout_config=knockout_config,
         n_message_steps=args.n_message_steps,
         eval_batch_size=args.eval_batch_size,
         periodic_eval_test_seed=args.periodic_eval_test_seed,
