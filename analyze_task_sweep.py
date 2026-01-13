@@ -184,92 +184,90 @@ def analyze_task_sweep(
     
     test_acc_col = 'final_hard_accuracy'
     
-    # Plot 1: Accuracy by task (train vs test) - Bar chart with error bars
-    train_means = []
-    train_stds = []
-    train_counts = []
-    test_means = []
-    test_stds = []
-    test_counts = []
+    # Plot 1: Accuracy by task (train vs test) - Box plots
+    # Collect data for box plots
+    train_data_list = []
+    test_data_list = []
+    train_positions = []
+    test_positions = []
     
-    for task in all_tasks:
+    for i, task in enumerate(all_tasks):
         task_df = df_latest[df_latest['task'] == task]
         
         # Train data
-        if train_acc_col:
+        train_data = None
+        if train_acc_col and train_acc_col in task_df.columns:
             train_data = task_df[train_acc_col].dropna()
-            if len(train_data) > 0:
-                train_means.append(train_data.mean())
-                train_stds.append(train_data.std() if len(train_data) > 1 else 0)
-                train_counts.append(len(train_data))
-            else:
-                train_means.append(np.nan)
-                train_stds.append(0)
-                train_counts.append(0)
         else:
             # Try to get from split='train'
             train_split_df = task_df[task_df['split'] == 'train']
             if len(train_split_df) > 0 and test_acc_col in train_split_df.columns:
                 train_data = train_split_df[test_acc_col].dropna()
-                if len(train_data) > 0:
-                    train_means.append(train_data.mean())
-                    train_stds.append(train_data.std() if len(train_data) > 1 else 0)
-                    train_counts.append(len(train_data))
-                else:
-                    train_means.append(np.nan)
-                    train_stds.append(0)
-                    train_counts.append(0)
-            else:
-                train_means.append(np.nan)
-                train_stds.append(0)
-                train_counts.append(0)
+        
+        if train_data is not None and len(train_data) > 0:
+            train_data_list.append(train_data.values)
+            train_positions.append(i - width/2)
         
         # Test data
         test_split_df = task_df[task_df['split'] == 'test']
         if len(test_split_df) > 0 and test_acc_col in test_split_df.columns:
             test_data = test_split_df[test_acc_col].dropna()
             if len(test_data) > 0:
-                test_means.append(test_data.mean())
-                test_stds.append(test_data.std() if len(test_data) > 1 else 0)
-                test_counts.append(len(test_data))
-            else:
-                test_means.append(np.nan)
-                test_stds.append(0)
-                test_counts.append(0)
-        else:
-            test_means.append(np.nan)
-            test_stds.append(0)
-            test_counts.append(0)
+                test_data_list.append(test_data.values)
+                test_positions.append(i + width/2)
     
-    # Plot bars (only plot if we have data)
-    train_bars = None
-    test_bars = None
+    # Create box plots
+    bp_train = None
+    bp_test = None
     
-    if any(not np.isnan(m) for m in train_means):
-        train_bars = ax_acc.bar(
-            x_pos - width/2,
-            train_means,
-            width,
-            yerr=train_stds,
-            label='Train',
-            color=color_train,
-            alpha=0.8,
-            capsize=5,
-            error_kw={'elinewidth': 1.5}
+    if train_data_list:
+        bp_train = ax_acc.boxplot(
+            train_data_list,
+            positions=train_positions,
+            widths=width * 0.8,
+            patch_artist=True,
+            tick_labels=None,
+            showmeans=True,
+            meanline=False,
+            boxprops=dict(facecolor=color_train, alpha=0.7, linewidth=1.5),
+            medianprops=dict(color='white', linewidth=2),
+            whiskerprops=dict(color=color_train, linewidth=1.5),
+            capprops=dict(color=color_train, linewidth=1.5),
+            flierprops=dict(marker='o', markerfacecolor=color_train, 
+                          markeredgecolor=color_train, markersize=4, alpha=0.5),
+            meanprops=dict(marker='D', markerfacecolor='white', 
+                          markeredgecolor=color_train, markersize=5, markeredgewidth=1.5)
         )
+        # Add label for legend
+        from matplotlib.patches import Rectangle
+        train_patch = Rectangle((0, 0), 1, 1, facecolor=color_train, alpha=0.7, 
+                                edgecolor=color_train, linewidth=1.5)
+        ax_acc.plot([], [], color=color_train, marker='D', linestyle='None', 
+                   markersize=5, markeredgecolor=color_train, 
+                   markerfacecolor='white', markeredgewidth=1.5, label='Train (mean)')
     
-    if any(not np.isnan(m) for m in test_means):
-        test_bars = ax_acc.bar(
-            x_pos + width/2,
-            test_means,
-            width,
-            yerr=test_stds,
-            label='Test',
-            color=color_test,
-            alpha=0.8,
-            capsize=5,
-            error_kw={'elinewidth': 1.5}
+    if test_data_list:
+        bp_test = ax_acc.boxplot(
+            test_data_list,
+            positions=test_positions,
+            widths=width * 0.8,
+            patch_artist=True,
+            tick_labels=None,
+            showmeans=True,
+            meanline=False,
+            boxprops=dict(facecolor=color_test, alpha=0.7, linewidth=1.5),
+            medianprops=dict(color='white', linewidth=2),
+            whiskerprops=dict(color=color_test, linewidth=1.5),
+            capprops=dict(color=color_test, linewidth=1.5),
+            flierprops=dict(marker='o', markerfacecolor=color_test, 
+                          markeredgecolor=color_test, markersize=4, alpha=0.5),
+            meanprops=dict(marker='D', markerfacecolor='white', 
+                          markeredgecolor=color_test, markersize=5, markeredgewidth=1.5)
         )
+        # Add label for legend
+        ax_acc.plot([], [], color=color_test, marker='D', linestyle='None', 
+                   markersize=5, markeredgecolor=color_test, 
+                   markerfacecolor='white', markeredgewidth=1.5, label='Test (mean)')
     
     # Format accuracy subplot
     format_axis(
@@ -277,31 +275,49 @@ def analyze_task_sweep(
         xlabel='Task',
         ylabel='Hard Accuracy',
         xlim=[-0.5, n_tasks - 0.5],
-        ylim=[0, 1.05],
+        ylim=[0.7, 1.05],
         grid=True,
         legend=True,
-        legend_loc='upper right',
+        legend_loc='lower right',
     )
     ax_acc.set_xticks(x_pos)
     ax_acc.set_xticklabels(all_tasks, rotation=45, ha='right')
     ax_acc.set_title('Final Epoch Performance by Task', fontsize=FONT_SIZES['title'])
     
-    # Add count annotations
-    for i, (train_count, test_count) in enumerate(zip(train_counts, test_counts)):
+    # Add count annotations below boxes
+    for i, task in enumerate(all_tasks):
+        task_df = df_latest[df_latest['task'] == task]
+        
+        # Count train samples
+        train_count = 0
+        if train_acc_col and train_acc_col in task_df.columns:
+            train_data = task_df[train_acc_col].dropna()
+            train_count = len(train_data)
+        else:
+            train_split_df = task_df[task_df['split'] == 'train']
+            if len(train_split_df) > 0 and test_acc_col in train_split_df.columns:
+                train_data = train_split_df[test_acc_col].dropna()
+                train_count = len(train_data)
+        
+        # Count test samples
+        test_count = 0
+        test_split_df = task_df[task_df['split'] == 'test']
+        if len(test_split_df) > 0 and test_acc_col in test_split_df.columns:
+            test_data = test_split_df[test_acc_col].dropna()
+            test_count = len(test_data)
+        
         if train_count > 0:
-            ax_acc.text(i - width/2, train_means[i] + train_stds[i] + 0.02, 
-                       f'n={train_count}', ha='center', va='bottom', 
-                       fontsize=8, color=color_train)
+            ax_acc.text(i - width/2, -0.05, f'n={train_count}', 
+                       ha='center', va='top', fontsize=8, color=color_train)
         if test_count > 0:
-            ax_acc.text(i + width/2, test_means[i] + test_stds[i] + 0.02, 
-                       f'n={test_count}', ha='center', va='bottom', 
-                       fontsize=8, color=color_test)
+            ax_acc.text(i + width/2, -0.05, f'n={test_count}', 
+                       ha='center', va='top', fontsize=8, color=color_test)
     
     plt.tight_layout()
     
     # Save plot
     if output_path is None:
-        output_dir = Path("results/visuals")
+        output_dir = Path("reports/figures/multitask")
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"task_sweep_analysis_{sweep_id}.png"
     

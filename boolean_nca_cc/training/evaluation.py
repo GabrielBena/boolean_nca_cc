@@ -878,21 +878,6 @@ def _evaluate_with_loop(
             else step_knockout_patterns
         )
 
-        # DEBUG: Log damage injection timing and pattern counts
-        if jp.any(inject_now_mask):
-            n_injecting = int(jp.sum(inject_now_mask))
-            n_damaged_gates = int(jp.sum(step_knockout_patterns))
-            n_damaged_per_circuit = jp.sum(step_knockout_patterns, axis=1)
-            avg_damaged = float(jp.mean(n_damaged_per_circuit))
-            print(f"  Step {step}: INJECTING damage into {n_injecting}/{batch_size} circuits, "
-                  f"total gates damaged: {n_damaged_gates}, avg per circuit: {avg_damaged:.1f}")
-        elif jp.any(effective_knockout_patterns):
-            # Damage is active but not injecting new damage this step
-            n_active_circuits = int(jp.sum(jp.any(effective_knockout_patterns, axis=1)))
-            n_damaged_gates = int(jp.sum(effective_knockout_patterns))
-            print(f"  Step {step}: Damage ACTIVE in {n_active_circuits}/{batch_size} circuits, "
-                  f"total gates damaged: {n_damaged_gates}")
-
         # DEBUG: Measure pre-update accuracy (after damage bias, before model updates)
         # This captures the "raw damage" impact before the SA model can compensate
         if track_pre_update_accuracy and pre_update_tracking is not None and jp.any(inject_now_mask):

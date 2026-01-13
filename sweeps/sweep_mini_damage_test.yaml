@@ -1,0 +1,49 @@
+# Mini Damage Probability Sweep
+# This sweep tests 2 different damage probabilities with permanent damage
+# Short training run (129 epochs) with frequent evaluation (every 64 epochs)
+# Useful for quick testing of damage recovery capabilities
+
+# Program to run for the sweep (relative to project root where wandb sweep is run)
+program: train.py
+
+# Method for the sweep
+method: grid
+
+# Metric to track (not optimizing, just for comparison)
+metric:
+  goal: maximize
+  name: eval_ko_in/final_hard_accuracy
+
+# Parameters to sweep over
+parameters:
+  # Vary damage probability (number of gates knocked out)
+  pool.damage_prob:
+    values:
+      - 20
+      - 40
+  
+  # Set damage type to permanent
+  model.damage_behavior:
+    value: "permanent"
+  
+  # Training epochs (129 ensures evaluation at epoch 128 when interval=64)
+  training.epochs:
+    value: 129
+  
+  # Periodic evaluation interval
+  eval.periodic_eval_interval:
+    value: 64
+  
+  # Ensure knockout evaluation is enabled
+  pool.damage_pool_enabled:
+    value: true
+  
+  eval.knockout_eval.enabled:
+    value: true
+
+# Add this command block to format arguments correctly for Hydra
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args_no_hyphens}

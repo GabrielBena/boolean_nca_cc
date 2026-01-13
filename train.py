@@ -212,6 +212,48 @@ def main(cfg: DictConfig) -> None:
             group=cfg.wandb.group,
         )
         wandb_run = wandb.run
+    else:
+        wandb_run = None
+    
+    # Save config snapshot to local metrics storage (works with or without WandB)
+    try:
+        from boolean_nca_cc.utils.metrics_storage import save_config_snapshot
+        import time
+        
+        # Get run_id and sweep_id
+        if wandb_run and wandb_run.run:
+            run_id = wandb_run.run.id
+            sweep_id = str(wandb_run.run.sweep_id) if hasattr(wandb_run.run, 'sweep_id') and wandb_run.run.sweep_id else None
+        else:
+            # Generate local run ID if no WandB
+            run_id = f"local_{int(time.time())}"
+            sweep_id = None
+        
+        # Determine model config path from Hydra's config resolution
+        model_config_path = None
+        try:
+            # Hydra stores the source file path in the config's _metadata_
+            if hasattr(cfg.model, '_metadata_') and hasattr(cfg.model._metadata_, 'source_file'):
+                model_config_path = cfg.model._metadata_.source_file
+            else:
+                # Fallback: try to infer from model type
+                model_type = cfg.model.get("type", None)
+                if model_type:
+                    potential_path = f"configs/model/{model_type}.yaml"
+                    if os.path.exists(potential_path):
+                        model_config_path = potential_path
+        except Exception:
+            pass  # Will skip model config if we can't find it
+        
+        save_config_snapshot(
+            cfg=cfg,
+            run_id=run_id,
+            metrics_dir="results/metrics",
+            sweep_id=sweep_id,
+            model_config_path=model_config_path,
+        )
+    except Exception as e:
+        log.warning(f"Failed to save config snapshot: {e}")
 
     # Generate circuit layer sizes
     input_n, output_n = cfg.circuit.input_bits, cfg.circuit.output_bits

@@ -1,9 +1,20 @@
 #!/bin/bash
 
-# This script launches 5 W&B agents in parallel on different GPUs
+# This script launches W&B agents in parallel on different GPUs
 # for the specified sweep.
+#
+# Usage: ./sweeps/sweep.sh [SWEEP_ID]
+# If no SWEEP_ID is provided, uses the default hardcoded one
 
-SWEEP_ID="marcello-barylli-growai/boolean-nca-cc/h3ltucx9"
+# Use provided sweep ID or default
+INPUT_ID="${1:-marcello-barylli-growai/boolean_nca_cc/t3rb9jjg}"
+
+# If input doesn't contain '/', assume it's just the short ID and construct full path
+if [[ "$INPUT_ID" != *"/"* ]]; then
+    SWEEP_ID="marcello-barylli-growai/boolean_nca_cc/$INPUT_ID"
+else
+    SWEEP_ID="$INPUT_ID"
+fi
 
 echo "Starting agents for sweep: $SWEEP_ID"
 
@@ -19,4 +30,4 @@ CUDA_VISIBLE_DEVICES=3 wandb agent $SWEEP_ID &
 # CUDA_VISIBLE_DEVICES=6 wandb agent $SWEEP_ID &
 # CUDA_VISIBLE_DEVICES=7 wandb agent $SWEEP_ID &
 
-echo " agents launched in the background."
+echo "4 agents launched in the background."

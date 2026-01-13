@@ -24,33 +24,48 @@ parameters:
       - 123
       - 456
       - 789
+
+  # set input split to true
+  eval.input_split_enabled:
+    value: true
   
   # Vary the boolean circuit task
   circuit.task:
     values:
-      - "add"              # Binary addition
-      - "xor"              # Bitwise XOR
       # - "parity"           # Parity (odd/even number of 1s)
-      - "binary_multiply"  # Binary multiplication
+      - "reverse"          # Reverse bits
       - "and"              # Bitwise AND
+      - "xor"              # Bitwise XOR
+      - "add"              # Binary addition
+      - "binary_multiply"  # Binary multiplication
       # Uncomment additional tasks if desired:
       # - "identity"        # Identity function
-      - "reverse"         # Reverse bits
       # - "copy"            # Copy (same as identity)
       # - "gray"            # Gray code conversion
       # - "popcount"        # Population count (count 1s)
+
+      
   
   # Ensure stepwise logging is enabled for statistical aggregation
   eval.periodic_eval_log_stepwise:
     value: true
   
-  # Ensure no-damage evaluation runs (disable knockout eval)
+  # DISABLE ALL DAMAGE-RELATED SETTINGS
+  # Disable damage during training (pool damage)
   pool.damage_pool_enabled:
     value: false
   
-  # Ensure input split is enabled for train/test comparison
-  eval.input_split_enabled:
-    value: true
+  # Explicitly disable knockout evaluation (damage testing)
+  eval.knockout_eval.enabled:
+    value: false
+  
+  # Use growth mode instead of repair mode (repair mode is for damage recovery)
+  training.training_mode:
+    value: "growth"
+  
+  # Disable backprop knockout vocabulary (if backprop is enabled)
+  backprop.knockout_vocabulary.enabled:
+    value: false
 
 # Add this command block to format arguments correctly for Hydra
 command:

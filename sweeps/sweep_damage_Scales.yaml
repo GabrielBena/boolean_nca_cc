@@ -2,9 +2,6 @@
 # This sweep varies damage_prob to test how different damage scales affect model performance
 # and recovery capabilities.
 
-# WandB project name (WandB normalizes hyphens/underscores, but we specify explicitly)
-project: boolean-nca-cc
-
 # Program to run for the sweep (relative to project root where wandb sweep is run)
 program: train.py
 
@@ -20,16 +17,10 @@ metric:
 parameters:
   pool.damage_prob:
     values:
-      - 1
       - 10
       - 20
       - 40
       - 60
-      - 80
-      - 120
-      - 140
-      - 160
-
 # Add this command block to format arguments correctly for Hydra
 command:
   - ${env}

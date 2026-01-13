@@ -60,6 +60,8 @@ from boolean_nca_cc.analysis.hamming_utils import (
     _active_gate_mask_from_knockout,
     _hamming_distance_tables,
 )
+from boolean_nca_cc.analysis.visualization import plot_combined_bp_sa_stepwise_performance
+
 # Optional imports for visualization - imported lazily when needed
 # These are only used conditionally and may not be available in all environments
 import json
@@ -188,6 +190,7 @@ def run_knockout_periodic_evaluation(
     layer_neighbors: bool = False,
     metric_suffix: str = "",  # Suffix for metric names (e.g., "_train" for train data eval)
     blind_mode: bool = False,  # If True, zero out loss feedback (ablation study)
+    input_split_enabled: bool = False,  # Whether input split is enabled (for input_split metadata)
 ) -> Tuple[Dict, List]:  # Return both results and updated accumulated data
     """
     Run periodic evaluation on circuits with persistent knockouts using vocabulary-based sampling.
@@ -359,6 +362,11 @@ def run_knockout_periodic_evaluation(
             f"eval_ko_out{metric_suffix}/epoch": epoch,
         }
         
+        # Calculate and add standard deviation for eval_ko_out/hard_accuracy
+        if "per_pattern" in step_metrics_out:
+            final_hard_accuracies_out = step_metrics_out["per_pattern"]["pattern_hard_accuracies"][-1]
+            hard_acc_std = float(jp.std(final_hard_accuracies_out))
+            final_metrics_out[f"eval_ko_out{metric_suffix}/final_hard_accuracy_std"] = hard_acc_std
 
             
                     # Add new pattern data to accumulated data for persistent scatter plot
@@ -508,6 +516,14 @@ def run_knockout_periodic_evaluation(
                         f"eval_ko_in{metric_suffix}_steps/full_map_accuracy": step_metrics_in["full_map_accuracy"][step_idx],
                         f"eval_ko_in{metric_suffix}_steps/epoch": epoch,
                     }
+                    
+                    # Calculate and add standard deviation for eval_ko_in/hard_accuracy at this step
+                    if "per_pattern" in step_metrics_in:
+                        if step_idx < len(step_metrics_in["per_pattern"]["pattern_hard_accuracies"]):
+                            step_hard_accuracies_in = step_metrics_in["per_pattern"]["pattern_hard_accuracies"][step_idx]
+                            hard_acc_std = float(jp.std(step_hard_accuracies_in))
+                            log_dict[f"eval_ko_in{metric_suffix}_steps/hard_accuracy_std"] = hard_acc_std
+                    
                     # DEBUG: Add damage validation metrics if available
                     if "damaged_node_avg_change" in step_metrics_in and step_idx < len(step_metrics_in["damaged_node_avg_change"]):
                         log_dict[f"eval_ko_in{metric_suffix}_steps/damaged_node_avg_change"] = step_metrics_in["damaged_node_avg_change"][step_idx]
@@ -524,6 +540,14 @@ def run_knockout_periodic_evaluation(
                         f"eval_ko_out{metric_suffix}_steps/full_map_accuracy": step_metrics_out["full_map_accuracy"][step_idx],
                         f"eval_ko_out{metric_suffix}_steps/epoch": epoch,
                     }
+                    
+                    # Calculate and add standard deviation for eval_ko_out/hard_accuracy at this step
+                    if "per_pattern" in step_metrics_out:
+                        if step_idx < len(step_metrics_out["per_pattern"]["pattern_hard_accuracies"]):
+                            step_hard_accuracies_out = step_metrics_out["per_pattern"]["pattern_hard_accuracies"][step_idx]
+                            hard_acc_std = float(jp.std(step_hard_accuracies_out))
+                            log_dict[f"eval_ko_out{metric_suffix}_steps/hard_accuracy_std"] = hard_acc_std
+                    
                     # DEBUG: Add damage validation metrics if available
                     if "damaged_node_avg_change" in step_metrics_out and step_idx < len(step_metrics_out["damaged_node_avg_change"]):
                         log_dict[f"eval_ko_out{metric_suffix}_steps/damaged_node_avg_change"] = step_metrics_out["damaged_node_avg_change"][step_idx]
@@ -541,6 +565,128 @@ def run_knockout_periodic_evaluation(
             f"Acc={final_metrics_out[f'eval_ko_out{metric_suffix}/final_accuracy']:.4f}, "
             f"Hard Acc={final_metrics_out[f'eval_ko_out{metric_suffix}/final_hard_accuracy']:.4f}"
         )
+
+        # Save metrics locally with metadata
+        try:
+            from boolean_nca_cc.utils.metrics_storage import save_eval_metrics_locally, save_stepwise_metrics_locally
+            import time
+            
+            # Get run ID and sweep_id
+            sweep_id = None
+            if wandb_run and hasattr(wandb_run, 'run') and wandb_run.run:
+                run_id = wandb_run.run.id
+                if hasattr(wandb_run.run, 'sweep_id') and wandb_run.run.sweep_id:
+                    sweep_id = str(wandb_run.run.sweep_id)
+            else:
+                run_id = f"local_{int(time.time())}"
+            
+            # Extract task and other config from wandb_run if available
+            task = None
+            if wandb_run:
+                try:
+                    if hasattr(wandb_run, 'config') and wandb_run.config:
+                        config = wandb_run.config if isinstance(wandb_run.config, dict) else dict(wandb_run.config)
+                        circuit_config = config.get("circuit", {})
+                        if isinstance(circuit_config, dict):
+                            task = circuit_config.get("task")
+                except Exception:
+                    pass  # Fallback to None if config access fails
+            
+            # Get damage metadata from knockout_config
+            damage_prob = knockout_config.get("damage_prob", None)
+            damage_mode = knockout_config.get("damage_mode", None)
+            damage_injection_mode = knockout_config.get("damage_injection_mode", None)
+            
+            # Get damage_type from model (defaults to "permanent" if not set)
+            damage_type = getattr(model, "damage_behavior", "permanent")
+            
+            # Determine split (test vs train) from metric_suffix
+            split = "test" if metric_suffix == "" else "train"
+            
+            # Determine input_split: when input_split_enabled, test=unseen, train=seen
+            input_split_val = None
+            if input_split_enabled:
+                input_split_val = "unseen" if metric_suffix == "" else "seen"
+            
+            # Save IN-distribution (seen damage patterns) metrics
+            save_eval_metrics_locally(
+                metrics=final_metrics_in,
+                epoch=epoch,
+                split=split,
+                run_id=run_id,
+                sweep_id=sweep_id,
+                metrics_dir="results/metrics",
+                format="jsonl",
+                task=task,
+                training_mode=training_mode,
+                damage_prob=damage_prob,
+                damage_type=damage_type,
+                damage_mode=damage_mode,
+                damage_injection_mode=damage_injection_mode,
+                                    eval_type="ko_in",  # Seen damage patterns
+                                    input_split=input_split_val,
+            )
+            
+            # Save OUT-of-distribution (unseen damage patterns) metrics
+            save_eval_metrics_locally(
+                metrics=final_metrics_out,
+                epoch=epoch,
+                split=split,
+                run_id=run_id,
+                sweep_id=sweep_id,
+                metrics_dir="results/metrics",
+                format="jsonl",
+                task=task,
+                training_mode=training_mode,
+                damage_prob=damage_prob,
+                damage_type=damage_type,
+                damage_mode=damage_mode,
+                damage_injection_mode=damage_injection_mode,
+                eval_type="ko_out",  # Unseen damage patterns
+                input_split=input_split_val,
+            )
+            
+            # Save stepwise metrics if enabled
+            if log_stepwise and step_metrics_in and step_metrics_out:
+                # Save stepwise metrics for IN-distribution
+                save_stepwise_metrics_locally(
+                    step_metrics=step_metrics_in,
+                    epoch=epoch,
+                    split=split,
+                    run_id=run_id,
+                    sweep_id=sweep_id,
+                    metrics_dir="results/metrics",
+                    format="jsonl",
+                    task=task,
+                    training_mode=training_mode,
+                    damage_prob=damage_prob,
+                    damage_type=damage_type,
+                    damage_mode=damage_mode,
+                    damage_injection_mode=damage_injection_mode,
+                    eval_type="ko_in",
+                    input_split=input_split_val,
+                )
+                
+                # Save stepwise metrics for OUT-of-distribution
+                save_stepwise_metrics_locally(
+                    step_metrics=step_metrics_out,
+                    epoch=epoch,
+                    split=split,
+                    run_id=run_id,
+                    sweep_id=sweep_id,
+                    metrics_dir="results/metrics",
+                    format="jsonl",
+                    task=task,
+                    training_mode=training_mode,
+                    damage_prob=damage_prob,
+                    damage_type=damage_type,
+                    damage_mode=damage_mode,
+                    damage_injection_mode=damage_injection_mode,
+                    eval_type="ko_out",
+                    input_split=input_split_val,
+                )
+        except Exception as e:
+            log.warning(f"Failed to save knockout metrics locally: {e}")
 
         return {
             "final_metrics_in": final_metrics_in,
@@ -1655,6 +1801,7 @@ def train_model(
                         bp_hamming_summary=bp_hamming_summary,
                         layer_neighbors=layer_neighbors,
                         metric_suffix="",  # Default metrics for test data
+                        input_split_enabled=input_split_enabled,  # Pass input split flag
                     )
                     # Extract final metrics for best model tracking
                     if ko_eval_results and "final_metrics_in" in ko_eval_results:
@@ -1693,6 +1840,7 @@ def train_model(
                             bp_hamming_summary=None,
                             layer_neighbors=layer_neighbors,
                             metric_suffix="_train",  # Train data metrics: eval_ko_in_train/*, eval_ko_out_train/*
+                            input_split_enabled=input_split_enabled,  # Pass input split flag
                         )
                         # Also add train metrics to all_eval_metrics
                         if ko_eval_results_train and "final_metrics_in" in ko_eval_results_train:
@@ -1767,7 +1915,7 @@ def train_model(
                         # Save metrics locally for reliable data access (avoids WandB step grouping issues)
                         # This replaces the need for raw metrics in WandB
                         try:
-                            from boolean_nca_cc.utils.metrics_storage import save_eval_metrics_locally
+                            from boolean_nca_cc.utils.metrics_storage import save_eval_metrics_locally, save_stepwise_metrics_locally
                             import time
                             # Get run ID and sweep_id: wandb_run is the wandb module, so use wandb.run.id
                             sweep_id = None
@@ -1779,13 +1927,32 @@ def train_model(
                             else:
                                 run_id = f"local_{int(time.time())}"
                             
-                            # Extract task from wandb_run_config if available
+                            # Extract task and config from wandb_run_config or wandb_run
                             task = None
                             if wandb_run_config and isinstance(wandb_run_config, dict):
                                 circuit_config = wandb_run_config.get("circuit", {})
                                 if isinstance(circuit_config, dict):
                                     task = circuit_config.get("task")
+                            elif wandb_run:
+                                try:
+                                    if hasattr(wandb_run, 'config') and wandb_run.config:
+                                        config = wandb_run.config if isinstance(wandb_run.config, dict) else dict(wandb_run.config)
+                                        circuit_config = config.get("circuit", {})
+                                        if isinstance(circuit_config, dict):
+                                            task = circuit_config.get("task")
+                                except Exception:
+                                    pass
                             
+                            # Get damage_type from model (defaults to "permanent" if not set)
+                            damage_type = getattr(model, "damage_behavior", "permanent")
+                            
+                            # Determine input_split: when input_split_enabled, test=unseen, train=seen
+                            # metric_suffix="" means test data, "_train" means train data
+                            input_split_val = None
+                            if input_split_enabled:
+                                input_split_val = "unseen" if metric_suffix == "" else "seen"
+                            
+                            # Save final metrics
                             save_eval_metrics_locally(
                                 metrics=final_metrics,
                                 epoch=epoch,
@@ -1794,8 +1961,29 @@ def train_model(
                                 sweep_id=sweep_id,
                                 metrics_dir="results/metrics",
                                 format="jsonl",
-                                task=task
+                                task=task,
+                                training_mode=training_mode,
+                                damage_type=damage_type,
+                                eval_type="no_damage",
+                                input_split=input_split_val,
                             )
+                            
+                            # Save stepwise metrics if enabled
+                            if periodic_eval_log_stepwise and step_metrics:
+                                save_stepwise_metrics_locally(
+                                    step_metrics=step_metrics,
+                                    epoch=epoch,
+                                    split="test" if metric_suffix == "" else "train",
+                                    run_id=run_id,
+                                    sweep_id=sweep_id,
+                                    metrics_dir="results/metrics",
+                                    format="jsonl",
+                                    task=task,
+                                    training_mode=training_mode,
+                                    damage_type=damage_type,
+                                    eval_type="no_damage",
+                                    input_split=input_split_val,
+                                )
                         except Exception as e:
                             log.warning(f"Failed to save metrics locally: {e}")
                         
@@ -2100,155 +2288,37 @@ def train_model(
             # Create Figure 3 with BP reference line (show_bp_trajectory=False)
             # Reuse bp_results from Figure 1 if available, otherwise compute new ones
             # Use test data for evaluation/plotting (training is complete)
-            try:
-                # Try direct import first (works when project root is in path)
-                from experiments.visualization.plot_trajectory import (
-                    plot_inner_loop_trajectory,
-                    build_evaluation_params,
-                    run_sa_evaluation,
-                    generate_ood_patterns,
-                )
-                from boolean_nca_cc.training.evaluation import (
-                    evaluate_model_stepwise_batched,
-                    get_loss_from_wires_logits,
-                )
-            except ImportError:
-                # Fallback: add project root to path if direct import fails
-                try:
-                    import sys
-                    import os as os_module
-                    project_root = os_module.path.dirname(os_module.path.dirname(os_module.path.dirname(__file__)))
-                    if project_root not in sys.path:
-                        sys.path.insert(0, project_root)
-                    from experiments.visualization.plot_trajectory import (
-                        plot_inner_loop_trajectory,
-                        build_evaluation_params,
-                        run_sa_evaluation,
-                        generate_ood_patterns,
-                    )
-                    from boolean_nca_cc.training.evaluation import (
-                        evaluate_model_stepwise_batched,
-                        get_loss_from_wires_logits,
-                    )
-                except ImportError as e:
-                    log.warning(f"Could not import trajectory plotting functions: {e}. Skipping figure generation.")
-                    plot_inner_loop_trajectory = None
-            
-            if plot_inner_loop_trajectory is not None:
-                # Extract parameters from knockout_eval config
-                damage_mode = knockout_eval.get("damage_mode", "greedy")
-                damage_injection_mode = knockout_eval.get("damage_injection_mode", "multi")
-                max_damage_per_circuit = int(knockout_eval.get("max_damage_per_circuit", 10))
-                greedy_window_size = int(knockout_eval.get("greedy_window_size", 1))
-                greedy_injection_recover_steps = int(knockout_eval.get("greedy_injection_recover_steps", 10))
-                damage_start_offset = int(knockout_eval.get("damage_start_offset", 0))
-                damage_start_offset_random = knockout_eval.get("damage_start_offset_random", False)
-                damage_start_offset_seed = int(knockout_eval.get("damage_start_offset_seed", 42))
-                
-                # Determine batch size and evaluation approach based on damage mode
-                if damage_mode in ["greedy", "greedy_vocabulary"] and damage_injection_mode == "multi":
-                    if damage_mode == "greedy" and greedy_ordered_indices is None:
-                        log.warning("greedy_ordered_indices is None but required for damage_mode='greedy'. Skipping figure generation.")
-                        plot_inner_loop_trajectory = None
-                    else:
-                        eval_batch_size = max(10, len(knockout_vocabulary) if knockout_vocabulary is not None else 10)
-                        knockout_patterns_for_eval = None
-                else:
-                    if knockout_vocabulary is None:
-                        log.warning("knockout_vocabulary is None but required for static damage modes. Skipping figure generation.")
-                        plot_inner_loop_trajectory = None
-                    else:
-                        eval_batch_size = len(knockout_vocabulary)
-                        knockout_patterns_for_eval = knockout_vocabulary
-                
-                if plot_inner_loop_trajectory is not None:
-                    # Build evaluation parameters
-                    eval_params = build_evaluation_params(
-                        model=result["model"],
-                        x_data=x_test,
-                        y_data=y_test,
-                        input_n=input_n,
-                        arity=arity,
-                        circuit_hidden_dim=circuit_hidden_dim,
-                        n_message_steps=periodic_eval_inner_steps,
-                        loss_type=loss_type,
-                        layer_sizes=layer_sizes,
-                        layer_neighbors=layer_neighbors,
-                        return_per_pattern=True,
-                        damage_mode=damage_mode,
-                        damage_injection_mode=damage_injection_mode,
-                        max_damage_per_circuit=max_damage_per_circuit,
-                        greedy_ordered_indices=greedy_ordered_indices,
-                        greedy_window_size=greedy_window_size,
-                        greedy_injection_recover_steps=greedy_injection_recover_steps,
-                        damage_start_offset=damage_start_offset,
-                        damage_start_offset_random=damage_start_offset_random,
-                        damage_start_offset_seed=damage_start_offset_seed,
-                        knockout_vocabulary=knockout_vocabulary,
-                    )
-                    
-                    # Run SA evaluation on IN-distribution patterns
-                    base_wires, base_logits = knockout_eval_base_circuit
-                    sa_step_metrics_in = run_sa_evaluation(
-                        eval_fn=evaluate_model_stepwise_batched,
-                        base_wires=base_wires,
-                        base_logits=base_logits,
-                        knockout_patterns=knockout_patterns_for_eval,
-                        target_chunk_size=eval_batch_size,
-                        eval_params=eval_params,
-                    )
-                    
-                    # Run SA evaluation on OUT-of-distribution patterns if requested
-                    sa_step_metrics_out = None
-                    if knockout_eval is not None:
-                        if damage_mode in ["greedy", "greedy_vocabulary"] and damage_injection_mode == "multi":
-                            ood_knockout_patterns = None
-                            ood_batch_size = eval_batch_size
-                        else:
-                            ood_knockout_patterns = generate_ood_patterns(
-                                knockout_patterns=knockout_vocabulary,
-                                layer_sizes=layer_sizes,
-                                damage_prob=knockout_eval["damage_prob"],
-                                periodic_eval_test_seed=periodic_eval_test_seed,
-                            )
-                            ood_batch_size = len(ood_knockout_patterns)
-                        
-                        # Build OOD evaluation parameters (force unseen by not providing vocabulary)
-                        ood_eval_params = eval_params.copy()
-                        ood_eval_params['knockout_vocabulary'] = None
-                        
-                        # Run SA evaluation on OOD patterns
-                        sa_step_metrics_out = run_sa_evaluation(
-                            eval_fn=evaluate_model_stepwise_batched,
-                            base_wires=base_wires,
-                            base_logits=base_logits,
-                            knockout_patterns=ood_knockout_patterns,
-                            target_chunk_size=ood_batch_size,
-                            eval_params=ood_eval_params,
-                        )
-                    
-                    # Get pre-damage accuracy
-                    _, base_aux = get_loss_from_wires_logits(base_logits, base_wires, x_test, y_test, loss_type)
-                    pre_damage_accuracy = float(base_aux[4])
-                    
-                    # Plot damage response trajectory
-                    fig3 = plot_inner_loop_trajectory(
-                        trajectory_type="damage_response",
-                        sa_step_metrics_in=sa_step_metrics_in,
-                        sa_step_metrics_out=sa_step_metrics_out,
-                        bp_results=bp_results,  # Reuse BP results from Figure 1 (not shown when show_bp_trajectory=False)
-                        show_bp_trajectory=False,  # Figure 3 mode: BP as reference line
-                        show_ood_trajectory=True,  # Enable OOD trajectory plotting
-                        damage_injection_mode=damage_injection_mode,
-                        damage_start_offset=damage_start_offset,
-                        max_damage_per_circuit=max_damage_per_circuit,
-                        greedy_injection_recover_steps=greedy_injection_recover_steps,
-                        training_mode=training_mode,
-                        pre_damage_accuracy=pre_damage_accuracy,
-                        output_path=None,
-                        title=None,
-                        figsize=None,
-                    )
+            fig3 = plot_combined_bp_sa_stepwise_performance(
+                cfg=mock_cfg,
+                x_data=x_test,
+                y_data=y_test,
+                loss_type=loss_type,
+                knockout_patterns=knockout_vocabulary,
+                model=result["model"],
+                base_circuit=knockout_eval_base_circuit,
+                n_message_steps=periodic_eval_inner_steps,
+                layer_sizes=layer_sizes,
+                input_n=input_n,
+                arity=arity,
+                circuit_hidden_dim=circuit_hidden_dim,
+                bp_results=bp_results,  # Reuse BP results from Figure 1
+                show_bp_trajectory=False,  # Figure 3 mode: BP as reference line
+                periodic_eval_test_seed=periodic_eval_test_seed,
+                knockout_config=knockout_eval,
+                show_ood_trajectory=True,  # Enable OOD trajectory plotting
+                # Multi-damage support parameters
+                damage_mode=knockout_eval.get("damage_mode", "greedy"),
+                damage_injection_mode=knockout_eval.get("damage_injection_mode", "multi"),
+                max_damage_per_circuit=int(knockout_eval.get("max_damage_per_circuit", 10)),
+                greedy_ordered_indices=greedy_ordered_indices,
+                greedy_window_size=int(knockout_eval.get("greedy_window_size", 1)),
+                greedy_injection_recover_steps=int(knockout_eval.get("greedy_injection_recover_steps", 10)),
+                damage_start_offset=int(knockout_eval.get("damage_start_offset", 0)),
+                damage_start_offset_random=knockout_eval.get("damage_start_offset_random", False),
+                damage_start_offset_seed=int(knockout_eval.get("damage_start_offset_seed", 42)),
+                knockout_vocabulary=knockout_vocabulary,
+                training_mode=training_mode,  # Add this line
+            )
             
             # Save Figure 3 locally
             fig3_path = f"reports/figures/damage_recovery_trajectories_{training_mode}.png"
