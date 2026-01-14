@@ -68,7 +68,7 @@ def plot_accuracy_vs_distance(
     ax.set_title('Circuit Performance vs Perturbation Response', fontsize=20)
     ax.tick_params(axis='both', which='major', labelsize=16)
     ax.grid(True, alpha=0.3)
-    ax.set_ylim(0.6, 1.02)
+    ax.set_ylim(0.97, 1.02)
     
     plt.tight_layout()
     plt.savefig(output_path, dpi=dpi, bbox_inches='tight')
@@ -84,7 +84,8 @@ def plot_damage_size_vs_hamming(
     dpi: int = 300,
     color_by_method: bool = True,
     baseline_accuracy: Optional[float] = None,
-    baseline_loss: Optional[float] = None
+    baseline_loss: Optional[float] = None,
+    ylim_max: Optional[float] = None
 ) -> str:
     """
     Create line plot with error bars of damage size (knockout_size) vs hamming distance.
@@ -191,7 +192,144 @@ def plot_damage_size_vs_hamming(
     # Customize plot
     ax.set_xlabel(f'{damage_type} Damage Size', fontsize=18)
     ax.set_ylabel('Hamming Distance (Mean per Gate)', fontsize=18)
-    ax.set_ylim(0, 0.325)
+    ylim_upper = ylim_max if ylim_max is not None else 0.325
+    ax.set_ylim(0, ylim_upper)
+    ax.tick_params(axis='both', which='major', labelsize=16)
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=dpi, bbox_inches='tight')
+    plt.close()
+    
+    return output_path
+
+
+def plot_damage_size_vs_accuracy(
+    summary_df: pd.DataFrame,
+    output_path: str,
+    figsize: tuple = (8, 6),
+    dpi: int = 300,
+    color_by_method: bool = True,
+    baseline_accuracy: Optional[float] = None,
+    baseline_loss: Optional[float] = None
+) -> str:
+    """
+    Create line plot with error bars of damage size (knockout_size) vs hard accuracy.
+    Shows trendlines with error bars, colored by method (GNN vs BP): red for GNN, blue for BP.
+    
+    Args:
+        summary_df: DataFrame with knockout results (must have 'knockout_size', 
+                   'final_hard_accuracy', and 'method' columns)
+        output_path: Path to save the plot image
+        figsize: Figure dimensions
+        dpi: Image resolution
+        color_by_method: Whether to color lines by method (GNN vs BP)
+        baseline_accuracy: Optional baseline accuracy to plot as horizontal reference line
+        baseline_loss: Optional baseline loss (unused, kept for compatibility)
+    
+    Returns:
+        Path to saved image file
+    """
+    required_cols = ['knockout_size', 'final_hard_accuracy']
+    missing_cols = [col for col in required_cols if col not in summary_df.columns]
+    if missing_cols:
+        raise ValueError(f"DataFrame must contain columns: {missing_cols}")
+    
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    
+    if color_by_method and 'method' in summary_df.columns:
+        # Group by knockout_size and method, calculate mean and std
+        grouped = summary_df.groupby(['knockout_size', 'method'])['final_hard_accuracy'].agg(['mean', 'std', 'count']).reset_index()
+        
+        # Plot each method separately with different colors and markers
+        # Matching standard: GNN = red, BP = blue (from plot_accuracy_vs_distance)
+        for method, color, marker in [
+            ('gnn', 'red', 'o'), 
+            ('bp', 'blue', 's')
+        ]:
+            method_data = grouped[grouped['method'] == method]
+            if len(method_data) > 0:
+                # Sort by knockout_size for proper line plotting
+                method_data = method_data.sort_values('knockout_size')
+                
+                x_coords = method_data['knockout_size'].values
+                y_means = method_data['mean'].values
+                y_stds = method_data['std'].values
+                
+                # Fill NaN std values with 0 (happens when only one data point)
+                y_stds = np.nan_to_num(y_stds, nan=0.0)
+                
+                # Plot line with markers
+                ax.plot(x_coords, y_means, 
+                       color=color,
+                       marker=marker,
+                       markersize=8,
+                       linewidth=2,
+                       label=method.upper(),
+                       alpha=0.9)
+                
+                # Add error bars
+                ax.errorbar(x_coords, y_means, yerr=y_stds,
+                           color=color,
+                           alpha=0.5,
+                           capsize=4,
+                           capthick=1.5,
+                           linestyle='None',
+                           elinewidth=1.5)
+        
+        # Add legend
+        ax.legend(loc='best', fontsize=16)
+    else:
+        # Fallback: group by knockout_size only
+        grouped = summary_df.groupby('knockout_size')['final_hard_accuracy'].agg(['mean', 'std']).reset_index()
+        grouped = grouped.sort_values('knockout_size')
+        
+        x_coords = grouped['knockout_size'].values
+        y_means = grouped['mean'].values
+        y_stds = grouped['std'].values
+        y_stds = np.nan_to_num(y_stds, nan=0.0)
+        
+        ax.plot(x_coords, y_means, 
+               marker='o',
+               markersize=8,
+               linewidth=2,
+               alpha=0.9)
+        
+        ax.errorbar(x_coords, y_means, yerr=y_stds,
+                   alpha=0.5,
+                   capsize=4,
+                   capthick=1.5,
+                   linestyle='None',
+                   elinewidth=1.5)
+    
+    # Add baseline accuracy as horizontal reference line if provided
+    if baseline_accuracy is not None:
+        ax.axhline(y=baseline_accuracy, 
+                  color='gray', 
+                  linestyle='--', 
+                  linewidth=1.5, 
+                  alpha=0.7, 
+                  label=f'Baseline ({baseline_accuracy:.3f})')
+        if not (color_by_method and 'method' in summary_df.columns):
+            ax.legend(loc='best', fontsize=16)
+    
+    # Determine damage behavior type from dataframe
+    damage_behavior = None
+    if 'damage_behavior' in summary_df.columns:
+        damage_behavior_values = summary_df['damage_behavior'].unique()
+        if len(damage_behavior_values) > 0:
+            damage_behavior = damage_behavior_values[0]
+    
+    # Capitalize first letter for label
+    if damage_behavior:
+        damage_type = damage_behavior.capitalize()
+    else:
+        damage_type = "Damage"  # Fallback
+    
+    # Customize plot
+    ax.set_xlabel(f'{damage_type} Damage Size', fontsize=18)
+    ax.set_ylabel('Final Hard Accuracy', fontsize=18)
+    ax.set_ylim(0.97, 1.02)
     ax.tick_params(axis='both', which='major', labelsize=16)
     ax.grid(True, alpha=0.3)
     

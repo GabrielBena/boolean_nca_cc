@@ -1,0 +1,172 @@
+program: train.py
+method: grid
+metric:
+  name: eval_ko_in/final_hard_accuracy
+  goal: maximize
+
+parameters:
+  eval:
+    value:
+      blind_mode: true
+      knockout_eval:
+        enabled: true
+        damage_mode: shotgun
+        damage_prob: 40
+        greedy_window_size: 40
+        damage_start_offset: 15
+        damage_injection_mode: single
+        max_damage_per_circuit: 1
+        damage_start_offset_seed: 14
+        damage_start_offset_random: false
+        greedy_injection_recover_steps: 30
+      input_split_seed: 14
+      final_eval_enabled: true
+      input_split_enabled: false
+      hamming_analysis_dir: results/hamming_analysis_mbs64_div256_dam40
+      input_train_fraction: 0.8
+      periodic_eval_enabled: true
+      final_eval_inner_steps: 200
+      periodic_eval_interval: 1024
+      periodic_eval_test_seed: 14
+      periodic_eval_batch_size: 256
+      periodic_eval_inner_steps: 200
+      periodic_eval_log_stepwise: true
+      track_pool_damage_validation: false
+
+  pool:
+    value:
+      size: 1024
+      damage_mode: shotgun
+      damage_prob: 40
+      reset_fraction: 0.15
+      reset_interval: 128
+      reset_strategy: combined
+      damage_strategy: loss_biased
+      combined_weights: [0.5, 0.5]
+      damage_eval_steps: 200
+      greedy_window_size: 40
+      damage_pool_enabled: true
+      damage_pool_fraction: 0.15
+      damage_pool_interval: 128
+      damage_injection_mode: multi
+      greedy_ordered_indices: [53, 12, 167, 31, 67, 46, 69]
+      max_damage_per_circuit: 20
+      damage_combined_weights: [0.5, 0.5]
+      damage_knockout_diversity: 256
+
+  seed:
+    value: 14
+
+  model:
+    value:
+      type: self_attention
+      mlp_dim: null
+      _target_: boolean_nca_cc.models.CircuitSelfAttention
+      num_heads: 4
+      zero_init: false
+      num_layers: 3
+      dropout_rate: 0
+      attention_dim: 128
+      re_zero_update: true
+      damage_behavior: reversible
+      reversible_bias: -10
+      circuit_hidden_dim: 64
+      mlp_dim_multiplier: 2
+
+  wandb:
+    value:
+      tags: [boolean-circuit, nca, meta-learning]
+      group: null
+      entity: marcello-barylli-growai
+      enabled: true
+      project: boolean-nca-cc
+      run_name: null
+
+  output:
+    value:
+      dir: null
+
+  circuit:
+    value:
+      task: add
+      arity: 4
+      input_bits: 8
+      num_layers: 3
+      layer_sizes: null
+      output_bits: 8
+      max_task_samples: 100000
+      circuit_hidden_dim: 64
+
+  logging:
+    value:
+      level: INFO
+      log_interval: 16
+
+  n_nodes:
+    value: 176
+
+  backprop:
+    value:
+      beta1: 0.8
+      beta2: 0.8
+      epochs: 200
+      enabled: false
+      parallel: true
+      optimizer: adamw
+      batch_size: null
+      weight_decay: 0.1
+      learning_rate: 1
+      knockout_vocabulary:
+        size: 256
+        enabled: true
+        damage_prob: 40
+
+  training:
+    value:
+      epochs: 8193
+      use_scan: false
+      loss_type: l4
+      lr_scheduler: linear_warmup
+      weight_decay: 0.00001
+      learning_rate: 0.0002
+      training_mode: repair
+      layer_neighbors: false
+      meta_batch_size: 64
+      n_message_steps: 5
+      lr_scheduler_params:
+        alpha: 0.1
+        exponent: 1
+        lr_warmup_start: 0.000001
+        warmup_steps_factor: 50
+
+  test_seed:
+    value: 14
+
+  checkpoint:
+    value:
+      enabled: true
+      interval: 1031
+      save_best: true
+      best_metric: hard_accuracy
+      best_metric_source: eval_ko_in
+      save_stable_states: false
+
+  early_stop:
+    value:
+      metric: hard_accuracy
+      source: eval_ko_in
+      enabled: false
+      patience: 2
+      threshold: 1
+      min_epochs: 3072
+
+  damage_seed:
+    value: 481
+
+  layer_sizes:
+    value:
+      - [8, 1]
+      - [64, 4]
+      - [64, 4]
+      - [32, 2]
+      - [8, 1]

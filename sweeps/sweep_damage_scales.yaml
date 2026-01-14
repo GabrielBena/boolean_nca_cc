@@ -17,10 +17,23 @@ metric:
 parameters:
   pool.damage_prob:
     values:
+      - 1
       - 10
       - 20
       - 40
       - 60
+      - 80
+      - 100
+      - 160
+  # Single damage mode: only one damage event per circuit during training and eval
+  pool.damage_injection_mode:
+    value: "single"
+  pool.max_damage_per_circuit:
+    value: 1
+  eval.knockout_eval.damage_injection_mode:
+    value: "single"
+  eval.knockout_eval.max_damage_per_circuit:
+    value: 1
 # Add this command block to format arguments correctly for Hydra
 command:
   - ${env}

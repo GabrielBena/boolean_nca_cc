@@ -10,11 +10,15 @@
 INPUT_ID="${1:-marcello-barylli-growai/boolean_nca_cc/t3rb9jjg}"
 
 # If input doesn't contain '/', assume it's just the short ID and construct full path
-if [[ "$INPUT_ID" != *"/"* ]]; then
-    SWEEP_ID="marcello-barylli-growai/boolean_nca_cc/$INPUT_ID"
-else
-    SWEEP_ID="$INPUT_ID"
-fi
+# Using case statement for POSIX compatibility (works with both sh and bash)
+case "$INPUT_ID" in
+    */*)
+        SWEEP_ID="$INPUT_ID"
+        ;;
+    *)
+        SWEEP_ID="marcello-barylli-growai/boolean_nca_cc/$INPUT_ID"
+        ;;
+esac
 
 echo "Starting agents for sweep: $SWEEP_ID"
 

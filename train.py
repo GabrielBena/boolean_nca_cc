@@ -3,15 +3,69 @@ Main training script for Boolean Circuit NCA optimization using GNNs and Self-At
 
 This script trains models that learn to simulate the inner loop of backpropagation
 when training boolean circuits, using either Graph Neural Networks or Self-Attention.
+
+Usage:
+    # Default config (configs/config.yaml):
+    python train.py
+    
+    # Custom config file:
+    python train.py --config path/to/custom_config.yaml
+    
+    # With Hydra overrides:
+    python train.py --config path/to/config.yaml training.epochs=1000 seed=42
 """
 
 import os
+import sys
 
 import logging
 import jax
 import optax
 import hydra
 from omegaconf import DictConfig, OmegaConf, open_dict
+
+
+def _process_config_arg():
+    """
+    Process custom --config argument before Hydra takes over.
+    
+    Converts: python train.py --config path/to/config.yaml
+    To:       python train.py --config-path=path/to --config-name=config
+    
+    This allows using a simple --config flag while still leveraging Hydra.
+    """
+    if '--config' in sys.argv:
+        idx = sys.argv.index('--config')
+        if idx + 1 < len(sys.argv):
+            config_path = sys.argv[idx + 1]
+            
+            # Remove --config and its value from argv
+            sys.argv.pop(idx)  # Remove --config
+            sys.argv.pop(idx)  # Remove the path value
+            
+            # Parse the config path
+            if os.path.isfile(config_path):
+                config_dir = os.path.dirname(config_path) or '.'
+                config_name = os.path.splitext(os.path.basename(config_path))[0]
+                
+                # Convert to path relative to train.py's location if needed
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                if os.path.isabs(config_dir):
+                    # Make relative to script directory for Hydra
+                    config_dir = os.path.relpath(config_dir, script_dir)
+                
+                # Insert Hydra-style config arguments
+                sys.argv.insert(1, f'--config-path={config_dir}')
+                sys.argv.insert(2, f'--config-name={config_name}')
+                
+                print(f"Using custom config: {config_path}")
+            else:
+                print(f"Error: Config file not found: {config_path}")
+                sys.exit(1)
+
+
+# Process --config argument before Hydra initializes
+_process_config_arg()
 import wandb
 from tqdm.auto import tqdm
 from functools import partial

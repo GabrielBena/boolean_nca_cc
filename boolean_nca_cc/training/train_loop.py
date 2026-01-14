@@ -310,6 +310,17 @@ def run_knockout_periodic_evaluation(
             final_hard_accuracies_in = step_metrics_in["per_pattern"]["pattern_hard_accuracies"][-1]
             hard_acc_std = float(jp.std(final_hard_accuracies_in))
             final_metrics_in[f"eval_ko_in{metric_suffix}/final_hard_accuracy_std"] = hard_acc_std
+            
+            # Calculate and add hard_accuracy_std for each step (mirrors save_eval_metrics_locally behavior)
+            hard_accuracy_std_in = []
+            for step_idx in range(len(step_metrics_in["step"])):
+                if step_idx < len(step_metrics_in["per_pattern"]["pattern_hard_accuracies"]):
+                    step_hard_accuracies = step_metrics_in["per_pattern"]["pattern_hard_accuracies"][step_idx]
+                    step_hard_acc_std = float(jp.std(step_hard_accuracies))
+                    hard_accuracy_std_in.append(step_hard_acc_std)
+                else:
+                    hard_accuracy_std_in.append(0.0)
+            step_metrics_in["hard_accuracy_std"] = hard_accuracy_std_in
 
         
         # Replicate base circuit for the batch
@@ -367,6 +378,17 @@ def run_knockout_periodic_evaluation(
             final_hard_accuracies_out = step_metrics_out["per_pattern"]["pattern_hard_accuracies"][-1]
             hard_acc_std = float(jp.std(final_hard_accuracies_out))
             final_metrics_out[f"eval_ko_out{metric_suffix}/final_hard_accuracy_std"] = hard_acc_std
+            
+            # Calculate and add hard_accuracy_std for each step (mirrors save_eval_metrics_locally behavior)
+            hard_accuracy_std_out = []
+            for step_idx in range(len(step_metrics_out["step"])):
+                if step_idx < len(step_metrics_out["per_pattern"]["pattern_hard_accuracies"]):
+                    step_hard_accuracies = step_metrics_out["per_pattern"]["pattern_hard_accuracies"][step_idx]
+                    step_hard_acc_std = float(jp.std(step_hard_accuracies))
+                    hard_accuracy_std_out.append(step_hard_acc_std)
+                else:
+                    hard_accuracy_std_out.append(0.0)
+            step_metrics_out["hard_accuracy_std"] = hard_accuracy_std_out
 
             
                     # Add new pattern data to accumulated data for persistent scatter plot

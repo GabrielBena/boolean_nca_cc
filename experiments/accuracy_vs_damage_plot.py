@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment: GNN vs Backprop comparison under knockout patterns, and LUT truth-table distances.
+Experiment: GNN vs Backprop comparison under knockout patterns, plotting accuracy vs damage size.
 
 This script implements a streamlined, run ID-driven analysis:
 - GNN run ID is the single source of truth for ALL configuration
@@ -11,10 +11,9 @@ This script implements a streamlined, run ID-driven analysis:
 - Runs baseline backprop training (no knockout)
 - Runs backprop training per knockout pattern (same wiring)
 - Runs GNN evaluation per knockout pattern (same wiring)
-- Computes Hamming distances between hard LUT truth tables of baseline vs perturbed
-  excluding any gates that are knocked out in the perturbed configuration
-- Compares GNN vs BP recovery performance
-- Writes a CSV summary and generates unified comparison plots
+- Computes hard accuracy metrics for each pattern
+- Compares GNN vs BP recovery performance by plotting accuracy vs damage size
+- Writes a CSV summary and generates comparison plots
 
 CLI: Only requires --run-id (defaults to "nypyrbwh") and --methods selection.
 All other parameters (vocab size, damage prob, loss type, etc.) come from GNN config.
@@ -386,9 +385,9 @@ def main():
     if args.output is None:
         ko_sizes_str = "_".join(map(str, knockout_sizes))
         gates_mode = "allgates" if include_all_gates else "activeonly"
-        args.output = f"reports/figures/hamming/hamming_scaled{ko_sizes_str}_p{patterns_per_size}_{damage_behavior}_{gates_mode}"
+        args.output = f"reports/figures/rev_damage_scale/accuracy_scaled{ko_sizes_str}_p{patterns_per_size}_{damage_behavior}_{gates_mode}"
     log.info(f"Output directory: {args.output}")
-    log.info(f"Hamming distance mode: {'include all gates' if include_all_gates else 'exclude knocked-out gates'}")
+    log.info(f"Analysis mode: accuracy vs damage size")
 
     # Ensure layer_sizes are present
     circuit_cfg = cfg.get("circuit", {})
@@ -499,7 +498,7 @@ def main():
     # Single damage mode for this simplified experiment
     damage_mode = "shotgun"
 
-    # Truth tables
+    # Truth tables (still computed for CSV, but not the focus of this script)
     baseline_tables = _hard_truth_tables_from_logits(bp_baseline["params"])  # per-layer
     
     # Compute baseline circuit performance metrics
@@ -726,7 +725,7 @@ def main():
                 # Get pattern from vocab
                 pattern = vocab_array[idx]
                 
-                # Compute hamming distance
+                # Compute hamming distance (still computed for CSV completeness)
                 pert_tables = _hard_truth_tables_from_logits(pattern_final_logits)  # per-layer
                 active_masks = _active_gate_mask_from_knockout(layer_sizes, pattern)
                 # Use include_all_gates setting from command line
@@ -798,28 +797,27 @@ def main():
         
         from experiments.visualization.plot_accuracy_vs_distance import (
             plot_accuracy_vs_distance,
-            plot_damage_size_vs_hamming,
+            plot_damage_size_vs_accuracy,
         )  # type: ignore
         
-        # Accuracy vs distance scatter plot
+        # Accuracy vs distance scatter plot (still useful for reference)
         if 'final_hard_accuracy' in df.columns and 'overall_bitwise_fraction_diff' in df.columns:
             accuracy_plot_path = os.path.join(args.output, "accuracy_vs_distance.png")
             plot_accuracy_vs_distance(df, accuracy_plot_path, color_by_method=True)
             print(f"Accuracy plot saved to: {accuracy_plot_path}")
             report["accuracy_plot_path"] = os.path.abspath(accuracy_plot_path)
         
-        # Damage size vs hamming distance plot
-        if 'knockout_size' in df.columns and 'per_gate_mean_hamming' in df.columns:
-            damage_plot_path = os.path.join(args.output, "damage_size_vs_hamming.png")
-            plot_damage_size_vs_hamming(
+        # Damage size vs accuracy plot (main focus of this script)
+        if 'knockout_size' in df.columns and 'final_hard_accuracy' in df.columns:
+            damage_plot_path = os.path.join(args.output, "damage_size_vs_accuracy.png")
+            plot_damage_size_vs_accuracy(
                 df, 
                 damage_plot_path, 
                 color_by_method=True,
                 baseline_accuracy=baseline_hard_accuracy,
-                baseline_loss=baseline_hard_loss,
-                ylim_max=0.45
+                baseline_loss=baseline_hard_loss
             )
-            print(f"Damage size vs hamming plot saved to: {damage_plot_path}")
+            print(f"Damage size vs accuracy plot saved to: {damage_plot_path}")
             report["damage_size_plot_path"] = os.path.abspath(damage_plot_path)
             
     except ImportError as e:
@@ -837,5 +835,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
