@@ -211,11 +211,12 @@ def plot_damage_size_vs_accuracy(
     dpi: int = 300,
     color_by_method: bool = True,
     baseline_accuracy: Optional[float] = None,
-    baseline_loss: Optional[float] = None
+    baseline_loss: Optional[float] = None,
+    ylim_min: Optional[float] = None
 ) -> str:
     """
-    Create line plot with error bars of damage size (knockout_size) vs hard accuracy.
-    Shows trendlines with error bars, colored by method (GNN vs BP): red for GNN, blue for BP.
+    Create scatter plot of damage size (knockout_size) vs hard accuracy.
+    Shows individual data points, colored by method (GNN vs BP): red for GNN, blue for BP.
     
     Args:
         summary_df: DataFrame with knockout results (must have 'knockout_size', 
@@ -226,6 +227,7 @@ def plot_damage_size_vs_accuracy(
         color_by_method: Whether to color lines by method (GNN vs BP)
         baseline_accuracy: Optional baseline accuracy to plot as horizontal reference line
         baseline_loss: Optional baseline loss (unused, kept for compatibility)
+        ylim_min: Optional minimum y-axis limit (default: 0.97)
     
     Returns:
         Path to saved image file
@@ -237,70 +239,47 @@ def plot_damage_size_vs_accuracy(
     
     fig, ax = plt.subplots(1, 1, figsize=figsize)
     
+    # Calculate minimal jitter amount based on typical spacing between knockout sizes
+    unique_sizes = sorted(summary_df['knockout_size'].unique())
+    if len(unique_sizes) > 1:
+        typical_spacing = unique_sizes[1] - unique_sizes[0]  # Use first spacing as reference
+        jitter_amount = typical_spacing * 0.06  # 1.5% of typical spacing - minimal jitter
+    else:
+        jitter_amount = 1.0  # Fallback if only one size
+    
     if color_by_method and 'method' in summary_df.columns:
-        # Group by knockout_size and method, calculate mean and std
-        grouped = summary_df.groupby(['knockout_size', 'method'])['final_hard_accuracy'].agg(['mean', 'std', 'count']).reset_index()
-        
         # Plot each method separately with different colors and markers
         # Matching standard: GNN = red, BP = blue (from plot_accuracy_vs_distance)
-        for method, color, marker in [
-            ('gnn', 'red', 'o'), 
-            ('bp', 'blue', 's')
+        for method, color, marker, jitter_offset in [
+            ('gnn', 'red', 'o', -jitter_amount),  # GNN slightly to the left
+            ('bp', 'blue', 's', jitter_amount)    # BP slightly to the right
         ]:
-            method_data = grouped[grouped['method'] == method]
+            method_data = summary_df[summary_df['method'] == method]
             if len(method_data) > 0:
-                # Sort by knockout_size for proper line plotting
-                method_data = method_data.sort_values('knockout_size')
-                
-                x_coords = method_data['knockout_size'].values
-                y_means = method_data['mean'].values
-                y_stds = method_data['std'].values
-                
-                # Fill NaN std values with 0 (happens when only one data point)
-                y_stds = np.nan_to_num(y_stds, nan=0.0)
-                
-                # Plot line with markers
-                ax.plot(x_coords, y_means, 
-                       color=color,
-                       marker=marker,
-                       markersize=8,
-                       linewidth=2,
-                       label=method.upper(),
-                       alpha=0.9)
-                
-                # Add error bars
-                ax.errorbar(x_coords, y_means, yerr=y_stds,
-                           color=color,
-                           alpha=0.5,
-                           capsize=4,
-                           capthick=1.5,
-                           linestyle='None',
-                           elinewidth=1.5)
+                # Add minimal jitter to x-coordinates
+                x_coords = method_data['knockout_size'].values + jitter_offset
+                # Plot individual points
+                ax.scatter(x_coords, 
+                          method_data['final_hard_accuracy'],
+                          color=color,
+                          marker=marker,
+                          s=50,  # marker size
+                          label=method.upper(),
+                          alpha=0.6,
+                          edgecolors='black',
+                          linewidths=0.5)
         
         # Add legend
         ax.legend(loc='best', fontsize=16)
     else:
-        # Fallback: group by knockout_size only
-        grouped = summary_df.groupby('knockout_size')['final_hard_accuracy'].agg(['mean', 'std']).reset_index()
-        grouped = grouped.sort_values('knockout_size')
-        
-        x_coords = grouped['knockout_size'].values
-        y_means = grouped['mean'].values
-        y_stds = grouped['std'].values
-        y_stds = np.nan_to_num(y_stds, nan=0.0)
-        
-        ax.plot(x_coords, y_means, 
-               marker='o',
-               markersize=8,
-               linewidth=2,
-               alpha=0.9)
-        
-        ax.errorbar(x_coords, y_means, yerr=y_stds,
-                   alpha=0.5,
-                   capsize=4,
-                   capthick=1.5,
-                   linestyle='None',
-                   elinewidth=1.5)
+        # Fallback: plot all points without method distinction
+        ax.scatter(summary_df['knockout_size'], 
+                  summary_df['final_hard_accuracy'],
+                  marker='o',
+                  s=50,
+                  alpha=0.6,
+                  edgecolors='black',
+                  linewidths=0.5)
     
     # Add baseline accuracy as horizontal reference line if provided
     if baseline_accuracy is not None:
@@ -329,7 +308,8 @@ def plot_damage_size_vs_accuracy(
     # Customize plot
     ax.set_xlabel(f'{damage_type} Damage Size', fontsize=18)
     ax.set_ylabel('Final Hard Accuracy', fontsize=18)
-    ax.set_ylim(0.97, 1.02)
+    ylim_lower = ylim_min if ylim_min is not None else 0.97
+    ax.set_ylim(ylim_lower, 1.02)
     ax.tick_params(axis='both', which='major', labelsize=16)
     ax.grid(True, alpha=0.3)
     

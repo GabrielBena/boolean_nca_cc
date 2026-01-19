@@ -17,7 +17,7 @@ Pure plotting functions that take pre-computed data and generate figures. No dat
   - Output: matplotlib Figure
 - `plot_combined_bp_sa_stepwise_performance()` - Legacy wrapper (backward compatibility)
 
-#### `plot_accuracy_vs_distance.py`
+#### `plot_perturbation_utils.py`
 - `plot_accuracy_vs_distance()` - Scatter plot (accuracy vs hamming distance)
 - `plot_damage_size_vs_hamming()` - Line plot with error bars (damage size vs hamming)
 - Input: pandas DataFrame
@@ -46,7 +46,7 @@ Utilities for loading models, running evaluations, and preparing data.
 - Runs BP training per knockout pattern
 - Runs GNN evaluation per knockout pattern
 - Computes hamming distances
-- **Calls**: `plot_accuracy_vs_distance.py` functions
+- **Calls**: `plot_perturbation_utils.py` functions
 - **Output**: CSV summary + plots
 
 ### Layer 3: Figure Generation Scripts (Orchestration)
@@ -106,7 +106,7 @@ Local Storage / WandB API
 Checkpoint + Config
   → Run experiments (BP + GNN evaluations)
   → Compute metrics (hamming distances, accuracies)
-  → plot_accuracy_vs_distance.plot_*()
+  → plot_perturbation_utils.plot_*()
 ```
 **Example**: `hamming_distance_plot.py`
 
@@ -117,7 +117,7 @@ experiments/
 ├── visualization/
 │   ├── core/                    # Pure plotting functions
 │   │   ├── plot_trajectory.py
-│   │   ├── plot_accuracy_vs_distance.py
+│   │   ├── plot_perturbation_utils.py
 │   │   └── figure_config.py
 │   ├── data_loading/            # Data loading utilities
 │   │   ├── checkpoint_loader.py  # Consolidate checkpoint loading
@@ -134,7 +134,7 @@ experiments/
 
 ```
 hamming_distance_plot.py
-  └─→ plot_accuracy_vs_distance.py 
+  └─→ plot_perturbation_utils.py 
       (plot_accuracy_vs_distance, plot_damage_size_vs_hamming)
 
 fig_boolean_discovery.py
@@ -175,7 +175,7 @@ experiments/
 ├── visualization/
 │   ├── core/                    # Pure plotting functions
 │   │   ├── plot_trajectory.py
-│   │   ├── plot_accuracy_vs_distance.py
+│   │   ├── plot_perturbation_utils.py
 │   │   └── figure_config.py
 │   ├── data_loading/            # Data loading utilities
 │   │   ├── checkpoint_loader.py  # Consolidate checkpoint loading

@@ -14,7 +14,7 @@ project_root = os.path.dirname(script_dir)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from experiments.visualization.plot_accuracy_vs_distance import plot_damage_size_vs_hamming
+from experiments.visualization.plot_perturbation_utils import plot_damage_size_vs_hamming
 
 
 def main():

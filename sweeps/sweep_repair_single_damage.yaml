@@ -1,0 +1,77 @@
+# Repair Mode Single Damage Event Sweep
+# This sweep tests repair mode with single damage events (reversible) vs null runs (no damage)
+# across different tasks (add, binary_multiply) and input/output sizes (8, 12)
+
+# Program to run for the sweep (relative to project root where wandb sweep is run)
+program: train.py
+
+# Method for the sweep
+method: grid
+
+# Metric to track (eval_no_damage is available for both damage and null runs)
+metric:
+  goal: maximize
+  name: eval_no_damage/final_hard_accuracy
+
+# Parameters to sweep over
+parameters:
+  # Set training mode to repair
+  training.training_mode:
+    value: "repair"
+  
+  # Vary the boolean circuit task
+  circuit.task:
+    values:
+      - "binary_multiply"
+      - "add"
+
+  
+  # Vary input and output bits (must match - validation in train.py will skip mismatched pairs)
+  # Grid will create 4 combinations: (8,8), (8,12), (12,8), (12,12)
+  # Only (8,8) and (12,12) will run; mismatched pairs are automatically skipped
+  circuit.input_bits:
+    values:
+      - 8
+      # - 12
+  circuit.output_bits:
+    values:
+      - 8
+      # - 12
+  
+  # Single damage event configuration (reversible)
+  # Set damage behavior to reversible for repair mode
+  model.damage_behavior:
+    value: "reversible"
+  pool.damage_injection_mode:
+    value: "single"
+  pool.max_damage_per_circuit:
+    value: 1
+  eval.knockout_eval.damage_injection_mode:
+    value: "single"
+  eval.knockout_eval.max_damage_per_circuit:
+    value: 1
+  
+  # Vary damage enabled/disabled (damage runs vs null runs)
+  # Note: eval.knockout_eval.enabled defaults to pool.damage_pool_enabled in config
+  pool.damage_pool_enabled:
+    values:
+      - true   # Damage enabled (repair mode with single damage event)
+      - false  # Null run (no damage applied)
+
+    # vary damage_prob
+  pool.damage_prob:
+    values:
+      - 5
+      - 10
+      - 40
+  
+  # Ensure stepwise logging is enabled for analysis
+  eval.periodic_eval_log_stepwise:
+    value: true
+
+# Add this command block to format arguments correctly for Hydra
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args_no_hyphens}

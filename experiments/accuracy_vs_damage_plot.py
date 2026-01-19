@@ -240,7 +240,9 @@ def main():
     parser.add_argument("--config", type=str, default="configs/config.yaml", 
                         help="Path to config YAML file (default: configs/config.yaml)")
     parser.add_argument("--run-id", type=str, default="nypyrbwh", 
-                        help="WandB run id for GNN model load (default: nypyrbwh)")
+                        help="WandB run id for GNN model load (default: nypyrbwh). Can also be a sweep ID.")
+    parser.add_argument("--sweep-id", type=str, default=None,
+                        help="WandB sweep ID to load from (will select best run from sweep)")
     parser.add_argument("--checkpoint", type=str, default=None, 
                         help="Local checkpoint path .pkl for GNN model (optional, only needed if --methods includes 'gnn')")
     # Analysis method selection
@@ -280,8 +282,9 @@ def main():
         filename_to_load = "best_model_eval_ko_hard_accuracy"
         cfg, _, _ = load_config_from_wandb(
             run_id=args.run_id,
+            sweep_id=args.sweep_id,
             filename=filename_to_load,
-            select_by_best_metric=False,  # Just get config, not necessarily best model
+            select_by_best_metric=True if args.sweep_id else False,  # Select best if from sweep
         )
         gnn_training_config = cfg
 
@@ -361,8 +364,10 @@ def main():
             # Load the actual model now
             gnn_model, loaded_dict, _ = load_best_model_from_wandb(
                 run_id=args.run_id,
+                sweep_id=args.sweep_id,
                 seed=0,  # Use default seed, will be overridden by GNN config
                 filename=filename_to_load,
+                select_by_best_metric=True if args.sweep_id else False,  # Select best if from sweep
             )
             gnn_hidden_dim = int(cfg.model.get("circuit_hidden_dim", 16))
             
@@ -385,7 +390,7 @@ def main():
     if args.output is None:
         ko_sizes_str = "_".join(map(str, knockout_sizes))
         gates_mode = "allgates" if include_all_gates else "activeonly"
-        args.output = f"reports/figures/rev_damage_scale/accuracy_scaled{ko_sizes_str}_p{patterns_per_size}_{damage_behavior}_{gates_mode}"
+        args.output = f"reports/figures/rev_damage_scale/accuracy_scaled{ko_sizes_str}_p{patterns_per_size}_{damage_behavior}_{gates_mode}_run{args.run_id}"
     log.info(f"Output directory: {args.output}")
     log.info(f"Analysis mode: accuracy vs damage size")
 
@@ -795,7 +800,7 @@ def main():
         if project_root not in sys.path:
             sys.path.insert(0, project_root)
         
-        from experiments.visualization.plot_accuracy_vs_distance import (
+        from experiments.visualization.plot_perturbation_utils import (
             plot_accuracy_vs_distance,
             plot_damage_size_vs_accuracy,
         )  # type: ignore
@@ -815,7 +820,8 @@ def main():
                 damage_plot_path, 
                 color_by_method=True,
                 baseline_accuracy=baseline_hard_accuracy,
-                baseline_loss=baseline_hard_loss
+                baseline_loss=baseline_hard_loss,
+                ylim_min=0.5
             )
             print(f"Damage size vs accuracy plot saved to: {damage_plot_path}")
             report["damage_size_plot_path"] = os.path.abspath(damage_plot_path)

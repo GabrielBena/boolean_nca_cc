@@ -1,4 +1,4 @@
-# Usage: python train.py --config sweeps/singles/self_attention_repair_dam40_hydra.yaml
+# Usage: python train.py --config sweeps/singles/self_attention_repair_nodamage.yaml
 #
 # This is a fully self-contained config (no defaults references)
 
@@ -66,15 +66,15 @@ training:
 pool:
   size: 1024
   damage_mode: shotgun
-  damage_prob: 5
+  damage_prob: 0
   reset_fraction: 0.15
   reset_interval: 128
   reset_strategy: combined
   damage_strategy: loss_biased
   combined_weights: [0.5, 0.5]
-  damage_eval_steps: ${eval.periodic_eval_inner_steps}
+  damage_eval_steps: 500
   greedy_window_size: 40
-  damage_pool_enabled: true
+  damage_pool_enabled: false
   damage_pool_fraction: 0.15
   damage_pool_interval: 128
   damage_injection_mode: multi
@@ -86,7 +86,7 @@ pool:
 eval:
   blind_mode: true
   knockout_eval:
-    enabled: true
+    enabled: false
     damage_mode: shotgun
     damage_prob: ${pool.damage_prob}
     greedy_window_size: 40
@@ -103,7 +103,7 @@ eval:
   input_train_fraction: 0.8
   periodic_eval_enabled: true
   final_eval_inner_steps: 500
-  periodic_eval_interval: 1024
+  periodic_eval_interval: 4096
   periodic_eval_test_seed: 14
   periodic_eval_batch_size: 256
   periodic_eval_inner_steps: 200

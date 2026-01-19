@@ -242,17 +242,36 @@ def main(cfg: DictConfig) -> None:
     # Print configuration
     log.info(OmegaConf.to_yaml(cfg))
     
-
-    # Set random seed
-    rng = jax.random.PRNGKey(cfg.seed)
-
-    # Create output directory
+    # Create output directory (needed for wandb init if we skip)
     if cfg.output.dir is not None:
         output_dir = cfg.output.dir
         os.makedirs(output_dir, exist_ok=True)
     else:
         output_dir = os.getcwd()
     log.info(f"Output directory: {output_dir}")
+    
+    # Validate that input_bits matches output_bits (required for matched I/O)
+    if cfg.circuit.input_bits != cfg.circuit.output_bits:
+        log.warning(
+            f"Skipping run: input_bits ({cfg.circuit.input_bits}) != output_bits ({cfg.circuit.output_bits}). "
+            "Only matched I/O sizes are supported in this sweep."
+        )
+        if cfg.wandb.enabled:
+            wandb.init(
+                project=cfg.wandb.project,
+                entity=cfg.wandb.entity,
+                name=cfg.wandb.run_name,
+                dir=output_dir,
+                config=OmegaConf.to_container(cfg, resolve=True),
+                group=cfg.wandb.group,
+            )
+            wandb.run.summary["skipped"] = True
+            wandb.run.summary["skip_reason"] = f"input_bits ({cfg.circuit.input_bits}) != output_bits ({cfg.circuit.output_bits})"
+            wandb.finish()
+        return
+
+    # Set random seed
+    rng = jax.random.PRNGKey(cfg.seed)
 
     # Initialize wandb if enabled
     wandb_run = None
@@ -275,9 +294,9 @@ def main(cfg: DictConfig) -> None:
         import time
         
         # Get run_id and sweep_id
-        if wandb_run and wandb_run.run:
-            run_id = wandb_run.run.id
-            sweep_id = str(wandb_run.run.sweep_id) if hasattr(wandb_run.run, 'sweep_id') and wandb_run.run.sweep_id else None
+        if wandb_run:
+            run_id = wandb_run.id
+            sweep_id = str(wandb_run.sweep_id) if hasattr(wandb_run, 'sweep_id') and wandb_run.sweep_id else None
         else:
             # Generate local run ID if no WandB
             run_id = f"local_{int(time.time())}"

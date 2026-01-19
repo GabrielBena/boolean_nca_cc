@@ -238,6 +238,7 @@ def derive_checkpoint_metric_from_config(config: Any) -> tuple[str, str]:
 
 def load_config_from_wandb(
     run_id: str | None = None,
+    sweep_id: str | None = None,
     filters: dict[str, Any] | None = None,
     project: str = "boolean-nca-cc",
     entity: str = "marcello-barylli-growai",
@@ -259,7 +260,8 @@ def load_config_from_wandb(
     for config modification before model instantiation.
 
     Args:
-        run_id: Optional specific run ID to load from
+        run_id: Optional specific run ID to load from (can also be a sweep ID)
+        sweep_id: Optional sweep ID to load a run from (will select best run from sweep)
         filters: Optional dictionary of filters to find runs
         project: WandB project name
         entity: WandB entity/username
@@ -280,35 +282,133 @@ def load_config_from_wandb(
     # Initialize WandB API
     api = wandb.Api()
 
+    # Helper function to load runs from a sweep
+    def get_runs_from_sweep(sweep_id_val: str):
+        """Get runs from a sweep by ID."""
+        try:
+            sweep = api.sweep(f"{entity}/{project}/{sweep_id_val}")
+            sweep_runs = list(sweep.runs)
+            log.info(f"Found sweep '{sweep.name}' with {len(sweep_runs)} runs")
+            return sweep_runs
+        except Exception as e:
+            log.warning(f"Could not load sweep {sweep_id_val}: {e}")
+            return None
+
     # Find the run
     run = None
-    if run_id:
+    
+    # If sweep_id is explicitly provided, get runs from sweep
+    if sweep_id:
+        log.info(f"Loading from sweep ID: {sweep_id}")
+        sweep_runs = get_runs_from_sweep(sweep_id)
+        if sweep_runs:
+            # Select best run from sweep based on metric
+            if select_by_best_metric:
+                log.info(f"Selecting best run from sweep by {metric_name}")
+                best_run = None
+                best_metric_value = float("-inf")
+                for candidate_run in sweep_runs:
+                    if candidate_run.state != "finished":
+                        continue
+                    summary = candidate_run.summary
+                    metric_value = summary.get(metric_name)
+                    if metric_value is not None and metric_value > best_metric_value:
+                        best_metric_value = metric_value
+                        best_run = candidate_run
+                if best_run:
+                    run = best_run
+                    run_id = run.id
+                    log.info(f"Selected best run from sweep: {run.name} (ID: {run.id}) with {metric_name}={best_metric_value}")
+                else:
+                    log.warning("No finished runs with metric found in sweep, using most recent")
+                    run = sweep_runs[0]
+                    run_id = run.id
+            else:
+                # Use the most recent run from sweep
+                run = sweep_runs[0]
+                run_id = run.id
+                log.info(f"Using most recent run from sweep: {run.name} (ID: {run.id})")
+        else:
+            raise ValueError(f"Could not load runs from sweep {sweep_id}")
+    elif run_id:
         log.info(f"Looking for run with ID: {run_id}")
         try:
             run = api.run(f"{entity}/{project}/{run_id}")
             log.info(f"Found run: {run.name}")
         except Exception as e:
-            # Workaround for WandB bug when run is part of a sweep (JSON serialization error)
-            # Try using api.runs() with a filter instead
-            if "not JSON serializable" in str(e) or isinstance(e, wandb.errors.CommError):
-                log.warning(f"Error loading run directly (likely sweep-related bug): {e}")
-                log.info("Trying alternative method: using api.runs() with filter...")
+            # First, check if this might be a sweep ID
+            log.warning(f"Could not load run directly: {e}")
+            log.info("Checking if this is a sweep ID...")
+            
+            sweep_runs = get_runs_from_sweep(run_id)
+            if sweep_runs:
+                log.info(f"ID {run_id} is a sweep! Loading best run from sweep...")
+                # Select best run from sweep based on metric
+                best_run = None
+                best_metric_value = float("-inf")
+                for candidate_run in sweep_runs:
+                    if candidate_run.state != "finished":
+                        continue
+                    summary = candidate_run.summary
+                    metric_value = summary.get(metric_name)
+                    if metric_value is not None and metric_value > best_metric_value:
+                        best_metric_value = metric_value
+                        best_run = candidate_run
+                if best_run:
+                    run = best_run
+                    run_id = run.id
+                    log.info(f"Selected best run from sweep: {run.name} (ID: {run.id}) with {metric_name}={best_metric_value}")
+                else:
+                    log.warning("No finished runs with metric found in sweep, using most recent")
+                    run = sweep_runs[0]
+                    run_id = run.id
+            else:
+                # Workaround for WandB bug when run is part of a sweep
+                # Try using api.runs() with filters to find the run
+                log.info("Not a sweep ID. Trying alternative methods to load run...")
+                run_found = False
+                
                 try:
-                    # Try to get the run using filters
-                    runs = api.runs(f"{entity}/{project}", filters={"display_name": run_id})
+                    # Method 1: Try to get the run using name/display_name filter
+                    log.info(f"Trying to find run via name filter...")
+                    runs = list(api.runs(f"{entity}/{project}", filters={"$or": [
+                        {"display_name": run_id},
+                        {"name": run_id},
+                        {"name": {"$regex": f".*{run_id}.*"}}
+                    ]}))
                     if runs:
                         run = runs[0]
-                        log.info(f"Found run using filter method: {run.name}")
-                    else:
-                        # Try with ID filter
-                        runs = api.runs(f"{entity}/{project}", filters={"id": run_id})
-                        if runs:
-                            run = runs[0]
-                            log.info(f"Found run using ID filter: {run.name}")
-                        else:
-                            raise ValueError(f"Could not find run {run_id} using filter method")
+                        run_found = True
+                        log.info(f"Found run using name filter: {run.name} (ID: {run.id})")
                 except Exception as e2:
-                    log.warning(f"Filter method also failed: {e2}")
+                    log.warning(f"Name filter method failed: {e2}")
+                
+                if not run_found:
+                    try:
+                        # Method 2: Query all recent runs and search for matching ID
+                        log.info(f"Searching through recent runs for ID {run_id}...")
+                        all_runs = list(api.runs(f"{entity}/{project}", per_page=500))
+                        for candidate_run in all_runs:
+                            if candidate_run.id == run_id:
+                                run = candidate_run
+                                run_found = True
+                                log.info(f"Found run by iterating: {run.name} (ID: {run.id})")
+                                break
+                    except Exception as e3:
+                        log.warning(f"Iteration method failed: {e3}")
+                    
+                    # Method 3: If still not found, try searching through runs with sweep filter
+                    # This helps find runs that are part of sweeps but can't be accessed directly
+                    if not run_found:
+                        try:
+                            log.info(f"Searching for run ID {run_id} in sweep runs...")
+                            # Try to find runs that might be in sweeps by using a broader search
+                            # We'll rely on the MinimalRun fallback which can access artifacts directly
+                            log.info("Will attempt to load via artifacts using MinimalRun fallback")
+                        except Exception as e4:
+                            log.warning(f"Additional search method failed: {e4}")
+                
+                if not run_found:
                     # Last resort: create a minimal run object and load config from checkpoint
                     log.info("Creating minimal run object - will load config from checkpoint file...")
                     class MinimalRun:
@@ -348,8 +448,6 @@ def load_config_from_wandb(
                     
                     run = MinimalRun(run_id, api, entity, project, filename)
                     log.info("Using minimal run object - config will be loaded from checkpoint file")
-            else:
-                raise
     else:
         if not filters:
             filters = {}
@@ -685,6 +783,7 @@ def load_model_from_config_and_checkpoint(
 
 def load_best_model_from_wandb(
     run_id: str | None = None,
+    sweep_id: str | None = None,
     filters: dict[str, Any] | None = None,
     seed: int = 0,
     project: str = "boolean-nca-cc",
@@ -709,7 +808,8 @@ def load_best_model_from_wandb(
     and load_model_from_config_and_checkpoint.
 
     Args:
-        run_id: Optional specific run ID to load from
+        run_id: Optional specific run ID to load from (can also be a sweep ID)
+        sweep_id: Optional sweep ID to load a run from (will select best run from sweep)
         filters: Optional dictionary of filters to find runs
         seed: Seed for RNG initialization
         project: WandB project name
@@ -736,6 +836,7 @@ def load_best_model_from_wandb(
     # Load config and checkpoint information
     config, checkpoint_path, run_id = load_config_from_wandb(
         run_id=run_id,
+        sweep_id=sweep_id,
         filters=filters,
         project=project,
         entity=entity,

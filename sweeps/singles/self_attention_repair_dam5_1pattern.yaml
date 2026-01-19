@@ -81,7 +81,7 @@ pool:
   greedy_ordered_indices: [53, 12, 167, 31, 67, 46, 69]
   max_damage_per_circuit: 20
   damage_combined_weights: [0.5, 0.5]
-  damage_knockout_diversity: 256
+  damage_knockout_diversity: 1
 
 eval:
   blind_mode: true

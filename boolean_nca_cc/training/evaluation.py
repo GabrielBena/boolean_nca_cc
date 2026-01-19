@@ -547,6 +547,13 @@ def evaluate_model_stepwise_batched(
         "hard_accuracy": [],
         "full_map_accuracy": [],
         "logits_mean": [],
+        # State magnitude tracking for stability analysis
+        "logits_std": [],
+        "logits_min": [],
+        "logits_max": [],
+        "hidden_l2_norm": [],
+        "hidden_mean": [],
+        "hidden_std": [],
     }
 
     # Store initial metrics (averaged across batch)
@@ -557,7 +564,13 @@ def evaluate_model_stepwise_batched(
     step_metrics["hard_accuracy"].append(float(jp.mean(initial_hard_accuracies)))
     step_metrics["full_map_accuracy"].append(float(jp.mean(initial_full_map_accuracies)))
     step_metrics["logits_mean"].append(float(jp.mean(batch_graphs.nodes["logits"])))
-    
+    # State magnitude tracking for stability analysis (initial values)
+    step_metrics["logits_std"].append(float(jp.std(batch_graphs.nodes["logits"])))
+    step_metrics["logits_min"].append(float(jp.min(batch_graphs.nodes["logits"])))
+    step_metrics["logits_max"].append(float(jp.max(batch_graphs.nodes["logits"])))
+    step_metrics["hidden_l2_norm"].append(float(jp.sqrt(jp.sum(batch_graphs.nodes["hidden"] ** 2))))
+    step_metrics["hidden_mean"].append(float(jp.mean(batch_graphs.nodes["hidden"])))
+    step_metrics["hidden_std"].append(float(jp.std(batch_graphs.nodes["hidden"])))
 
     # Store original shapes for reconstruction
     logits_original_shapes = [
@@ -1080,6 +1093,13 @@ def _evaluate_with_loop(
         step_metrics["logits_mean"].append(
             float(jp.mean(updated_graphs.nodes["logits"]))
         )
+        # State magnitude tracking for stability analysis
+        step_metrics["logits_std"].append(float(jp.std(updated_graphs.nodes["logits"])))
+        step_metrics["logits_min"].append(float(jp.min(updated_graphs.nodes["logits"])))
+        step_metrics["logits_max"].append(float(jp.max(updated_graphs.nodes["logits"])))
+        step_metrics["hidden_l2_norm"].append(float(jp.sqrt(jp.sum(updated_graphs.nodes["hidden"] ** 2))))
+        step_metrics["hidden_mean"].append(float(jp.mean(updated_graphs.nodes["hidden"])))
+        step_metrics["hidden_std"].append(float(jp.std(updated_graphs.nodes["hidden"])))
 
         current_graphs = updated_graphs
 

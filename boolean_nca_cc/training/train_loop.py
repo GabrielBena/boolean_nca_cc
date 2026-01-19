@@ -232,7 +232,8 @@ def run_knockout_periodic_evaluation(
         
         # 1. Sample IN-distribution knockout patterns from vocabulary
         if knockout_vocabulary is not None:
-            log.info(f"Running IN-distribution Knockout evaluation using vocabulary ({eval_batch_size} patterns)...")
+            vocab_size = len(knockout_vocabulary)
+            log.info(f"Running IN-distribution Knockout evaluation using vocabulary ({vocab_size} pattern{'s' if vocab_size != 1 else ''}, evaluating {eval_batch_size} circuits)...")
             
             # Sample patterns from vocabulary with replacement
             id_rng = jax.random.PRNGKey(periodic_eval_test_seed)
@@ -244,10 +245,12 @@ def run_knockout_periodic_evaluation(
             log.info(f"Running IN-distribution Knockout evaluation with fresh patterns ({eval_batch_size} patterns)...")
             
             # Generate patterns using same logic as vocabulary but with eval seed
+            # Use .get() with default to avoid KeyError when damage_pool_enabled=false but knockout_eval.enabled=true
+            damage_prob = knockout_config.get("damage_prob", 40)  # Default to 40 if not specified
             pattern_creator_fn = partial(
                 create_reproducible_knockout_pattern,
                 layer_sizes=true_layer_sizes,
-                damage_prob=knockout_config["damage_prob"],
+                damage_prob=damage_prob,
             )
             
             id_rng = jax.random.PRNGKey(periodic_eval_test_seed)
@@ -457,7 +460,7 @@ def run_knockout_periodic_evaluation(
                     # Import visualization function locally (may not be available in all environments)
                     try:
                         # Try direct import first (works when project root is in path)
-                        from experiments.visualization.plot_accuracy_vs_distance import plot_accuracy_vs_distance  # type: ignore
+                        from experiments.visualization.plot_perturbation_utils import plot_accuracy_vs_distance  # type: ignore
                         
                         plot_accuracy_vs_distance(
                             summary_df=df,
@@ -472,7 +475,7 @@ def run_knockout_periodic_evaluation(
                             project_root = os_module.path.dirname(os_module.path.dirname(os_module.path.dirname(__file__)))
                             if project_root not in sys.path:
                                 sys.path.insert(0, project_root)
-                            from experiments.visualization.plot_accuracy_vs_distance import plot_accuracy_vs_distance  # type: ignore
+                            from experiments.visualization.plot_perturbation_utils import plot_accuracy_vs_distance  # type: ignore
                             
                             plot_accuracy_vs_distance(
                                 summary_df=df,
@@ -539,6 +542,20 @@ def run_knockout_periodic_evaluation(
                         f"eval_ko_in{metric_suffix}_steps/epoch": epoch,
                     }
                     
+                    # State magnitude tracking for stability analysis
+                    if "logits_std" in step_metrics_in and step_idx < len(step_metrics_in["logits_std"]):
+                        log_dict[f"eval_ko_in{metric_suffix}_steps/logits_std"] = step_metrics_in["logits_std"][step_idx]
+                    if "logits_min" in step_metrics_in and step_idx < len(step_metrics_in["logits_min"]):
+                        log_dict[f"eval_ko_in{metric_suffix}_steps/logits_min"] = step_metrics_in["logits_min"][step_idx]
+                    if "logits_max" in step_metrics_in and step_idx < len(step_metrics_in["logits_max"]):
+                        log_dict[f"eval_ko_in{metric_suffix}_steps/logits_max"] = step_metrics_in["logits_max"][step_idx]
+                    if "hidden_l2_norm" in step_metrics_in and step_idx < len(step_metrics_in["hidden_l2_norm"]):
+                        log_dict[f"eval_ko_in{metric_suffix}_steps/hidden_l2_norm"] = step_metrics_in["hidden_l2_norm"][step_idx]
+                    if "hidden_mean" in step_metrics_in and step_idx < len(step_metrics_in["hidden_mean"]):
+                        log_dict[f"eval_ko_in{metric_suffix}_steps/hidden_mean"] = step_metrics_in["hidden_mean"][step_idx]
+                    if "hidden_std" in step_metrics_in and step_idx < len(step_metrics_in["hidden_std"]):
+                        log_dict[f"eval_ko_in{metric_suffix}_steps/hidden_std"] = step_metrics_in["hidden_std"][step_idx]
+                    
                     # Calculate and add standard deviation for eval_ko_in/hard_accuracy at this step
                     if "per_pattern" in step_metrics_in:
                         if step_idx < len(step_metrics_in["per_pattern"]["pattern_hard_accuracies"]):
@@ -562,6 +579,20 @@ def run_knockout_periodic_evaluation(
                         f"eval_ko_out{metric_suffix}_steps/full_map_accuracy": step_metrics_out["full_map_accuracy"][step_idx],
                         f"eval_ko_out{metric_suffix}_steps/epoch": epoch,
                     }
+                    
+                    # State magnitude tracking for stability analysis
+                    if "logits_std" in step_metrics_out and step_idx < len(step_metrics_out["logits_std"]):
+                        log_dict[f"eval_ko_out{metric_suffix}_steps/logits_std"] = step_metrics_out["logits_std"][step_idx]
+                    if "logits_min" in step_metrics_out and step_idx < len(step_metrics_out["logits_min"]):
+                        log_dict[f"eval_ko_out{metric_suffix}_steps/logits_min"] = step_metrics_out["logits_min"][step_idx]
+                    if "logits_max" in step_metrics_out and step_idx < len(step_metrics_out["logits_max"]):
+                        log_dict[f"eval_ko_out{metric_suffix}_steps/logits_max"] = step_metrics_out["logits_max"][step_idx]
+                    if "hidden_l2_norm" in step_metrics_out and step_idx < len(step_metrics_out["hidden_l2_norm"]):
+                        log_dict[f"eval_ko_out{metric_suffix}_steps/hidden_l2_norm"] = step_metrics_out["hidden_l2_norm"][step_idx]
+                    if "hidden_mean" in step_metrics_out and step_idx < len(step_metrics_out["hidden_mean"]):
+                        log_dict[f"eval_ko_out{metric_suffix}_steps/hidden_mean"] = step_metrics_out["hidden_mean"][step_idx]
+                    if "hidden_std" in step_metrics_out and step_idx < len(step_metrics_out["hidden_std"]):
+                        log_dict[f"eval_ko_out{metric_suffix}_steps/hidden_std"] = step_metrics_out["hidden_std"][step_idx]
                     
                     # Calculate and add standard deviation for eval_ko_out/hard_accuracy at this step
                     if "per_pattern" in step_metrics_out:
@@ -2012,7 +2043,7 @@ def train_model(
                         # Log stepwise if enabled (for both test and train sets)
                         if periodic_eval_log_stepwise and wandb_run:
                             for step_idx in range(len(step_metrics["step"])):
-                                wandb_run.log({
+                                log_dict = {
                                     f"eval_no_damage{metric_suffix}_steps/step": step_metrics["step"][step_idx],
                                     f"eval_no_damage{metric_suffix}_steps/loss": step_metrics["soft_loss"][step_idx],
                                     f"eval_no_damage{metric_suffix}_steps/hard_loss": step_metrics["hard_loss"][step_idx],
@@ -2020,7 +2051,21 @@ def train_model(
                                     f"eval_no_damage{metric_suffix}_steps/hard_accuracy": step_metrics["hard_accuracy"][step_idx],
                                     f"eval_no_damage{metric_suffix}_steps/full_map_accuracy": step_metrics["full_map_accuracy"][step_idx],
                                     f"eval_no_damage{metric_suffix}_steps/epoch": epoch,
-                                })
+                                }
+                                # State magnitude tracking for stability analysis
+                                if "logits_std" in step_metrics and step_idx < len(step_metrics["logits_std"]):
+                                    log_dict[f"eval_no_damage{metric_suffix}_steps/logits_std"] = step_metrics["logits_std"][step_idx]
+                                if "logits_min" in step_metrics and step_idx < len(step_metrics["logits_min"]):
+                                    log_dict[f"eval_no_damage{metric_suffix}_steps/logits_min"] = step_metrics["logits_min"][step_idx]
+                                if "logits_max" in step_metrics and step_idx < len(step_metrics["logits_max"]):
+                                    log_dict[f"eval_no_damage{metric_suffix}_steps/logits_max"] = step_metrics["logits_max"][step_idx]
+                                if "hidden_l2_norm" in step_metrics and step_idx < len(step_metrics["hidden_l2_norm"]):
+                                    log_dict[f"eval_no_damage{metric_suffix}_steps/hidden_l2_norm"] = step_metrics["hidden_l2_norm"][step_idx]
+                                if "hidden_mean" in step_metrics and step_idx < len(step_metrics["hidden_mean"]):
+                                    log_dict[f"eval_no_damage{metric_suffix}_steps/hidden_mean"] = step_metrics["hidden_mean"][step_idx]
+                                if "hidden_std" in step_metrics and step_idx < len(step_metrics["hidden_std"]):
+                                    log_dict[f"eval_no_damage{metric_suffix}_steps/hidden_std"] = step_metrics["hidden_std"][step_idx]
+                                wandb_run.log(log_dict)
                         
                         suffix_label = f" ({metric_suffix.strip('_')})" if metric_suffix else ""
                         log.info(
