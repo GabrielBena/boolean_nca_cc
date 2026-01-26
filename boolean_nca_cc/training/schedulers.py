@@ -329,3 +329,64 @@ def get_current_message_steps_and_batch_size(
     return current_steps, current_batch_size
 
 
+def get_step_beta(
+    loss_key: jax.random.PRNGKey,
+    n_message_steps: int,
+    training_progress: float = 0.0,
+    beta_max: float = 10,
+    beta_min: float = 0.1,
+    min_step: int = 1,
+) -> jp.ndarray:
+    """
+    Sample a loss step using Beta distribution that shifts from early to late steps.
+
+    Args:
+        loss_key: JAX random key for sampling
+        n_message_steps: Total number of message passing steps
+        training_progress: Float in [0.0, 1.0] indicating training progress
+
+    Returns:
+        Selected step index as integer
+
+    Distribution evolution during training:
+
+    EARLY TRAINING (progress ≈ 0.0):          MID TRAINING (progress ≈ 0.5):
+    ████                                         ████
+    ███                                          ██████
+    ██                                           ████████
+    █                                            ████████
+    █                                            ██████
+    █                                            ████
+    0────────────────────100                     0────────────────────100
+    (favors early steps)                         (balanced)
+
+    LATE TRAINING (progress ≈ 1.0):
+
+    █
+    █
+    █
+    ██
+    ███
+    ████
+    0────────────────────100
+    (favors late steps)
+    """
+    training_progress = jp.clip(training_progress, 0.01, 0.99)  # Avoid extreme values
+
+    # Parameters for beta distribution
+    # Early: alpha > beta (left skewed, favors early steps)
+    # Late: alpha < beta (right skewed, favors later steps)
+
+    max_concentration = beta_max  # Controls how concentrated the distribution is
+    min_concentration = beta_min
+
+    beta = max_concentration * (1.0 - training_progress) + min_concentration * training_progress
+    alpha = min_concentration * (1.0 - training_progress) + max_concentration * training_progress
+
+    # Sample from beta distribution
+    beta_sample = jax.random.beta(loss_key, alpha, beta)
+
+    # Map to step range
+    step = beta_sample * (n_message_steps - min_step) + min_step
+
+    return jp.round(step).astype(jp.int32).clip(min_step, n_message_steps - 1)
