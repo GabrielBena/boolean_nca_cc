@@ -1399,46 +1399,6 @@ def train_model(
 
             hard_loss, _, _, accuracy, hard_accuracy, full_map_accuracy, _, _ = aux
 
-            # DEBUG BLOCK: PERMANENT DAMAGE VALIDATION (Vectorized)
-            # Validate permanent damage after pool update (if enabled)
-            if track_pool_damage_validation:
-                damage_behavior = getattr(model, "damage_behavior", "permanent")
-                validation_result = circuit_pool.validate_permanent_damage(
-                    damage_behavior=damage_behavior,
-                    tolerance=1e-6,
-                )
-                skipped_pending = validation_result.get("skipped_pending", 0)
-                if validation_result["total_checks"] > 0:
-                    if validation_result["num_failures"] > 0:
-                        log.warning(
-                            f"POOL DAMAGE VALIDATION FAILED (epoch {epoch}): "
-                            f"{validation_result['passed_checks']}/{validation_result['total_checks']} checks passed "
-                            f"({100*validation_result['pass_rate']:.1f}%), "
-                            f"{skipped_pending} circuits with pending damage skipped"
-                        )
-                        for f in validation_result["failures"][:3]:  # Show first 3
-                            log.warning(
-                                f"  Circuit {f['circuit_idx']}: logits={f['logits_range']}, "
-                                f"hidden={f['hidden_range']}, n_damaged={f['n_damaged_nodes']}"
-                            )
-                    elif epoch % 100 == 0:  # Log success periodically
-                        log.info(
-                            f"POOL DAMAGE VALIDATION PASSED (epoch {epoch}): "
-                            f"{validation_result['passed_checks']}/{validation_result['total_checks']} checks passed, "
-                            f"{skipped_pending} circuits with pending damage skipped"
-                        )
-                    
-                    # Log to wandb if enabled
-                    if wandb_run and epoch % log_interval == 0:
-                        wandb_run.log({
-                            "pool_damage_validation/total_checks": validation_result["total_checks"],
-                            "pool_damage_validation/passed_checks": validation_result["passed_checks"],
-                            "pool_damage_validation/pass_rate": validation_result["pass_rate"],
-                            "pool_damage_validation/num_failures": validation_result["num_failures"],
-                            "pool_damage_validation/skipped_pending": skipped_pending,
-                            "training/epoch": epoch,
-                        })
-
             # Reset a fraction of the pool using scheduled intervals
             if should_reset_pool(epoch, reset_pool_interval, last_reset_epoch):
                 rng, reset_key, fresh_key = jax.random.split(rng, 3)
@@ -1588,72 +1548,6 @@ def train_model(
                     new_patterns, 
                     accumulate=should_accumulate
                 )
-
-                # DEBUG BLOCK: CUMULATIVE DAMAGE VALIDATION
-                # Validate cumulative damage (if enabled and we have old patterns)
-                if track_pool_damage_validation and damage_behavior == "permanent" and old_patterns is not None:
-                    cumulative_validation = circuit_pool.validate_cumulative_damage(
-                        damaged_indices=damaged_idxs,
-                        new_patterns=new_patterns,
-                        old_patterns=old_patterns,
-                        damage_behavior=damage_behavior,
-                    )
-                    if cumulative_validation["total_checks"] > 0:
-                        if cumulative_validation["num_failures"] > 0:
-                            log.warning(
-                                f"CUMULATIVE DAMAGE VALIDATION FAILED (epoch {epoch}): "
-                                f"{cumulative_validation['passed_checks']}/{cumulative_validation['total_checks']} checks passed "
-                                f"({100*cumulative_validation['pass_rate']:.1f}%)"
-                            )
-                            log.warning(
-                                "  This indicates damage patterns are NOT being accumulated (OR'd) correctly!"
-                            )
-                            for f in cumulative_validation["failures"][:3]:  # Show first 3
-                                log.warning(
-                                    f"  Circuit {f['circuit_idx']}: "
-                                    f"old={f['old_damage_count']}, new={f['new_damage_count']}, "
-                                    f"current={f['current_damage_count']}, expected={f['expected_damage_count']}, "
-                                    f"previously_damaged_remain={f['previously_damaged_remain']}, "
-                                    f"new_damage_added={f['new_damage_added']}, "
-                                    f"patterns_match={f['patterns_match']}"
-                                )
-                        else:
-                            log.info(
-                                f"CUMULATIVE DAMAGE VALIDATION PASSED (epoch {epoch}): "
-                                f"All {cumulative_validation['total_checks']} circuits with previous damage "
-                                f"correctly accumulated new damage (OR operation)"
-                            )
-                        
-                        # Log to wandb if enabled
-                        if wandb_run:
-                            wandb_run.log({
-                                "cumulative_damage_validation/total_checks": cumulative_validation["total_checks"],
-                                "cumulative_damage_validation/passed_checks": cumulative_validation["passed_checks"],
-                                "cumulative_damage_validation/pass_rate": cumulative_validation["pass_rate"],
-                                "cumulative_damage_validation/num_failures": cumulative_validation["num_failures"],
-                                "training/epoch": epoch,
-                            })
-
-                # DEBUG BLOCK: DAMAGE APPLICATION VALIDATION
-                # Validate damage application (if enabled)
-                if track_pool_damage_validation and damage_behavior == "permanent":
-                    # Check that damaged nodes have expected values immediately after application
-                    # Note: This validates the pool state, but the actual graph features will be
-                    # updated on the next training step when the model is applied
-                    validation_result = circuit_pool.validate_permanent_damage(
-                        damage_behavior=damage_behavior,
-                        tolerance=1e-6,
-                    )
-                    if validation_result["total_checks"] > 0 and validation_result["num_failures"] > 0:
-                        log.warning(
-                            f"DAMAGE APPLICATION VALIDATION FAILED (epoch {epoch}): "
-                            f"{validation_result['passed_checks']}/{validation_result['total_checks']} checks passed "
-                            f"({100*validation_result['pass_rate']:.1f}%)"
-                        )
-                        log.warning(
-                            "  Note: Graph features will be updated on next training step. "
-                            "This validates pool state after pattern application."
-                        )
 
                 damaged_count = int(damaged_idxs.shape[0]) if hasattr(damaged_idxs, "shape") else 0
                 damaged_frac = damaged_count / float(pool_size) if pool_size > 0 else 0.0
@@ -2222,87 +2116,6 @@ def train_model(
         pbar.close()
     # Log final results to wandb
     _log_final_wandb_metrics(wandb_run, result, epochs)
-    
-    # Create final Figure 1: Training progress tracking (complete dataset)
-    # NOTE: create_eval_plot_prog was commented out in the original visualization.py
-    # and has not been moved to the new location. This functionality is disabled.
-    if False and accumulated_pattern_data:  # Disabled until create_eval_plot_prog is reimplemented
-        try:
-            # from experiments.visualization.plot_trajectory import create_eval_plot_prog  # Not yet implemented
-            pass
-            
-            # Compute backpropagation results for reference line (reuse across figures)
-            bp_results = None
-            if knockout_vocabulary is not None:
-                try:
-                    from types import SimpleNamespace
-                    from boolean_nca_cc.training.backprop import _run_backpropagation_training_with_knockouts
-                    
-                    # Create config object for backprop evaluation
-                    if backprop_config is not None:
-                        mock_cfg = SimpleNamespace(
-                            test_seed=periodic_eval_test_seed,
-                            circuit=SimpleNamespace(
-                                layer_sizes=layer_sizes,
-                                arity=arity
-                            ),
-                            backprop=SimpleNamespace(**backprop_config),
-                            logging=SimpleNamespace(log_interval=log_interval),
-                        )
-                    else:
-                        # Create default backprop config
-                        mock_cfg = SimpleNamespace(
-                            test_seed=periodic_eval_test_seed,
-                            circuit=SimpleNamespace(
-                                layer_sizes=layer_sizes,
-                                arity=arity
-                            ),
-                            backprop=SimpleNamespace(
-                                epochs=50,  # Reduced for faster evaluation
-                                learning_rate=1e-2,
-                                weight_decay=1e-4,
-                                optimizer="adam",
-                                beta1=0.9,
-                                beta2=0.999,
-                            ),
-                            logging=SimpleNamespace(log_interval=log_interval),
-                        )
-                    
-                    # Run backpropagation training once for reuse
-                    # Use train data only to avoid data leakage (test data should never be seen during training)
-                    log.info("Computing backpropagation results for Figure 1 reference line...")
-                    bp_results = _run_backpropagation_training_with_knockouts(
-                        mock_cfg, x_train, y_train, loss_type, knockout_vocabulary,
-                        parallel=backprop_config.get("parallel", True) if backprop_config else True,
-                        batch_size=backprop_config.get("batch_size", None) if backprop_config else None
-                    )
-                    log.info(f"Backpropagation results computed. Mean final accuracy: {bp_results['aggregate_metrics']['mean_final_hard_accuracy']:.3f}")
-                    
-                except Exception as e:
-                    log.warning(f"Error computing backpropagation results for Figure 1: {e}")
-                    bp_results = None
-            
-            # Create the final plot with all accumulated data and BP reference
-            final_plot_path = create_eval_plot_prog(
-                pattern_data=accumulated_pattern_data,
-                training_mode=training_mode,
-                wandb_run=wandb_run,
-                output_dir="reports/figures",
-                filename=f"training_progress_final_{training_mode}.png",
-                bp_results=bp_results,
-                show_bp_reference=True
-            )
-            
-            # Log the final plot to wandb if enabled
-            if wandb_run:
-                import wandb as wandb_module
-                wandb_run.log({"training_progress_final": wandb_module.Image(final_plot_path)})
-                log.info(f"Final Figure 1 (training progress) saved and logged to wandb: {final_plot_path}")
-            else:
-                log.info(f"Final Figure 1 (training progress) saved to: {final_plot_path}")
-            
-        except Exception as e:
-            log.warning(f"Error creating final training progress plot: {e}")
 
     # Create Figure 3: Damage recovery and growth trajectories (stepwise)
     if (knockout_vocabulary is not None and 
