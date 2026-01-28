@@ -912,6 +912,13 @@ def train_model(
     backprop_config: Optional[Dict] = None,
     # DEBUG Param: Permanent damage validation parameters
     track_pool_damage_validation: bool = False,  # Enable validation of permanent damage in pool
+    # Low-footprint loss computation: Step 0 - remove loss from graph state
+    blind_mode: bool = True,  # If True, do not write loss to graph.globals (default for memory efficiency)
+    # Low-footprint loss computation: Step 1 - random loss_step sampling
+    random_loss_step: bool = False,  # If True, sample random loss_step per meta-batch
+    random_loss_step_min: int = 0,  # Minimum step for random loss_step selection
+    long_horizon_enabled: bool = False,  # Step 3: loss = mean over window of long_horizon_size steps
+    long_horizon_size: int = 1,  # Window size H (static); H=1 is single-step
 ):
     """
     Train a GNN to optimize boolean circuit parameters.
@@ -1155,6 +1162,10 @@ def train_model(
             "layer_sizes",
             "n_message_steps",
             "loss_type",
+            "blind_mode",
+            "loss_step",  # Step 1: loss_step is now a static argument (sampled outside JIT)
+            "long_horizon_enabled",
+            "long_horizon_size",
         ),
     )
 
@@ -1174,6 +1185,10 @@ def train_model(
         loss_key: jax.random.PRNGKey,
         epoch: int,
         knockout_patterns: Optional[jp.ndarray] = None,
+        blind_mode: bool = True,  # If True, do not write loss to graph.globals
+        loss_step: int = None,  # Step 1: loss_step sampled outside JIT (None means use n_message_steps - 1)
+        long_horizon_enabled: bool = False,  # Step 3: if True, loss = mean over window of long_horizon_size steps
+        long_horizon_size: int = 1,  # Window size H (static); H=1 is single-step
     ):
         """
         Single training step using graphs from the pool.
@@ -1197,15 +1212,22 @@ def train_model(
             Tuple of (loss, auxiliary outputs, updated pool)
         """
 
-        def get_loss_step(loss_key):
-            return n_message_steps - 1
+        # Step 1: Use loss_step passed as static argument (sampled outside JIT)
+        if loss_step is None:
+            loss_step = n_message_steps - 1
 
         def loss_fn_no_scan(model, graph, logits, wires, loss_key, knockout_pattern):
             # Store original shapes for reconstruction
             logits_original_shapes = [logit.shape for logit in logits]
-            loss_step = get_loss_step(loss_key)
+            # loss_step is captured from closure (sampled once per batch, passed as static arg)
 
-            all_results = []
+            # Step 2: Low-footprint loss computation
+            # Only accumulate loss scalars (cheap), conditionally snapshot large objects at loss_step
+            losses = []  # Will accumulate T scalar losses
+            
+            # Initialize snapshot - will be set on first iteration
+            # We need a valid structure for lax.cond, so initialize with first step's values
+            selected_snapshot = None  # Will be initialized on first iteration
 
             for i in range(n_message_steps):
                 graph = model(
@@ -1224,22 +1246,58 @@ def train_model(
                     loss_type=loss_type,
                     layer_sizes=layer_sizes,
                 )
-                # Update graph globals with current update steps
+                # Update graph globals: Step 0 - conditionally exclude loss from state
                 current_update_steps = (
                     graph.globals[..., 1] if graph.globals is not None else 0
                 )
-                graph = graph._replace(
-                    globals=jp.array([loss, current_update_steps + 1], dtype=jp.float32)
-                )
-                all_results.append((loss, aux, graph, logits))
+                if blind_mode:
+                    # Low-footprint mode: only store step count, not loss
+                    graph = graph._replace(
+                        globals=jp.array([0.0, current_update_steps + 1], dtype=jp.float32)
+                    )
+                else:
+                    # Legacy mode: store loss in globals (for loss-feedback dynamics)
+                    graph = graph._replace(
+                        globals=jp.array([loss, current_update_steps + 1], dtype=jp.float32)
+                    )
+                
+                # Step 2: Accumulate only loss scalar (cheap)
+                losses.append(loss)
+                
+                # Step 2: Conditionally snapshot (graph, logits, aux) only at loss_step
+                # Handle initialization: on first iteration (i == 0), always initialize snapshot
+                # Then, update snapshot only at loss_step
+                # Use lax.cond to ensure this works in JIT context and preserves gradient flow
+                # Both branches are traced, so gradient flow is preserved for BPTT
+                if i == 0:
+                    # Initialize snapshot on first iteration (needed for lax.cond structure)
+                    selected_snapshot = (graph, logits, aux)
+                else:
+                    # After initialization, conditionally update only at loss_step
+                    selected_snapshot = jax.lax.cond(
+                        i == loss_step,
+                        lambda _: (graph, logits, aux),  # True: save current state at loss_step
+                        lambda _: selected_snapshot,      # False: keep previous snapshot
+                        None
+                    )
 
-            # Stack all results using jax.tree_map
-            stacked_results = jax.tree.map(lambda *args: jp.stack(args), *all_results)
+            # Step 2/3: Final loss — single-step or horizon mean (static window)
+            losses_arr = jp.stack(losses)  # (T,) for indexing
+            if long_horizon_enabled and long_horizon_size > 1:
+                # Window [loss_step - (H-1), ..., loss_step], static length H, masked mean
+                H = long_horizon_size
+                start = loss_step - (H - 1)
+                indices = start + jp.arange(H)
+                idx_clipped = jp.clip(indices, 0, n_message_steps - 1)
+                valid = (indices >= 0) & (indices < n_message_steps)
+                valid_f = valid.astype(losses_arr.dtype)
+                window_losses = losses_arr[idx_clipped]
+                final_loss = jp.sum(window_losses * valid_f) / jp.maximum(jp.sum(valid_f), 1.0)
+            else:
+                final_loss = losses_arr[loss_step]
 
-            # Index at n_loss_step
-            final_loss, final_aux, final_graph, final_logits = jax.tree.map(
-                lambda x: x[loss_step], stacked_results
-            )
+            # Step 2: Extract snapshot at loss_step (already selected via lax.cond)
+            final_graph, final_logits, final_aux = selected_snapshot
 
             return final_loss, (final_aux, final_graph, final_logits, loss_step)
 
@@ -1375,6 +1433,14 @@ def train_model(
                 sample_key, meta_batch_size
             )
 
+            # Step 1: Sample loss_step once per meta-batch (outside JIT, before pool_train_step)
+            if random_loss_step:
+                loss_step = int(jax.random.randint(
+                    loss_key, (1,), random_loss_step_min, n_message_steps
+                )[0])
+            else:
+                loss_step = n_message_steps - 1
+
             # Perform pool training step
             (
                 loss,
@@ -1395,6 +1461,10 @@ def train_model(
                 loss_key=loss_key,
                 epoch=epoch,
                 knockout_patterns=knockout_patterns,
+                blind_mode=blind_mode,  # Step 0: remove loss from graph state
+                loss_step=loss_step,  # Step 1: loss_step sampled outside JIT
+                long_horizon_enabled=long_horizon_enabled,
+                long_horizon_size=long_horizon_size,
             )
 
             hard_loss, _, _, accuracy, hard_accuracy, full_map_accuracy, _, _ = aux

@@ -545,6 +545,14 @@ def main(cfg: DictConfig) -> None:
         hamming_analysis_dir=cfg.eval.get("hamming_analysis_dir", None),
         # DEBUG: Permanent damage validation
         track_pool_damage_validation=cfg.eval.get("track_pool_damage_validation", False),  # DEBUG
+        # Low-footprint loss computation: Step 0 - remove loss from graph state
+        blind_mode=cfg.eval.get("blind_mode", True),  # Default True for memory efficiency
+        # Low-footprint loss computation: Step 1 - random loss_step sampling
+        random_loss_step=cfg.training.get("random_loss_step", False),  # Enable random loss_step per meta-batch
+        random_loss_step_min=cfg.training.get("random_loss_step_min", 0),  # Minimum step for random selection
+        # Step 3 - horizon (window) loss
+        long_horizon_enabled=cfg.training.get("long_horizon_enabled", False),
+        long_horizon_size=cfg.training.get("long_horizon_size", 1),
     )
 
     # Save final model if checkpointing is enabled

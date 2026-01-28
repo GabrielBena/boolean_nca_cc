@@ -17,5 +17,5 @@ re_zero_update: true
   # Damage behavior
   # permanent: current behavior (remove from attention, clamp logits, zero updates)
   # reversible: keep nodes in attention and residual path; add logit bias to damaged nodes
-damage_behavior: "permanent"  # Options: "permanent", "reversible"
+damage_behavior: "reversible"  # Options: "permanent", "reversible"
 reversible_bias: -10.0

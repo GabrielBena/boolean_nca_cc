@@ -26,10 +26,10 @@ wandb:
 # Circuit configuration
 circuit:
   task: "add"
-  input_bits: 12
-  output_bits: 12
+  input_bits: 8
+  output_bits: 8
   arity: 4
-  num_layers: 5
+  num_layers: 3
   layer_sizes: null  # Auto-generate if null 
   circuit_hidden_dim: 64
   max_task_samples: 100000  # Maximum number of task samples (caps exponential growth from 2^input_bits)
@@ -40,6 +40,11 @@ training:
   training_mode: "repair"  # Options: "growth" (nops -> configured) or "repair" (configured -> damaged -> recovery)
   # INNER LOOP
   n_message_steps: 5  # Number of message passing steps per training iteration
+  random_loss_step: true  # If true, sample random loss_step per meta-batch (instead of always using final step)
+  random_loss_step_min: 4  # Minimum step for random loss_step selection (when random_loss_step=true)
+  # Horizon (window) loss: mean over last H steps ending at loss_step (Step 3)
+  long_horizon_enabled: true  # If true, loss = mean over long_horizon_size steps
+  long_horizon_size: 3  # Window size H (static); H=1 is single-step
   # MESSAGE PASSING GRAPH AUGMENTATION
   layer_neighbors: false  # Allow attention between adjacent gates within a layer
   # LOSS TYPE
@@ -76,13 +81,13 @@ pool:
   damage_combined_weights: [0.5, 0.5]
   damage_mode: "shotgun"  # Options: "shotgun" (random), "strip" (localized), "greedy" (rolling window), or "greedy_vocabulary" (vocabulary sampling)
   # Number of gates to knock out when generating fresh patterns (ignored if vocabulary is used)
-  damage_prob: 10
+  damage_prob: 40
   # Damage-specific vocabulary size (decoupled from legacy persistent_knockout)
-  damage_knockout_diversity: 256
+  damage_knockout_diversity: 64
   
   # Unified damage control system
   damage_injection_mode: "multi"  # "single" (static) or "multi" (periodic)
-  max_damage_per_circuit: 20      # Maximum damage events per circuit
+  max_damage_per_circuit: 5      # Maximum damage events per circuit
   # Number of message passing steps for damage evaluation (baseline and recovery trajectories)
   # This should typically match or be close to the training n_message_steps for realistic recovery assessment
   damage_eval_steps: ${eval.periodic_eval_inner_steps}
@@ -95,7 +100,7 @@ pool:
 eval:
   # Periodic evaluation parameters
   periodic_eval_enabled: true
-  periodic_eval_inner_steps: 400
+  periodic_eval_inner_steps: 25
   periodic_eval_interval: 1024 # 16
   periodic_eval_test_seed: ${test_seed}
   periodic_eval_log_stepwise: true
