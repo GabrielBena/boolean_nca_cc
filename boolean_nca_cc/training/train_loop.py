@@ -1166,6 +1166,7 @@ def train_model(
             "loss_step",  # Step 1: loss_step is now a static argument (sampled outside JIT)
             "long_horizon_enabled",
             "long_horizon_size",
+            "random_loss_step",
         ),
     )
 
@@ -1187,8 +1188,9 @@ def train_model(
         knockout_patterns: Optional[jp.ndarray] = None,
         blind_mode: bool = True,  # If True, do not write loss to graph.globals
         loss_step: int = None,  # Step 1: loss_step sampled outside JIT (None means use n_message_steps - 1)
-        long_horizon_enabled: bool = False,  # Step 3: if True, loss = mean over window of long_horizon_size steps
-        long_horizon_size: int = 1,  # Window size H (static); H=1 is single-step
+        long_horizon_enabled: bool = False,  # Step 3: if True, loss = mean over window
+        long_horizon_size: int = 1,  # Window size H (fixed mode); ignored in random+horizon
+        random_loss_step: bool = False,  # If True, loss_step is sampled; drives horizon window semantics
     ):
         """
         Single training step using graphs from the pool.
@@ -1281,18 +1283,31 @@ def train_model(
                         None
                     )
 
-            # Step 2/3: Final loss — single-step or horizon mean (static window)
+            # Step 2/3: Final loss — single-step or horizon mean
+            # Single-step: loss at loss_step only.
+            # Horizon + random: window from loss_step to final step [loss_step .. n_message_steps-1].
+            # Horizon + fixed: last H steps ending at final step [(n_steps-1)-H .. n_steps-1].
             losses_arr = jp.stack(losses)  # (T,) for indexing
             if long_horizon_enabled and long_horizon_size > 1:
-                # Window [loss_step - (H-1), ..., loss_step], static length H, masked mean
-                H = long_horizon_size
-                start = loss_step - (H - 1)
-                indices = start + jp.arange(H)
-                idx_clipped = jp.clip(indices, 0, n_message_steps - 1)
-                valid = (indices >= 0) & (indices < n_message_steps)
-                valid_f = valid.astype(losses_arr.dtype)
-                window_losses = losses_arr[idx_clipped]
-                final_loss = jp.sum(window_losses * valid_f) / jp.maximum(jp.sum(valid_f), 1.0)
+                if random_loss_step:
+                    # Random + horizon: window = [loss_step, ..., n_message_steps - 1]
+                    # Static shape: gather up to T indices, mask to valid range
+                    indices = loss_step + jp.arange(n_message_steps)
+                    valid = (indices >= 0) & (indices < n_message_steps)
+                    idx_clipped = jp.clip(indices, 0, n_message_steps - 1)
+                    valid_f = valid.astype(losses_arr.dtype)
+                    window_losses = losses_arr[idx_clipped]
+                    final_loss = jp.sum(window_losses * valid_f) / jp.maximum(jp.sum(valid_f), 1.0)
+                else:
+                    # Fixed + horizon: last H steps ending at (n_message_steps - 1)
+                    H = long_horizon_size
+                    start = (n_message_steps - 1) - (H - 1)
+                    indices = start + jp.arange(H)
+                    idx_clipped = jp.clip(indices, 0, n_message_steps - 1)
+                    valid = (indices >= 0) & (indices < n_message_steps)
+                    valid_f = valid.astype(losses_arr.dtype)
+                    window_losses = losses_arr[idx_clipped]
+                    final_loss = jp.sum(window_losses * valid_f) / jp.maximum(jp.sum(valid_f), 1.0)
             else:
                 final_loss = losses_arr[loss_step]
 
@@ -1465,6 +1480,7 @@ def train_model(
                 loss_step=loss_step,  # Step 1: loss_step sampled outside JIT
                 long_horizon_enabled=long_horizon_enabled,
                 long_horizon_size=long_horizon_size,
+                random_loss_step=random_loss_step,
             )
 
             hard_loss, _, _, accuracy, hard_accuracy, full_map_accuracy, _, _ = aux
