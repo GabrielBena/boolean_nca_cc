@@ -17,6 +17,8 @@ This doc describes **horizon loss** (window loss) and **loss-step selection** (r
 
 ## Next Step: Beta Distribution for Loss-Step Selection
 
+**Implementation plan:** See **`docs/low_footprint_loss.md`** → **Step 5** (inserted after scan).
+
 **Goal:** When using random `loss_step`, optionally sample it from a **Beta distribution** that shifts from early steps (early training) to late steps (late training), instead of uniform over `[min_step, T)`.
 
 **Why:** Early on, encourage low loss earlier in the rollout; later, focus on the final steps. Single anchor (`loss_step`) still drives both single-step loss and horizon window (random-horizon = `[loss_step .. T-1]`).

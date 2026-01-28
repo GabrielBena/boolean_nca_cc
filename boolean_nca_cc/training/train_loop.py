@@ -1167,6 +1167,7 @@ def train_model(
             "long_horizon_enabled",
             "long_horizon_size",
             "random_loss_step",
+            "use_scan",  # Step 4: use lax.scan for loss loop when True
         ),
     )
 
@@ -1191,6 +1192,7 @@ def train_model(
         long_horizon_enabled: bool = False,  # Step 3: if True, loss = mean over window
         long_horizon_size: int = 1,  # Window size H (fixed mode); ignored in random+horizon
         random_loss_step: bool = False,  # If True, loss_step is sampled; drives horizon window semantics
+        use_scan: bool = False,  # Step 4: if True, use lax.scan for message loop (low-footprint, compact compile)
     ):
         """
         Single training step using graphs from the pool.
@@ -1344,8 +1346,142 @@ def train_model(
 
             return final_loss, (final_aux, final_graph, final_logits, loss_step)
 
+        def loss_fn_scan(model, graph, logits, wires, loss_key, knockout_pattern):
+            # Step 4 (low_footprint_loss.md): same contract as loss_fn_no_scan, but use lax.scan.
+            # Carry: (graph, selected_snapshot). Output: scalar loss per step only.
+            logits_original_shapes = [logit.shape for logit in logits]
+
+            attention_mask = None
+            if hasattr(model, "_create_attention_mask"):
+                knockout_for_mask = (
+                    knockout_pattern
+                    if (
+                        knockout_pattern is not None
+                        and getattr(model, "damage_behavior", "permanent") == "permanent"
+                    )
+                    else None
+                )
+                attention_mask = model._create_attention_mask(
+                    graph.senders,
+                    graph.receivers,
+                    knockout_pattern=knockout_for_mask,
+                    bidirectional=True,
+                    layer_neighbors=layer_neighbors,
+                    layer_sizes=layer_sizes,
+                )
+
+            # Run step 0 outside scan to get initial carry (avoids placeholder for selected_snapshot)
+            if attention_mask is not None:
+                graph = model(
+                    graph,
+                    attention_mask=attention_mask,
+                    knockout_pattern=knockout_pattern,
+                    layer_neighbors=layer_neighbors,
+                    layer_sizes=layer_sizes,
+                )
+            else:
+                graph = model(graph)
+
+            graph, loss_0, logits, aux = get_loss_and_update_graph(
+                graph=graph,
+                logits_original_shapes=logits_original_shapes,
+                wires=wires,
+                x_data=x,
+                y_data=y_target,
+                loss_type=loss_type,
+                layer_sizes=layer_sizes,
+            )
+            current_update_steps = (
+                graph.globals[..., 1] if graph.globals is not None else 0
+            )
+            if blind_mode:
+                graph = graph._replace(
+                    globals=jp.array([0.0, current_update_steps + 1], dtype=jp.float32)
+                )
+            else:
+                graph = graph._replace(
+                    globals=jp.array([loss_0, current_update_steps + 1], dtype=jp.float32)
+                )
+
+            init_carry = (graph, (graph, logits, aux))
+
+            def scan_body(carry, step_idx):
+                graph_in, selected_snapshot = carry
+                if attention_mask is not None:
+                    graph_out = model(
+                        graph_in,
+                        attention_mask=attention_mask,
+                        knockout_pattern=knockout_pattern,
+                        layer_neighbors=layer_neighbors,
+                        layer_sizes=layer_sizes,
+                    )
+                else:
+                    graph_out = model(graph_in)
+
+                graph_out, loss, logits_out, aux_out = get_loss_and_update_graph(
+                    graph=graph_out,
+                    logits_original_shapes=logits_original_shapes,
+                    wires=wires,
+                    x_data=x,
+                    y_data=y_target,
+                    loss_type=loss_type,
+                    layer_sizes=layer_sizes,
+                )
+                current_update_steps = (
+                    graph_out.globals[..., 1] if graph_out.globals is not None else 0
+                )
+                if blind_mode:
+                    graph_out = graph_out._replace(
+                        globals=jp.array([0.0, current_update_steps + 1], dtype=jp.float32)
+                    )
+                else:
+                    graph_out = graph_out._replace(
+                        globals=jp.array([loss, current_update_steps + 1], dtype=jp.float32)
+                    )
+
+                new_snapshot = jax.lax.cond(
+                    step_idx == loss_step,
+                    lambda _: (graph_out, logits_out, aux_out),
+                    lambda _: selected_snapshot,
+                    None,
+                )
+                return (graph_out, new_snapshot), loss
+
+            scan_length = n_message_steps - 1
+            (final_graph, selected_snapshot), scan_losses = jax.lax.scan(
+                scan_body,
+                init_carry,
+                jp.arange(1, n_message_steps),
+                length=scan_length,
+            )
+
+            losses_arr = jp.concatenate([loss_0[None], scan_losses])
+
+            if long_horizon_enabled and long_horizon_size > 1:
+                if random_loss_step:
+                    indices = loss_step + jp.arange(n_message_steps)
+                    valid = (indices >= 0) & (indices < n_message_steps)
+                    idx_clipped = jp.clip(indices, 0, n_message_steps - 1)
+                    valid_f = valid.astype(losses_arr.dtype)
+                    window_losses = losses_arr[idx_clipped]
+                    final_loss = jp.sum(window_losses * valid_f) / jp.maximum(jp.sum(valid_f), 1.0)
+                else:
+                    H = long_horizon_size
+                    start = (n_message_steps - 1) - (H - 1)
+                    indices = start + jp.arange(H)
+                    idx_clipped = jp.clip(indices, 0, n_message_steps - 1)
+                    valid = (indices >= 0) & (indices < n_message_steps)
+                    valid_f = valid.astype(losses_arr.dtype)
+                    window_losses = losses_arr[idx_clipped]
+                    final_loss = jp.sum(window_losses * valid_f) / jp.maximum(jp.sum(valid_f), 1.0)
+            else:
+                final_loss = losses_arr[loss_step]
+
+            final_graph, final_logits, final_aux = selected_snapshot
+            return final_loss, (final_aux, final_graph, final_logits, loss_step)
+
         def batch_loss_fn(model, graphs, logits, wires, loss_key, knockout_patterns):
-            loss_fn = loss_fn_no_scan # TODO: add scan as an option
+            loss_fn = loss_fn_scan if use_scan else loss_fn_no_scan
 
             loss_keys = jax.random.split(loss_key, graphs.n_node.shape[0])
             
@@ -1509,6 +1645,7 @@ def train_model(
                 long_horizon_enabled=long_horizon_enabled,
                 long_horizon_size=long_horizon_size,
                 random_loss_step=random_loss_step,
+                use_scan=use_scan,  # Step 4: lax.scan for message loop when True
             )
 
             hard_loss, _, _, accuracy, hard_accuracy, full_map_accuracy, _, _ = aux

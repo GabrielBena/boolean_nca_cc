@@ -15,8 +15,9 @@ This note describes a memory-efficient way to compute the training (“meta”) 
 - ✅ **Step 1**: Sample `loss_step` once per meta-batch — **COMPLETE**
 - ✅ **Step 2**: Stop stacking large per-step objects — **COMPLETE**
 - ✅ **Step 3**: Window loss with static horizon size — **COMPLETE** (`long_horizon_enabled`, `long_horizon_size`)
-- ⏸️ **Step 4**: Replace unrolled Python loop with `lax.scan` — see Step 4 below for **why** (compile/code size at large T, beta-horizon strategy) and **implementation strategy** for low-footprint `loss_fn_scan` (carry + loss-only output; relation to existing helpers).
-- ⏸️ **Step 5**: Add gradient checkpointing (remat)
+- ✅ **Step 4**: Replace unrolled Python loop with `lax.scan` — **COMPLETE** (`loss_fn_scan` in `train_loop.py`, gated by `training.use_scan`; same contract as `loss_fn_no_scan`, low-footprint carry + loss-only output).
+- ⏸️ **Step 5**: Beta distribution for loss-step selection — see Step 5 below (optional `get_step_beta` when `random_loss_step`; curriculum from early to late steps).
+- ⏸️ **Step 6**: Add gradient checkpointing (remat)
 
 ## Low-footprint checklist (the non-negotiables)
 
@@ -185,7 +186,15 @@ final_graph, final_logits, final_aux = selected_snapshot
 
 **Config**: `training.long_horizon_enabled`, `training.long_horizon_size`; `random_loss_step` is passed into `pool_train_step` (static) so the JIT branches on the correct window definition.
 
-### Step 4 — Replace unrolled Python loop with `lax.scan`
+### Step 4 — Replace unrolled Python loop with `lax.scan` ✅ COMPLETE
+
+**Status**: Implemented in `train_loop.py`. `loss_fn_scan` lives in the same scope as `loss_fn_no_scan` inside `pool_train_step`. Selection is gated by `use_scan` (static arg): `batch_loss_fn` uses `loss_fn_scan` when `use_scan=True`, else `loss_fn_no_scan`. Config: `training.use_scan` (default `false`); overridable via `configs/config.yaml` or CLI. Wired from `train.py` as `use_scan=cfg.training.use_scan` into `train_model`, then into `pool_train_step`.
+
+**Implementation summary**:
+- **First step outside scan**: Step 0 is run once before the scan to obtain initial `(graph_0, loss_0, logits_0, aux_0)` and avoid a placeholder for `selected_snapshot` in the carry.
+- **Scan**: `lax.scan(scan_body, init_carry, jp.arange(1, n_message_steps), length=n_message_steps-1)`. Carry = `(graph, selected_snapshot)`; output = scalar loss per step only. Body: one model step, `get_loss_and_update_graph`, globals update (blind_mode), `selected_snapshot = lax.cond(step_idx == loss_step, current, previous)`.
+- **After scan**: `losses_arr = jp.concatenate([loss_0[None], scan_losses])`; `final_loss` and snapshot extraction use the same logic as `loss_fn_no_scan` (single-step or horizon window, same static gather + mask).
+- **Edge case**: When `n_message_steps == 1`, scan length is 0; only the pre-scan step runs; behaviour matches no-scan.
 
 **Why scan matters at large T**
 
@@ -239,13 +248,54 @@ The existing `run_self_attention_scan_with_loss` in `boolean_nca_cc/models/self_
    - Snapshot = `selected_snapshot` from the final carry.  
    - Return `(final_loss, (aux, graph, logits, loss_step))` with `(graph, logits, aux) = selected_snapshot`.
 
-5. **Where to implement**  
-   Implement `loss_fn_scan` in `train_loop.py` (same scope as `loss_fn_no_scan`), or add a low-footprint scan helper (e.g. in `self_attention.py` or a shared training module) that takes `loss_step`, horizon params, and blind_mode, and returns the same contract; then call it from `pool_train_step` when `use_scan=True`. Horizon and loss_step logic stay identical to no_scan — no duplicate logic.
+5. **Where implemented**  
+   `loss_fn_scan` is implemented in `train_loop.py` (same scope as `loss_fn_no_scan`). It is invoked from `pool_train_step` when `use_scan=True`. Horizon and loss_step logic are identical to no_scan — no duplicate logic.
 
 6. **Static arguments**  
    `n_message_steps` (or `T_max`) and `loss_step` remain static for JIT; the scan `length` is `n_message_steps`. Beta strategy only changes `loss_step` per epoch in the caller; the scan body does not change.
 
-### Step 5 — Add gradient checkpointing (remat) for long unrolls
+### Step 5 — Beta distribution for loss-step selection
+
+**Goal:** When using random `loss_step`, optionally sample it from a **Beta distribution** that shifts from early steps (early training) to late steps (late training), instead of uniform over `[min_step, T)`.
+
+**Why:** Early on, encourage low loss earlier in the rollout; later, focus on the final steps. Single anchor (`loss_step`) still drives both single-step loss and horizon window (random-horizon = `[loss_step .. T-1]`).
+
+**API (already exists):** `boolean_nca_cc.training.schedulers.get_step_beta`:
+
+```python
+def get_step_beta(
+    loss_key: jax.random.PRNGKey,
+    n_message_steps: int,
+    training_progress: float = 0.0,  # e.g. epoch / max(epochs - 1, 1)
+    beta_max: float = 10,
+    beta_min: float = 0.1,
+    min_step: int = 1,
+) -> jp.ndarray:  # returns int step index
+```
+
+- **Early** (`training_progress ≈ 0`): left-skewed Beta → favors **early** steps.
+- **Late** (`training_progress ≈ 1`): right-skewed Beta → favors **late** steps.
+- Returns step in `[min_step, n_message_steps - 1]`.
+
+**Integration (to implement):**
+
+1. **Config**: Add `training.use_beta_loss_step: bool` (default `False`). Optional: `training.beta_loss_step_beta_max`, `training.beta_loss_step_beta_min`, `training.beta_loss_step_min_step` (or reuse `random_loss_step_min`).
+2. **Train loop**: When sampling `loss_step` (once per meta-batch, before `pool_train_step`):
+   - If `random_loss_step` and `use_beta_loss_step`: call `get_step_beta(loss_key, n_message_steps, training_progress=epoch / max(epochs - 1, 1), min_step=random_loss_step_min, ...)` and use the returned step (cast to int for static).
+   - Else if `random_loss_step`: keep current `jax.random.randint(..., random_loss_step_min, n_message_steps)`.
+   - Else: `loss_step = n_message_steps - 1`.
+3. **Static args**: `use_beta_loss_step` (and any new beta params used inside a JIT boundary) must be in `static_argnames` if they affect control flow; `loss_step` is already sampled outside JIT, so no change there.
+
+**Combined with horizon:**
+
+- Beta only chooses **which** step is the anchor (`loss_step`).
+- Single-step: loss at that step.
+- Horizon + random: window from that step to end.
+- Horizon + fixed: unchanged (last H steps at final step); beta does not apply when `random_loss_step=False`.
+
+**JAX:** Sampling happens **before** `pool_train_step` (outside JIT), so no traced-value issues. Return value of `get_step_beta` is converted to Python int for use as static `loss_step`.
+
+### Step 6 — Add gradient checkpointing (remat) for long unrolls
 
 Once the computation is in a `scan`, wrap the step function with `jax.remat` / `jax.checkpoint` (or `nnx.remat`) to reduce BPTT activation memory.
 
