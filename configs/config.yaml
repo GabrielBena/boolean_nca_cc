@@ -39,7 +39,7 @@ training:
   # TRAINING MODE
   training_mode: "repair"  # Options: "growth" (nops -> configured) or "repair" (configured -> damaged -> recovery)
   # INNER LOOP
-  n_message_steps: 5  # Number of message passing steps per training iteration
+  n_message_steps: 6  # Number of message passing steps per training iteration
   random_loss_step: true  # If true, sample random loss_step per meta-batch (instead of always using final step)
   random_loss_step_min: 4  # Minimum step for random loss_step selection (when random_loss_step=true)
   # Horizon (window) loss: mean over last H steps ending at loss_step (Step 3)

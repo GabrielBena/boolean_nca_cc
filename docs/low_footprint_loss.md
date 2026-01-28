@@ -15,7 +15,7 @@ This note describes a memory-efficient way to compute the training (“meta”) 
 - ✅ **Step 1**: Sample `loss_step` once per meta-batch — **COMPLETE**
 - ✅ **Step 2**: Stop stacking large per-step objects — **COMPLETE**
 - ✅ **Step 3**: Window loss with static horizon size — **COMPLETE** (`long_horizon_enabled`, `long_horizon_size`)
-- ⏸️ **Step 4**: Replace unrolled Python loop with `lax.scan`
+- ⏸️ **Step 4**: Replace unrolled Python loop with `lax.scan` — see Step 4 below for **why** (compile/code size at large T, beta-horizon strategy) and **implementation strategy** for low-footprint `loss_fn_scan` (carry + loss-only output; relation to existing helpers).
 - ⏸️ **Step 5**: Add gradient checkpointing (remat)
 
 ## Low-footprint checklist (the non-negotiables)
@@ -168,36 +168,82 @@ final_graph, final_logits, final_aux = selected_snapshot
 
 **Future optimization**: If you must still execute all `T_max` steps (static shapes), you can additionally **stop gradient flow after `loss_step`** using `jax.lax.stop_gradient` (memory win for the backward pass), but note it does **not** reduce forward compute.
 
-### Step 3 — Window loss with static horizon size (no dynamic slice sizes)
+### Step 3 — Window loss with static horizon size ✅ COMPLETE
 
-JAX requires static shapes for most slicing/gather patterns. For “loss over a selected window”, keep the horizon size `H` **static**.
+**Status**: Implemented. Horizon semantics depend on **random vs fixed** `loss_step` (driven by `random_loss_step`).
 
-Compute:
+**Behaviour**:
 
-- single-step loss: `L = losses[loss_step]`  (equivalent to `H=1`)
-- window loss (length `H`): mean over `[loss_step - (H-1), ..., loss_step]`, implemented with **static-length gather** and a mask.
+- **Single-step** (no horizon or `long_horizon_size=1`): `L = losses[loss_step]` — loss at the chosen step only (random or fixed).
+- **Horizon + random** (`random_loss_step=True`, `long_horizon_enabled=True`): window = **from** `loss_step` **to final step** — mean over `[loss_step, ..., T-1]`. Variable-length window; implemented with static-length gather (length `T`) and mask.
+- **Horizon + fixed** (`random_loss_step=False`, `long_horizon_enabled=True`): window = **last H steps ending at final step** — mean over `[(T-1)-(H-1), ..., T-1]`. Fixed length `H`; implemented with static gather + mask.
 
-Static-gather pattern:
+**Static-gather patterns** (JAX requires static shapes; use fixed-length gather + masking):
 
-1. `idx = loss_step - (H - 1) + arange(H)`  (length `H`)
-2. mask out indices outside `[0, T-1]` (or clamp + mask)
-3. `window = take(losses, clip(idx, 0, T-1))`
-4. `L = sum(window * mask) / sum(mask)`
+- **Random + horizon**: `indices = loss_step + arange(T)`; `valid = (indices >= 0) & (indices < T)`; clamp indices to `[0, T-1]`; `L = sum(take(losses, idx_clipped) * valid) / max(sum(valid), 1)`.
+- **Fixed + horizon**: `start = (T-1) - (H-1)`; `indices = start + arange(H)`; mask and mean as above.
 
-This avoids `dynamic_slice` with a traced `slice_sizes`.
+**Config**: `training.long_horizon_enabled`, `training.long_horizon_size`; `random_loss_step` is passed into `pool_train_step` (static) so the JIT branches on the correct window definition.
 
 ### Step 4 — Replace unrolled Python loop with `lax.scan`
 
-Switch the time loop to `jax.lax.scan` to:
+**Why scan matters at large T**
 
-- keep the compiled program compact (avoid unrolling `T` copies into HLO)
-- reduce compile time and improve runtime stability
-- create a single step function suitable for rematerialization
+With the current implementation, `n_message_steps` is a **static** argument, so JAX **unrolls** the Python loop at compile time: the compiled program contains `T` copies of the loop body. Consequences at large T (e.g. 30–100 steps):
 
-Design principle:
+- **Compile time** grows roughly with T (more operations to compile).
+- **Compiled code size** grows with T (100× more HLO for T=100), which hurts compiler optimizations and runtime.
+- **Runtime** can degrade (code bloat, worse cache behavior), so the slowdown when bumping `n_steps` to 100 is severe.
 
-- **scan carry** contains the evolving graph state and the “selected snapshot” containers
-- **scan output** should be **small** (e.g. scalar loss per step)
+`lax.scan` compiles to a **single** loop body executed `T` times:
+
+- **Compile time** is effectively independent of T (one body to compile).
+- **Compiled program** stays compact (one loop, not T copies).
+- **Runtime** at large T is typically better (same FLOPs, but cleaner code generation).
+
+So scan does **not** reduce the amount of work (we still run T steps for BPTT and horizon), but it makes **large T feasible** and avoids the immense slowdown from unrolling. It also allows **hoisting** work that is identical every step (e.g. attention mask creation in the self-attention model): compute once before the scan and pass into the step body, instead of recomputing T times inside the loop.
+
+**Scan and the beta-horizon strategy**
+
+The planned **beta** strategy uses a **static** `T_max` (e.g. 100) and a **dynamic** effective step: `loss_step = f(epoch)` (e.g. via `get_step_beta`), so we always run `T_max` steps but only the step used for loss and pool update changes over training. Horizon and single-step loss still use the same contract (window ending at `loss_step`, snapshot at `loss_step`). Implementing this with an **unrolled** loop would mean compiling and running a 100-copy program every time; with **scan**, we compile once for `T_max` and run one loop body `T_max` times, so beta curriculum (early step → late step) is practical. The scan-based loss function keeps the same interface (`loss_step`, horizon, snapshot at `loss_step`), so beta and horizon logic remain entirely in the caller—no duplicate logic between scan and no-scan paths.
+
+**Design principle (unchanged)**
+
+- **scan carry** contains the evolving graph state and the “selected snapshot” containers (low-footprint: do not emit full graph/logits/aux per step).
+- **scan output** should be **small** (e.g. scalar loss per step only); after the scan, compute final loss from the `[T]` losses (single-step or horizon) and take the snapshot from the carry.
+
+**Relation to existing scan helpers**
+
+The existing `run_self_attention_scan_with_loss` in `boolean_nca_cc/models/self_attention.py` **does** scan along MP steps (model + `get_loss_and_update_graph` per step), but it **emits** `(graph, loss, logits, aux)` every step, so the scan output is `[T, ...]` for graphs and logits — **not** low-footprint. Do **not** use it as-is for training. Implement `loss_fn_scan` with the low-footprint contract below (carry holds snapshot; output is loss-only). Optionally, add a low-footprint variant in the model module and call it from the train loop; the logic is the same.
+
+**Implementation strategy for `loss_fn_scan`**
+
+1. **Contract (same as `loss_fn_no_scan`)**  
+   Inputs: `model`, graph, logits, wires, `loss_step`, `n_message_steps`, horizon params, etc.  
+   Outputs: `(final_loss, (aux, graph, logits, loss_step))` — scalar loss (single-step or horizon mean) and one snapshot at `loss_step` for pool update.
+
+2. **Scan shape (low-footprint)**  
+   - **Carry**: `(graph, selected_snapshot)` where `selected_snapshot = (graph, logits, aux)` at the chosen step. Updated only when `step_idx == loss_step` via `lax.cond`.  
+   - **Output**: scalar loss per step only → after scan, stacked as `losses` of shape `[T]`.  
+   - **Do not** emit graph, logits, or aux from the scan body; that would stack `[T, ...]` and defeat low-footprint.
+
+3. **Scan body (one step)**  
+   - Input: `(carry, _)` with `carry = (graph, selected_snapshot)`; step index is implicit (scan iteration).  
+   - Compute: `graph = model(graph, ...)`; then `graph, loss, logits, aux = get_loss_and_update_graph(graph, ...)`; set graph globals for blind_mode as in no_scan.  
+   - Snapshot: `selected_snapshot = lax.cond(step_idx == loss_step, lambda _: (graph, logits, aux), lambda _: selected_snapshot, None)`. Use the scan's iteration index (e.g. pass `jax.lax.iota` or an arange as `xs` so the body receives `step_idx`).  
+   - Return: `(new_carry, output)` with `new_carry = (graph, selected_snapshot)` and `output = loss` (scalar).
+
+4. **After the scan**  
+   - `losses` = stacked scan outputs, shape `[T]`.  
+   - Compute `final_loss` from `losses` and `loss_step` exactly as in `loss_fn_no_scan` (single-step: `losses[loss_step]`; horizon: same static gather + mask as Step 3).  
+   - Snapshot = `selected_snapshot` from the final carry.  
+   - Return `(final_loss, (aux, graph, logits, loss_step))` with `(graph, logits, aux) = selected_snapshot`.
+
+5. **Where to implement**  
+   Implement `loss_fn_scan` in `train_loop.py` (same scope as `loss_fn_no_scan`), or add a low-footprint scan helper (e.g. in `self_attention.py` or a shared training module) that takes `loss_step`, horizon params, and blind_mode, and returns the same contract; then call it from `pool_train_step` when `use_scan=True`. Horizon and loss_step logic stay identical to no_scan — no duplicate logic.
+
+6. **Static arguments**  
+   `n_message_steps` (or `T_max`) and `loss_step` remain static for JIT; the scan `length` is `n_message_steps`. Beta strategy only changes `loss_step` per epoch in the caller; the scan body does not change.
 
 ### Step 5 — Add gradient checkpointing (remat) for long unrolls
 

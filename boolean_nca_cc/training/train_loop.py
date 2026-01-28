@@ -1223,6 +1223,28 @@ def train_model(
             logits_original_shapes = [logit.shape for logit in logits]
             # loss_step is captured from closure (sampled once per batch, passed as static arg)
 
+            # Precompute attention mask once (fixed for this graph + knockout_pattern).
+            # Mask depends only on wiring (senders, receivers) and knockout; same every step.
+            # Avoids recomputing it T times inside the loop (CircuitSelfAttention only).
+            attention_mask = None
+            if hasattr(model, "_create_attention_mask"):
+                knockout_for_mask = (
+                    knockout_pattern
+                    if (
+                        knockout_pattern is not None
+                        and getattr(model, "damage_behavior", "permanent") == "permanent"
+                    )
+                    else None
+                )
+                attention_mask = model._create_attention_mask(
+                    graph.senders,
+                    graph.receivers,
+                    knockout_pattern=knockout_for_mask,
+                    bidirectional=True,
+                    layer_neighbors=layer_neighbors,
+                    layer_sizes=layer_sizes,
+                )
+
             # Step 2: Low-footprint loss computation
             # Only accumulate loss scalars (cheap), conditionally snapshot large objects at loss_step
             losses = []  # Will accumulate T scalar losses
@@ -1232,12 +1254,18 @@ def train_model(
             selected_snapshot = None  # Will be initialized on first iteration
 
             for i in range(n_message_steps):
-                graph = model(
-                    graph,
-                    knockout_pattern=knockout_pattern,
-                    layer_neighbors=layer_neighbors,
-                    layer_sizes=layer_sizes,
-                )
+                if attention_mask is not None:
+                    # CircuitSelfAttention: pass precomputed mask (avoids T redundant creations)
+                    graph = model(
+                        graph,
+                        attention_mask=attention_mask,
+                        knockout_pattern=knockout_pattern,
+                        layer_neighbors=layer_neighbors,
+                        layer_sizes=layer_sizes,
+                    )
+                else:
+                    # CircuitGNN: only accepts graph
+                    graph = model(graph)
 
                 graph, loss, logits, aux = get_loss_and_update_graph(
                     graph=graph,
