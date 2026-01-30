@@ -220,6 +220,9 @@ def setup_circuit_like_gui(config, wiring_key, preconfigured_state_file=None):
     # Generate layer sizes
     layer_sizes = list(generate_layer_sizes(input_n, output_n, arity, layer_n))
     log.info(f"Layer sizes: {layer_sizes}")
+
+    # Filename suffix from config (task, input_bits, output_bits, num_layers) for preconfigured circuit files
+    circuit_suffix = f"{task_name}_{input_n}in_{output_n}out_{layer_n}layers"
     
     # Get task data
     case_n = 1 << input_n
@@ -255,7 +258,7 @@ def setup_circuit_like_gui(config, wiring_key, preconfigured_state_file=None):
             if not os.path.exists(wires_file):
                 wires_file = os.path.join(logits_dir, logits_basename.replace("preconfigured_logits", "wires"))
             
-            # If still not found, try just "wires" + same suffix (for files like wires_20251112_linux.npz)
+            # If still not found, try just "wires" + same suffix (e.g. wires_add_8in_8out_3layers.npz)
             if not os.path.exists(wires_file):
                 # Extract suffix after "preconfigured_logits_" or "logits_"
                 if "preconfigured_logits_" in logits_basename:
@@ -290,7 +293,7 @@ def setup_circuit_like_gui(config, wiring_key, preconfigured_state_file=None):
             initial_loss, initial_aux = get_loss_from_wires_logits(
                 logits, wires, x_data, y_data, loss_type
             )
-            initial_hard_loss, _, _, initial_accuracy, initial_hard_accuracy, _, _ = initial_aux
+            initial_hard_loss, _, _, initial_accuracy, initial_hard_accuracy, _, _, _ = initial_aux
             log.info(
                 f"Loaded preconfigured circuit metrics: loss={float(initial_loss):.6f}, "
                 f"hard_loss={float(initial_hard_loss):.4f}, "
@@ -405,7 +408,7 @@ def setup_circuit_like_gui(config, wiring_key, preconfigured_state_file=None):
         log.debug(f"x_data min: {float(x_data_np.min())}, max: {float(x_data_np.max())}")
         log.debug(f"y_data min: {float(y_data_np.min())}, max: {float(y_data_np.max())}")
         # Save full arrays to file for comparison
-        data_file = os.path.join(log_dir, f"task_data_{timestamp}.npz")
+        data_file = os.path.join(log_dir, f"task_data_{circuit_suffix}.npz")
         np.savez(data_file, x_data=x_data_np, y_data=y_data_np)
         log.debug(f"Full task data saved to: {data_file}")
         log.debug("="*80)
@@ -452,8 +455,10 @@ def setup_circuit_like_gui(config, wiring_key, preconfigured_state_file=None):
             log.debug(f"Layer {i} min: {float(logit_np.min()):.10f}, max: {float(logit_np.max()):.10f}")
             log.debug(f"Layer {i} first 10 values (flattened): {logit_np.flatten()[:10].tolist()}")
             log.debug(f"Layer {i} last 10 values (flattened): {logit_np.flatten()[-10:].tolist()}")
-        # Save full logits to file
-        logits_file = os.path.join(log_dir, f"preconfigured_logits_{timestamp}.npz")
+        # Save full logits to file (preconfigured_circuits so GUI can load without copying)
+        preconfigured_dir = "preconfigured_circuits"
+        os.makedirs(preconfigured_dir, exist_ok=True)
+        logits_file = os.path.join(preconfigured_dir, f"preconfigured_logits_{circuit_suffix}.npz")
         np.savez(logits_file, **logits_dict)
         log.debug(f"Full preconfigured logits saved to: {logits_file}")
         log.debug("="*80)
@@ -466,7 +471,7 @@ def setup_circuit_like_gui(config, wiring_key, preconfigured_state_file=None):
             wire_np = np.array(wire_layer) if hasattr(wire_layer, '__array__') else wire_layer
             log.debug(f"Wires layer {i} shape: {wire_np.shape}, dtype: {wire_np.dtype}")
             log.debug(f"Wires layer {i} first 10 values (flattened): {wire_np.flatten()[:10].tolist()}")
-        wires_file = os.path.join(log_dir, f"wires_{timestamp}.npz")
+        wires_file = os.path.join(preconfigured_dir, f"wires_{circuit_suffix}.npz")
         wires_dict = {f"layer_{i}": np.array(w) for i, w in enumerate(wires)}
         np.savez(wires_file, **wires_dict)
         log.debug(f"Full wires saved to: {wires_file}")
@@ -476,7 +481,7 @@ def setup_circuit_like_gui(config, wiring_key, preconfigured_state_file=None):
         initial_loss, initial_aux = get_loss_from_wires_logits(
             logits, wires, x_data, y_data, loss_type
         )
-        initial_hard_loss, _, _, initial_accuracy, initial_hard_accuracy, _, _ = initial_aux
+        initial_hard_loss, _, _, initial_accuracy, initial_hard_accuracy, _, _, _ = initial_aux
         log.info(
             f"Preconfigured circuit metrics: loss={float(initial_loss):.6f}, "
             f"hard_loss={float(initial_hard_loss):.4f}, "
@@ -565,7 +570,7 @@ def setup_circuit_like_gui(config, wiring_key, preconfigured_state_file=None):
             "logits_file": logits_file,
             "wires_file": wires_file,
         }
-        summary_file = os.path.join(log_dir, f"preconfig_summary_{timestamp}.json")
+        summary_file = os.path.join(log_dir, f"preconfig_summary_{circuit_suffix}.json")
         with open(summary_file, 'w') as f:
             json.dump(summary, f, indent=2)
         log.debug(f"Summary JSON saved to: {summary_file}")
@@ -577,7 +582,7 @@ def setup_circuit_like_gui(config, wiring_key, preconfigured_state_file=None):
         initial_loss, initial_aux = get_loss_from_wires_logits(
             logits, wires, x_data, y_data, loss_type
         )
-        initial_hard_loss, _, _, initial_accuracy, initial_hard_accuracy, _, _ = initial_aux
+        initial_hard_loss, _, _, initial_accuracy, initial_hard_accuracy, _, _, _ = initial_aux
         log.info(
             f"Initial circuit: loss={float(initial_loss):.6f}, "
             f"hard_loss={float(initial_hard_loss):.4f}, "
@@ -908,31 +913,91 @@ def main():
         default="vayt4820",
         help="WandB run ID to load"
     )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to config YAML (e.g. configs/config.yaml). If set, circuit params (task, input_bits, output_bits, num_layers) and saved filenames use this config instead of WandB. For --preconfig-only this is the only config used."
+    )
+    parser.add_argument(
+        "--preconfig-only",
+        action="store_true",
+        help="Only run preconfiguration and save logits/wires to outputs/ (and optionally to preconfigured_circuits/), then exit. Uses --config (default configs/config.yaml); no WandB model load."
+    )
     args = parser.parse_args()
-    
+
+    # Optional: load config from file (for circuit setup and/or preconfig-only mode)
+    config_from_file = None
+    if args.config:
+        config_path = args.config
+        if not os.path.isabs(config_path) and not os.path.exists(config_path):
+            config_path = os.path.join(os.path.dirname(__file__), "..", config_path)
+        log.info(f"Loading config from file: {config_path}")
+        config_from_file = OmegaConf.load(config_path)
+        OmegaConf.resolve(config_from_file)
+
+    if args.preconfig_only:
+        # Preconfig-only: use config from file (default configs/config.yaml), run preconfig, save, exit
+        if config_from_file is None:
+            default_config_path = None
+            for candidate in (
+                os.path.join(os.path.dirname(__file__), "..", "configs", "config.yaml"),
+                "configs/config.yaml",
+            ):
+                if os.path.exists(candidate):
+                    default_config_path = candidate
+                    break
+            if default_config_path is None:
+                raise FileNotFoundError("Default config not found. Use --config PATH (e.g. configs/config.yaml).")
+            log.info(f"Loading config from default: {default_config_path}")
+            config_from_file = OmegaConf.load(default_config_path)
+            OmegaConf.resolve(config_from_file)
+        config = config_from_file
+        log.info("="*80)
+        log.info("Preconfig-only: generating logits and wires from config")
+        log.info("="*80)
+        test_seed = getattr(config, "test_seed", 42) if hasattr(config, "test_seed") else 42
+        wiring_key = jax.random.PRNGKey(test_seed)
+        wires, logits, layer_sizes, x_data, y_data, task_name = setup_circuit_like_gui(
+            config, wiring_key, preconfigured_state_file=None
+        )
+        task_name = getattr(config.circuit, "task", "add") if hasattr(config, "circuit") else "add"
+        input_n = getattr(config.circuit, "input_bits", 8) if hasattr(config, "circuit") else 8
+        output_n = getattr(config.circuit, "output_bits", 8) if hasattr(config, "circuit") else 8
+        layer_n = getattr(config.circuit, "num_layers", 3) if hasattr(config, "circuit") else 3
+        circuit_suffix = f"{task_name}_{input_n}in_{output_n}out_{layer_n}layers"
+        log.info(f"Preconfigured circuit saved to preconfigured_circuits/ with suffix: {circuit_suffix}")
+        log.info("Done.")
+        return
+
     log.info("="*80)
     log.info("GUI vs Training Evaluation Conditions Test")
     log.info("="*80)
-    
+
     # Configuration
     run_id = args.run_id
     eval_batch_size = 16  # Matches training eval batch size
     # Note: wiring_seed will be taken from loaded config's test_seed (matches train.py)
-    
+
     # Step 1: Load model exactly like GUI
     log.info("\n[Step 1] Loading model from WandB...")
     model, config, loaded_dict = load_model_like_gui(run_id)
-    
+
+    # If --config was given, use it for circuit setup (so saved files match local config)
+    if config_from_file is not None:
+        config = config_from_file
+        log.info("Using circuit params from --config for circuit setup and saved filenames")
+
     # Step 2: Set up circuit exactly like training
     log.info("\n[Step 2] Setting up circuit...")
     # Use test_seed from config (matches train.py: wiring_fixed_key=jax.random.PRNGKey(cfg.test_seed))
     test_seed = getattr(config, "test_seed", 42) if hasattr(config, "test_seed") else 42
     wiring_key = jax.random.PRNGKey(test_seed)
     log.info(f"Using test_seed={test_seed} for wiring (from loaded config)")
-    
+
     if args.preconfigured_state:
         log.info(f"Loading preconfigured state from: {args.preconfigured_state}")
-    
+
     wires, logits, layer_sizes, x_data, y_data, task_name = setup_circuit_like_gui(
         config, wiring_key, preconfigured_state_file=args.preconfigured_state
     )
@@ -958,7 +1023,7 @@ def main():
     initial_loss, initial_aux = get_loss_from_wires_logits(
         logits, wires, x_data, y_data, loss_type
     )
-    _, _, _, initial_accuracy, initial_hard_accuracy, _, _ = initial_aux
+    _, _, _, initial_accuracy, initial_hard_accuracy, _, _, _ = initial_aux
     
     print_evaluation_results(
         step_metrics,

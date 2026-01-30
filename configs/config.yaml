@@ -75,8 +75,8 @@ training:
     initial_steps: 5
     final_steps: 100
     step_intervals: [4096, 8192]
-    step_values: [5, 20, 150]
-    constant_product: null  # Optional: meta_batch_size * n_message_steps = constant (set to e.g. 6400 to scale batch with T)
+    step_values: [5, 40, 160]
+    constant_product: null # 2560  # Optional: meta_batch_size * n_message_steps = constant (set to e.g. 6400 to scale batch with T)
 
 pool:
   size: 1024

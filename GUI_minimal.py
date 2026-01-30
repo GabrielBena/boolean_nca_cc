@@ -2100,10 +2100,12 @@ class CircuitOptimizationDemo:
             # Load preconfigured circuit state
             imgui.separator_text("Preconfigured Circuit")
             if imgui.button("Load Preconfigured State"):
-                # Try to load from preconfigured_circuits folder
+                # Load from preconfigured_circuits using task, input_bits, output_bits, num_layers (matches config)
                 import os
-                logits_file = "preconfigured_circuits/preconfigured_logits_20251112_linux.npz"
-                wires_file = "preconfigured_circuits/wires_20251112_linux.npz"
+                task_name = self.available_tasks[self.task_idx]
+                circuit_suffix = f"{task_name}_{self.input_n}in_{self.output_n}out_{self.layer_n}layers"
+                logits_file = f"preconfigured_circuits/preconfigured_logits_{circuit_suffix}.npz"
+                wires_file = f"preconfigured_circuits/wires_{circuit_suffix}.npz"
                 
                 if os.path.exists(logits_file) and os.path.exists(wires_file):
                     wires, logits = self.load_preconfigured_state_from_file(logits_file, wires_file)

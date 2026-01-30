@@ -238,11 +238,11 @@ The GUI still shows preconfiguration issues despite fixes:
    - Loads logits and wires from NPZ files
    - Automatically infers wires file from logits file path
    - Verifies loaded state and computes metrics
-   - **Usage**: `python test_gui_vs_eval_conditions.py --preconfigured-state preconfigured_circuits/preconfigured_logits_20251112_linux.npz`
+   - **Usage**: `python test_gui_vs_eval_conditions.py --preconfigured-state preconfigured_circuits/preconfigured_logits_add_8in_8out_3layers.npz` (suffix from config: task, input_bits, output_bits, num_layers)
 
 2. ✅ **GUI**: Added "Load Preconfigured State" button in `GUI_minimal.py`
    - Simple button in "Circuit Architecture" section
-   - Hardcoded to load from `preconfigured_circuits/preconfigured_logits_20251112_linux.npz` and `preconfigured_circuits/wires_20251112_linux.npz`
+   - Loads from `preconfigured_circuits/preconfigured_logits_{task}_{input_bits}in_{output_bits}out_{num_layers}layers.npz` and matching `wires_*.npz` (values from current GUI config)
    - Updates circuit state, reinitializes optimization, and updates task
    - Logs metrics after loading
    - ✅ **FIXED**: Disentangled from automatic preconfiguration - loading preconfigured state no longer triggers automatic preconfiguration that overwrites the loaded state
@@ -251,9 +251,9 @@ The GUI still shows preconfiguration issues despite fixes:
      - Model loading and circuit loading are now independent features
      - Can load model once, then load different preconfigured circuit states without triggering preconfiguration
 
-**Files Required**:
-- `preconfigured_circuits/preconfigured_logits_20251112_linux.npz` - Contains logits with keys `layer_0`, `layer_1`, etc.
-- `preconfigured_circuits/wires_20251112_linux.npz` - Contains wires with keys `layer_0`, `layer_1`, etc.
+**Files Required** (naming from config: task, input_bits, output_bits, num_layers):
+- `preconfigured_circuits/preconfigured_logits_{task}_{input_bits}in_{output_bits}out_{num_layers}layers.npz` - e.g. `add_8in_8out_3layers`; contains logits with keys `layer_0`, `layer_1`, etc.
+- `preconfigured_circuits/wires_{task}_{input_bits}in_{output_bits}out_{num_layers}layers.npz` - same suffix; contains wires with keys `layer_0`, `layer_1`, etc.
 
 **Benefits**:
 - ✅ Bypasses cross-platform task data generation issue completely
