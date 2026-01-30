@@ -241,6 +241,9 @@ class CircuitOptimizationDemo:
         self.greedy_ordered_indices = None  # Prefer from training config
         self.default_damage_prob = None  # Prefer from training config
         self.training_mode = "repair"  # Will be set from config
+        # WandB run filters (match configs/config.yaml so "Load Model" finds runs)
+        self.wandb_filter_damage_mode = "shotgun"
+        self.wandb_filter_damage_injection_mode = "multi"
         # Preconfiguration params (used in repair mode)
         self.preconfig_steps = 200
         self.preconfig_lr = 1.0
@@ -459,6 +462,9 @@ class CircuitOptimizationDemo:
             self.greedy_ordered_indices = pool_cfg.get(
                 "greedy_ordered_indices", DEFAULT_GREEDY_ORDERED_INDICES
             )
+            # WandB run filters (so Load Model uses same criteria as config)
+            self.wandb_filter_damage_mode = pool_cfg.get("damage_mode", self.wandb_filter_damage_mode)
+            self.wandb_filter_damage_injection_mode = pool_cfg.get("damage_injection_mode", self.wandb_filter_damage_injection_mode)
 
             # Preconfiguration params (from backprop block)
             backprop_cfg = cfg.get("backprop", {})
@@ -590,7 +596,7 @@ class CircuitOptimizationDemo:
                 initial_loss, initial_aux = get_loss_from_wires_logits(
                     self.logits, self.wires, x_data, y_data, self.loss_type
                 )
-                initial_hard_loss, _, _, initial_accuracy, initial_hard_accuracy, _, _ = initial_aux
+                initial_hard_loss, _, _, initial_accuracy, initial_hard_accuracy, _, _, _ = initial_aux
                 print(f"Preconfigured circuit metrics: loss={float(initial_loss):.6f}, hard_loss={float(initial_hard_loss):.4f}, accuracy={float(initial_accuracy):.4f}, hard_accuracy={float(initial_hard_accuracy):.4f}")
                 
                 # Warn if preconfiguration didn't achieve perfect accuracy (training shows 1.0000)
@@ -618,7 +624,7 @@ class CircuitOptimizationDemo:
                 initial_loss, initial_aux = get_loss_from_wires_logits(
                     self.logits, self.wires, self.input_x, self.y0, self.loss_type
                 )
-                initial_hard_loss, _, _, initial_accuracy, initial_hard_accuracy, _, _ = initial_aux
+                initial_hard_loss, _, _, initial_accuracy, initial_hard_accuracy, _, _, _ = initial_aux
                 print(f"[Circuit Init] Direct loss computation (before model): loss={float(initial_loss):.6f}, hard_loss={float(initial_hard_loss):.4f}, accuracy={float(initial_accuracy):.4f}, hard_accuracy={float(initial_hard_accuracy):.4f}")
             except Exception as e:
                 print(f"[Circuit Init] Could not compute initial loss: {e}")
@@ -665,7 +671,7 @@ class CircuitOptimizationDemo:
                     initial_loss, initial_aux = get_loss_from_wires_logits(
                         self.logits, self.wires, self.input_x, self.y0, self.loss_type
                     )
-                    initial_hard_loss, _, _, initial_accuracy, initial_hard_accuracy, _, _ = initial_aux
+                    initial_hard_loss, _, _, initial_accuracy, initial_hard_accuracy, _, _, _ = initial_aux
                     print(f"[Task Setup] Direct loss computation (before model): loss={float(initial_loss):.6f}, hard_loss={float(initial_hard_loss):.4f}, accuracy={float(initial_accuracy):.4f}, hard_accuracy={float(initial_hard_accuracy):.4f}")
                 except Exception as e:
                     print(f"[Task Setup] Could not compute initial loss: {e}")
@@ -880,9 +886,9 @@ class CircuitOptimizationDemo:
                 "config.model.type": model_type,
                 # Note: wiring_mode doesn't exist in training config - training always uses fixed wiring
                 "config.circuit.task": self.available_tasks[self.task_idx],
-                "config.training.training_mode": "repair",  # Match your config's training mode
-                "config.pool.damage_mode": "greedy_vocabulary",  # Match your config's damage mode
-                "config.pool.damage_injection_mode": "multi",  # Match your config's damage injection mode
+                "config.training.training_mode": self.training_mode,
+                "config.pool.damage_mode": self.wandb_filter_damage_mode,
+                "config.pool.damage_injection_mode": self.wandb_filter_damage_injection_mode,
             }
 
             # Load frozen model based on selected mode
@@ -1155,6 +1161,7 @@ class CircuitOptimizationDemo:
                 pred_hard,
                 accuracy,
                 hard_accuracy,
+                full_map_accuracy,
                 res,
                 hard_res,
             ),
@@ -1295,6 +1302,7 @@ class CircuitOptimizationDemo:
                         pred_hard,
                         accuracy,
                         hard_accuracy,
+                        full_map_accuracy,
                         res,
                         hard_res,
                     ),
@@ -2142,7 +2150,7 @@ class CircuitOptimizationDemo:
                                 initial_loss, initial_aux = get_loss_from_wires_logits(
                                     self.logits, self.wires, self.input_x, self.y0, self.loss_type
                                 )
-                                initial_hard_loss, _, _, initial_accuracy, initial_hard_accuracy, _, _ = initial_aux
+                                initial_hard_loss, _, _, initial_accuracy, initial_hard_accuracy, _, _, _ = initial_aux
                                 print(f"✓ Loaded preconfigured circuit metrics: loss={float(initial_loss):.6f}, hard_loss={float(initial_hard_loss):.4f}, accuracy={float(initial_accuracy):.4f}, hard_accuracy={float(initial_hard_accuracy):.4f}")
                             except Exception as e:
                                 print(f"⚠️  Warning: Could not compute loaded circuit metrics: {e}")
