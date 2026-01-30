@@ -267,8 +267,9 @@ class CircuitOptimizationDemo:
             )
         self.task_text = "Hello Neural CA"  # Shorter text works better with performance mode
         self.noise_p = 0.5
-        # Flag to skip preconfiguration when loading preconfigured state
-        self._skip_preconfig = False
+        # Preconfiguration control flags
+        self._skip_preconfig = False  # Skip preconfiguration when loading preconfigured state
+        self._do_preconfig = False    # Trigger preconfiguration (only when explicitly requested)
         # Initialize circuit using shared functions (may preconfigure in repair mode)
         self.initialize_circuit()
 
@@ -528,9 +529,9 @@ class CircuitOptimizationDemo:
             self.input_n, self.output_n, self.arity, self.layer_n
         ))
 
-        # Use preconfigure_circuit_logits in repair mode (matches training), otherwise gen_circuit
-        # Skip preconfiguration if flag is set (e.g., when loading preconfigured state)
-        if self.training_mode == "repair" and self.wiring_mode == "fixed" and not self._skip_preconfig:
+        # Use preconfigure_circuit_logits only when explicitly requested via _do_preconfig flag
+        # Default is gen_circuit with NOPs (no automatic preconfiguration)
+        if getattr(self, '_do_preconfig', False) and not self._skip_preconfig:
             # Always generate fresh task data for preconfiguration to ensure it matches current task settings
             # (matches test script approach - always generates fresh task data)
             task_name = self.available_tasks[self.task_idx]
@@ -2069,8 +2070,8 @@ class CircuitOptimizationDemo:
             orig_layer_n = self.layer_n
             orig_width_factor = self.width_factor
 
-            _, self.input_n = imgui.slider_int("Input Bits", self.input_n, 2, 8)
-            _, self.output_n = imgui.slider_int("Output Bits", self.output_n, 2, 8)
+            _, self.input_n = imgui.slider_int("Input Bits", self.input_n, 2, 16)
+            _, self.output_n = imgui.slider_int("Output Bits", self.output_n, 2, 16)
             _, self.arity = imgui.slider_int("Gate Arity", self.arity, 2, 4)
             _, self.layer_n = imgui.slider_int("Hidden Layers", self.layer_n, 1, 5)
             _, self.width_factor = imgui.slider_int("Width Factor", self.width_factor, 1, 4)
@@ -2099,6 +2100,16 @@ class CircuitOptimizationDemo:
 
             # Load preconfigured circuit state
             imgui.separator_text("Preconfigured Circuit")
+            
+            # Button to run preconfiguration (trains circuit to 100% accuracy via backprop)
+            if imgui.button("Preconfigure Circuit"):
+                print("Running preconfiguration (backprop training to 100% accuracy)...")
+                self._do_preconfig = True
+                self.regenerate_circuit(reset_logs=True)
+                self._do_preconfig = False  # Reset flag after use
+                print("Preconfiguration complete!")
+            
+            imgui.same_line()
             if imgui.button("Load Preconfigured State"):
                 # Load from preconfigured_circuits using task, input_bits, output_bits, num_layers (matches config)
                 import os
