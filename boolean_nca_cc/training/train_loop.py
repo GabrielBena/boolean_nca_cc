@@ -33,6 +33,7 @@ from boolean_nca_cc.training.checkpointing import (
 from boolean_nca_cc.training.schedulers import (
     should_reset_pool,
     get_learning_rate_schedule,
+    get_current_message_steps_and_batch_size,
 )
 
 from boolean_nca_cc.training.pool.pool import GraphPool, initialize_graph_pool
@@ -831,6 +832,7 @@ def train_model(
     n_message_steps: int = 1,
     layer_neighbors: bool = False,
     use_scan: bool = False,
+    use_remat: bool = False,  # Step 6: gradient checkpointing for scan body (only when use_scan)
     # Loss parameters
     loss_type: str = "l4",  # Options: 'l4' or 'bce'
     meta_batch_size: int = 64,
@@ -916,9 +918,13 @@ def train_model(
     blind_mode: bool = True,  # If True, do not write loss to graph.globals (default for memory efficiency)
     # Low-footprint loss computation: Step 1 - random loss_step sampling
     random_loss_step: bool = False,  # If True, sample random loss_step per meta-batch
-    random_loss_step_min: int = 0,  # Minimum step for random loss_step selection
-    long_horizon_enabled: bool = False,  # Step 3: loss = mean over window of long_horizon_size steps
-    long_horizon_size: int = 1,  # Window size H (static); H=1 is single-step
+    random_loss_step_min: int = 0,  # Minimum step for random loss_step selection (used when random_loss_step_min_fraction is None)
+    random_loss_step_min_fraction: Optional[float] = None,  # If set (e.g. 0.7), min step = max(1, int(fraction * n_message_steps)) per epoch
+    long_horizon_enabled: bool = False,  # Step 3: loss = mean over window (random: [loss_step..T-1]; fixed: last H steps)
+    long_horizon_size: int = 1,  # Window size H for fixed+horizon only; when random_loss_step is True this is ignored
+    message_steps_schedule: Optional[Dict[str, Any]] = None,  # When set and enabled, n_message_steps (and optionally meta_batch_size) vary per epoch (recompilation)
+    # End-of-training figure (Figure 3) step count: when set, fig3 uses this instead of periodic_eval_inner_steps (aligns with final_eval_inner_steps)
+    final_eval_inner_steps: Optional[int] = None,
 ):
     """
     Train a GNN to optimize boolean circuit parameters.
@@ -972,6 +978,7 @@ def train_model(
         input_train_fraction: Fraction of input combinations for training (default 0.8 = 80% train, 20% test)
         input_split_seed: Seed for reproducible input combination split
         use_scan: Whether to use scan for message passing
+        use_remat: Whether to use gradient checkpointing (remat) on scan body (reduces BPTT memory when use_scan)
         wandb_logging: Whether to log metrics to wandb
         log_interval: Interval for logging metrics
         wandb_run_config: Configuration to pass to wandb
@@ -993,6 +1000,8 @@ def train_model(
         stop_accuracy_min_epochs: Minimum epochs before early stopping
         hamming_analysis_dir: Directory for hamming analysis plots and CSVs
         backprop_config: Configuration for one-time backprop evaluation
+        message_steps_schedule: Optional dict for message-steps schedule (recompilation). When set and enabled, n_message_steps and optionally meta_batch_size vary per epoch; see docs/recompilation.md.
+        final_eval_inner_steps: Optional. When set, Figure 3 (damage recovery trajectories) uses this many message steps instead of periodic_eval_inner_steps, aligning with the final BP vs SA comparison eval.
         track_pool_damage_validation: DEBUG - If True, enable validation of permanent damage in pool.
                                       Validates that damaged nodes remain at expected values
                                       (logits=-10.0, hidden=0.0) across pool updates and resets.
@@ -1168,6 +1177,7 @@ def train_model(
             "long_horizon_size",
             "random_loss_step",
             "use_scan",  # Step 4: use lax.scan for loss loop when True
+            "use_remat",  # Step 6: gradient checkpointing for scan body when True (only when use_scan)
         ),
     )
 
@@ -1190,9 +1200,10 @@ def train_model(
         blind_mode: bool = True,  # If True, do not write loss to graph.globals
         loss_step: int = None,  # Step 1: loss_step sampled outside JIT (None means use n_message_steps - 1)
         long_horizon_enabled: bool = False,  # Step 3: if True, loss = mean over window
-        long_horizon_size: int = 1,  # Window size H (fixed mode); ignored in random+horizon
+        long_horizon_size: int = 1,  # Window size H for fixed+horizon only; when random_loss_step is True, horizon window is [loss_step..T-1] and this is ignored
         random_loss_step: bool = False,  # If True, loss_step is sampled; drives horizon window semantics
         use_scan: bool = False,  # Step 4: if True, use lax.scan for message loop (low-footprint, compact compile)
+        use_remat: bool = False,  # Step 6: if True (and use_scan), wrap scan body with jax.checkpoint to reduce BPTT memory
     ):
         """
         Single training step using graphs from the pool.
@@ -1315,29 +1326,27 @@ def train_model(
 
             # Step 2/3: Final loss — single-step or horizon mean
             # Single-step: loss at loss_step only.
-            # Horizon + random: window from loss_step to final step [loss_step .. n_message_steps-1].
-            # Horizon + fixed: last H steps ending at final step [(n_steps-1)-H .. n_steps-1].
+            # Horizon + random: window from loss_step to final step [loss_step .. n_message_steps-1]; long_horizon_size is not used.
+            # Horizon + fixed: last H steps ending at final step [(n_steps-1)-H .. n_steps-1], H = long_horizon_size.
             losses_arr = jp.stack(losses)  # (T,) for indexing
-            if long_horizon_enabled and long_horizon_size > 1:
-                if random_loss_step:
-                    # Random + horizon: window = [loss_step, ..., n_message_steps - 1]
-                    # Static shape: gather up to T indices, mask to valid range
-                    indices = loss_step + jp.arange(n_message_steps)
-                    valid = (indices >= 0) & (indices < n_message_steps)
-                    idx_clipped = jp.clip(indices, 0, n_message_steps - 1)
-                    valid_f = valid.astype(losses_arr.dtype)
-                    window_losses = losses_arr[idx_clipped]
-                    final_loss = jp.sum(window_losses * valid_f) / jp.maximum(jp.sum(valid_f), 1.0)
-                else:
-                    # Fixed + horizon: last H steps ending at (n_message_steps - 1)
-                    H = long_horizon_size
-                    start = (n_message_steps - 1) - (H - 1)
-                    indices = start + jp.arange(H)
-                    idx_clipped = jp.clip(indices, 0, n_message_steps - 1)
-                    valid = (indices >= 0) & (indices < n_message_steps)
-                    valid_f = valid.astype(losses_arr.dtype)
-                    window_losses = losses_arr[idx_clipped]
-                    final_loss = jp.sum(window_losses * valid_f) / jp.maximum(jp.sum(valid_f), 1.0)
+            if long_horizon_enabled and random_loss_step:
+                # Random + horizon: window = [loss_step, ..., n_message_steps - 1] (length depends on loss_step and T only; long_horizon_size ignored)
+                indices = loss_step + jp.arange(n_message_steps)
+                valid = (indices >= 0) & (indices < n_message_steps)
+                idx_clipped = jp.clip(indices, 0, n_message_steps - 1)
+                valid_f = valid.astype(losses_arr.dtype)
+                window_losses = losses_arr[idx_clipped]
+                final_loss = jp.sum(window_losses * valid_f) / jp.maximum(jp.sum(valid_f), 1.0)
+            elif long_horizon_enabled and long_horizon_size > 1:
+                # Fixed + horizon: last H steps ending at (n_message_steps - 1)
+                H = long_horizon_size
+                start = (n_message_steps - 1) - (H - 1)
+                indices = start + jp.arange(H)
+                idx_clipped = jp.clip(indices, 0, n_message_steps - 1)
+                valid = (indices >= 0) & (indices < n_message_steps)
+                valid_f = valid.astype(losses_arr.dtype)
+                window_losses = losses_arr[idx_clipped]
+                final_loss = jp.sum(window_losses * valid_f) / jp.maximum(jp.sum(valid_f), 1.0)
             else:
                 final_loss = losses_arr[loss_step]
 
@@ -1447,9 +1456,11 @@ def train_model(
                 )
                 return (graph_out, new_snapshot), loss
 
+            # Step 6: optionally wrap scan body with gradient checkpointing (remat) to reduce BPTT activation memory
+            step_fn = jax.checkpoint(scan_body) if use_remat else scan_body
             scan_length = n_message_steps - 1
             (final_graph, selected_snapshot), scan_losses = jax.lax.scan(
-                scan_body,
+                step_fn,
                 init_carry,
                 jp.arange(1, n_message_steps),
                 length=scan_length,
@@ -1457,23 +1468,24 @@ def train_model(
 
             losses_arr = jp.concatenate([loss_0[None], scan_losses])
 
-            if long_horizon_enabled and long_horizon_size > 1:
-                if random_loss_step:
-                    indices = loss_step + jp.arange(n_message_steps)
-                    valid = (indices >= 0) & (indices < n_message_steps)
-                    idx_clipped = jp.clip(indices, 0, n_message_steps - 1)
-                    valid_f = valid.astype(losses_arr.dtype)
-                    window_losses = losses_arr[idx_clipped]
-                    final_loss = jp.sum(window_losses * valid_f) / jp.maximum(jp.sum(valid_f), 1.0)
-                else:
-                    H = long_horizon_size
-                    start = (n_message_steps - 1) - (H - 1)
-                    indices = start + jp.arange(H)
-                    idx_clipped = jp.clip(indices, 0, n_message_steps - 1)
-                    valid = (indices >= 0) & (indices < n_message_steps)
-                    valid_f = valid.astype(losses_arr.dtype)
-                    window_losses = losses_arr[idx_clipped]
-                    final_loss = jp.sum(window_losses * valid_f) / jp.maximum(jp.sum(valid_f), 1.0)
+            if long_horizon_enabled and random_loss_step:
+                # Random + horizon: window = [loss_step .. n_message_steps-1]; long_horizon_size ignored
+                indices = loss_step + jp.arange(n_message_steps)
+                valid = (indices >= 0) & (indices < n_message_steps)
+                idx_clipped = jp.clip(indices, 0, n_message_steps - 1)
+                valid_f = valid.astype(losses_arr.dtype)
+                window_losses = losses_arr[idx_clipped]
+                final_loss = jp.sum(window_losses * valid_f) / jp.maximum(jp.sum(valid_f), 1.0)
+            elif long_horizon_enabled and long_horizon_size > 1:
+                # Fixed + horizon: last H steps ending at (n_message_steps - 1)
+                H = long_horizon_size
+                start = (n_message_steps - 1) - (H - 1)
+                indices = start + jp.arange(H)
+                idx_clipped = jp.clip(indices, 0, n_message_steps - 1)
+                valid = (indices >= 0) & (indices < n_message_steps)
+                valid_f = valid.astype(losses_arr.dtype)
+                window_losses = losses_arr[idx_clipped]
+                final_loss = jp.sum(window_losses * valid_f) / jp.maximum(jp.sum(valid_f), 1.0)
             else:
                 final_loss = losses_arr[loss_step]
 
@@ -1599,26 +1611,57 @@ def train_model(
     bp_hamming_summary = None
     bp_results = None
 
+    # Pre-compute n_message_steps and meta_batch_size per epoch (recompilation / message-steps schedule)
+    if message_steps_schedule and message_steps_schedule.get("enabled", False):
+        n_message_steps_per_epoch = []
+        meta_batch_size_per_epoch = []
+        for e in range(epochs):
+            steps, batch = get_current_message_steps_and_batch_size(
+                e, message_steps_schedule, epochs, n_message_steps, meta_batch_size
+            )
+            n_message_steps_per_epoch.append(int(steps))
+            meta_batch_size_per_epoch.append(int(batch))
+        log.info(
+            f"Message-steps schedule enabled: T per epoch pre-computed, "
+            f"unique T = {sorted(set(n_message_steps_per_epoch))}"
+        )
+    else:
+        n_message_steps_per_epoch = [n_message_steps] * epochs
+        meta_batch_size_per_epoch = [meta_batch_size] * epochs
+
     # # Counter for event-driven damage evaluations (for WandB filtering)
     # damage_event_id = 0
     result = {}
     # Training loop
     try:
         for epoch in pbar:
+            n_message_steps_this = n_message_steps_per_epoch[epoch]
+            meta_batch_size_this = meta_batch_size_per_epoch[epoch]
+
             # Pool-based training
             # Sample a batch from the pool using the current (potentially dynamic) batch size
             rng, sample_key, loss_key = jax.random.split(rng, 3)
             idxs, graphs, wires, logits, knockout_patterns = circuit_pool.sample(
-                sample_key, meta_batch_size
+                sample_key, meta_batch_size_this
             )
 
             # Step 1: Sample loss_step once per meta-batch (outside JIT, before pool_train_step)
+            if random_loss_step_min_fraction is not None:
+                random_loss_step_min_this = max(
+                    1, int(random_loss_step_min_fraction * n_message_steps_this)
+                )
+            else:
+                random_loss_step_min_this = random_loss_step_min
+            # Ensure valid range [min, T): min must be < T (at least one step to sample)
+            random_loss_step_min_this = min(
+                random_loss_step_min_this, n_message_steps_this - 1
+            )
             if random_loss_step:
                 loss_step = int(jax.random.randint(
-                    loss_key, (1,), random_loss_step_min, n_message_steps
+                    loss_key, (1,), random_loss_step_min_this, n_message_steps_this
                 )[0])
             else:
-                loss_step = n_message_steps - 1
+                loss_step = n_message_steps_this - 1
 
             # Perform pool training step
             (
@@ -1635,7 +1678,7 @@ def train_model(
                 x_train,
                 y_train,
                 tuple(layer_sizes),  # Convert list to tuple for JAX static arguments
-                n_message_steps,
+                n_message_steps_this,
                 loss_type=loss_type,
                 loss_key=loss_key,
                 epoch=epoch,
@@ -1646,6 +1689,7 @@ def train_model(
                 long_horizon_size=long_horizon_size,
                 random_loss_step=random_loss_step,
                 use_scan=use_scan,  # Step 4: lax.scan for message loop when True
+                use_remat=use_remat,  # Step 6: gradient checkpointing for scan body when True
             )
 
             hard_loss, _, _, accuracy, hard_accuracy, full_map_accuracy, _, _ = aux
@@ -1893,6 +1937,9 @@ def train_model(
                 # Add learning rate if available
                 schedule_value = schedule(epoch) if schedule is not None else learning_rate
                 metrics_dict["scheduler/learning_rate"] = schedule_value
+                # Message-steps schedule (recompilation): track T and batch size when they change
+                metrics_dict["scheduler/n_message_steps"] = n_message_steps_this
+                metrics_dict["scheduler/meta_batch_size"] = meta_batch_size_this
 
                 # Add early stopping metrics if enabled
                 if stop_accuracy_enabled:
@@ -2418,7 +2465,13 @@ def train_model(
             
             # Create Figure 3 with BP reference line (show_bp_trajectory=False)
             # Reuse bp_results from Figure 1 if available, otherwise compute new ones
-            # Use test data for evaluation/plotting (training is complete)
+            # Use test data for evaluation/plotting (training is complete).
+            # Use final_eval_inner_steps when provided so fig3 matches final eval step count.
+            fig3_message_steps = (
+                final_eval_inner_steps
+                if final_eval_inner_steps is not None
+                else periodic_eval_inner_steps
+            )
             fig3 = plot_combined_bp_sa_stepwise_performance(
                 cfg=mock_cfg,
                 x_data=x_test,
@@ -2427,7 +2480,7 @@ def train_model(
                 knockout_patterns=knockout_vocabulary,
                 model=result["model"],
                 base_circuit=knockout_eval_base_circuit,
-                n_message_steps=periodic_eval_inner_steps,
+                n_message_steps=fig3_message_steps,
                 layer_sizes=layer_sizes,
                 input_n=input_n,
                 arity=arity,

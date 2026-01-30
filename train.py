@@ -473,6 +473,10 @@ def main(cfg: DictConfig) -> None:
         n_message_steps=cfg.training.n_message_steps,
         layer_neighbors=cfg.training.get("layer_neighbors", False),
         use_scan=cfg.training.use_scan,
+        use_remat=cfg.training.get("use_remat", False),
+        message_steps_schedule=OmegaConf.to_container(cfg.training.message_steps_schedule, resolve=True)
+        if cfg.training.get("message_steps_schedule") is not None
+        else None,
         # Loss parameters
         loss_type=cfg.training.loss_type,
         # Wiring mode parameters
@@ -516,6 +520,7 @@ def main(cfg: DictConfig) -> None:
         knockout_eval=cfg.eval.get("knockout_eval", None),
         # Periodic evaluation parameters
         periodic_eval_inner_steps=cfg.eval.get("periodic_eval_inner_steps", 100),
+        final_eval_inner_steps=cfg.eval.get("final_eval_inner_steps"),  # When set, Figure 3 uses this step count (aligns with final eval)
         periodic_eval_interval=cfg.eval.get("periodic_eval_interval", 1024),
         periodic_eval_test_seed=cfg.eval.get("periodic_eval_test_seed", 42),
         periodic_eval_log_stepwise=cfg.eval.get("periodic_eval_log_stepwise", False),
@@ -549,7 +554,8 @@ def main(cfg: DictConfig) -> None:
         blind_mode=cfg.eval.get("blind_mode", True),  # Default True for memory efficiency
         # Low-footprint loss computation: Step 1 - random loss_step sampling
         random_loss_step=cfg.training.get("random_loss_step", False),  # Enable random loss_step per meta-batch
-        random_loss_step_min=cfg.training.get("random_loss_step_min", 0),  # Minimum step for random selection
+        random_loss_step_min=cfg.training.get("random_loss_step_min", 0),  # Minimum step for random selection (used when random_loss_step_min_fraction is null)
+        random_loss_step_min_fraction=cfg.training.get("random_loss_step_min_fraction"),  # If set (e.g. 0.7), min = fraction of n_message_steps per epoch
         # Step 3 - horizon (window) loss
         long_horizon_enabled=cfg.training.get("long_horizon_enabled", False),
         long_horizon_size=cfg.training.get("long_horizon_size", 1),

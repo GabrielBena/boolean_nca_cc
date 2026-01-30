@@ -50,20 +50,26 @@ training:
   message_steps_schedule:
     enabled: false     # When false: fixed n_message_steps for whole run (current behaviour)
     type: "step"       # When enabled, use "step" for phase-wise T
-    initial_steps: 5   # Ignored for step type; can match first phase
-    final_steps: 100   # max_n_message_steps (last phase)
+    initial_steps: 5   # Only used when step_values is null (auto-generate); ignored when step_values is set
+    final_steps: 100   # Only used when step_values is null (auto-generate); ignored when step_values is set
     # For recompilation: derive from num_recompile_phases and total_epochs, or set explicitly:
     step_intervals: [2730, 5460]   # Epoch boundaries (e.g. total_epochs=8193, 3 phases → 8193//3-1, 2*8193//3-1)
-    step_values: [33, 66, 100]     # T per phase (e.g. num_recompile_phases=3, max=100 → ~33, ~66, 100). If null, scheduler auto-generates from initial_steps and final_steps with len(step_intervals)+1 phases.
+    step_values: [33, 66, 100]     # T per phase. When set, this and step_intervals fully define the schedule; initial_steps and final_steps are ignored. When null, scheduler auto-generates step_values from initial_steps and final_steps (len(step_intervals)+1 phases).
     constant_product: null        # Optional: meta_batch_size * n_message_steps = constant for memory
 ```
 
 - If `message_steps_schedule.enabled` is `False`, `n_message_steps` is taken from `training.n_message_steps` (base_steps) and used for all epochs.
 - If `True`, `n_message_steps` is **overridden** per epoch by the scheduler; `step_values` and `step_intervals` (or values derived from `max_n_message_steps` and `num_recompile_phases`) define the schedule. A thin adapter can build `step_intervals` / `step_values` from `num_recompile_phases` and `max_n_message_steps` so callers can configure recompilation without hand-writing the lists.
 
+**Config semantics (FAQ)**  
+- **When `message_steps_schedule.enabled` is false, which config determines the number of message steps?**  
+  `training.n_message_steps` is used as `base_steps` in `get_current_message_steps_and_batch_size` and returned unchanged when the schedule is disabled. So **`training.n_message_steps`** is the single source of truth when the schedule is off.  
+- **Does `n_message_steps` override the schedule when the schedule is enabled?**  
+  No. When the schedule is enabled, the function uses the scheduler output for the current epoch; `n_message_steps` is only passed as `base_steps` and is not used for the step count. The schedule (e.g. `step_values` / `step_intervals`) fully determines T per epoch.
+
 ## Relation to existing schedulers (`schedulers.py`)
 
-- **`get_message_steps_scheduler(schedule_config, total_epochs)`**: Returns a callable `epoch -> n_message_steps`. For recompilation we use `type: "step"` with `step_intervals` (epoch boundaries) and `step_values` (T per phase). When `enabled: false`, the factory returns a constant callable using `initial_steps`.
+- **`get_message_steps_scheduler(schedule_config, total_epochs)`**: Returns a callable `epoch -> n_message_steps`. For recompilation we use `type: "step"` with `step_intervals` (epoch boundaries) and `step_values` (T per phase). When `enabled: false`, the factory returns a constant callable using `initial_steps`. For `type: "step"`: if `step_values` is set, only `step_intervals` and `step_values` are used (`initial_steps` and `final_steps` are ignored); if `step_values` is null, the scheduler auto-generates `step_values` from `initial_steps` and `final_steps`.
 - **`get_current_message_steps_and_batch_size(epoch, schedule_config, total_epochs, base_steps, base_batch_size)`**: When schedule is disabled, returns `(base_steps, base_batch_size)`. When enabled, calls the scheduler for the current epoch and optionally scales batch size via `constant_product`. This is the single entry point for “T (and optionally batch size) for this epoch”.
 - **Adaptations for recompilation**: No signature change required. Config must provide `message_steps_schedule` with `enabled`, `type: "step"`, and either (a) explicit `step_intervals` / `step_values`, or (b) a small helper that builds those from `max_n_message_steps` and `num_recompile_phases` and injects them into the config before creating the scheduler.
 

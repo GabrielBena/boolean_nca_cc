@@ -1,0 +1,44 @@
+# Low-footprint and recompilation ablation sweep
+#
+# Grid of 4 runs: long_horizon_enabled × message_steps_schedule.enabled.
+# Primary comparison:
+#   Full (true, true): current config — horizon loss + message-steps schedule on.
+#   Baseline (false, false): horizon and schedule off — fixed training.n_message_steps,
+#     single-step loss at final step.
+# The other two cells (horizon on/schedule off, horizon off/schedule on) are optional ablations.
+#
+# Config semantics (see docs/recompilation.md):
+# - When message_steps_schedule.enabled is false, the number of message steps is
+#   determined by training.n_message_steps.
+# - When the schedule is enabled, n_message_steps does not override it; the schedule
+#   (step_values / step_intervals) determines T per epoch.
+#
+# Usage (Wandb): wandb sweep sweeps/sweep_low_footprint_ablation.yaml
+# Then: wandb agent <sweep_id>
+#
+# Usage (Hydra multirun, 4 runs): python train.py -m training.long_horizon_enabled=true,false training.message_steps_schedule.enabled=true,false
+#
+# Exactly 2 runs (full vs baseline): use the single configs and launch separately:
+#   python train.py --config sweeps/singles/low_footprint_full.yaml
+#   python train.py --config sweeps/singles/low_footprint_baseline.yaml
+#
+# Default config: configs/config.yaml (sweep overrides below).
+
+program: train.py
+method: grid
+metric:
+  goal: maximize
+  name: eval_ko_in/final_hard_accuracy
+
+parameters:
+  # Full = horizon + schedule on (current); Baseline = both off
+  training.long_horizon_enabled:
+    values: [true, false]
+  training.message_steps_schedule.enabled:
+    values: [true, false]
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args_no_hyphens}

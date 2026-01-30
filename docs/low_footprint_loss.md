@@ -17,7 +17,7 @@ This note describes a memory-efficient way to compute the training (“meta”) 
 - ✅ **Step 3**: Window loss with static horizon size — **COMPLETE** (`long_horizon_enabled`, `long_horizon_size`)
 - ✅ **Step 4**: Replace unrolled Python loop with `lax.scan` — **COMPLETE** (`loss_fn_scan` in `train_loop.py`, gated by `training.use_scan`; same contract as `loss_fn_no_scan`, low-footprint carry + loss-only output).
 - ⏸️ **Step 5**: Beta distribution for loss-step selection — see Step 5 below (optional `get_step_beta` when `random_loss_step`; curriculum from early to late steps).
-- ⏸️ **Step 6**: Add gradient checkpointing (remat)
+- ✅ **Step 6**: Add gradient checkpointing (remat) — **COMPLETE** (`training.use_remat`; when True and `use_scan`, scan body wrapped with `jax.checkpoint`)
 
 ## Low-footprint checklist (the non-negotiables)
 
@@ -295,11 +295,11 @@ def get_step_beta(
 
 **JAX:** Sampling happens **before** `pool_train_step` (outside JIT), so no traced-value issues. Return value of `get_step_beta` is converted to Python int for use as static `loss_step`.
 
-### Step 6 — Add gradient checkpointing (remat) for long unrolls
+### Step 6 — Add gradient checkpointing (remat) for long unrolls ✅ COMPLETE
 
-Once the computation is in a `scan`, wrap the step function with `jax.remat` / `jax.checkpoint` (or `nnx.remat`) to reduce BPTT activation memory.
+**Status**: Implemented. When `use_scan=True` and `training.use_remat=True`, the scan body in `loss_fn_scan` is wrapped with `jax.checkpoint(scan_body)` before being passed to `lax.scan`. Config: `training.use_remat` (default `false`); wired from `train.py` into `train_model` and `pool_train_step` (static arg for JIT).
 
-Trade-off:
+**Trade-off:**
 
 - lower memory (often substantially)
 - higher compute (recomputes some forward work during backward)
