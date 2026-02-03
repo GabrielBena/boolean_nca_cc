@@ -3,7 +3,7 @@
 # Default parameters for experiment
 defaults:
   - model: self_attention  # Default model (gnn or self_attention or perceiver_attention)
-  - circuit: text
+  - circuit: binary_multiply_large
   - loss: bce  # Options: l2, l4, bce, bce_w3, focal, asym, focal_asym
   - _self_  # For self-overrides
 
@@ -34,20 +34,20 @@ graph:
 # Training parameters
 training:
   # WIRING MODE : "random" or "fixed"
-  wiring_mode: "random"  # Options: "fixed", "genetic", or "random"
-  initial_diversity: 256
+  wiring_mode: "fixed"  # Options: "fixed", "genetic", or "random"
+  initial_diversity: 1
   # INNER LOOP
-  n_message_steps: 50  # Number of message passing steps per training iteration
+  n_message_steps: 5  # Number of message passing steps per training iteration
   # DATA FRACTION
-  data_per_batch: 128  # Number of data points per batch (null means use all data)
+  data_per_batch: 64  # Number of data points per batch (null means use all data)
   # RANDOM LOSS STEP
   random_loss_step: false  # Use random message passing step for loss computation
   random_loss_step_min: 2
   use_beta_loss_step: false  # Use beta distribution for random loss step (varies from early to late steps through training)
   # TRAIN/TEST SPLIT
-  test_num: 256  # Fraction/absolute number of data to use for testing (from all input combinations)
+  test_num: 64  # Fraction/absolute number of data to use for testing (from all input combinations)
   # BATCH SIZE
-  meta_batch_size: 96 
+  meta_batch_size: 256 
   
   # MULTI-GPU DATA PARALLELISM
   # Distributes batch across GPUs, each device processes batch_size/num_devices circuits
@@ -57,8 +57,8 @@ training:
     num_devices: null  # Number of devices to use (null = all available)
   
   # OPTIMIZATION
-  learning_rate: 1e-4
-  weight_decay: 1e-4
+  learning_rate: 5e-4
+  weight_decay: 1e-5
   # LEARNING RATE SCHEDULER
   # Options: "constant", "exponential", "cosine", "linear_warmup", "adaptive", "reduce_on_plateau"
   lr_scheduler: "linear_warmup"  # Loss-aware scheduler - reduces LR when loss plateaus
@@ -99,7 +99,7 @@ training:
 
   # NUMBER OF EPOCHS
   epochs: null
-  epochs_power_of_2: 18 # 2^n
+  epochs_power_of_2: 15 # 2^n
   # USE SCAN
   use_scan: true
   # GRADIENT CHECKPOINTING (remat)
@@ -183,10 +183,12 @@ eval:
   interval: 1024  # Evaluate every N epochs
   inner_steps: ${pool.expected_updates}  # Number of message passing steps for inner loop evaluation
   log_stepwise: true  # Whether to log detailed step-by-step metrics to wandb
-  batch_size_in: ${training.meta_batch_size}  # Batch size for IN-distribution evaluation (None means use initial_diversity)
+  # batch_size_in: ${training.meta_batch_size}  # Batch size for IN-distribution evaluation (None means use initial_diversity)
+  batch_size_in: 16  # Batch size for IN-distribution evaluation (None means use initial_diversity)
+  # batch_size_out: 64  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
   batch_size_out: ${training.meta_batch_size}  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
   log_pool_scatter: true
-  do_ood_evaluation: true # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
+  do_ood_evaluation: null # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
   damage_enabled: true # Whether to apply damage during evaluation (if damage.enabled is also true)
   n_damage_steps: 2 # Number of damage steps to apply during evaluation
   get_all_wirings: true # Whether to get all wirings (True) or a subset (False)

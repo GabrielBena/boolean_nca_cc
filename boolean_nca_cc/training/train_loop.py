@@ -366,18 +366,38 @@ def run_unified_periodic_evaluation(
         # Define data scenarios: (suffix, x, y, description)
         # For meta-learning: models condition on data during optimization, so train/test must be separate
         data_scenarios = []
+
         if data_dict["x_test"] is not None and data_dict["y_test"] is not None:
             data_scenarios.append(("test", data_dict["x_test"], data_dict["y_test"]))
+            print(f"test data shape: {data_dict['x_test'].shape}")
+            n_test = data_dict["x_test"].shape[0]
+        else:
+            n_test = None
+
         if data_dict["x_train"] is not None and data_dict["y_train"] is not None:
-            data_scenarios.append(("train", data_dict["x_train"], data_dict["y_train"]))
+            # restrict data to the size of n_test
+            data_scenarios.append(
+                (
+                    "train",
+                    data_dict["x_train"][:n_test] if n_test is not None else data_dict["x_train"],
+                    data_dict["y_train"][:n_test] if n_test is not None else data_dict["y_train"],
+                )
+            )
+            print(f"x_train shape: {data_scenarios[-1][1].shape}")
 
         mid_point = data_dict["x_total"][:].shape[0] // 2
         x_plot = data_dict["x_total"][
-            min(mid_point - 128, 0) : min(mid_point + 128, data_dict["x_total"].shape[0])
+            max(mid_point - n_test // 2, 0) : min(
+                mid_point + n_test // 2, data_dict["x_total"].shape[0]
+            )
         ]
         y_plot = data_dict["y_total"][
-            min(mid_point - 128, 0) : min(mid_point + 128, data_dict["y_total"].shape[0])
+            max(mid_point - n_test // 2, 0) : min(
+                mid_point + n_test // 2, data_dict["y_total"].shape[0]
+            )
         ]
+
+        print(f"x_plot shape: {x_plot.shape}")
 
         # Results storage: step_metrics[key] where key is e.g. "in_test", "out_train"
         step_metrics = {}
@@ -821,7 +841,7 @@ def train_model(
             "y_test": Target output data [num_test, output_bits]
             "x_total": Input data for total [num_total, input_bits]
             "y_total": Target output data [num_total, output_bits]
-        data_fraction: Fraction of data to use for training
+        data_fraction: Fraction of boolean circuit data to use for each training batch
         arity: Number of inputs per gate
         circuit_hidden_dim: Dimension of hidden features
         message_passing: Whether to use message passing or only self-updates

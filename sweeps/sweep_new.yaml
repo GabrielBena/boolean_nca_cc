@@ -5,5 +5,7 @@ defaults:
 sweep:
   grid:  # parameters to combine in all possible ways
     model: [self_attention]
-    training.wiring_mode: [random, fixed]
-    damage.enabled: [true]
+    training.wiring_mode: [fixed, random]
+    damage.enabled: [true, false]
+    circuit: [reverse_large, add_large, binary_multiply_large]
+    seed: [0, 1, 2, 3, 4, 5]
