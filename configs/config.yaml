@@ -34,7 +34,7 @@ graph:
 # Training parameters
 training:
   # WIRING MODE : "random" or "fixed"
-  wiring_mode: "fixed"  # Options: "fixed", "genetic", or "random"
+  wiring_mode: "random"  # Options: "fixed", "genetic", or "random"
   initial_diversity: 1
   # INNER LOOP
   n_message_steps: 5  # Number of message passing steps per training iteration
@@ -99,7 +99,7 @@ training:
 
   # NUMBER OF EPOCHS
   epochs: null
-  epochs_power_of_2: 15 # 2^n
+  epochs_power_of_2: 16 # 2^n
   # USE SCAN
   use_scan: true
   # GRADIENT CHECKPOINTING (remat)
@@ -144,7 +144,7 @@ damage:
   # Per-gate-per-step failure probability
   p_fault: null  # Auto-computed from expected_faulty_gates_at_reset if null
   # Target number of faulty gates when circuit is reset (used to compute p_fault)
-  expected_faulty_gates_at_reset: 16
+  expected_faulty_gates_at_reset: 36
   
   # === DISCRETE MODE PARAMETERS ===
   # Damage intensity - how many gates to knock out per damage event
@@ -186,7 +186,7 @@ eval:
   # batch_size_in: ${training.meta_batch_size}  # Batch size for IN-distribution evaluation (None means use initial_diversity)
   batch_size_in: 16  # Batch size for IN-distribution evaluation (None means use initial_diversity)
   # batch_size_out: 64  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
-  batch_size_out: ${training.meta_batch_size}  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
+  batch_size_out: 16  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
   log_pool_scatter: true
   do_ood_evaluation: null # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
   damage_enabled: true # Whether to apply damage during evaluation (if damage.enabled is also true)
