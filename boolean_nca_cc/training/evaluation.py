@@ -305,6 +305,7 @@ def run_model_scan_with_loss(
     # Probabilistic damage parameters (for training)
     p_fault: float | None = None,
     faulty_value: float = -10.0,
+    permanent_damage: bool = True,
 ):
     """
     Unified scan function for all model types with loss computation at each step.
@@ -339,7 +340,7 @@ def run_model_scan_with_loss(
         knockout_per_damage_step: Number of gates to knock out at each discrete damage step
         p_fault: Per-gate-per-step failure probability (None = disabled, 0.0 = no failures)
         faulty_value: Value to set for failed gate logits (large negative for zero output)
-
+        permanent_damage: Whether to apply permanent damage to gates (True) or temporary damage (False)
     Returns:
         Tuple of (final_graph, step_outputs) where step_outputs contains
         (graphs, losses, logits, aux_data) for each step
@@ -427,9 +428,13 @@ def run_model_scan_with_loss(
                 flat=True,
             )
             new_gate_mask = gate_mask * modified_gate_mask
+            new_gate_mask = jax.lax.cond(permanent_damage, lambda: new_gate_mask, lambda: gate_mask)
+
             new_nodes = {
                 **graph.nodes,
                 "logits": modified_logits,
+                # If permanent damage, update the gate mask to the new mask, otherwise keep the original gate mask
+                # "gate_knockout_mask": new_gate_mask if permanent_damage else gate_mask,
                 "gate_knockout_mask": new_gate_mask,
             }
             return graph._replace(nodes=new_nodes), new_gate_mask
@@ -457,14 +462,19 @@ def run_model_scan_with_loss(
             faulty_value,
         )
 
+        new_gate_mask = jax.lax.cond(permanent_damage, lambda: new_mask, lambda: gate_mask)
+
         # Update graph if any gates failed
         # (always update to maintain consistent graph structure in traced code)
         new_nodes = {
             **graph.nodes,
             "logits": new_logits,
-            "gate_knockout_mask": new_mask,
+            # If permanent damage, update the gate mask to the new mask, otherwise keep the original gate mask
+            # "gate_knockout_mask": new_mask if permanent_damage else gate_mask,
+            "gate_knockout_mask": new_gate_mask,
         }
-        return graph._replace(nodes=new_nodes), new_mask
+
+        return graph._replace(nodes=new_nodes), new_gate_mask
 
     def scan_step(carry, step_idx):
         current_graph, current_gate_mask = carry
@@ -563,8 +573,13 @@ def evaluate_model_stepwise_generator(
     bidirectional_edges: bool = True,
     layer_sizes: list[tuple[int, int]] | None = None,
     damage_steps: list[int] | None = None,
+    # Discrete damage parameters (for visualization)
     knockout_per_damage_step: int = 1,
     damage_key: jax.random.PRNGKey = jax.random.PRNGKey(42),
+    # Probabilistic damage parameters (for training)
+    p_fault: float | None = None,
+    faulty_value: float = -10.0,
+    permanent_damage: bool = True,
     verbose: bool = False,
 ) -> Generator[StepResult, None, None]:
     """
@@ -593,7 +608,9 @@ def evaluate_model_stepwise_generator(
         knockout_per_damage_step: Number of gates to knock out at each damage step
         damage_key: Random key for damage
         verbose: Print damage info
-
+        p_fault: Per-gate-per-step failure probability (None = disabled, 0.0 = no failures)
+        faulty_value: Value to set for failed gate logits (large negative for zero output)
+        permanent_damage: Whether to apply permanent damage to gates (True) or temporary damage (False)
     Yields:
         StepResult: Results from each step including loss, accuracy, predictions, and updated logits
     """
@@ -654,7 +671,9 @@ def evaluate_model_stepwise_generator(
                 num_knockouts=knockout_per_damage_step,
                 flat=True,
             )
-            gate_mask = gate_mask * modified_gate_mask
+
+            new_gate_mask = gate_mask * modified_gate_mask
+            gate_mask = new_gate_mask if permanent_damage else gate_mask
 
             # Update graph nodes with new damage
             new_nodes = {
@@ -705,6 +724,11 @@ def evaluate_model_stepwise(
     use_tqdm: bool = False,
     verbose: bool = False,
     knockout_per_damage_step: int = 1,
+    # Probabilistic damage parameters (for training)
+    p_fault: float | None = None,
+    faulty_value: float = -10.0,
+    permanent_damage: bool = True,
+    # Discrete damage parameters (for visualization)
     damage_key: jax.random.PRNGKey = jax.random.PRNGKey(42),
     damage_steps: list[int] | None = None,
 ) -> dict:
@@ -732,6 +756,9 @@ def evaluate_model_stepwise(
         knockout_per_damage_step: Number of gates to knock out at each damage step
         damage_key: Random key for damage
         damage_steps: List of step indices at which to apply damage
+        p_fault: Per-gate-per-step failure probability (None = disabled, 0.0 = no failures)
+        faulty_value: Value to set for failed gate logits (large negative for zero output)
+        permanent_damage: Whether to apply permanent damage to gates (True) or temporary damage (False)
 
     Returns:
         Dictionary with metrics collected at each step
@@ -758,7 +785,7 @@ def evaluate_model_stepwise(
     damage_steps_array = jp.asarray(damage_steps) if damage_steps is not None else None
 
     # Run unified scan
-    _, step_outputs = run_model_scan_with_loss(
+    final_graph, step_outputs = run_model_scan_with_loss(
         model=model,
         graph=graph,
         num_steps=n_message_steps,
@@ -773,6 +800,9 @@ def evaluate_model_stepwise(
         gradient_checkpointing=False,
         damage_steps=damage_steps_array,
         knockout_per_damage_step=knockout_per_damage_step,
+        p_fault=p_fault,
+        faulty_value=faulty_value,
+        permanent_damage=permanent_damage,
     )
 
     # Extract metrics from scan outputs
@@ -786,6 +816,7 @@ def evaluate_model_stepwise(
         "hard_loss": [float(hl) for hl in aux_data["hard_loss"]],
         "accuracy": [float(a) for a in aux_data["accuracy"]],
         "hard_accuracy": [float(a) for a in aux_data["hard_accuracy"]],
+        "final_graph": final_graph,
     }
 
     if verbose:
@@ -826,6 +857,7 @@ def evaluate_model_stepwise_batched(
     # Probabilistic damage (for training-consistent evaluation)
     p_fault: float | None = None,
     faulty_value: float = -10.0,
+    permanent_damage: bool = True,
     # Chunking and details
     chunk_size: int | None = None,
     return_first_circuit_details: bool = False,
@@ -895,6 +927,7 @@ def evaluate_model_stepwise_batched(
                 damage_key=damage_key,
                 p_fault=p_fault,
                 faulty_value=faulty_value,
+                permanent_damage=permanent_damage,
                 chunk_size=None,  # Don't recurse further
                 return_first_circuit_details=return_first_circuit_details and (i == 0),
             )
@@ -954,6 +987,7 @@ def evaluate_model_stepwise_batched(
             # Probabilistic damage (for training-consistent evaluation)
             p_fault=p_fault,
             faulty_value=faulty_value,
+            permanent_damage=permanent_damage,
         )
 
     # Vmap over batch

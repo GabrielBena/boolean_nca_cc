@@ -296,6 +296,7 @@ def run_unified_periodic_evaluation(
     # Probabilistic damage (for training-consistent evaluation)
     p_fault: float | None = None,
     faulty_value: float = -10.0,
+    permanent_damage: bool = True,
     # Discrete damage (for visualization with fixed steps)
     damage_steps=None,
     knockout_per_damage_step=1,
@@ -336,6 +337,7 @@ def run_unified_periodic_evaluation(
         track_metrics: List of specific metrics to track and save (optional)
         p_fault: Per-gate-per-step failure probability for training-consistent evaluation
         faulty_value: Value to set for failed gate logits
+        permanent_damage: Whether to apply permanent damage to gates (True) or temporary damage (False)
         damage_steps: Fixed damage steps for visualization (discrete mode)
         knockout_per_damage_step: Gates to knock out at each discrete damage step
         damage_key: Random key for damage
@@ -435,6 +437,7 @@ def run_unified_periodic_evaluation(
                 layer_sizes=layer_sizes,
                 p_fault=p_fault if with_damage else None,
                 faulty_value=faulty_value,
+                permanent_damage=permanent_damage,
                 chunk_size=datasets.target_batch_size,
                 return_first_circuit_details=not with_damage,
             )
@@ -817,15 +820,11 @@ def train_model(
     damage_mode: str = "probabilistic",  # "probabilistic" or "discrete"
     # Probabilistic damage (applied during scan at every step)
     p_fault: float | None = None,  # Per-gate-per-step failure probability
-    # Discrete damage (applied between epochs on pool)
-    damage_interval: int | None = None,  # Epochs between damage applications
-    damage_fraction: float = 0.1,  # Fraction of pool to damage each interval
-    knockouts_per_event: int = 1,  # Gates to knock out per damage event
-    random_knockouts_per_event: bool = False,
-    random_knockouts_per_event_min: int = 2,
-    random_knockouts_per_event_max: int = 4,
+    permanent_damage: bool = True,  # Whether to apply permanent damage to gates (True) or temporary damage (False)
     max_damage_per_circuit: int | None = None,  # Max knockouts per circuit
     faulty_logit_value: float = -10.0,  # Value for knocked-out gate logits
+    # Discrete damage (applied between epochs on pool)
+    knockouts_per_event: int = 1,  # Gates to knock out per damage event
     # Debugging parameters
     do_check_gradients: bool = False,
 ):
@@ -902,9 +901,7 @@ def train_model(
         damage_enabled: Whether to enable gate damage during training
         damage_mode: Damage mode - "probabilistic" (per-step, during scan) or "discrete" (between epochs)
         p_fault: Per-gate-per-step failure probability for probabilistic mode (None = use auto-computed)
-        damage_interval: Epochs between damage applications (discrete mode)
-        damage_fraction: Fraction of pool to damage each interval (discrete mode)
-        knockouts_per_event: Number of gates to knock out per damage event (discrete mode)
+        permanent_damage: Whether to apply permanent damage to gates (True) or temporary damage (False)
         max_damage_per_circuit: Maximum knockouts per circuit (None = no limit)
         faulty_logit_value: Value for knocked-out gate logits (large negative)
         do_check_gradients: Whether to check gradients for zero values
@@ -1050,6 +1047,7 @@ def train_model(
         # Probabilistic damage parameters
         p_fault: float | None = None,
         faulty_value: float = -10.0,
+        permanent_damage: bool = True,
     ):
         """
         Core loss and gradient computation logic.
@@ -1072,7 +1070,7 @@ def train_model(
             data_fraction: Fraction of data to use for loss computation
             p_fault: Per-gate-per-step failure probability (None = disabled)
             faulty_value: Value to set for failed gate logits
-
+            permanent_damage: Whether to apply permanent damage to gates (True) or temporary damage (False)
         Returns:
             Tuple of (loss, aux, updated_graphs, updated_logits, loss_steps, grads)
         """
@@ -1118,6 +1116,7 @@ def train_model(
                 # Probabilistic damage during training
                 p_fault=p_fault,
                 faulty_value=faulty_value,
+                permanent_damage=permanent_damage,
             )
 
             loss_step = get_loss_step(loss_key)
@@ -1204,19 +1203,6 @@ def train_model(
 
         return loss, aux, updated_graphs, updated_logits, loss_steps, grads
 
-    # JIT-compiled version of core computation (used by both single batch and chunked)
-    _compute_loss_and_gradients_jit = partial(
-        nnx.jit,
-        static_argnames=(
-            "layer_sizes",
-            "n_message_steps",
-            "loss_cfg",
-            "data_fraction",
-            "p_fault",
-            "faulty_value",
-        ),
-    )(_compute_loss_and_gradients)
-
     # =========================================================================
     # Single batch training step (processes full batch at once)
     # =========================================================================
@@ -1239,6 +1225,7 @@ def train_model(
         # Probabilistic damage parameters
         p_fault: float | None = None,
         faulty_value: float = -10.0,
+        permanent_damage: bool = True,
     ):
         """
         Single training step using graphs from the pool.
@@ -1262,7 +1249,7 @@ def train_model(
             data_fraction: Fraction of data to use for loss computation
             p_fault: Per-gate-per-step failure probability (None = disabled)
             faulty_value: Value to set for failed gate logits
-
+            permanent_damage: Whether to apply permanent damage to gates (True) or temporary damage (False)
         Returns:
             Tuple of (loss, (aux, updated_pool, loss_steps))
         """
@@ -1283,6 +1270,7 @@ def train_model(
             data_fraction=data_fraction,
             p_fault=p_fault,
             faulty_value=faulty_value,
+            permanent_damage=permanent_damage,
         )
 
         if do_check_gradients:
@@ -1312,6 +1300,7 @@ def train_model(
             "data_fraction",
             "p_fault",
             "faulty_value",
+            "permanent_damage",
         ),
     )(_pool_train_step)
 
@@ -1412,6 +1401,7 @@ def train_model(
                 # Probabilistic damage during training
                 p_fault=p_fault,
                 faulty_value=faulty_logit_value,
+                permanent_damage=permanent_damage,
             )
 
             hard_loss = aux["hard_loss"]
@@ -1474,34 +1464,6 @@ def train_model(
                 # Update last reset epoch
                 last_reset_epoch = epoch
                 diversity = circuit_pool.get_wiring_diversity(layer_sizes)
-
-            # Apply damage to ongoing optimizations if enabled (DISCRETE MODE ONLY)
-            # In probabilistic mode, damage happens during the scan, so we skip pool-level damage
-            if (
-                damage_enabled
-                and damage_mode == "discrete"
-                and damage_interval is not None
-                and should_reset_pool(epoch, damage_interval, last_damage_epoch)
-            ):
-                rng, damage_key = jax.random.split(rng)
-
-                circuit_pool, num_circuits_damaged = circuit_pool.apply_damage(
-                    key=damage_key,
-                    fraction=damage_fraction,
-                    layer_sizes=layer_sizes,
-                    num_knockouts=knockouts_per_event,
-                    random_knockouts_per_event=random_knockouts_per_event,
-                    random_knockouts_per_event_min=random_knockouts_per_event_min,
-                    random_knockouts_per_event_max=random_knockouts_per_event_max,
-                    input_n=input_n,
-                    arity=arity,
-                    circuit_hidden_dim=circuit_hidden_dim,
-                    faulty_value=faulty_logit_value,
-                    max_damage_per_circuit=max_damage_per_circuit,
-                    selection_strategy="uniform",  # Use uniform for damage
-                )
-
-                last_damage_epoch = epoch
 
             # Track average damage count (works for both modes - reads from gate_knockout_mask)
             avg_damage_count = circuit_pool.get_average_damage_count()
@@ -1656,6 +1618,7 @@ def train_model(
                     # Probabilistic damage (training-consistent evaluation)
                     p_fault=p_fault,
                     faulty_value=faulty_logit_value,
+                    permanent_damage=permanent_damage,
                     # Discrete damage (for visualization)
                     damage_steps=damage_steps,
                     knockout_per_damage_step=knockouts_per_event,
