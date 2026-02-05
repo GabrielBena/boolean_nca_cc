@@ -3,7 +3,7 @@
 # Default parameters for experiment
 defaults:
   - model: self_attention  # Default model (gnn or self_attention or perceiver_attention)
-  - circuit: binary_multiply_large
+  - circuit: reverse_large
   - loss: bce  # Options: l2, l4, bce, bce_w3, focal, asym, focal_asym
   - _self_  # For self-overrides
 
@@ -133,7 +133,7 @@ pool:
 # Simulates permanent structural damage to gates during ongoing optimization
 # Damaged gates have faulty logits and cannot receive model updates (they still emit messages to neighbors)
 damage:
-  enabled: false  # Master switch for damage system
+  enabled: true  # Master switch for damage system
   
   # Damage mode: "probabilistic" or "discrete"
   # - probabilistic: Each gate has p_fault probability of failing at each optimization step (during scan)
@@ -144,7 +144,7 @@ damage:
   # Per-gate-per-step failure probability
   p_fault: null  # Auto-computed from expected_faulty_gates_at_reset if null
   # Target number of faulty gates when circuit is reset (used to compute p_fault)
-  expected_faulty_gates_at_reset: 36
+  expected_faulty_gates_at_reset: 16
   
   # === DISCRETE MODE PARAMETERS ===
   # Damage intensity - how many gates to knock out per damage event
@@ -152,6 +152,7 @@ damage:
   random_knockouts_per_event: true
   random_knockouts_per_event_min: 1
   random_knockouts_per_event_max: 7
+  
   # Damage scheduling (similar to pool reset scheduling)
   # Formula: expected_damages = (expected_updates / damage_interval) x damage_fraction
   damage_interval: null  # Epochs between damage applications (can be auto-computed)
@@ -184,9 +185,9 @@ eval:
   inner_steps: ${pool.expected_updates}  # Number of message passing steps for inner loop evaluation
   log_stepwise: true  # Whether to log detailed step-by-step metrics to wandb
   # batch_size_in: ${training.meta_batch_size}  # Batch size for IN-distribution evaluation (None means use initial_diversity)
-  batch_size_in: 16  # Batch size for IN-distribution evaluation (None means use initial_diversity)
-  # batch_size_out: 64  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
-  batch_size_out: 16  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
+  batch_size_in: 64  # Batch size for IN-distribution evaluation (None means use initial_diversity)
+  # batch_size_out: ${training.meta_batch_size}  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
+  batch_size_out: 64  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
   log_pool_scatter: true
   do_ood_evaluation: null # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
   damage_enabled: true # Whether to apply damage during evaluation (if damage.enabled is also true)
