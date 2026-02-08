@@ -2,8 +2,8 @@
 
 # Default parameters for experiment
 defaults:
-  - model: self_attention  # Default model (gnn or self_attention or perceiver_attention)
-  - circuit: reverse_large
+  - model: perceiver_attention  # Default model (gnn or self_attention or perceiver_attention)
+  - circuit: binary_multiply
   - loss: bce  # Options: l2, l4, bce, bce_w3, focal, asym, focal_asym
   - _self_  # For self-overrides
 
@@ -99,7 +99,7 @@ training:
 
   # NUMBER OF EPOCHS
   epochs: null
-  epochs_power_of_2: 15 # 2^n
+  epochs_power_of_2: 17 # 2^n
   # USE SCAN
   use_scan: true
   # GRADIENT CHECKPOINTING (remat)

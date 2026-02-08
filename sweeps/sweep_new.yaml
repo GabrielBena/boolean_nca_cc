@@ -10,6 +10,7 @@ sweep:
     circuit: [reverse_large, add_large, binary_multiply_large]
     training.meta_batch_size: [256]
     training.epochs_power_of_2: [16]
+    model.attention_dim: [128]
     training.wiring_mode : [fixed, random]
 
   paired:
