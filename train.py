@@ -45,6 +45,9 @@ from boolean_nca_cc.training.checkpointing import save_checkpoint
 from boolean_nca_cc.training.eval_datasets import (
     create_unified_evaluation_datasets,
 )
+from boolean_nca_cc.training.pool.structural_perturbation import (
+    process_probabilistic_damage_configuration,
+)
 from boolean_nca_cc.training.train_loop import (
     run_unified_periodic_evaluation,
     train_model,
@@ -507,74 +510,6 @@ def process_pool_configuration(cfg):
     return cfg, n_message_steps_effective
 
 
-def process_probabilistic_damage_configuration(cfg, layer_sizes):
-    """
-    Process probabilistic damage configuration to compute p_fault.
-
-    Uses the formula from compute_p_fault_from_expected:
-        p_fault = 1 - (1 - k/n)^(1/L)
-
-    Where:
-        k = expected_faulty_gates_at_reset
-        n = number of eligible gates (hidden layers)
-        L = expected circuit lifetime in steps (pool.expected_updates * n_message_steps)
-
-    Args:
-        cfg: Configuration object with damage and pool settings
-        layer_sizes: List of (gate_n, group_size) tuples for the circuit
-
-    Returns:
-        Computed p_fault value, or None if damage is disabled or mode is discrete
-    """
-    from boolean_nca_cc.training.pool.structural_perturbation import (
-        compute_p_fault_from_expected,
-        count_eligible_gates,
-    )
-
-    # Skip if damage disabled or mode is discrete
-    if not cfg.damage.enabled:
-        log.info("Damage system disabled, p_fault = None")
-        return None
-
-    damage_mode = cfg.damage.get("mode", "probabilistic")
-    if damage_mode != "probabilistic":
-        log.info(f"Damage mode is '{damage_mode}', not computing p_fault")
-        return None
-
-    # If p_fault is explicitly set, use it
-    if cfg.damage.get("p_fault") is not None:
-        p_fault = float(cfg.damage.p_fault)
-        log.info(f"Using explicit p_fault = {p_fault:.2e}")
-        return p_fault
-
-    # Auto-compute p_fault from expected_faulty_gates_at_reset
-    expected_faulty = cfg.damage.get("expected_faulty_gates_at_reset", 4)
-    if expected_faulty is None or expected_faulty <= 0:
-        log.info("expected_faulty_gates_at_reset not set or <= 0, p_fault = None")
-        return None
-
-    # Count eligible gates (hidden layers only)
-    n_eligible = count_eligible_gates(layer_sizes)
-    if n_eligible <= 0:
-        log.warning("No eligible gates for damage (no hidden layers?), p_fault = None")
-        return None
-
-    # Compute p_fault
-    p_fault = compute_p_fault_from_expected(
-        expected_faulty_gates=expected_faulty,
-        n_eligible_gates=n_eligible,
-        expected_lifetime_steps=cfg.pool.expected_updates,
-    )
-
-    log.info(
-        f"Computed p_fault = {p_fault:.2e} "
-        f"(target {expected_faulty} faulty gates, {n_eligible} eligible gates, "
-        f"{cfg.pool.expected_updates} updates lifetime)"
-    )
-
-    return p_fault
-
-
 @hydra.main(version_base=None, config_path="configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     """
@@ -731,8 +666,8 @@ def main(cfg: DictConfig) -> None:
             else:
                 test_ratio = cfg.training.test_num / case_n
 
-        # Max 1/4 of the data for testing
-        test_ratio = min(test_ratio, 0.25)
+        # Max 1/5 of the data for testing
+        test_ratio = min(test_ratio, 0.2)
         print(f"Test ratio: {test_ratio}")
     else:
         test_ratio = None
@@ -847,7 +782,10 @@ def main(cfg: DictConfig) -> None:
     track_metrics = extract_track_metrics_config(cfg)
 
     # Compute p_fault for probabilistic damage mode
-    p_fault = process_probabilistic_damage_configuration(cfg, layer_sizes)
+    p_fault = process_probabilistic_damage_configuration(cfg, layer_sizes, log)
+    cfg.damage.p_fault = p_fault
+    if p_fault is not None:
+        log.info(f"Computed p_fault = {p_fault:.2e}")
 
     # Train model
     log.info(f"Starting {cfg.model.type.upper()} training")
@@ -886,6 +824,7 @@ def main(cfg: DictConfig) -> None:
         reset_pool_fraction=cfg.pool.reset_fraction,
         reset_strategy=cfg.pool.reset_strategy,
         reset_pool_interval=cfg.pool.reset_interval,
+        pool_noise_scale=cfg.pool.noise_scale,
         # Genetic mutation parameters
         genetic_mutation_rate=cfg.pool.mutation_rate,
         genetic_swaps_per_layer=cfg.pool.n_swaps_per_layer,
@@ -982,6 +921,7 @@ def main(cfg: DictConfig) -> None:
             if cfg.eval.do_ood_evaluation is not None
             else cfg.training.wiring_mode == "random",
             get_all_wirings=cfg.eval.get_all_wirings,
+            pool_noise_scale=cfg.pool.noise_scale,
         )
         eval_results = run_unified_periodic_evaluation(
             model=model_results["model"],

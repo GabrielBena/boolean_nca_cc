@@ -423,7 +423,7 @@ def run_unified_periodic_evaluation(
             log.info(
                 f"Running {damage_suffix}{wiring_desc} ({data_suffix}) evaluation ({batch_size} circuits)..."
             )
-            result = evaluate_model_stepwise_batched(
+            _, result = evaluate_model_stepwise_batched(
                 model=model,
                 batch_wires=wires,
                 batch_logits=logits,
@@ -531,7 +531,7 @@ def run_unified_periodic_evaluation(
                             viz_wires = [w[:1] for w in wires]  # Just first circuit
                             viz_logits = [log[:1] for log in logits]
 
-                            viz_damage_result = evaluate_model_stepwise_batched(
+                            _, viz_damage_result = evaluate_model_stepwise_batched(
                                 model=model,
                                 batch_wires=viz_wires,
                                 batch_logits=viz_logits,
@@ -548,6 +548,7 @@ def run_unified_periodic_evaluation(
                                 damage_key=damage_key,
                                 p_fault=None,  # No probabilistic damage for viz
                                 return_first_circuit_details=True,
+                                permanent_damage=permanent_damage,
                             )
                             viz_damage_results = viz_damage_result.get("first_circuit_results", [])
 
@@ -768,6 +769,7 @@ def train_model(
         0.5,
         0.5,
     ),  # Weights for [loss, steps] in combined strategy
+    pool_noise_scale: float = 0.0,
     # Learning rate scheduling
     lr_scheduler: str = "constant",  # Options: "constant", "exponential", "cosine", "linear_warmup"
     lr_scheduler_params: dict | None = None,
@@ -1006,6 +1008,7 @@ def train_model(
         loss_value=0.0,  # Initial loss will be calculated properly in first step
         wiring_mode=wiring_mode,
         initial_diversity=initial_diversity if wiring_mode in ["fixed", "genetic"] else pool_size,
+        noise_scale=pool_noise_scale,
     )
 
     # =========================================================================
@@ -1090,7 +1093,7 @@ def train_model(
             else:
                 return n_message_steps - 1
 
-        def loss_fn_scan(model, graph, logits, wires, loss_key):
+        def loss_fn_scan(model, graph, logits, wires, loss_key, permanent_damage):
             # Store original shapes for reconstruction
             logits_original_shapes = [logit.shape for logit in logits]
 
@@ -1135,7 +1138,7 @@ def train_model(
 
             return final_loss, (final_aux, final_graph, final_logits, loss_step)
 
-        def loss_fn_no_scan(model, graph, logits, wires, loss_key):
+        def loss_fn_no_scan(model, graph, logits, wires, loss_key, permanent_damage):
             # Store original shapes for reconstruction
             from boolean_nca_cc.training.evaluation import (
                 _prepare_model_fn,
@@ -1176,13 +1179,19 @@ def train_model(
 
             return final_loss, (final_aux, final_graph, final_logits, loss_step)
 
-        def batch_loss_fn(model, graphs, logits, wires, loss_key):
+        def batch_loss_fn(model, graphs, logits, wires, loss_key, permanent_damage):
             loss_fn = loss_fn_scan if use_scan else loss_fn_no_scan
+
+            if permanent_damage == "random":
+                permanent_damage = jax.random.choice([True, False], graphs.n_node.shape[0])
+            else:
+                permanent_damage = jax.numpy.full(graphs.n_node.shape[0], permanent_damage)
 
             loss_keys = jax.random.split(loss_key, graphs.n_node.shape[0])
             loss, (aux, updated_graphs, updated_logits, loss_steps) = nnx.vmap(
-                loss_fn, in_axes=(None, 0, 0, 0, 0)
-            )(model, graphs, logits, wires, loss_keys)
+                loss_fn, in_axes=(None, 0, 0, 0, 0, 0)
+            )(model, graphs, logits, wires, loss_keys, permanent_damage)
+
             return jp.mean(loss), (
                 jax.tree.map(lambda x: jp.mean(x, axis=0), aux),
                 updated_graphs,
@@ -1199,6 +1208,7 @@ def train_model(
             logits=logits,
             wires=wires,
             loss_key=loss_key,
+            permanent_damage=permanent_damage,
         )
 
         return loss, aux, updated_graphs, updated_logits, loss_steps, grads
@@ -1356,6 +1366,7 @@ def train_model(
             if periodic_eval_do_ood_evaluation is not None
             else wiring_mode == "random",
             get_all_wirings=periodic_eval_get_all_wirings,
+            pool_noise_scale=pool_noise_scale,
         )
 
         log.info(eval_datasets.get_summary())
@@ -1447,6 +1458,7 @@ def train_model(
                         if wiring_mode == "fixed"
                         else pool_size,
                         initialize_gate_masks=True,
+                        noise_scale=pool_noise_scale,
                     )
 
                     # Reset a fraction of the pool and get avg steps of reset graphs

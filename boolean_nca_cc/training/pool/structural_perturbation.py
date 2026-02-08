@@ -678,3 +678,77 @@ def create_flat_active_mask(layer_sizes: list[tuple[int, int]]) -> jp.ndarray:
     """
     total_gates = get_total_gates(layer_sizes)
     return jp.ones(total_gates, dtype=jp.float32)
+
+
+def process_probabilistic_damage_configuration(cfg, layer_sizes, log=None):
+    """
+    Process probabilistic damage configuration to compute p_fault.
+
+    Uses the formula from compute_p_fault_from_expected:
+        p_fault = 1 - (1 - k/n)^(1/L)
+
+    Where:
+        k = expected_faulty_gates_at_reset
+        n = number of eligible gates (hidden layers)
+        L = expected circuit lifetime in steps (pool.expected_updates * n_message_steps)
+
+    Args:
+        cfg: Configuration object with damage and pool settings
+        layer_sizes: List of (gate_n, group_size) tuples for the circuit
+
+    Returns:
+        Computed p_fault value, or None if damage is disabled or mode is discrete
+    """
+    from boolean_nca_cc.training.pool.structural_perturbation import (
+        compute_p_fault_from_expected,
+        count_eligible_gates,
+    )
+
+    # Skip if damage disabled or mode is discrete
+    if not cfg.damage.enabled:
+        if log is not None:
+            log.info("Damage system disabled, p_fault = None")
+        return None
+
+    damage_mode = cfg.damage.get("mode", "probabilistic")
+    if damage_mode != "probabilistic":
+        if log is not None:
+            log.info(f"Damage mode is '{damage_mode}', not computing p_fault")
+        return None
+
+    # If p_fault is explicitly set, use it
+    if cfg.damage.get("p_fault") is not None:
+        p_fault = float(cfg.damage.p_fault)
+        if log is not None:
+            log.info(f"Using explicit p_fault = {p_fault:.2e}")
+        return p_fault
+
+    # Auto-compute p_fault from expected_faulty_gates_at_reset
+    expected_faulty = cfg.damage.get("expected_faulty_gates_at_reset", 4)
+    if expected_faulty is None or expected_faulty <= 0:
+        if log is not None:
+            log.info("expected_faulty_gates_at_reset not set or <= 0, p_fault = None")
+        return None
+
+    # Count eligible gates (hidden layers only)
+    n_eligible = count_eligible_gates(layer_sizes)
+    if n_eligible <= 0:
+        if log is not None:
+            log.warning("No eligible gates for damage (no hidden layers?), p_fault = None")
+        return None
+
+    # Compute p_fault
+    p_fault = compute_p_fault_from_expected(
+        expected_faulty_gates=expected_faulty,
+        n_eligible_gates=n_eligible,
+        expected_lifetime_steps=cfg.pool.expected_updates,
+    )
+
+    if log is not None:
+        log.info(
+            f"Computed p_fault = {p_fault:.2e} "
+            f"(target {expected_faulty} faulty gates, {n_eligible} eligible gates, "
+            f"{cfg.pool.expected_updates} updates lifetime)"
+        )
+
+    return p_fault

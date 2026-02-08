@@ -36,14 +36,19 @@ class GraphGlobals(NamedTuple):
         x_data: Input data batch [N_samples, N_input_bits] or None
         y_data: Target output batch [N_samples, N_output_bits] or None
         residuals: Current prediction errors [N_samples, N_output_bits] or None
+        subsample_key: Base PRNG key for stochastic token subsampling or None.
+            Per-step keys are derived via jax.random.fold_in(key, update_steps),
+            so this key stays constant across the scan while producing unique
+            subsampling patterns at each step.
     """
 
     loss: float | jp.ndarray
     update_steps: int | jp.ndarray
-    # Perceiver-specific fields (None for non-Perceiver models)
+    # Perceiver-specific fields
     x_data: jp.ndarray | None = None
     y_data: jp.ndarray | None = None
     residuals: jp.ndarray | None = None
+    subsample_key: jp.ndarray | None = None
 
 
 def build_graph(
@@ -120,11 +125,16 @@ def build_graph(
     layer_start_indices = []
     pe_dim = circuit_hidden_dim
 
+    # Total number of gate layers (input layer is layer 0, last gate layer is total_layers)
+    # Used to normalize layer_pe to depth fraction [0.0, 1.0] for scale-free generalization
+    total_layers = len(logits)  # number of gate layers; max layer index = total_layers
+
     # --- Input Layer Nodes ---
     layer_start_indices.append(current_global_node_idx)
     input_layer_indices = jp.arange(input_n)
+    # Normalized layer PE: input layer is at depth 0.0
     input_layer_pe = get_positional_encoding(
-        jp.zeros(input_n, dtype=jp.int32), pe_dim, max_val=positional_encoding_max_val
+        jp.zeros(input_n, dtype=jp.float32), pe_dim, max_val=positional_encoding_max_val
     )
     input_intra_layer_pe = get_positional_encoding(
         input_layer_indices, pe_dim, max_val=positional_encoding_max_val
@@ -193,9 +203,15 @@ def build_graph(
         }
 
         # Add Positional Encodings
-        layer_indices_pe = jp.full(num_gates_in_layer, layer_idx_graph, dtype=jp.int32)
+        # Normalized layer PE: depth fraction in [0.0, 1.0] for scale-free generalization
+        # Input layer = 0.0, output layer = 1.0, regardless of total circuit depth
+        normalized_depth = layer_idx_graph / total_layers if total_layers > 0 else 0.0
+        # Scale to [0, max_val] range for good sinusoidal frequency spread
+        scaled_depth = jp.full(
+            num_gates_in_layer, normalized_depth * positional_encoding_max_val, dtype=jp.float32
+        )
         layer_pe = get_positional_encoding(
-            layer_indices_pe, pe_dim, max_val=positional_encoding_max_val
+            scaled_depth, pe_dim, max_val=positional_encoding_max_val
         )
         intra_layer_indices = jp.arange(num_gates_in_layer, dtype=jp.int32)
         intra_layer_pe = get_positional_encoding(

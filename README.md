@@ -134,7 +134,7 @@ from boolean_nca_cc.training import (
 )
 
 # Batched evaluation with automatic chunking for memory efficiency
-results = evaluate_model_stepwise_batched(
+final_graphs, step_metrics = evaluate_model_stepwise_batched(
     model=model,
     batch_wires=wires,
     batch_logits=logits,

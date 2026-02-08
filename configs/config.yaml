@@ -3,14 +3,14 @@
 # Default parameters for experiment
 defaults:
   - model: self_attention  # Default model (gnn or self_attention or perceiver_attention)
-  - circuit: binary_multiply_large
+  - circuit: reverse_large
   - loss: bce  # Options: l2, l4, bce, bce_w3, focal, asym, focal_asym
   - _self_  # For self-overrides
 
 # Random seed for reproducibility
 seed: 0
 test_seed: 42
-
+ 
 # Output configuration
 output:
   dir: null  # Output directory (null means use current working directory)
@@ -34,7 +34,7 @@ graph:
 # Training parameters
 training:
   # WIRING MODE : "random" or "fixed"
-  wiring_mode: "fixed"  # Options: "fixed", "genetic", or "random"
+  wiring_mode: "random"  # Options: "fixed", "genetic", or "random"
   # Diversity will always be fully random for random mode. This controls number of different wirings for fixed.
   initial_diversity: 1
   # INNER LOOP
@@ -48,7 +48,7 @@ training:
   # TRAIN/TEST SPLIT
   test_num: 256  # Fraction/absolute number of data to use for testing (from all input combinations)
   # BATCH SIZE
-  meta_batch_size: 96 
+  meta_batch_size: 128 
   
   # MULTI-GPU DATA PARALLELISM
   # Distributes batch across GPUs, each device processes batch_size/num_devices circuits
@@ -100,7 +100,7 @@ training:
 
   # NUMBER OF EPOCHS
   epochs: null
-  epochs_power_of_2: 16 # 2^n
+  epochs_power_of_2: 15 # 2^n
   # USE SCAN
   use_scan: true
   # GRADIENT CHECKPOINTING (remat)
@@ -113,9 +113,11 @@ training:
 
 # Pool configuration for meta-learning
 pool:
+  noise_scale: 0.0
+
   # size: 8192
   size: 4096
-  reset_fraction: 0.15  # Reduced from 0.25 - smaller resets = more stable training
+  reset_fraction: 0.15  # Reduced from 0.25
   reset_interval: null
   reset_strategy: "uniform"
   combined_weights: [0.5, 0.5] # Weights for [loss, steps] in combined reset strategy
@@ -123,7 +125,7 @@ pool:
   # Automatic parameter computation based on target expected updates
   # If expected_updates is specified and some parameters above are null, 
   # the system will automatically compute the missing parameter(s)
-  expected_updates: 256  # Target expected updates per circuit (e.g., 50.0)
+  expected_updates: 128  # Target expected updates per circuit (e.g., 50.0)
   
   # Genetic mutation parameters
   mutation_rate: 1e-3 # For genetic mutation rate
@@ -134,12 +136,12 @@ pool:
 # Simulates permanent structural damage to gates during ongoing optimization
 # Damaged gates have faulty logits and cannot receive model updates (they still emit messages to neighbors)
 damage:
-  enabled: true  # Master switch for damage system
+  enabled: false  # Master switch for damage system
   
   # Damage mode: "probabilistic" or "discrete"
   # - probabilistic: Each gate has p_fault probability of failing at each optimization step (during scan)
   mode: "probabilistic"
-  permanent: false # Whether to apply permanent damage to gates (True) or temporary damage (False)
+  permanent: true # Whether to apply permanent damage to gates (True) or temporary damage (False) or random (True/False)
   
   # === PROBABILISTIC MODE PARAMETERS === (Used for training)
   # Per-gate-per-step failure probability
@@ -149,7 +151,7 @@ damage:
   
   # === DISCRETE MODE PARAMETERS === (Only used for visualization)
   # Damage intensity - how many gates to knock out per damage event
-  knockouts_per_event: 4
+  knockouts_per_event: 8
   
   # === SHARED PARAMETERS ===
   # Behavior of damaged gates
@@ -172,7 +174,8 @@ backprop:
 eval:
   enabled: true  # Whether to run periodic evaluation during training
   interval: 1024  # Evaluate every N epochs
-  inner_steps: ${pool.expected_updates}  # Number of message passing steps for inner loop evaluation
+  # inner_steps: ${pool.expected_updates}  # Number of message passing steps for inner loop evaluation
+  inner_steps: 256
   log_stepwise: true  # Whether to log detailed step-by-step metrics to wandb
   # batch_size_in: ${training.meta_batch_size}  # Batch size for IN-distribution evaluation (None means use initial_diversity)
   batch_size_in: 64  # Batch size for IN-distribution evaluation (None means use initial_diversity)

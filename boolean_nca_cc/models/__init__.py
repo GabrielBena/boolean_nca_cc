@@ -17,13 +17,9 @@ For evaluation and training:
 from boolean_nca_cc.models.attention.base import AttentionBlock, ReZero
 from boolean_nca_cc.models.attention.perceiver_attention import (
     PerceiverCircuitAttention,
-    run_perceiver_scan,
-    run_perceiver_scan_with_loss,  # DEPRECATED
 )
 from boolean_nca_cc.models.attention.self_attention import (
     CircuitSelfAttention,
-    run_self_attention_scan,
-    run_self_attention_scan_with_loss,  # DEPRECATED
 )
 from boolean_nca_cc.models.gnn.aggregation import AttentionAggregation, aggregate_sum
 from boolean_nca_cc.models.gnn.edge_update import EdgeUpdateModule
@@ -44,12 +40,4 @@ __all__ = [
     "PerceiverCircuitAttention",
     "ReZero",
     "aggregate_sum",
-    # Model-specific scans (no loss computation)
-    "run_gnn_scan",
-    # DEPRECATED: Use run_model_scan_with_loss from boolean_nca_cc.training.evaluation instead
-    "run_gnn_scan_with_loss",
-    "run_perceiver_scan",
-    "run_perceiver_scan_with_loss",
-    "run_self_attention_scan",
-    "run_self_attention_scan_with_loss",
 ]

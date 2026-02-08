@@ -15,7 +15,7 @@ sweep:
         damage.permanent : [false, false, true]
     
     - wirings:
-        training.wiring_mode : [fixed, fixed, random]
-        training.initial_diversity : [1, 256, 256]
-        training.n_message_steps : [5, 5, 50]
+        training.wiring_mode : [fixed, random]
+        training.initial_diversity : [1, 256]
+        training.n_message_steps : [5, 25]
         

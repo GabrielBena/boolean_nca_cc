@@ -84,6 +84,7 @@ def create_unified_evaluation_datasets(
     eval_batch_size_out: int,
     do_ood_evaluation: bool = True,
     get_all_wirings: bool = False,
+    pool_noise_scale: float = 0.0,
 ) -> UnifiedEvaluationDatasets:
     """
     Create unified evaluation datasets that properly match training patterns.
@@ -126,6 +127,7 @@ def create_unified_evaluation_datasets(
                 wiring_mode=training_wiring_mode,
                 initial_diversity=training_initial_diversity,
                 get_all_wirings=get_all_wirings,
+                pool_noise_scale=pool_noise_scale,
             )
         )
     else:
@@ -142,6 +144,7 @@ def create_unified_evaluation_datasets(
                 batch_size=eval_batch_size_out,
                 wiring_mode="random",  # Always random for OOD
                 initial_diversity=eval_batch_size_out,  # Full diversity for OOD
+                pool_noise_scale=pool_noise_scale,
             )
         )
     else:
@@ -178,6 +181,7 @@ def _create_circuit_batch_with_pattern(
     wiring_mode: str,
     initial_diversity: int,
     get_all_wirings: bool = False,
+    pool_noise_scale: float = 0.0,
 ) -> tuple[list[jp.ndarray], list[jp.ndarray], int]:
     """
     Create a batch of circuits using the exact same logic as initialize_graph_pool.
@@ -206,7 +210,9 @@ def _create_circuit_batch_with_pattern(
 
         if effective_diversity == 1:
             # Single wiring repeated for all circuits
-            single_wires, single_logits = gen_circuit(rng, layer_sizes, arity=arity)
+            single_wires, single_logits = gen_circuit(
+                rng, layer_sizes, arity=arity, noise_scale=pool_noise_scale
+            )
 
             # Replicate the same wiring for all circuits
             batch_wires = jax.tree.map(
@@ -226,13 +232,17 @@ def _create_circuit_batch_with_pattern(
                 if get_all_wirings
                 else jax.random.split(rng, effective_diversity)[:batch_size]
             )
-            vmap_gen_circuit = jax.vmap(lambda rng: gen_circuit(rng, layer_sizes, arity=arity))
+            vmap_gen_circuit = jax.vmap(
+                lambda rng: gen_circuit(rng, layer_sizes, arity=arity, noise_scale=pool_noise_scale)
+            )
             batch_wires, batch_logits = vmap_gen_circuit(rngs)
             actual_batch_size = effective_diversity if get_all_wirings else batch_size
         else:
             # Generate N different wirings and repeat them across the batch
             diversity_rngs = jax.random.split(rng, effective_diversity)
-            vmap_gen_circuit = jax.vmap(lambda rng: gen_circuit(rng, layer_sizes, arity=arity))
+            vmap_gen_circuit = jax.vmap(
+                lambda rng: gen_circuit(rng, layer_sizes, arity=arity, noise_scale=pool_noise_scale)
+            )
             diverse_wires, diverse_logits = vmap_gen_circuit(diversity_rngs)
 
             # Calculate how many times to repeat each diverse wiring
@@ -280,7 +290,9 @@ def _create_circuit_batch_with_pattern(
     else:  # wiring_mode == "random"
         # In random mode, generate different wirings for each circuit
         rngs = jax.random.split(rng, batch_size)
-        vmap_gen_circuit = jax.vmap(lambda rng: gen_circuit(rng, layer_sizes, arity=arity))
+        vmap_gen_circuit = jax.vmap(
+            lambda rng: gen_circuit(rng, layer_sizes, arity=arity, noise_scale=pool_noise_scale)
+        )
         batch_wires, batch_logits = vmap_gen_circuit(rngs)
         actual_batch_size = batch_size
 

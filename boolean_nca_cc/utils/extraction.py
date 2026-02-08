@@ -61,10 +61,10 @@ def extract_logits_from_graph(
     return extracted_logits_list
 
 
-def update_output_node_loss(
+def update_output_node_from_residuals(
     graph: jraph.GraphsTuple,
     layer_sizes: list[tuple[int, int]],
-    loss_values: jp.ndarray,
+    residuals: jp.ndarray,
 ) -> jraph.GraphsTuple:
     """
     Update the loss feature for output nodes in the graph.
@@ -72,7 +72,7 @@ def update_output_node_loss(
     Args:
         graph: GraphsTuple containing node features
         layer_sizes: List of (nodes, group_size) tuples for each layer
-        loss_values: Array of loss values for each output node.
+        residuals: Array of residual values for each output node.
                     Expected shape: [num_output_nodes] or scalar.
                     If shape is [case_n, output_bits], it will be averaged across cases.
 
@@ -83,28 +83,28 @@ def update_output_node_loss(
     output_start_idx, output_end_idx = get_output_node_indices(layer_sizes)
     num_output_nodes = output_end_idx - output_start_idx
 
-    # Handle different input shapes for loss_values
-    loss_values = jp.atleast_1d(loss_values)
+    # Handle different input shapes for residuals
+    residuals = jp.atleast_1d(residuals)
 
     # For 2D case (shape [case_n, output_bits]), average across the first dimension
-    processed_loss_values = jp.mean(loss_values, axis=0) if loss_values.ndim == 2 else loss_values
+    processed_residuals = jp.mean(residuals, axis=0) if residuals.ndim == 2 else residuals
 
     # If we have a single value, broadcast it to all output nodes
-    if processed_loss_values.shape[0] == 1:
-        processed_loss_values = jp.full(num_output_nodes, processed_loss_values[0])
+    if processed_residuals.shape[0] == 1:
+        processed_residuals = jp.full(num_output_nodes, processed_residuals[0])
 
     # Ensure we have exactly the right number of values
     # Take the first num_output_nodes values if we have more, or pad with zeros if we have fewer
-    if processed_loss_values.shape[0] != num_output_nodes:
-        processed_loss_values = jp.resize(processed_loss_values, num_output_nodes)
+    if processed_residuals.shape[0] != num_output_nodes:
+        processed_residuals = jp.resize(processed_residuals, num_output_nodes)
 
     # Update the loss feature for output nodes
-    updated_loss = (
-        graph.nodes["loss"].at[output_start_idx:output_end_idx].set(processed_loss_values)
+    updated_residuals = (
+        graph.nodes["loss"].at[output_start_idx:output_end_idx].set(processed_residuals)
     )
 
     # Create updated nodes with the new loss values
-    updated_nodes = {**graph.nodes, "loss": updated_loss}
+    updated_nodes = {**graph.nodes, "loss": updated_residuals}
 
     return graph._replace(nodes=updated_nodes)
 

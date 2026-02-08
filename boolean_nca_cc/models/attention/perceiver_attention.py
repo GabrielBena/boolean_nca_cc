@@ -26,6 +26,7 @@ from flax import nnx
 from boolean_nca_cc.circuits.train import LossConfig
 from boolean_nca_cc.models.attention.base import (
     AttentionBlock,
+    PassThrough,
     ReZero,
     apply_knockout_mask,
     create_attention_mask,
@@ -67,10 +68,15 @@ class PerceiverCircuitAttention(nnx.Module):
         type: str = "perceiver_attention",
         use_node_loss: bool = False,
         re_zero_attn: bool = True,
+        warm_start: bool = True,
+        re_zero_updates: bool = True,
+        use_intra_layer_PE: bool = False,
+        use_layer_PE: bool = True,
         # Perceiver-specific options
         use_input_cross_attention: bool = True,
         use_output_cross_attention: bool = True,
         token_pe_dim: int = 8,
+        samples_per_step: int | None = None,
         # Structural constraints
         restrict_input_cross_attn_to_first_layer: bool = False,
         restrict_output_cross_attn_to_last_layer: bool = False,
@@ -79,7 +85,8 @@ class PerceiverCircuitAttention(nnx.Module):
         Initialize the Perceiver-style circuit attention model.
 
         Args:
-            n_node: Fixed number of nodes in the circuit
+            n_node: Fixed number of nodes in the circuit (used for attention mask precomputation;
+                    learned weights are scale-free and work with any circuit size)
             circuit_hidden_dim: Dimension of hidden features in the circuit graphs
             arity: Number of inputs per gate
             attention_dim: Internal attention dimension
@@ -90,12 +97,23 @@ class PerceiverCircuitAttention(nnx.Module):
             mlp_dim_multiplier: Multiplier for mlp_dim if not specified
             dropout_rate: Dropout rate
             use_attention_mask: Whether to use topology-based attention mask
+            re_zero_attn: Whether to use ReZero for attention
+            warm_start: Whether to use warm start for training
+            re_zero_updates: Whether to use ReZero for updates
             rngs: Random number generators
             type: Model type identifier
             use_node_loss: Whether to include per-node loss in features
+            use_intra_layer_PE: Whether to include intra-layer positional encodings in features
+            use_layer_PE: Whether to include layer depth positional encodings in features
             use_input_cross_attention: Enable cross-attention to input data
             use_output_cross_attention: Enable cross-attention to output residuals
             token_pe_dim: Dimension for sinusoidal positional encodings
+            samples_per_step: Number of data samples to subsample per NCA step for cross-attention.
+                None = use all samples (no subsampling). When set, each step randomly selects
+                this many samples from the data batch, creating an information bottleneck that
+                promotes incremental, in-context learning over many recurrent steps.
+                Reduces cross-attention compute from O(N_gates * N_samples * N_bits) to
+                O(N_gates * samples_per_step * N_bits) per step.
             restrict_input_cross_attn_to_first_layer: Only first gate layer attends to inputs
             restrict_output_cross_attn_to_last_layer: Only output layer attends to residuals
         """
@@ -108,11 +126,17 @@ class PerceiverCircuitAttention(nnx.Module):
         self.num_heads = num_heads
         self.use_attention_mask = use_attention_mask
         self.use_node_loss = use_node_loss
+        self.use_intra_layer_PE = use_intra_layer_PE
+        self.use_layer_PE = use_layer_PE
         self.use_input_cross_attention = use_input_cross_attention
         self.use_output_cross_attention = use_output_cross_attention
         self.restrict_input_cross_attn_to_first_layer = restrict_input_cross_attn_to_first_layer
         self.restrict_output_cross_attn_to_last_layer = restrict_output_cross_attn_to_last_layer
         self.token_pe_dim = token_pe_dim
+        self.samples_per_step = samples_per_step
+        self.re_zero_attn = re_zero_attn
+        self.re_zero_updates = re_zero_updates
+        self.warm_start = warm_start
 
         if mlp_dim is None:
             mlp_dim = attention_dim * mlp_dim_multiplier
@@ -123,10 +147,17 @@ class PerceiverCircuitAttention(nnx.Module):
             )
 
         # === Gate feature projection ===
-        input_feature_dim = self.logit_dim + circuit_hidden_dim * 3  # logits + hidden + 2 PEs
+        # Compute input_feature_dim dynamically based on PE flags
+        input_feature_dim = self.logit_dim + circuit_hidden_dim  # logits + hidden (always)
+        if self.use_intra_layer_PE:
+            input_feature_dim += circuit_hidden_dim
+        if self.use_layer_PE:
+            input_feature_dim += circuit_hidden_dim
         if self.use_node_loss:
             input_feature_dim += 1
 
+        # Input normalization on concatenated heterogeneous features
+        self.input_norm = nnx.LayerNorm(input_feature_dim, rngs=rngs)
         self.feature_proj = nnx.Linear(
             input_feature_dim,
             self.attention_dim,
@@ -139,6 +170,7 @@ class PerceiverCircuitAttention(nnx.Module):
             token_input_dim = 1 + 2 * token_pe_dim
             # === Input data encoder ===
             encoder = nnx.Sequential(
+                nnx.LayerNorm(token_input_dim, rngs=rngs),
                 nnx.Linear(
                     token_input_dim,
                     attention_dim,
@@ -163,6 +195,7 @@ class PerceiverCircuitAttention(nnx.Module):
                         dropout_rate=dropout_rate,
                         rngs=rngs,
                         re_zero=re_zero_attn,
+                        warm_start=warm_start,
                     )
                     for _ in range(num_cross_attn_layers)
                 ]
@@ -187,10 +220,14 @@ class PerceiverCircuitAttention(nnx.Module):
                     dropout_rate=dropout_rate,
                     rngs=rngs,
                     re_zero=re_zero_attn,
+                    warm_start=warm_start,
                 )
                 for _ in range(num_self_attn_layers)
             ]
         )
+
+        # Final LayerNorm before output heads (standard Pre-LN practice)
+        self.final_norm = nnx.LayerNorm(self.attention_dim, rngs=rngs)
 
         # === Output projections ===
         self.logit_proj = nnx.Linear(
@@ -209,8 +246,8 @@ class PerceiverCircuitAttention(nnx.Module):
         )
 
         # ReZero for final output residuals
-        self.logit_rezero = ReZero(rngs=rngs)
-        self.hidden_rezero = ReZero(rngs=rngs)
+        self.logit_rezero = ReZero(rngs=rngs) if re_zero_updates else PassThrough()
+        self.hidden_rezero = ReZero(rngs=rngs) if re_zero_updates else PassThrough()
 
     def _create_attention_mask(
         self,
@@ -245,19 +282,38 @@ class PerceiverCircuitAttention(nnx.Module):
 
     def _encode_data(self, data: jp.ndarray) -> jp.ndarray:
         """
-        Encode data as tokens with sinusoidal positional encodings.
+        Encode data as tokens with normalized sinusoidal positional encodings.
+
+        Uses normalized positions [0, 1] for both sample and bit indices,
+        ensuring scale-free generalization across different data batch sizes
+        and different numbers of input/output bits.
+
+        The sample PE links corresponding samples across input/output cross-attention
+        (same sample index → same PE). The bit PE distinguishes bit positions.
 
         Args:
-            data: Input data [N_samples, N_input_bits]
+            data: Input data [N_samples, N_bits]
 
         Returns:
-            Encoded tokens [N_samples * N_input_bits, attention_dim]
+            Encoded tokens [N_samples * N_bits, 1 + 2 * token_pe_dim]
         """
         N_samples, N_bits = data.shape
 
-        # Sinusoidal positional encodings
-        sample_pe = get_positional_encoding(jp.arange(N_samples), self.token_pe_dim)
-        bit_pe = get_positional_encoding(jp.arange(N_bits), self.token_pe_dim)
+        # Normalized positional encodings: positions in [0, 1]
+        # Scale by a fixed constant for good sinusoidal frequency spread
+        pe_scale = 1000.0
+
+        # Sample PE: normalized sample position [0, 1]
+        normalized_sample_pos = jp.arange(N_samples, dtype=jp.float32) / jp.maximum(N_samples - 1, 1)
+        sample_pe = get_positional_encoding(
+            normalized_sample_pos * pe_scale, self.token_pe_dim, max_val=pe_scale
+        )
+
+        # Bit PE: normalized bit position [0, 1]
+        normalized_bit_pos = jp.arange(N_bits, dtype=jp.float32) / jp.maximum(N_bits - 1, 1)
+        bit_pe = get_positional_encoding(
+            normalized_bit_pos * pe_scale, self.token_pe_dim, max_val=pe_scale
+        )
 
         # Broadcast to [N_samples, N_bits, pe_dim]
         sample_pe_broadcast = jp.broadcast_to(
@@ -306,13 +362,35 @@ class PerceiverCircuitAttention(nnx.Module):
         x_data = globals_.x_data if globals_ is not None else None
         residuals = globals_.residuals if globals_ is not None else None
 
+        # === Stochastic sample subsampling ===
+        # Subsample data at the SAMPLE level (not token level) so input and residual
+        # cross-attention see matching data points with coherent bit structure.
+        # Per-step keys derived via fold_in(base_key, update_steps) — stateless & unique.
+        if self.samples_per_step is not None and globals_ is not None and globals_.subsample_key is not None:
+            step_key = jax.random.fold_in(globals_.subsample_key, globals_.update_steps)
+            # Determine sample count from whichever data is available
+            n_samples = x_data.shape[0] if x_data is not None else (
+                residuals.shape[0] if residuals is not None else None
+            )
+            if n_samples is not None:
+                sample_indices = jax.random.randint(
+                    step_key, shape=(self.samples_per_step,), minval=0, maxval=n_samples
+                )
+                # Use same indices for both: input/residual pairs stay linked
+                if x_data is not None:
+                    x_data = x_data[sample_indices]
+                if residuals is not None:
+                    residuals = residuals[sample_indices]
+
         # Get layer information for structural constraints
         layer_indices = nodes["layer"]
         max_layer = jp.max(layer_indices)
 
-        # Encode gate features
-        gate_features = extract_node_features(nodes, self.use_node_loss)
-        gate_latents = self.feature_proj(gate_features)[None, ...]  # [1, N_gates, dim]
+        # Encode gate features (normalize heterogeneous features before projection)
+        gate_features = extract_node_features(
+            nodes, self.use_node_loss, self.use_intra_layer_PE, self.use_layer_PE
+        )
+        gate_latents = self.feature_proj(self.input_norm(gate_features))[None, ...]  # [1, N_gates, dim]
 
         # Store intermediate latents
         intermediate_latents = []
@@ -360,15 +438,20 @@ class PerceiverCircuitAttention(nnx.Module):
                     intermediate_latents.append(gate_latents.copy())
 
         # === Self-attention among gates ===
+        # Derive n_node from graph (scale-free: works with any circuit size)
+        # Note: this fallback path is only used outside JIT. In training/eval,
+        # masks are always precomputed with a concrete n_node.
         if attention_mask is None:
-            attention_mask = self._create_attention_mask(senders, receivers, self.n_node)
+            n_node = nodes["layer"].shape[0]
+            attention_mask = self._create_attention_mask(senders, receivers, n_node)
 
         for layer in self.self_attn_layers:
             gate_latents = layer(gate_latents, key_value=None, mask=attention_mask)
             if return_intermediate_latents:
                 intermediate_latents.append(gate_latents.copy())
 
-        # === Project to updates ===
+        # === Final norm + project to updates ===
+        gate_latents = self.final_norm(gate_latents)
         logit_updates = self.logit_proj(gate_latents)[0]
         hidden_updates = self.hidden_proj(gate_latents)[0]
 
@@ -385,99 +468,3 @@ class PerceiverCircuitAttention(nnx.Module):
             return graph._replace(nodes=updated_nodes), intermediate_latents
         else:
             return graph._replace(nodes=updated_nodes)
-
-
-# =============================================================================
-# Scan functions for iterative optimization
-# =============================================================================
-
-
-@partial(nnx.jit, static_argnames=("num_steps",))
-def run_perceiver_scan(
-    model: PerceiverCircuitAttention,
-    graph: jraph.GraphsTuple,
-    num_steps: int,
-) -> tuple[jraph.GraphsTuple, list[jraph.GraphsTuple]]:
-    """
-    Apply the Perceiver model iteratively for multiple steps.
-
-    Note: Requires graph.globals to contain x_data and residuals.
-    """
-    # Precompute all masks and gates once
-    attention_mask = model._create_attention_mask(graph.senders, graph.receivers, model.n_node)
-
-    layer_indices = graph.nodes["layer"]
-    max_layer = jp.max(layer_indices)
-
-    # Precompute output gates for layer restrictions
-    # Note: We only need output gates (not attention masks) for layer-based restrictions
-    # because the output gate hard-zeros contributions for non-allowed layers.
-    input_output_gate = None
-    if model.restrict_input_cross_attn_to_first_layer and graph.globals.x_data is not None:
-        input_output_gate = model._create_output_gate(layer_indices, allowed_layer=0)
-
-    output_output_gate = None
-    if model.restrict_output_cross_attn_to_last_layer and graph.globals.residuals is not None:
-        output_output_gate = model._create_output_gate(layer_indices, allowed_layer=max_layer)
-
-    def scan_body(carry_graph, _):
-        updated_graph = model(
-            carry_graph,
-            attention_mask=attention_mask,
-            input_output_gate=input_output_gate,
-            output_output_gate=output_output_gate,
-        )
-        return updated_graph, updated_graph
-
-    final_graph, intermediate_graphs = jax.lax.scan(scan_body, graph, None, length=num_steps)
-    all_graphs = [graph, *list(intermediate_graphs)]
-
-    return final_graph, all_graphs
-
-
-# DEPRECATED: Use run_model_scan_with_loss from boolean_nca_cc.training.evaluation instead
-# This function is kept for backward compatibility but will be removed in a future version.
-def run_perceiver_scan_with_loss(
-    model: PerceiverCircuitAttention,
-    graph: jraph.GraphsTuple,
-    num_steps: int,
-    logits_original_shapes: list[tuple],
-    wires: list[jp.ndarray],
-    x_data: jp.ndarray,
-    y_data: jp.ndarray,
-    loss_cfg: LossConfig,
-    layer_sizes: tuple[tuple[int, int], ...],
-    data_fraction: float = 1.0,
-    scan_key: jax.random.PRNGKey = None,
-    gradient_checkpointing: bool = False,
-) -> tuple[jraph.GraphsTuple, list[jraph.GraphsTuple], jp.ndarray, list]:
-    """
-    DEPRECATED: Use run_model_scan_with_loss from boolean_nca_cc.training.evaluation instead.
-
-    This function wraps the unified run_model_scan_with_loss for backward compatibility.
-    """
-    import warnings
-
-    from boolean_nca_cc.training.evaluation import run_model_scan_with_loss
-
-    warnings.warn(
-        "run_perceiver_scan_with_loss is deprecated. "
-        "Use run_model_scan_with_loss from boolean_nca_cc.training.evaluation instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-
-    return run_model_scan_with_loss(
-        model=model,
-        graph=graph,
-        num_steps=num_steps,
-        logits_original_shapes=logits_original_shapes,
-        wires=wires,
-        x_data=x_data,
-        y_data=y_data,
-        loss_cfg=loss_cfg,
-        layer_sizes=layer_sizes,
-        data_fraction=data_fraction,
-        scan_key=scan_key,
-        gradient_checkpointing=gradient_checkpointing,
-    )

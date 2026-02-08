@@ -7,13 +7,26 @@ defaults:
 type: "self_attention"
 
 # Attention architecture
-attention_dim: 128
+attention_dim: 64
 mlp_dim: null  # If null, will be set to attention_dim * mlp_dim_multiplier
 mlp_dim_multiplier: 2
 num_heads: 8
 dropout_rate: 0.0
-re_zero_attn: false
 
-# Self-attention (among gates)
+# ReZero for updates and attention
+re_zero_updates: True
+re_zero_attn: True
+warm_start: True
+
+# Self-attention masks (among gates)
 num_self_attn_layers: 1
 use_attention_mask: true
+
+# Node loss (adds one extra feature to the node features)
+use_node_loss: true
+
+# Positional encodings
+# layer_PE: normalized depth fraction [0,1] — scale-free across circuit depths
+# intra_layer_PE: absolute gate index within layer — breaks scale-freedom for random wiring
+use_intra_layer_PE: false
+use_layer_PE: true

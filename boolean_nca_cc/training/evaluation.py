@@ -27,7 +27,7 @@ from boolean_nca_cc.training.pool.structural_perturbation import (
 )
 from boolean_nca_cc.utils import (
     extract_logits_from_graph,
-    update_output_node_loss,
+    update_output_node_from_residuals,
 )
 from boolean_nca_cc.utils.configured_graph_builder import configured_build_graph as build_graph
 
@@ -148,12 +148,20 @@ def get_loss_and_update_graph(
 
     # Update the loss feature for output nodes using residuals
     # We'll use the magnitude of residuals as the loss signal for each output node
-    updated_graph = update_output_node_loss(graph, layer_sizes, jp.abs(residuals).mean(axis=0))
+    updated_graph = update_output_node_from_residuals(
+        graph, layer_sizes, jp.abs(residuals).mean(axis=0)
+    )
 
     # Always update GraphGlobals with full information for consistency across all models
     current_update_steps = (
         updated_graph.globals.update_steps if updated_graph.globals is not None else 0
     )
+
+    # Carry forward the subsample key (constant base key; per-step keys derived via fold_in)
+    subsample_key = (
+        updated_graph.globals.subsample_key if updated_graph.globals is not None else None
+    )
+
     updated_graph = updated_graph._replace(
         globals=GraphGlobals(
             loss=loss,
@@ -161,6 +169,7 @@ def get_loss_and_update_graph(
             x_data=x_data,
             y_data=y_data,
             residuals=residuals,
+            subsample_key=subsample_key,
         )
     )
 
@@ -345,12 +354,13 @@ def run_model_scan_with_loss(
         Tuple of (final_graph, step_outputs) where step_outputs contains
         (graphs, losses, logits, aux_data) for each step
     """
-    # Split key for data sampling and damage
+    # Split key for data sampling, damage, and token subsampling
     if scan_key is not None:
-        data_key, damage_key = jax.random.split(scan_key)
+        data_key, damage_key, subsample_key = jax.random.split(scan_key, 3)
     else:
         data_key = None
         damage_key = jax.random.PRNGKey(42)
+        subsample_key = None
 
     # Select data subset if needed
     if data_fraction < 1.0 and data_key is not None:
@@ -369,16 +379,23 @@ def run_model_scan_with_loss(
     # Prepare model function with precomputed masks
     model_fn, _ = _prepare_model_fn(model, graph, gradient_checkpointing)
 
-    # Initialize graph globals with initial loss computation
+    # Initialize graph globals with initial loss computation and batch data
     graph, _, _, _ = get_loss_and_update_graph(
-        graph,
-        logits_original_shapes,
-        wires,
-        x_batch,
-        y_batch,
-        loss_cfg,
-        layer_sizes,
+        graph=graph,
+        logits_original_shapes=logits_original_shapes,
+        wires=wires,
+        x_data=x_batch,
+        y_data=y_batch,
+        loss_cfg=loss_cfg,
+        layer_sizes=layer_sizes,
     )
+
+    # Inject subsample key for stochastic token subsampling (Perceiver only)
+    # The key is constant; per-step variation comes from fold_in(key, update_steps)
+    if subsample_key is not None:
+        graph = graph._replace(
+            globals=graph.globals._replace(subsample_key=subsample_key)
+        )
 
     # === Discrete damage setup ===
     # Precompute damage keys for all potential damage steps
@@ -479,7 +496,7 @@ def run_model_scan_with_loss(
     def scan_step(carry, step_idx):
         current_graph, current_gate_mask = carry
 
-        # 1. Apply probabilistic damage (happens every step if enabled)
+        # 1. Apply probabilistic damage (could happen every step if enabled)
         current_graph, current_gate_mask = apply_probabilistic_damage(
             current_graph,
             step_idx,
@@ -824,7 +841,6 @@ def evaluate_model_stepwise(
         print(f"Final accuracy: {step_results['accuracy'][-1]:.4f}")
         print(f"Final hard accuracy: {step_results['hard_accuracy'][-1]:.4f}")
 
-    if use_tqdm:
         # Print summary if tqdm was requested (for compatibility)
         print(f"Evaluation complete: {n_message_steps} steps")
         print(f"  Loss: {step_results['loss'][-1]:.4f}")
@@ -861,7 +877,8 @@ def evaluate_model_stepwise_batched(
     # Chunking and details
     chunk_size: int | None = None,
     return_first_circuit_details: bool = False,
-) -> dict:
+    verbose: bool = False,
+) -> tuple[jp.ndarray, dict]:
     """
     Vectorized evaluation of model performance on a batch of circuits.
 
@@ -897,6 +914,7 @@ def evaluate_model_stepwise_batched(
                                      (useful for visualization without re-running evaluation)
 
     Returns:
+        Final graphs after evaluation.
         Dictionary with averaged metrics collected at each step.
         If return_first_circuit_details=True, also includes 'first_circuit_results' key
         with list of StepResult objects for visualization.
@@ -909,7 +927,7 @@ def evaluate_model_stepwise_batched(
         chunks = []
         for i in range(0, batch_size, chunk_size):
             end = min(i + chunk_size, batch_size)
-            chunk_res = evaluate_model_stepwise_batched(
+            chunk_final_graphs, chunk_step_metrics = evaluate_model_stepwise_batched(
                 model=model,
                 batch_wires=[w[i:end] for w in batch_wires],
                 batch_logits=[lg[i:end] for lg in batch_logits],
@@ -931,17 +949,18 @@ def evaluate_model_stepwise_batched(
                 chunk_size=None,  # Don't recurse further
                 return_first_circuit_details=return_first_circuit_details and (i == 0),
             )
-            chunks.append((end - i, chunk_res))
+            chunks.append((end - i, chunk_final_graphs, chunk_step_metrics))
         # Weighted average across chunks
-        total = sum(w for w, _ in chunks)
-        result = {"step": chunks[0][1]["step"]}
+        total = sum(w for w, *_ in chunks)
+        final_graphs = jax.tree.map(lambda x: jp.concat(x, axis=0), chunks[0][0])
+        step_metrics = {"step": chunks[0][2]["step"]}
         for k in ["loss", "hard_loss", "accuracy", "hard_accuracy"]:
-            result[k] = [
+            step_metrics[k] = [
                 sum(w * r[k][s] for w, r in chunks) / total for s in range(n_message_steps)
             ]
         if "first_circuit_results" in chunks[0][1]:
-            result["first_circuit_results"] = chunks[0][1]["first_circuit_results"]
-        return result
+            step_metrics["first_circuit_results"] = chunks[0][1]["first_circuit_results"]
+        return final_graphs, step_metrics
 
     if loss_cfg is None:
         loss_cfg = LOSS_L4
@@ -991,7 +1010,7 @@ def evaluate_model_stepwise_batched(
         )
 
     # Vmap over batch
-    _, batch_step_outputs = nnx.vmap(run_single_scan)(
+    final_graphs, batch_step_outputs = nnx.vmap(run_single_scan)(
         batch_graphs, batch_wires, batch_logits, damage_keys
     )
 
@@ -1015,7 +1034,14 @@ def evaluate_model_stepwise_batched(
             batch_step_outputs, circuit_idx=0, n_message_steps=n_message_steps
         )
 
-    return step_metrics
+    if verbose:
+        # Print summary if tqdm was requested (for compatibility)
+        print(f"Evaluation complete: {n_message_steps} steps")
+        print(f"  Loss: {step_metrics['loss'][-1]:.4f}")
+        print(f"  Accuracy: {step_metrics['accuracy'][-1]:.4f}")
+        print(f"  Hard Acc: {step_metrics['hard_accuracy'][-1]:.4f}")
+
+    return final_graphs, step_metrics
 
 
 def _extract_single_circuit_step_results(

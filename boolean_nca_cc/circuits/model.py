@@ -43,6 +43,29 @@ def make_nops(gate_n, arity, group_size, nop_scale=3.0):
     return logits.reshape(gate_n // group_size, group_size, -1)
 
 
+def make_nops_with_noise(gate_n, arity, group_size, key, nop_scale=3.0, noise_scale=0.0):
+    """
+    Args:
+        key: A JAX random key (REQUIRED for randomness)
+        noise_scale: How much noise to add (e.g., 0.1 or 0.5)
+    """
+    # ... existing code ...
+    I = jp.arange(1 << arity)
+    bits = (I >> I[:arity, None]) & 1
+    luts = bits[jp.arange(gate_n) % arity]
+
+    # 1. Calculate the base deterministic logits (The "No-Ops")
+    base_logits = (2.0 * luts - 1.0) * nop_scale
+
+    # 2. Generate random noise
+    noise = jax.random.normal(key, shape=base_logits.shape) * noise_scale
+
+    # 3. Add noise to the base
+    logits = base_logits + noise
+
+    return logits.reshape(gate_n // group_size, group_size, -1)
+
+
 @jax.jit
 def run_layer(lut, inputs):
     """
@@ -131,8 +154,8 @@ def gen_circuit(
     layer_sizes,
     arity=4,
     verbose=False,
-    local_noise=0.0,  # Existing optional param
-    init_logits_fn=make_nops,
+    init_logits_fn=make_nops_with_noise,
+    noise_scale=0.0,
 ):
     """
     Generate a complete circuit with random wiring and initial operations.
@@ -152,12 +175,19 @@ def gen_circuit(
     for out_n, group_size in layer_sizes[1:]:
         if verbose:
             print(f"in_n: {in_n}, out_n: {out_n}, group_size: {group_size}")
+
+        key, wires_key, logits_key = jax.random.split(key, 3)
         wires = gen_wires(
-            key, in_n, out_n, arity, group_size
+            wires_key, in_n, out_n, arity, group_size
         )  # Assuming gen_wires also takes local_noise if needed
         # Use the provided function to initialize logits:
-        logits = init_logits_fn(out_n, arity, group_size)
-        _, key = jax.random.split(key)
+        logits = init_logits_fn(
+            gate_n=out_n,
+            arity=arity,
+            group_size=group_size,
+            key=logits_key,
+            noise_scale=noise_scale,
+        )
         in_n = out_n
         all_wires.append(wires)
         all_logits.append(logits)

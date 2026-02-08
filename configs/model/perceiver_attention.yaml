@@ -14,8 +14,17 @@ use_input_cross_attention: true   # Cross-attend to input bit patterns
 use_output_cross_attention: true  # Cross-attend to output residuals
 token_pe_dim: 16                   # Sinusoidal PE dimension for sample/bit positions
                                   # Enables linking samples across input/output cross-attention
+
+# Stochastic sample subsampling: each NCA step attends to a random subset of data samples.
+# Reduces cross-attention cost from O(N_gates * N_samples * N_bits) to O(N_gates * k * N_bits).
+# Promotes incremental in-context learning: the model integrates data over many recurrent steps
+# rather than seeing everything at once. Set to null to attend to all samples per step.
+samples_per_step: 16
+
 # Structural constraints (respect circuit topology)
 # If true, only first gate layer can attend to inputs (mirrors circuit input flow)
 restrict_input_cross_attn_to_first_layer: true
 # If true, only output layer can attend to residuals (mirrors circuit output flow)
 restrict_output_cross_attn_to_last_layer: true
+
+use_node_loss: false

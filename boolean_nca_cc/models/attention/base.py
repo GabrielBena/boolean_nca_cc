@@ -20,8 +20,9 @@ class ReZero(nnx.Module):
     Reference: https://arxiv.org/abs/2003.04887
     """
 
-    def __init__(self, *, rngs: nnx.Rngs):
-        self.scale = nnx.Param(jp.zeros((1,)))
+    def __init__(self, *, rngs: nnx.Rngs, warm_start: bool = False):
+        initial_value = jp.full((1,), 0.0 if warm_start else 1e-3)
+        self.scale = nnx.Param(initial_value)
 
     def __call__(self, x: jp.ndarray) -> jp.ndarray:
         return self.scale.value * x
@@ -40,9 +41,12 @@ class AttentionBlock(nnx.Module):
     """
     Unified attention block for both self-attention and cross-attention.
 
-    Uses ReZero for stable training:
-        x = x + ReZero(Attention(x, kv))
-        x = x + ReZero(FFN(x))
+    Pre-LN pattern with ReZero residuals:
+        x = x + ReZero(Attention(LN_q(x), LN_kv(kv)))
+        x = x + ReZero(FFN(LN(x)))
+
+    Additionally uses QK-normalization (normalize_qk) inside MultiHeadAttention
+    to stabilize attention logits, complementary to the pre-LN input norms.
 
     For self-attention: call with key_value=None (uses query as key/value)
     For cross-attention: call with separate key_value
@@ -59,6 +63,7 @@ class AttentionBlock(nnx.Module):
         *,
         rngs: nnx.Rngs,
         re_zero: bool = True,
+        warm_start: bool = True,
     ):
         """
         Initialize an attention block.
@@ -76,6 +81,13 @@ class AttentionBlock(nnx.Module):
         if mlp_dim is None:
             mlp_dim = dim * 2
 
+        # Pre-attention LayerNorms (Pre-LN pattern)
+        # These normalize the input representation before Q/K/V projections.
+        # Separate norms for Q and KV to support both self- and cross-attention.
+        # Complementary to normalize_qk which normalizes Q/K *after* projection.
+        self.layer_norm_q = nnx.LayerNorm(dim, rngs=rngs)
+        self.layer_norm_kv = nnx.LayerNorm(dim, rngs=rngs)
+
         self.attention = nnx.MultiHeadAttention(
             num_heads=num_heads,
             in_features=dim,
@@ -85,8 +97,9 @@ class AttentionBlock(nnx.Module):
             normalize_qk=True,
         )
 
-        # Feed-forward network
+        # Feed-forward network (Pre-LN: LayerNorm before FFN)
         self.ffn = nnx.Sequential(
+            nnx.LayerNorm(dim, rngs=rngs),
             nnx.Linear(
                 dim,
                 mlp_dim,
@@ -103,12 +116,8 @@ class AttentionBlock(nnx.Module):
         )
 
         # ReZero scaling for attention and FFN residuals
-        self.attn_rezero = ReZero(rngs=rngs) if re_zero else PassThrough()
-        self.ffn_rezero = ReZero(rngs=rngs) if re_zero else PassThrough()
-
-        # Layer normalization
-        self.layer_norm_q = nnx.LayerNorm(dim, rngs=rngs)
-        self.layer_norm_kv = nnx.LayerNorm(dim, rngs=rngs)
+        self.attn_rezero = ReZero(rngs=rngs, warm_start=warm_start) if re_zero else PassThrough()
+        self.ffn_rezero = ReZero(rngs=rngs, warm_start=warm_start) if re_zero else PassThrough()
 
     def __call__(
         self,
@@ -138,15 +147,16 @@ class AttentionBlock(nnx.Module):
         if key_value is None:
             key_value = query
 
-        # Layer normalization
-        query = self.layer_norm_q(query)
-        key_value = self.layer_norm_kv(key_value)
+        # Pre-LN: normalize inputs before attention projections
+        # (original query is preserved for residual connection below)
+        query_normed = self.layer_norm_q(query)
+        kv_normed = self.layer_norm_kv(key_value)
 
-        # Attention
+        # Attention (normalize_qk additionally normalizes Q/K after projection)
         attn_output = self.attention(
-            inputs_q=query,
-            inputs_k=key_value,
-            inputs_v=key_value,
+            inputs_q=query_normed,
+            inputs_k=kv_normed,
+            inputs_v=kv_normed,
             mask=mask,
             deterministic=True,
             decode=False,
@@ -205,6 +215,8 @@ def create_attention_mask(
 def extract_node_features(
     nodes: dict[str, jp.ndarray],
     use_node_loss: bool = False,
+    use_intra_layer_PE: bool = False,
+    use_layer_PE: bool = False,
 ) -> jp.ndarray:
     """
     Extract and concatenate node features for attention.
@@ -222,7 +234,11 @@ def extract_node_features(
     layer_pe = nodes["layer_pe"]  # [n_node, circuit_hidden_dim]
     intra_layer_pe = nodes["intra_layer_pe"]  # [n_node, circuit_hidden_dim]
 
-    features = jp.concatenate([logits, hidden, layer_pe, intra_layer_pe], axis=-1)
+    features = jp.concatenate([logits, hidden], axis=-1)
+    if use_intra_layer_PE:
+        features = jp.concatenate([features, intra_layer_pe], axis=-1)
+    if use_layer_PE:
+        features = jp.concatenate([features, layer_pe], axis=-1)
 
     if use_node_loss:
         features = jp.concatenate([features, nodes["loss"][:, None]], axis=-1)

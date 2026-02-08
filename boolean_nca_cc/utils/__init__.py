@@ -8,7 +8,7 @@ feature extraction, and processing.
 from boolean_nca_cc.utils.extraction import (
     extract_logits_from_graph,
     get_output_node_indices,
-    update_output_node_loss,
+    update_output_node_from_residuals,
 )
 from boolean_nca_cc.utils.graph_builder import GraphGlobals, build_graph
 from boolean_nca_cc.utils.positional_encoding import get_positional_encoding
@@ -19,5 +19,5 @@ __all__ = [
     "extract_logits_from_graph",
     "get_output_node_indices",
     "get_positional_encoding",
-    "update_output_node_loss",
+    "update_output_node_from_residuals",
 ]

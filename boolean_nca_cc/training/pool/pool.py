@@ -23,7 +23,6 @@ from flax import struct
 from jax import Array
 
 from boolean_nca_cc.circuits.model import gen_circuit
-from boolean_nca_cc.training.pool.perturbation import mutate_wires_batch
 from boolean_nca_cc.utils.configured_graph_builder import configured_build_graph as build_graph
 from boolean_nca_cc.utils.extraction import extract_logits_from_graph
 
@@ -463,115 +462,6 @@ class GraphPool(struct.PyTreeNode):
 
         return reset_pool, avg_steps_reset
 
-    def reset_with_genetic_mutation(
-        self,
-        key: Array,
-        fraction: float,
-        layer_sizes: list[tuple[int, int]],
-        input_n: int,
-        arity: int,
-        circuit_hidden_dim: int,
-        mutation_rate: float = 0.1,
-        n_swaps_per_layer: int = 1,
-        reset_strategy: str = "uniform",
-        combined_weights: tuple[float, float] = (0.5, 0.5),
-    ) -> tuple["GraphPool", float]:
-        """
-        Reset a fraction using genetic mutation of existing circuits.
-
-        Damage is cleared for mutated circuits (fresh start).
-
-        Args:
-            key: Random key for mutations and selection
-            fraction: Fraction of pool to reset
-            layer_sizes: Circuit layer sizes for logit generation
-            input_n: Number of input nodes
-            arity: Number of inputs per gate
-            circuit_hidden_dim: Hidden dimension for graphs
-            mutation_rate: Rate of wire mutations (0.0 to 1.0)
-            n_swaps_per_layer: Number of swaps per layer
-            reset_strategy: Strategy for selecting circuits to reset
-            combined_weights: Weights for combined reset strategy
-
-        Returns:
-            Tuple of (updated_pool, avg_steps_of_reset_circuits)
-        """
-        selection_key, mutation_key, _ = jax.random.split(key, 3)
-
-        reset_idxs, avg_steps_reset = self.get_reset_indices(
-            selection_key, fraction, reset_strategy, combined_weights
-        )
-        num_reset = len(reset_idxs)
-
-        # Sample source circuits for mutation
-        source_idxs = jax.random.choice(mutation_key, self.size, shape=(num_reset,), replace=True)
-        source_wires = jax.tree.map(lambda leaf: leaf[source_idxs], self.wires)
-
-        # Apply mutations
-        mutated_wires = mutate_wires_batch(
-            source_wires, mutation_key, mutation_rate, n_swaps_per_layer
-        )
-
-        # Generate fresh logits
-        from boolean_nca_cc.circuits.model import make_nops
-
-        fresh_logits = []
-        for out_n, group_size in layer_sizes[1:]:
-            layer_logits = make_nops(out_n, arity, group_size)
-            batched_logits = jp.repeat(layer_logits[None, ...], num_reset, axis=0)
-            fresh_logits.append(batched_logits)
-
-        # Fresh gate masks (all active - damage cleared)
-        if self.gate_masks is not None:
-            total_gates = self.gate_masks.shape[1]
-            fresh_gate_masks = jp.ones((num_reset, total_gates), dtype=jp.float32)
-        else:
-            fresh_gate_masks = None
-
-        # Build new graphs
-        vmap_build_graph = jax.vmap(
-            lambda logit, wires, gate_mask: build_graph(
-                logits=logit,
-                wires=wires,
-                input_n=input_n,
-                arity=arity,
-                circuit_hidden_dim=circuit_hidden_dim,
-                loss_value=0.0,
-                update_steps=0,
-                gate_knockout_mask=gate_mask,
-                faulty_logit_value=-10.0,
-            )
-        )
-
-        if fresh_gate_masks is not None:
-            mutated_graphs = vmap_build_graph(fresh_logits, mutated_wires, fresh_gate_masks)
-        else:
-            # Build without gate masks
-            vmap_build_graph_no_mask = jax.vmap(
-                lambda logit, wires: build_graph(
-                    logits=logit,
-                    wires=wires,
-                    input_n=input_n,
-                    arity=arity,
-                    circuit_hidden_dim=circuit_hidden_dim,
-                    loss_value=0.0,
-                    update_steps=0,
-                )
-            )
-            mutated_graphs = vmap_build_graph_no_mask(fresh_logits, mutated_wires)
-
-        # Update pool
-        updated_pool = self.update(
-            reset_idxs, mutated_graphs, mutated_wires, fresh_logits, fresh_gate_masks
-        )
-
-        # Increment reset counter
-        if updated_pool.reset_counter is not None:
-            new_counter = updated_pool.reset_counter + 1
-            updated_pool = updated_pool.replace(reset_counter=new_counter)
-
-        return updated_pool, avg_steps_reset
-
     def apply_damage(
         self,
         key: Array,
@@ -723,6 +613,7 @@ def initialize_graph_pool(
     wiring_mode: str = "random",
     initial_diversity: int = 1,
     initialize_gate_masks: bool = True,
+    noise_scale: float = 0.0,
 ) -> GraphPool:
     """
     Initialize a pool of graphs for training.
@@ -751,7 +642,9 @@ def initialize_graph_pool(
 
         if effective_diversity == 1:
             # Single wiring repeated
-            single_wires, single_logits = gen_circuit(rng, layer_sizes, arity=arity)
+            single_wires, single_logits = gen_circuit(
+                rng, layer_sizes, arity=arity, noise_scale=noise_scale
+            )
             all_wires = jax.tree.map(
                 lambda leaf: jp.repeat(leaf[None, ...], pool_size, axis=0), single_wires
             )
@@ -761,12 +654,16 @@ def initialize_graph_pool(
         elif effective_diversity >= pool_size:
             # Unique wiring for each
             rngs = jax.random.split(rng, pool_size)
-            vmap_gen_circuit = jax.vmap(lambda rng: gen_circuit(rng, layer_sizes, arity=arity))
+            vmap_gen_circuit = jax.vmap(
+                lambda rng: gen_circuit(rng, layer_sizes, arity=arity, noise_scale=noise_scale)
+            )
             all_wires, all_logits = vmap_gen_circuit(rngs)
         else:
             # N different wirings repeated
             diversity_rngs = jax.random.split(rng, effective_diversity)
-            vmap_gen_circuit = jax.vmap(lambda rng: gen_circuit(rng, layer_sizes, arity=arity))
+            vmap_gen_circuit = jax.vmap(
+                lambda rng: gen_circuit(rng, layer_sizes, arity=arity, noise_scale=noise_scale)
+            )
             diverse_wires, diverse_logits = vmap_gen_circuit(diversity_rngs)
 
             base_repeats = pool_size // effective_diversity
@@ -805,7 +702,9 @@ def initialize_graph_pool(
                 all_logits.append(jp.concatenate(layer_logits, axis=0))
     else:  # wiring_mode == "random"
         rngs = jax.random.split(rng, pool_size)
-        vmap_gen_circuit = jax.vmap(lambda rng: gen_circuit(rng, layer_sizes, arity=arity))
+        vmap_gen_circuit = jax.vmap(
+            lambda rng: gen_circuit(rng, layer_sizes, arity=arity, noise_scale=noise_scale)
+        )
         all_wires, all_logits = vmap_gen_circuit(rngs)
 
     # Initialize gate masks
