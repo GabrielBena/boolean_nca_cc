@@ -3,7 +3,7 @@
 # Default parameters for experiment
 defaults:
   - model: perceiver_attention  # Default model (gnn or self_attention or perceiver_attention)
-  - circuit: binary_multiply
+  - circuit: binary_multiply_large
   - loss: bce  # Options: l2, l4, bce, bce_w3, focal, asym, focal_asym
   - _self_  # For self-overrides
 
