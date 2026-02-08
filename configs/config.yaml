@@ -25,7 +25,6 @@ wandb:
   group: null
   dir: null  # Output directory (null means use current working directory)
 
-
 # Graph configuration
 graph:
   neighboring_connections: false  # Enable neighboring connections between adjacent gates in the same layer
