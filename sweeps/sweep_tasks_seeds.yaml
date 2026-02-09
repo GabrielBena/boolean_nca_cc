@@ -82,6 +82,18 @@ parameters:
   eval.periodic_eval_log_stepwise:
     value: true
   
+  # Eval: short message passing only (30 steps)
+  eval.periodic_eval_inner_steps:
+    value: 30
+
+  # Training: no horizon loss, fixed loss step, no message-step schedule
+  training.long_horizon_enabled:
+    value: false
+  training.random_loss_step:
+    value: false
+  training.message_steps_schedule.enabled:
+    value: false
+
   # DISABLE ALL DAMAGE-RELATED SETTINGS
   # Disable damage during training (pool damage)
   pool.damage_pool_enabled:

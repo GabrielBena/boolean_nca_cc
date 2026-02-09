@@ -21,7 +21,7 @@ circuit:
   task: binary_multiply
   arity: 4
   input_bits: 8
-  num_layers: 5
+  num_layers: 3
   layer_sizes: null
   output_bits: 8
   max_task_samples: 100000
