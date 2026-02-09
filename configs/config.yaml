@@ -137,7 +137,7 @@ pool:
 #   - Evaluation uses discrete "shotgun" damage: N volleys of knockouts (OOD test)
 # The single `target_damage_fraction` drives both, auto-computing p_fault and knockouts.
 damage:
-  enabled: true  # Master switch for damage system
+  enabled: false  # Master switch for damage system
   permanent: "random"  # true / false / "random" (coin flip per circuit)
   
   # === TARGET DAMAGE (the single knob) ===
@@ -188,17 +188,19 @@ eval:
   
 # Early stopping based on accuracy
 stop_accuracy:
-  enabled: true  # Whether to enable early stopping based on accuracy
-  threshold: 0.995  # Accuracy threshold to trigger early stopping
-  metric: "hard_accuracy"  # Which accuracy metric to use ("accuracy" or "hard_accuracy")
-  source: "eval"  # Source of the metric ("training" or "eval")
-  patience: 10  # Number of epochs to wait after reaching threshold before stopping
-  min_epochs: 1012 # Minimum number of epochs before early stopping can occur (eval every 512 epochs - 10 epochs)
+  enabled: true
+  threshold: 1.0  # Accuracy threshold to trigger early stopping
+  metric: "hard_accuracy"  # Which metric suffix to check ("accuracy" or "hard_accuracy")
+  source: "eval"  # "eval" (checks ALL matching eval metrics) or "training" (single metric)
+  scope: null  # null = require ALL eval */final_{metric} to pass (damaged + undamaged).
+               # Or a list of prefixes: ["eval_in_test", "eval_damaged_in_test"]
+  patience: 4  # Number of consecutive evals where ALL metrics are above threshold
+  min_epochs: 1025 # Minimum number of epochs before early stopping can occur (1st eval + 1 epochs)
 
 # Checkpointing
 checkpoint:
   enabled: true
-  interval: 1031  # Save checkpoints every N epochs (prime number to avoid rest pool before)
+  interval: 1031  # Save checkpoints every N epochs (prime number to avoid resetting pool before)
   save_best: true
   save_latest: true  # Always save latest checkpoint
   # Save checkpoints on MNT storage (if available)

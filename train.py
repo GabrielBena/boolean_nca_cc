@@ -41,7 +41,7 @@ from boolean_nca_cc import generate_layer_sizes
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.circuits.tasks import get_task_data
 from boolean_nca_cc.circuits.train import LOSS_L4, LossConfig, TrainState, loss_f, train_step
-from boolean_nca_cc.training.checkpointing import save_checkpoint
+from boolean_nca_cc.training.checkpointing import EarlyStopping, save_checkpoint
 from boolean_nca_cc.training.eval_datasets import (
     create_unified_evaluation_datasets,
 )
@@ -838,13 +838,15 @@ def main(cfg: DictConfig) -> None:
         wandb_logging=cfg.wandb.enabled,
         log_interval=cfg.logging.log_interval,
         wandb_run_config=OmegaConf.to_container(cfg, resolve=True),
-        # Early stopping parameters
-        stop_accuracy_enabled=cfg.stop_accuracy.enabled,
-        stop_accuracy_threshold=cfg.stop_accuracy.threshold,
-        stop_accuracy_metric=cfg.stop_accuracy.metric,
-        stop_accuracy_source=cfg.stop_accuracy.source,
-        stop_accuracy_patience=cfg.stop_accuracy.patience,
-        stop_accuracy_min_epochs=cfg.stop_accuracy.min_epochs,
+        # Early stopping
+        early_stopping=EarlyStopping(
+            metric=cfg.stop_accuracy.metric,
+            source=cfg.stop_accuracy.source,
+            threshold=cfg.stop_accuracy.threshold,
+            patience=cfg.stop_accuracy.patience,
+            min_epochs=cfg.stop_accuracy.min_epochs,
+            scope=cfg.stop_accuracy.get("scope", None),
+        ) if cfg.stop_accuracy.enabled else None,
         # Best model tracking parameters
         save_best=cfg.checkpoint.save_best,
         track_metrics=track_metrics,

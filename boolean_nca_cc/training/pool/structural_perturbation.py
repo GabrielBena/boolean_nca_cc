@@ -765,6 +765,7 @@ def compute_damage_params(cfg, layer_sizes, log=None) -> dict:
         result["knockouts_per_event"] = int(explicit_ko)
     elif n_dmg > 0:
         import math
+
         result["knockouts_per_event"] = max(1, math.ceil(target_frac * n_eligible / n_dmg))
     else:
         result["knockouts_per_event"] = 0
@@ -777,6 +778,14 @@ def compute_damage_params(cfg, layer_sizes, log=None) -> dict:
             f"  p_fault_eval   = {result['p_fault_eval']:.2e}  ({eval_steps} steps)\n"
             f"  discrete: {n_dmg} volleys x {result['knockouts_per_event']} knockouts"
         )
+
+    # if not result["enabled"]:
+    #     if log:
+    #         log.info("Damage system disabled: setting p_fault_train to None")
+
+    #     # Training will use p_fault_train
+    #     result["p_fault_train"] = None
+    #     # We still leave p_fault_eval as is, to plot damaged/undamaged performance
 
     return result
 

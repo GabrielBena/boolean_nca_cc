@@ -244,11 +244,6 @@ def load_checkpoint_with_compatibility(checkpoint_path):
     return load_checkpoint_with_compatibility_working(checkpoint_path)
 
 
-# Removed old manual reconstruction code - no longer needed
-
-
-# Removed old state conversion function - no longer needed with working loader
-
 
 def configure_notebook_logging(level=logging.INFO):
     """
@@ -449,16 +444,21 @@ class BestModelTracker:
         self.best_epochs[metric_key] = -1
 
     def is_better(self, metric_key: str, current_value: float) -> bool:
-        """Check if current value is better than the best for this metric."""
+        """Check if current value is better than (or equal to) the best for this metric.
+
+        Uses ``>=`` / ``<=`` so that later models at the same metric level are
+        preferred (a model that has trained longer at the same accuracy may
+        generalise better over longer horizons / homeostasis).
+        """
         if metric_key not in self.best_metrics:
             self.add_metric(metric_key)
 
         best_value = self.best_metrics[metric_key]
 
         if "accuracy" in metric_key.lower():
-            return current_value > best_value  # Higher is better
+            return current_value >= best_value  # Higher is better
         else:
-            return current_value < best_value  # Lower is better
+            return current_value <= best_value  # Lower is better
 
     def update(self, metric_key: str, current_value: float, epoch: int) -> bool:
         """Update the best value if current is better. Returns True if updated."""
@@ -478,59 +478,6 @@ class BestModelTracker:
         """Get the epoch when the best value was achieved."""
         return self.best_epochs.get(metric_key, -1)
 
-
-def get_metric_value(
-    metric_name: str,
-    metric_source: str,
-    training_metrics: dict,
-    eval_metrics: dict | None = None,
-) -> float:
-    """
-    Get metric value from the appropriate source.
-
-    Args:
-        metric_name: Name of the metric ('loss', 'hard_loss', 'accuracy', 'hard_accuracy')
-        metric_source: Source of the metric ('training' or 'eval')
-        training_metrics: Dictionary with training metrics
-        eval_metrics: Dictionary with evaluation metrics (optional)
-
-    Returns:
-        The metric value as a float
-    """
-    if metric_source == "training":
-        return training_metrics[metric_name]
-    elif metric_source == "eval":
-        if eval_metrics is None:
-            raise ValueError("Evaluation metrics not available for eval source")
-
-        # Map to evaluation metric keys (use IN-distribution evaluation for consistency)
-        eval_key_map = {
-            "loss": "eval_in/final_loss",
-            "hard_loss": "eval_in/final_hard_loss",
-            "accuracy": "eval_in/final_accuracy",
-            "hard_accuracy": "eval_in/final_hard_accuracy",
-        }
-
-        # Fallback map to OUT-of-distribution evaluation metrics
-        eval_out_key_map = {
-            "loss": "eval_out/final_loss",
-            "hard_loss": "eval_out/final_hard_loss",
-            "accuracy": "eval_out/final_accuracy",
-            "hard_accuracy": "eval_out/final_hard_accuracy",
-        }
-
-        # Try IN-distribution metrics first, fallback to OUT-of-distribution if not available
-        primary_key = eval_key_map[metric_name]
-        fallback_key = eval_out_key_map[metric_name]
-
-        if primary_key in eval_metrics:
-            return eval_metrics[primary_key]
-        elif fallback_key in eval_metrics:
-            return eval_metrics[fallback_key]
-        else:
-            raise KeyError(f"Neither {primary_key} nor {fallback_key} found in evaluation metrics")
-    else:
-        raise ValueError(f"Unknown metric source: {metric_source}")
 
 
 def setup_checkpoint_dir(checkpoint_dir: str | None, wandb_id: str | None) -> str | None:
@@ -753,12 +700,15 @@ def track_and_save_best_models(
     for source, metric, value in metrics_to_track:
         metric_key = f"{source}_{metric}"
 
+        # Capture previous best before update overwrites it
+        previous_best = best_model_tracker.get_best_value(metric_key)
+
         # Check if this is a new best
         if best_model_tracker.update(metric_key, value, epoch):
             updates[metric_key] = {
                 "value": value,
                 "epoch": epoch,
-                "previous_best": best_model_tracker.get_best_value(metric_key),
+                "previous_best": previous_best,
             }
 
             # Save best checkpoint
@@ -780,116 +730,161 @@ def track_and_save_best_models(
     return updates
 
 
-def check_early_stopping(
-    stop_accuracy_enabled: bool,
-    epoch: int,
-    stop_accuracy_min_epochs: int,
-    early_stop_triggered: bool,
-    stop_accuracy_metric: str,
-    stop_accuracy_source: str,
-    training_metrics: dict,
-    current_eval_metrics: dict | None,
-    stop_accuracy_threshold: float,
-    first_threshold_epoch: int | None,
-    epochs_above_threshold: int,
-    stop_accuracy_patience: int,
-    rng: jax.random.PRNGKey,
-) -> tuple[bool, bool, int, int | None, dict | None, jax.random.PRNGKey]:
-    """
-    Check early stopping conditions and handle early stopping logic.
+class EarlyStopping:
+    """Tracks consecutive evaluations above a threshold and triggers early stop.
 
-    Returns:
-        Tuple of (should_break, early_stop_triggered, epochs_above_threshold,
-                 first_threshold_epoch, updated_current_eval_metrics, updated_rng)
-    """
-    if not stop_accuracy_enabled or early_stop_triggered:
-        return (
-            False,
-            early_stop_triggered,
-            epochs_above_threshold,
-            first_threshold_epoch,
-            current_eval_metrics,
-            rng,
-        )
+    When ``source="eval"`` (the default), **all** eval metrics matching the
+    requested metric name must be above the threshold for the counter to advance.
+    This prevents stopping a run that handles undamaged circuits well but is
+    still learning to cope with damage.
 
-    # Get the accuracy value for early stopping
-    try:
-        stop_accuracy_value = get_metric_value(
-            stop_accuracy_metric,
-            stop_accuracy_source,
-            training_metrics,
-            current_eval_metrics,
-        )
-    except (ValueError, KeyError):
-        if stop_accuracy_source == "eval" and current_eval_metrics is None:
-            # Evaluation metrics not available, skip early stopping check this epoch
-            stop_accuracy_value = None
+    Non-eval epochs (``eval_metrics is None``) are skipped entirely -- the
+    counter is neither incremented nor reset.
+
+    Args:
+        metric: Which metric suffix to check (e.g. ``"hard_accuracy"``).
+        source: ``"eval"`` (check all matching eval metrics) or
+                ``"training"`` (check single training metric).
+        threshold: Value that must be reached.
+        patience: Consecutive evals where *all* metrics are above threshold.
+        min_epochs: Training won't stop before this epoch even if patience is met.
+        scope: Optional list of eval key prefixes to restrict which metrics are
+               checked.  ``None`` (default) means *all* available eval metrics
+               matching ``*/final_{metric}`` are required to pass.
+               Example: ``["eval_in_test", "eval_damaged_in_test"]``.
+
+    Usage::
+
+        es = EarlyStopping(threshold=0.995, patience=10, min_epochs=1000)
+
+        # inside training loop, every epoch:
+        if es.step(epoch, training_metrics, eval_metrics):
+            break
+    """
+
+    def __init__(
+        self,
+        metric: str = "hard_accuracy",
+        source: str = "eval",
+        threshold: float = 0.95,
+        patience: int = 10,
+        min_epochs: int = 0,
+        scope: list[str] | None = None,
+    ):
+        self.metric = metric
+        self.source = source
+        self.threshold = threshold
+        self.patience = patience
+        self.min_epochs = min_epochs
+        self.scope = scope
+
+        # Mutable state
+        self.count: int = 0  # consecutive evals with ALL metrics above threshold
+        self.first_epoch: int | None = None
+        self.triggered: bool = False
+
+    # -- internals ----------------------------------------------------------
+
+    def _gather_eval_values(self, eval_metrics: dict) -> dict[str, float]:
+        """Return ``{key: value}`` for every eval metric matching the suffix."""
+        suffix = f"/final_{self.metric}"
+        matched = {k: float(v) for k, v in eval_metrics.items() if k.endswith(suffix)}
+
+        if self.scope is not None:
+            matched = {
+                k: v
+                for k, v in matched.items()
+                if any(k.startswith(prefix) for prefix in self.scope)
+            }
+        return matched
+
+    # -- public API ---------------------------------------------------------
+
+    def step(
+        self,
+        epoch: int,
+        training_metrics: dict,
+        eval_metrics: dict | None = None,
+    ) -> bool:
+        """Feed one epoch's metrics. Returns ``True`` when training should stop.
+
+        * ``source="eval"``: requires **all** matching eval metrics >= threshold.
+        * ``source="training"``: single training metric check.
+        * Uses ``>=`` so that later models at the same accuracy still count
+          (homeostasis benefit).
+        """
+        if self.triggered:
+            return True
+
+        # --- training source: single metric check ---
+        if self.source == "training":
+            value = training_metrics.get(self.metric)
+            if value is None:
+                return False
+            all_above = float(value) >= self.threshold
+            status = f"{self.metric}={float(value):.4f}"
+            bottleneck = status
+
+        # --- eval source: multi-metric check ---
+        elif self.source == "eval":
+            if eval_metrics is None:
+                return False  # no eval this epoch
+
+            matched = self._gather_eval_values(eval_metrics)
+            if not matched:
+                log.warning(
+                    f"Early stopping: no eval metrics matching '*/final_{self.metric}'"
+                    f" (scope={self.scope}). Available: {list(eval_metrics.keys())}"
+                )
+                return False
+
+            all_above = all(v >= self.threshold for v in matched.values())
+            min_key = min(matched, key=matched.get)
+            min_val = matched[min_key]
+            n_pass = sum(1 for v in matched.values() if v >= self.threshold)
+            status = f"{n_pass}/{len(matched)} metrics above {self.threshold:.4f}"
+            bottleneck = f"bottleneck: {min_key}={min_val:.4f}"
         else:
-            # Fallback to training metrics if eval not available
-            stop_accuracy_value = get_metric_value(
-                stop_accuracy_metric,
-                "training",
-                training_metrics,
-                current_eval_metrics,
-            )
+            return False
 
-    if stop_accuracy_value is None:
-        return (
-            False,
-            early_stop_triggered,
-            epochs_above_threshold,
-            first_threshold_epoch,
-            current_eval_metrics,
-            rng,
-        )
+        # --- threshold logic ---
+        if all_above:
+            if self.first_epoch is None:
+                self.first_epoch = epoch
+                log.info(
+                    f"All metrics above {self.threshold:.4f} at epoch {epoch} "
+                    f"({status}). Starting patience countdown."
+                )
+            self.count += 1
 
-    if stop_accuracy_value >= stop_accuracy_threshold:
-        if first_threshold_epoch is None:
-            first_threshold_epoch = epoch
-            log.info(
-                f"Reached accuracy threshold {stop_accuracy_threshold:.4f} "
-                f"({stop_accuracy_source}_{stop_accuracy_metric}={stop_accuracy_value:.4f}) "
-                f"at epoch {epoch}. Starting patience countdown."
-            )
-        epochs_above_threshold += 1
+            if self.count >= self.patience and epoch >= self.min_epochs:
+                self.triggered = True
+                log.info(
+                    f"Early stopping triggered! {status} for "
+                    f"{self.patience} consecutive evals. Stopping at epoch {epoch}."
+                )
+                return True
 
-        # Check if we should stop (only after minimum epochs requirement is met)
-        if epochs_above_threshold >= stop_accuracy_patience and epoch >= stop_accuracy_min_epochs:
-            early_stop_triggered = True
-            log.info(
-                f"Early stopping triggered! "
-                f"Accuracy {stop_accuracy_source}_{stop_accuracy_metric}={stop_accuracy_value:.4f} "
-                f"has been above threshold {stop_accuracy_threshold:.4f} "
-                f"for {stop_accuracy_patience} epochs. "
-                f"Stopping at epoch {epoch}."
-            )
+            if self.count >= self.patience and epoch < self.min_epochs:
+                log.debug(
+                    f"Patience met ({self.count}/{self.patience}) "
+                    f"but waiting for min_epochs ({epoch}/{self.min_epochs})."
+                )
+        else:
+            if self.count > 0:
+                log.info(
+                    f"Dropped below threshold ({bottleneck}). "
+                    f"Resetting counter (was {self.count}/{self.patience})."
+                )
+            self.count = 0
+            self.first_epoch = None
 
-            return (
-                True,
-                early_stop_triggered,
-                epochs_above_threshold,
-                first_threshold_epoch,
-                current_eval_metrics,
-                rng,
-            )
-        elif epochs_above_threshold >= stop_accuracy_patience and epoch < stop_accuracy_min_epochs:
-            # Would stop but waiting for minimum epochs
-            pass
-    else:
-        # Reset counter if accuracy drops below threshold
-        if epochs_above_threshold > 0:
-            log.info("Accuracy dropped below threshold. Resetting early stopping counter.")
-        epochs_above_threshold = 0
-        first_threshold_epoch = None
+        return False
 
-    return (
-        False,
-        early_stop_triggered,
-        epochs_above_threshold,
-        first_threshold_epoch,
-        current_eval_metrics,
-        rng,
-    )
+    @property
+    def progress(self) -> str:
+        """Short string for progress bar display, e.g. ``'3/10'``."""
+        return f"{self.count}/{self.patience}"
 
 
 # WandB integration functions

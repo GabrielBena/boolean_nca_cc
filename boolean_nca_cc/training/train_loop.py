@@ -18,11 +18,11 @@ from tqdm.auto import tqdm
 
 import wandb
 from boolean_nca_cc.circuits.train import LOSS_L4, LossConfig
-from boolean_nca_cc.circuits.viz import create_wandb_visualization, plot_wandb_stepwise_results
+from boolean_nca_cc.circuits.viz import plot_wandb_stepwise_results
 from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention
 from boolean_nca_cc.training.checkpointing import (
     BestModelTracker,
-    check_early_stopping,
+    EarlyStopping,
     save_periodic_checkpoint,
     setup_checkpoint_dir,
 )
@@ -133,145 +133,6 @@ def _log_pool_scatter(pool, epoch, wandb_run):
                 )
             }
         )
-
-
-def _create_visualization_from_results(
-    step_results: list,
-    wires: list,
-    x_data,
-    y_data,
-    eval_type: str = "eval",
-    circuit_idx: int = 0,
-    log_stepwise: bool = False,
-    damage_steps=None,
-):
-    """
-    Create wandb visualization from pre-computed step results.
-
-    Args:
-        step_results: List of StepResult objects from evaluation
-        wires: Wire connections for the circuit
-        x_data: Input data
-        y_data: Target data
-        eval_type: Type of evaluation for labeling
-        circuit_idx: Circuit index for labeling
-        log_stepwise: Whether to create stepwise plot
-        damage_steps: Damage steps for plotting (optional)
-
-    Returns:
-        Dictionary with visualization results
-    """
-    final_result = step_results[-1]
-
-    # Create visualization with optimized logits
-    viz_result = create_wandb_visualization(
-        logits=final_result.logits,
-        wires=wires,
-        x=x_data,
-        y0=y_data,
-        title_prefix=f"{eval_type.upper()} Circuit {circuit_idx} - ",
-        hard=True,
-    )
-
-    if log_stepwise:
-        viz_result["stepwise_fig"] = plot_wandb_stepwise_results(
-            step_results, damage_steps=damage_steps
-        )
-    else:
-        viz_result["stepwise_fig"] = None
-
-    return {
-        "figure": viz_result["figure"],
-        "stepwise_fig": viz_result["stepwise_fig"],
-        "accuracy": viz_result["accuracy"],
-        "error_count": viz_result["error_count"],
-        "total_bits": viz_result["total_bits"],
-        "final_loss": float(final_result.loss),
-        "final_hard_loss": float(final_result.hard_loss),
-    }
-
-
-def _create_single_circuit_visualization(
-    wires_batch,
-    x_data,
-    y_data,
-    eval_type="eval_in",
-    circuit_idx=0,
-    log_stepwise=False,
-    # Pre-computed results (preferred - avoids re-running evaluation)
-    precomputed_results: list | None = None,
-    precomputed_damage_results: list | None = None,
-    damage_steps=None,
-):
-    """
-    Create a wandb visualization for a single circuit.
-
-    This function now accepts pre-computed step results to avoid re-running evaluation.
-    The precomputed_results should be a list of StepResult objects from the evaluation.
-
-    Args:
-        wires_batch: Batch of wires (we'll take circuit_idx)
-        logits_batch: Batch of logits (for extracting single circuit wires)
-        x_data: Input data
-        y_data: Target data
-        eval_type: Type of evaluation ("eval_in" or "eval_out")
-        circuit_idx: Index of circuit to visualize (default 0)
-        log_stepwise: Whether to create stepwise metric plots
-        precomputed_results: Pre-computed StepResult list (avoids re-running evaluation)
-        precomputed_damage_results: Pre-computed StepResult list with damage applied
-        damage_steps: List of damage step indices (for plotting)
-
-    Returns:
-        Dictionary with visualization results or None if failed
-    """
-    try:
-        # Extract single circuit wires for visualization
-        single_wires = [layer_wires[circuit_idx] for layer_wires in wires_batch]
-
-        if precomputed_results is None or len(precomputed_results) == 0:
-            log.warning("No precomputed results provided for visualization")
-            return None
-
-        # Create visualization from pre-computed results
-        final_viz_result = _create_visualization_from_results(
-            step_results=precomputed_results,
-            wires=single_wires,
-            x_data=x_data,
-            y_data=y_data,
-            eval_type=eval_type,
-            circuit_idx=circuit_idx,
-            log_stepwise=log_stepwise,
-            damage_steps=None,  # No damage for main results
-        )
-
-        # Add damage visualization if provided
-        if precomputed_damage_results is not None and len(precomputed_damage_results) > 0:
-            damage_viz = _create_visualization_from_results(
-                step_results=precomputed_damage_results,
-                wires=single_wires,
-                x_data=x_data,
-                y_data=y_data,
-                eval_type=f"{eval_type}_damaged",
-                circuit_idx=circuit_idx,
-                log_stepwise=log_stepwise,
-                damage_steps=damage_steps,
-            )
-            final_viz_result["figure_damaged"] = damage_viz["figure"]
-            final_viz_result["stepwise_fig_damaged"] = damage_viz["stepwise_fig"]
-            final_viz_result["accuracy_damaged"] = damage_viz["accuracy"]
-            final_viz_result["error_count_damaged"] = damage_viz["error_count"]
-            final_viz_result["total_bits_damaged"] = damage_viz["total_bits"]
-            final_viz_result["final_loss_damaged"] = damage_viz["final_loss"]
-            final_viz_result["final_hard_loss_damaged"] = damage_viz["final_hard_loss"]
-
-        return final_viz_result
-
-    except Exception as e:
-        import traceback
-
-        log.warning(f"Error creating circuit visualization: {e}")
-        log.warning(traceback.format_exc())
-        return None
 
 
 def run_unified_periodic_evaluation(
@@ -781,13 +642,8 @@ def train_model(
     wandb_logging: bool = False,
     log_interval: int = 1,
     wandb_run_config: dict | None = None,
-    # Early stopping parameters
-    stop_accuracy_enabled: bool = False,
-    stop_accuracy_threshold: float = 0.95,
-    stop_accuracy_metric: str = "hard_accuracy",
-    stop_accuracy_source: str = "training",
-    stop_accuracy_patience: int = 10,
-    stop_accuracy_min_epochs: int = 100,
+    # Early stopping (pass None to disable)
+    early_stopping: EarlyStopping | None = None,
     # Best model tracking parameters
     track_metrics: list[str] | None = None,
     # Damage parameters (derived from target_damage_fraction by caller)
@@ -862,12 +718,8 @@ def train_model(
         wandb_logging: Whether to log metrics to wandb
         log_interval: Interval for logging metrics
         wandb_run_config: Configuration to pass to wandb
-        stop_accuracy_enabled: Whether to enable early stopping based on accuracy
-        stop_accuracy_threshold: Accuracy threshold to trigger early stopping
-        stop_accuracy_metric: Which accuracy metric to use ('accuracy' or 'hard_accuracy')
-        stop_accuracy_source: Source of the metric ('training' or 'eval')
-        stop_accuracy_patience: Number of epochs to wait after reaching threshold before stopping
-        stop_accuracy_min_epochs: Minimum number of epochs before early stopping can occur
+        early_stopping: EarlyStopping instance (or None to disable).
+            Counts consecutive evaluations above threshold; see EarlyStopping docstring.
         track_metrics: List of specific metrics to track and save best models for (e.g.,
                       ["eval_in_hard_accuracy", "eval_out_hard_accuracy"]). If None,
                       tracks all available metrics during evaluation.
@@ -1302,11 +1154,6 @@ def train_model(
     # Initialize best model tracker for unified tracking
     best_model_tracker = BestModelTracker()
 
-    # Early stopping variables
-    early_stop_triggered = False
-    epochs_above_threshold = 0
-    first_threshold_epoch = None
-
     # Create progress bar for training
     pbar = tqdm(range(epochs), desc="Training GNN")
     avg_steps_reset = 0
@@ -1521,12 +1368,11 @@ def train_model(
                 metrics_dict.update(adaptive_scheduler.get_stats())
 
             # Add early stopping metrics if enabled
-            if stop_accuracy_enabled:
-                metrics_dict["early_stop/enabled"] = True
-                metrics_dict["early_stop/epochs_above_threshold"] = epochs_above_threshold
-                metrics_dict["early_stop/threshold"] = stop_accuracy_threshold
-                if first_threshold_epoch is not None:
-                    metrics_dict["early_stop/first_threshold_epoch"] = first_threshold_epoch
+            if early_stopping is not None:
+                metrics_dict["early_stop/count"] = early_stopping.count
+                metrics_dict["early_stop/threshold"] = early_stopping.threshold
+                if early_stopping.first_epoch is not None:
+                    metrics_dict["early_stop/first_epoch"] = early_stopping.first_epoch
 
             _log_to_wandb(wandb_run, metrics_dict, epoch, log_interval)
 
@@ -1542,8 +1388,8 @@ def train_model(
             }
 
             # Add early stopping info if active
-            if stop_accuracy_enabled and epochs_above_threshold > 0:
-                postfix_dict["ES"] = f"{epochs_above_threshold}/{stop_accuracy_patience}"
+            if early_stopping is not None and early_stopping.count > 0:
+                postfix_dict["ES"] = early_stopping.progress
 
             # Add damage info if active
             if damage_enabled and avg_damage_count > 0:
@@ -1564,7 +1410,7 @@ def train_model(
                 current_datasets = eval_datasets
 
                 # Build discrete damage steps (evenly spaced within eval window)
-                if damage_enabled and n_damage_steps > 0:
+                if n_damage_steps > 0:
                     damage_steps = jp.linspace(
                         0,
                         periodic_eval_inner_steps,
@@ -1608,8 +1454,15 @@ def train_model(
                     knockout_per_damage_step=knockouts_per_event,
                     damage_key=damage_key,
                 )
-                # Extract final metrics for best model tracking (use IN-distribution metrics)
-                current_eval_metrics = eval_results.get("final_metrics_in", None)
+                # Merge all final metrics into one dict for early stopping
+                # (covers IN-dist, OOD, damaged, etc.)
+                all_final = eval_results.get("final_metrics", {})
+                current_eval_metrics = {}
+                for sub_metrics in all_final.values():
+                    if sub_metrics is not None:
+                        current_eval_metrics.update(sub_metrics)
+                if not current_eval_metrics:
+                    current_eval_metrics = None
 
             # Step 3: Save periodic checkpoints (best models are now handled by unified system)
             if checkpoint_enabled:
@@ -1629,31 +1482,10 @@ def train_model(
                     wandb_run,
                 )
 
-            # Step 4: Check for early stopping based on accuracy
-            (
-                should_break,
-                early_stop_triggered,
-                epochs_above_threshold,
-                first_threshold_epoch,
-                current_eval_metrics,
-                rng,
-            ) = check_early_stopping(
-                stop_accuracy_enabled=stop_accuracy_enabled,
-                epoch=epoch,
-                stop_accuracy_min_epochs=stop_accuracy_min_epochs,
-                early_stop_triggered=early_stop_triggered,
-                stop_accuracy_metric=stop_accuracy_metric,
-                stop_accuracy_source=stop_accuracy_source,
-                training_metrics=training_metrics,
-                current_eval_metrics=current_eval_metrics,
-                stop_accuracy_threshold=stop_accuracy_threshold,
-                first_threshold_epoch=first_threshold_epoch,
-                epochs_above_threshold=epochs_above_threshold,
-                stop_accuracy_patience=stop_accuracy_patience,
-                rng=rng,
-            )
-
-            if should_break:
+            # Step 4: Check for early stopping
+            if early_stopping is not None and early_stopping.step(
+                epoch, training_metrics, current_eval_metrics
+            ):
                 break
 
     except KeyboardInterrupt:
@@ -1670,9 +1502,9 @@ def train_model(
         "accuracies": accuracies,
         "hard_accuracies": hard_accuracies,
         "reset_steps": reset_steps,
-        "early_stopped": early_stop_triggered,
-        "early_stop_epoch": epoch if early_stop_triggered else None,
-        "first_threshold_epoch": first_threshold_epoch,
+        "early_stopped": early_stopping.triggered if early_stopping else False,
+        "early_stop_epoch": epoch if (early_stopping and early_stopping.triggered) else None,
+        "first_threshold_epoch": early_stopping.first_epoch if early_stopping else None,
         "best_model_tracker": best_model_tracker,
         "pool": circuit_pool,
     }
