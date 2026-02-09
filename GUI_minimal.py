@@ -270,9 +270,8 @@ class CircuitOptimizationDemo:
             )
         self.task_text = "Hello Neural CA"  # Shorter text works better with performance mode
         self.noise_p = 0.5
-        # Preconfiguration control flags
-        self._skip_preconfig = False  # Skip preconfiguration when loading preconfigured state
-        self._do_preconfig = False    # Trigger preconfiguration (only when explicitly requested)
+        # Preconfiguration: "default" | "run" (on next init) | "skip" (e.g. while loading from file)
+        self._preconfig_mode = "default"
         # Initialize circuit using shared functions (may preconfigure in repair mode)
         self.initialize_circuit()
 
@@ -535,9 +534,9 @@ class CircuitOptimizationDemo:
             self.input_n, self.output_n, self.arity, self.layer_n
         ))
 
-        # Use preconfigure_circuit_logits only when explicitly requested via _do_preconfig flag
+        # Use preconfigure_circuit_logits only when explicitly requested (_preconfig_mode == "run")
         # Default is gen_circuit with NOPs (no automatic preconfiguration)
-        if getattr(self, '_do_preconfig', False) and not self._skip_preconfig:
+        if self._preconfig_mode == "run":
             # Always generate fresh task data for preconfiguration to ensure it matches current task settings
             # (matches test script approach - always generates fresh task data)
             task_name = self.available_tasks[self.task_idx]
@@ -2112,9 +2111,9 @@ class CircuitOptimizationDemo:
             # Button to run preconfiguration (trains circuit to 100% accuracy via backprop)
             if imgui.button("Preconfigure Circuit"):
                 print("Running preconfiguration (backprop training to 100% accuracy)...")
-                self._do_preconfig = True
+                self._preconfig_mode = "run"
                 self.regenerate_circuit(reset_logs=True)
-                self._do_preconfig = False  # Reset flag after use
+                self._preconfig_mode = "default"
                 print("Preconfiguration complete!")
             
             imgui.same_line()
@@ -2132,8 +2131,7 @@ class CircuitOptimizationDemo:
                         # Verify shapes match expected layer sizes
                         expected_logits_count = len(self.layer_sizes) - 1
                         if len(logits) == expected_logits_count and len(wires) == expected_logits_count:
-                            # Set flag to skip preconfiguration when initializing optimization method
-                            self._skip_preconfig = True
+                            self._preconfig_mode = "skip"
                             
                             self.wires = wires
                             self.logits = logits
@@ -2173,8 +2171,7 @@ class CircuitOptimizationDemo:
                                         print(f"⚠️  Warning: Could not load model, falling back to Backprop")
                                         self.optimization_method_idx = 0
                                         self.initialize_optimization_method()
-                                        # Clear flag since we're not using preconfigured state anymore
-                                        self._skip_preconfig = False
+                                        self._preconfig_mode = "default"
                                         print("✓ Successfully loaded preconfigured circuit state")
                                 else:
                                     # Model already loaded, just initialize generator
@@ -2183,18 +2180,15 @@ class CircuitOptimizationDemo:
                                 # For backprop, just reinitialize normally
                                 self.initialize_optimization_method()
                             
-                            # Clear the flag after initialization
-                            self._skip_preconfig = False
+                            self._preconfig_mode = "default"
                             
                             print("✓ Successfully loaded preconfigured circuit state")
                         else:
                             print(f"⚠️  Warning: Loaded circuit has {len(logits)} logit layers and {len(wires)} wire layers, expected {expected_logits_count}")
-                            # Clear flag on error
-                            self._skip_preconfig = False
+                            self._preconfig_mode = "default"
                     else:
                         print("✗ Failed to load preconfigured state")
-                        # Clear flag on error
-                        self._skip_preconfig = False
+                        self._preconfig_mode = "default"
                 else:
                     print(f"✗ Preconfigured circuit files not found:")
                     print(f"  Expected: {logits_file}")
