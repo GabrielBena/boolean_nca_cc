@@ -16,7 +16,7 @@ dropout_rate: 0.0
 # ReZero for updates and attention
 re_zero_updates: True
 re_zero_attn: True
-warm_start: True
+warm_start: False
 
 # Self-attention masks (among gates)
 num_self_attn_layers: 1
