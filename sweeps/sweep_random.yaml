@@ -14,7 +14,7 @@ sweep:
     model.attention_dim: [96]
     pool.noise_scale: [0.1]
     training.wiring_mode: [random]
-    training.epochs_power_of_2: [17]
+    training.epochs_power_of_2: [18]
     training.n_message_steps: [5]
     training.learning_rate: [2e-4]
     training.meta_batch_size: [512]
