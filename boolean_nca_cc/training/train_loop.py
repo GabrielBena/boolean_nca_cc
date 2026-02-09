@@ -294,7 +294,9 @@ def run_unified_periodic_evaluation(
                 faulty_value=faulty_value,
                 permanent_damage=permanent_damage,
                 p_fault_onset_step=p_fault_onset_step if with_damage else 0,
-                compute_no_repair_baseline=compute_no_repair_baseline if with_damage else False,
+                compute_no_repair_baseline=compute_no_repair_baseline
+                if( with_damage and p_fault_onset_step > 0)
+                else False,
                 chunk_size=datasets.target_batch_size,
                 return_first_circuit_details=False,
             )
@@ -313,7 +315,9 @@ def run_unified_periodic_evaluation(
                 metrics[f"{prefix}/final_no_repair_loss"] = result["no_repair_loss"][-1]
                 metrics[f"{prefix}/final_no_repair_hard_loss"] = result["no_repair_hard_loss"][-1]
                 metrics[f"{prefix}/final_no_repair_accuracy"] = result["no_repair_accuracy"][-1]
-                metrics[f"{prefix}/final_no_repair_hard_accuracy"] = result["no_repair_hard_accuracy"][-1]
+                metrics[f"{prefix}/final_no_repair_hard_accuracy"] = result[
+                    "no_repair_hard_accuracy"
+                ][-1]
 
             return result, metrics
 
