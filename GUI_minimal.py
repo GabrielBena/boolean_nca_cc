@@ -793,16 +793,14 @@ class CircuitOptimizationDemo:
                 # Initialize the generator for step-by-step evaluation
                 self.initialize_model_generator()
             else:
-                print(f"Could not load {method_name} model. Falling back to Backprop.")
+                # Stay on Self-Attention so user can see Run ID / Load from WandB and retry with a known-good run
+                print(f"Could not auto-load {method_name} model. Enter a Run ID and click 'Load from WandB' to load a known-good run.")
                 # DEBUG: Clear scale values and checkpoint metadata when model loading fails
                 self.model_logit_scale = None
                 self.model_hidden_scale = None
                 self.checkpoint_epoch = None
                 self.checkpoint_step = None
                 # END DEBUG
-                self.optimization_method_idx = 0
-                self.initialize_optimization_method()
-                return
 
     def initialize_model_generator(self):
         """Initialize the step-by-step model generator using the unified training code"""
@@ -1996,77 +1994,82 @@ class CircuitOptimizationDemo:
                         imgui.ImVec4(1.0, 0.0, 0.0, 1.0), f"✗ No {method_name} model"
                     )
 
-                # WandB integration
-                imgui.separator_text("Load Frozen Model")
+            # Load Frozen Model (Self-Attention) — visible in both modes so you can set Run ID before/after switching
+            imgui.separator_text("Load Frozen Model (Self-Attention)")
 
-                # Loading mode selection
-                load_changed, self.load_mode_idx = imgui.combo(
-                    "Load Mode", self.load_mode_idx, self.load_modes
+            # Loading mode selection
+            load_changed, self.load_mode_idx = imgui.combo(
+                "Load Mode", self.load_mode_idx, self.load_modes
+            )
+            if load_changed:
+                print(f"Changed load mode to: {self.load_modes[self.load_mode_idx]}")
+
+            # Show description of selected mode
+            if self.load_mode_idx == 0:  # Latest Checkpoint
+                imgui.text_colored(
+                    imgui.ImVec4(0.7, 0.7, 0.7, 1.0),
+                    "Loads most recent checkpoint (may not be best performing)",
                 )
-                if load_changed:
-                    print(f"Changed load mode to: {self.load_modes[self.load_mode_idx]}")
+            else:  # Best Model
+                imgui.text_colored(
+                    imgui.ImVec4(0.0, 1.0, 0.0, 1.0),
+                    "Loads best performing model (recommended)",
+                )
 
-                # Show description of selected mode
-                if self.load_mode_idx == 0:  # Latest Checkpoint
-                    imgui.text_colored(
-                        imgui.ImVec4(0.7, 0.7, 0.7, 1.0),
-                        "Loads most recent checkpoint (may not be best performing)",
+            # Optional preferred metric for best model selection
+            if self.load_mode_idx == 1:  # Best Model mode
+                prefer_metrics = [
+                    "Auto (Intelligent Selection)",
+                    "eval_ko_in_hard_accuracy",  # Matches checkpointing config
+                    "eval_ko_out_hard_accuracy",
+                    "eval_in_hard_accuracy",
+                    "eval_out_hard_accuracy",
+                    "eval_ko_in_hard_loss",
+                    "eval_ko_out_hard_loss",
+                    "eval_in_hard_loss",
+                    "eval_out_hard_loss",
+                    "training_hard_accuracy",
+                ]
+                prefer_metric_idx = (
+                    0
+                    if self.prefer_metric is None
+                    else (
+                        prefer_metrics.index(self.prefer_metric)
+                        if self.prefer_metric in prefer_metrics
+                        else 0
                     )
-                else:  # Best Model
-                    imgui.text_colored(
-                        imgui.ImVec4(0.0, 1.0, 0.0, 1.0),
-                        "Loads best performing model (recommended)",
-                    )
+                )
 
-                # Optional preferred metric for best model selection
-                if self.load_mode_idx == 1:  # Best Model mode
-                    prefer_metrics = [
-                        "Auto (Intelligent Selection)",
-                        "eval_ko_in_hard_accuracy",  # Matches checkpointing config
-                        "eval_ko_out_hard_accuracy",
-                        "eval_in_hard_accuracy",
-                        "eval_out_hard_accuracy",
-                        "eval_ko_in_hard_loss",
-                        "eval_ko_out_hard_loss",
-                        "eval_in_hard_loss",
-                        "eval_out_hard_loss",
-                        "training_hard_accuracy",
-                    ]
-                    prefer_metric_idx = (
-                        0
-                        if self.prefer_metric is None
-                        else (
-                            prefer_metrics.index(self.prefer_metric)
-                            if self.prefer_metric in prefer_metrics
-                            else 0
-                        )
-                    )
-
-                    changed, prefer_metric_idx = imgui.combo(
-                        "Prefer Metric", prefer_metric_idx, prefer_metrics
-                    )
-                    if changed:
-                        self.prefer_metric = (
-                            None if prefer_metric_idx == 0 else prefer_metrics[prefer_metric_idx]
-                        )
-                        print(f"Preferred metric: {self.prefer_metric or 'Auto'}")
-
-                run_id_buffer = self.run_id if self.run_id else ""
-                changed, run_id_buffer = imgui.input_text("Run ID", run_id_buffer, 256)
+                changed, prefer_metric_idx = imgui.combo(
+                    "Prefer Metric", prefer_metric_idx, prefer_metrics
+                )
                 if changed:
-                    self.run_id = run_id_buffer if run_id_buffer else None
-
-                if imgui.button("Load from WandB"):
-                    if self.try_load_wandb_model():
-                        print(f"Successfully loaded frozen {method_name} model")
-                    else:
-                        print(f"Failed to load {method_name} model")
-
-                if self.loaded_run_id:
-                    imgui.text_colored(
-                        imgui.ImVec4(0.0, 1.0, 0.0, 1.0),
-                        f"Loaded: {self.loaded_run_id}",
+                    self.prefer_metric = (
+                        None if prefer_metric_idx == 0 else prefer_metrics[prefer_metric_idx]
                     )
+                    print(f"Preferred metric: {self.prefer_metric or 'Auto'}")
+
+            run_id_buffer = self.run_id if self.run_id else ""
+            changed, run_id_buffer = imgui.input_text("Run ID", run_id_buffer, 256)
+            if changed:
+                self.run_id = run_id_buffer if run_id_buffer else None
+
+            imgui.same_line()
+            if imgui.button("Load from WandB"):
+                if self.try_load_wandb_model():
+                    print(f"Successfully loaded frozen Self-Attention model")
+                    if self.optimization_methods[self.optimization_method_idx] == "Self-Attention":
+                        self.logit_optimizer = None
+                        self.logit_opt_state = None
+                        self.initialize_model_generator()
+                else:
+                    print(f"Failed to load Self-Attention model")
+
+            if self.loaded_run_id:
+                imgui.text_colored(
+                    imgui.ImVec4(0.0, 1.0, 0.0, 1.0),
+                    f"Loaded: {self.loaded_run_id}",
+                )
 
             # Circuit architecture
             imgui.separator_text("Circuit Architecture")

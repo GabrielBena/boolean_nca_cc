@@ -21,7 +21,7 @@ dependencies = [
     # Core JAX ecosystem
     "jax>=0.4.0",
     "jaxlib>=0.4.0",
-    "flax>=0.8.0",
+    "flax>=0.12.2",
     "optax>=0.1.7",
     "jraph>=0.0.6.dev0",
     
