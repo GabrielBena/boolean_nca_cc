@@ -33,11 +33,11 @@ graph:
 # Training parameters
 training:
   # WIRING MODE : "random" or "fixed"
-  wiring_mode: "fixed"  # Options: "fixed", "genetic", or "random"
+  wiring_mode: "random"  # Options: "fixed", "genetic", or "random"
   # Diversity will always be fully random for random mode. This controls number of different wirings for fixed.
   initial_diversity: 1
   # INNER LOOP
-  n_message_steps: 5  # Number of message passing steps per training iteration
+  n_message_steps: 25  # Number of message passing steps per training iteration
   # DATA FRACTION
   data_per_batch: 64  # Number of data points per batch (null means use all data)
   # RANDOM LOSS STEP
@@ -99,7 +99,7 @@ training:
 
   # NUMBER OF EPOCHS
   epochs: null
-  epochs_power_of_2: 16 # 2^n
+  epochs_power_of_2: 17 # 2^n
   # USE SCAN
   use_scan: true
   # GRADIENT CHECKPOINTING (remat)
@@ -143,7 +143,7 @@ damage:
   # === TARGET DAMAGE (the single knob) ===
   # Fraction of eligible (hidden) gates expected to be damaged by circuit reset.
   # Drives BOTH p_fault and knockouts_per_event so they are directly comparable.
-  target_damage_fraction: 0.10  # e.g., 15% of hidden gates
+  target_damage_fraction: 0.05  # e.g., 15% of hidden gates
   
   # === PROBABILISTIC (training) ===
   # Auto-computed: p_fault = 1 - (1 - target_damage_fraction)^(1/pool.expected_updates)
@@ -159,16 +159,9 @@ damage:
   knockouts_per_event: null
   
   # === DELAYED ONSET (for repair-focused training/evaluation) ===
-  # Fraction of total steps before probabilistic damage starts.
-  # 0.0 = damage from the start (default). 0.5 = damage starts at 50% of steps.
-  # Lets the circuit converge first, then faults start, allowing comparison
-  # of "damaged without NCA repair" vs "damaged with NCA repair".
   p_fault_onset_fraction: 0.0
 
   # === NO-REPAIR BASELINE ===
-  # Compute loss/accuracy right after damage but before the NCA runs.
-  # Measures the raw damage impact, useful for quantifying NCA repair benefit.
-  # Only adds overhead during evaluation (one extra circuit execution per step).
   compute_no_repair_baseline: true
 
   # === SHARED ===

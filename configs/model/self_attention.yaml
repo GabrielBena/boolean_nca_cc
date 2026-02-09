@@ -11,7 +11,6 @@ attention_dim: 96
 mlp_dim: null  # If null, will be set to attention_dim * mlp_dim_multiplier
 mlp_dim_multiplier: 2
 num_heads: 8
-dropout_rate: 0.0
 
 # ReZero for updates and attention
 re_zero_updates: True

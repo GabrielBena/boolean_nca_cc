@@ -16,14 +16,11 @@ The graph structure is extended to include (via GraphGlobals NamedTuple):
 - globals.residuals: Current prediction errors [N_samples, N_output_bits]
 """
 
-from functools import partial
-
 import jax
 import jax.numpy as jp
 import jraph
 from flax import nnx
 
-from boolean_nca_cc.circuits.train import LossConfig
 from boolean_nca_cc.models.attention.base import (
     AttentionBlock,
     PassThrough,
@@ -304,7 +301,9 @@ class PerceiverCircuitAttention(nnx.Module):
         pe_scale = 1000.0
 
         # Sample PE: normalized sample position [0, 1]
-        normalized_sample_pos = jp.arange(N_samples, dtype=jp.float32) / jp.maximum(N_samples - 1, 1)
+        normalized_sample_pos = jp.arange(N_samples, dtype=jp.float32) / jp.maximum(
+            N_samples - 1, 1
+        )
         sample_pe = get_positional_encoding(
             normalized_sample_pos * pe_scale, self.token_pe_dim, max_val=pe_scale
         )
@@ -366,11 +365,17 @@ class PerceiverCircuitAttention(nnx.Module):
         # Subsample data at the SAMPLE level (not token level) so input and residual
         # cross-attention see matching data points with coherent bit structure.
         # Per-step keys derived via fold_in(base_key, update_steps) — stateless & unique.
-        if self.samples_per_step is not None and globals_ is not None and globals_.subsample_key is not None:
+        if (
+            self.samples_per_step is not None
+            and globals_ is not None
+            and globals_.subsample_key is not None
+        ):
             step_key = jax.random.fold_in(globals_.subsample_key, globals_.update_steps)
             # Determine sample count from whichever data is available
-            n_samples = x_data.shape[0] if x_data is not None else (
-                residuals.shape[0] if residuals is not None else None
+            n_samples = (
+                x_data.shape[0]
+                if x_data is not None
+                else (residuals.shape[0] if residuals is not None else None)
             )
             if n_samples is not None:
                 sample_indices = jax.random.randint(
@@ -390,7 +395,9 @@ class PerceiverCircuitAttention(nnx.Module):
         gate_features = extract_node_features(
             nodes, self.use_node_loss, self.use_intra_layer_PE, self.use_layer_PE
         )
-        gate_latents = self.feature_proj(self.input_norm(gate_features))[None, ...]  # [1, N_gates, dim]
+        gate_latents = self.feature_proj(self.input_norm(gate_features))[
+            None, ...
+        ]  # [1, N_gates, dim]
 
         # Store intermediate latents
         intermediate_latents = []

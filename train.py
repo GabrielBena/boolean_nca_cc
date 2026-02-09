@@ -858,6 +858,10 @@ def main(cfg: DictConfig) -> None:
         faulty_logit_value=damage_params["faulty_logit_value"],
         n_damage_steps=damage_params["n_damage_steps"],
         knockouts_per_event=damage_params["knockouts_per_event"],
+        # Delayed onset & no-repair baseline
+        p_fault_onset_step_train=damage_params["p_fault_onset_step_train"],
+        p_fault_onset_step_eval=damage_params["p_fault_onset_step_eval"],
+        compute_no_repair_baseline=damage_params["compute_no_repair_baseline"],
         # Debugging parameters
         do_check_gradients=cfg.training.check_gradients,
     )

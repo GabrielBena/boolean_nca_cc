@@ -1,0 +1,14 @@
+_target_: boolean_nca_cc.models.CircuitGatheredAttention
+# Gathered Neighborhood Attention — inherits all params from self_attention.yaml,
+# only overriding the target class and adding max_neighbors.
+
+defaults:
+  - _base
+  - self_attention
+
+type: "gathered_attention"
+
+# max_neighbors: fixed width of the neighbor tensor; must be >= max GATE degree.
+# Input nodes (layer=0) can exceed this but are never updated, so truncation is harmless.
+# For arity=4: gate degree = arity + fan-out + self ~ 9.
+max_neighbors: 10

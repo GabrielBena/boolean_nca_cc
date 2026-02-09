@@ -5,14 +5,10 @@ This module provides an alternative to GNN message passing by using
 masked self-attention to update boolean circuit parameters.
 """
 
-from functools import partial
-
-import jax
 import jax.numpy as jp
 import jraph
 from flax import nnx
 
-from boolean_nca_cc.circuits.train import LossConfig
 from boolean_nca_cc.models.attention.base import (
     AttentionBlock,
     PassThrough,
@@ -191,6 +187,7 @@ class CircuitSelfAttention(nnx.Module):
         # masks are always precomputed with a concrete n_node.
         if attention_mask is None:
             n_node = nodes["layer"].shape[0]
+
             attention_mask = self._create_attention_mask(senders, receivers, n_node)
 
         # Normalize + project features to attention dimension

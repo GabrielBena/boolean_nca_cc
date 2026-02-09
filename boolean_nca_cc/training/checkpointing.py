@@ -244,7 +244,6 @@ def load_checkpoint_with_compatibility(checkpoint_path):
     return load_checkpoint_with_compatibility_working(checkpoint_path)
 
 
-
 def configure_notebook_logging(level=logging.INFO):
     """
     Configure logging for Jupyter notebook usage.
@@ -340,7 +339,7 @@ def instantiate_model_from_config(config, seed=0, **overrides: Any):
     if (
         config.model.get("type") == "self_attention"
         or "self_attention" in config.model.get("_target_", "").lower()
-    ):
+    ) and "n_node" not in instantiate_overrides:
         n_nodes = compute_n_nodes_from_config(config)
         instantiate_overrides["n_node"] = n_nodes
 
@@ -477,7 +476,6 @@ class BestModelTracker:
     def get_best_epoch(self, metric_key: str) -> int:
         """Get the epoch when the best value was achieved."""
         return self.best_epochs.get(metric_key, -1)
-
 
 
 def setup_checkpoint_dir(checkpoint_dir: str | None, wandb_id: str | None) -> str | None:

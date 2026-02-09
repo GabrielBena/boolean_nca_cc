@@ -702,16 +702,24 @@ def compute_damage_params(cfg, layer_sizes, log=None) -> dict:
     """Derive all damage parameters from ``cfg.damage.target_damage_fraction``.
 
     Returns a dict with:
-        enabled             - master switch
-        target_fraction     - the configured fraction (echo)
-        n_eligible          - number of hidden-layer gates
-        p_fault_train       - p_fault tuned for pool.expected_updates steps
-        p_fault_eval        - p_fault tuned for eval.inner_steps steps
-        n_damage_steps      - number of discrete damage volleys in eval
-        knockouts_per_event - gates per volley (auto or explicit)
-        faulty_logit_value  - logit value for damaged gates
-        permanent           - permanence setting (bool | "random")
+        enabled                   - master switch
+        target_fraction           - the configured fraction (echo)
+        n_eligible                - number of hidden-layer gates
+        p_fault_train             - p_fault tuned for pool.expected_updates steps
+        p_fault_eval              - p_fault tuned for eval.inner_steps steps
+        n_damage_steps            - number of discrete damage volleys in eval
+        knockouts_per_event       - gates per volley (auto or explicit)
+        faulty_logit_value        - logit value for damaged gates
+        permanent                 - permanence setting (bool | "random")
+        p_fault_onset_fraction    - fraction of steps before probabilistic damage starts
+        p_fault_onset_step_train  - absolute onset step for training
+        p_fault_onset_step_eval   - absolute onset step for evaluation
+        compute_no_repair_baseline - whether to compute no-repair baseline metrics
     """
+    onset_frac = float(cfg.damage.get("p_fault_onset_fraction", 0.0))
+    train_steps = int(cfg.pool.expected_updates)
+    eval_steps = int(cfg.eval.inner_steps)
+
     result = {
         "enabled": bool(cfg.damage.enabled),
         "target_fraction": 0.0,
@@ -722,6 +730,10 @@ def compute_damage_params(cfg, layer_sizes, log=None) -> dict:
         "knockouts_per_event": 0,
         "faulty_logit_value": float(cfg.damage.get("faulty_logit_value", -10.0)),
         "permanent": cfg.damage.get("permanent", True),
+        "p_fault_onset_fraction": onset_frac,
+        "p_fault_onset_step_train": int(onset_frac * train_steps),
+        "p_fault_onset_step_eval": int(onset_frac * eval_steps),
+        "compute_no_repair_baseline": bool(cfg.damage.get("compute_no_repair_baseline", False)),
     }
 
     if not result["enabled"]:
@@ -742,9 +754,6 @@ def compute_damage_params(cfg, layer_sizes, log=None) -> dict:
         if log:
             log.info("target_damage_fraction <= 0, damage effectively disabled")
         return result
-
-    train_steps = int(cfg.pool.expected_updates)
-    eval_steps = int(cfg.eval.inner_steps)
 
     # --- p_fault (probabilistic) -----------------------------------------
     explicit_p = cfg.damage.get("p_fault")
@@ -772,11 +781,22 @@ def compute_damage_params(cfg, layer_sizes, log=None) -> dict:
 
     # --- Logging ---------------------------------------------------------
     if log:
+        onset_msg = ""
+        if onset_frac > 0:
+            onset_msg = (
+                f"\n  onset: {onset_frac:.0%} of steps "
+                f"(train={result['p_fault_onset_step_train']}, "
+                f"eval={result['p_fault_onset_step_eval']})"
+            )
+        baseline_msg = ""
+        if result["compute_no_repair_baseline"]:
+            baseline_msg = "\n  no-repair baseline: enabled"
         log.info(
             f"Damage params (target {target_frac:.1%} of {n_eligible} gates):\n"
             f"  p_fault_train  = {result['p_fault_train']:.2e}  ({train_steps} steps)\n"
             f"  p_fault_eval   = {result['p_fault_eval']:.2e}  ({eval_steps} steps)\n"
             f"  discrete: {n_dmg} volleys x {result['knockouts_per_event']} knockouts"
+            f"{onset_msg}{baseline_msg}"
         )
 
     # if not result["enabled"]:

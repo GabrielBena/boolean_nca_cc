@@ -9,7 +9,8 @@ sweep:
 
 
     # FIXED PARAMETERS
-    model: [self_attention]
+    # model: [self_attention]
+    model: [gathered_attention]
     model.attention_dim: [96]
     pool.noise_scale: [0.1]
     training.wiring_mode: [fixed]

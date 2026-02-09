@@ -1,8 +1,8 @@
 """
 Shared attention building blocks for circuit optimization models.
 
-This module provides common components used by both CircuitSelfAttention
-and PerceiverCircuitAttention models.
+This module provides common components used by both CircuitSelfAttention,
+PerceiverCircuitAttention, and CircuitGatheredAttention models.
 """
 
 import jax.numpy as jp
@@ -208,8 +208,69 @@ def create_attention_mask(
     # Add self-connections (diagonal)
     mask = mask | jp.eye(n_node, dtype=jp.bool_)
 
+    # print(f"Final mask shape: {mask.shape}")
+
     # Add batch and head dimensions [1, 1, n_node, n_node]
     return mask[None, None, ...]
+
+
+def build_neighbor_indices(
+    senders: jp.ndarray,
+    receivers: jp.ndarray,
+    n_node: int,
+    max_neighbors: int,
+    use_mask: bool = True,
+) -> tuple[jp.ndarray, jp.ndarray]:
+    """
+    Build padded neighbor-index tensor from edge lists (pure JAX, JIT-safe).
+
+    For each node i, collects all nodes j that i can attend to
+    (i.e. j is a sender on an edge where i is the receiver), plus self-loops.
+    Pads/truncates to ``max_neighbors`` so every row has the same fixed width.
+
+    Uses only JAX operations so it can be called inside ``jax.jit`` / ``nnx.vmap``.
+    ``n_node`` and ``max_neighbors`` must be Python ints (compile-time constants).
+
+    Args:
+        senders: Sender node indices from the graph edge list.
+        receivers: Receiver node indices from the graph edge list.
+        n_node: Total number of nodes in the circuit (Python int).
+        max_neighbors: Fixed width of the neighbor tensor (Python int).
+            Must be >= the maximum node degree in the graph.
+        use_mask: If False, returns full (all-to-all) neighbor lists.
+
+    Returns:
+        neighbor_indices: int32 array [N, max_neighbors] — padded column indices.
+            Padding slots point to node 0 (harmless; masked out by neighbor_mask).
+        neighbor_mask: bool array [N, max_neighbors] — True for real neighbors.
+    """
+    if not use_mask:
+        # Fully connected: everyone attends to everyone
+        # Truncate to max_neighbors (must be >= n_node for full attention)
+        indices = jp.broadcast_to(jp.arange(n_node, dtype=jp.int32), (n_node, n_node))
+        indices = indices[:, :max_neighbors]
+        mask = jp.arange(max_neighbors) < n_node
+        mask = jp.broadcast_to(mask, (n_node, max_neighbors))
+        return indices, mask
+
+    # Build adjacency matrix [N, N] — same ops as create_attention_mask
+    adj = jp.zeros((n_node, n_node), dtype=jp.bool_)
+    adj = adj.at[receivers, senders].set(True)
+    adj = adj | jp.eye(n_node, dtype=jp.bool_)
+
+    # Sort each row so True (neighbor) entries come first.
+    # ~adj flips True→False; argsort ascending puts False (=real neighbors) first.
+    sorted_indices = jp.argsort(~adj, axis=-1, stable=True)  # [N, N]
+
+    # Truncate to fixed width
+    neighbor_indices = sorted_indices[:, :max_neighbors]  # [N, max_neighbors]
+
+    # Build mask: position k is a real neighbor iff k < degree(i)
+    degrees = adj.sum(axis=-1)  # [N]
+    positions = jp.arange(max_neighbors)[None, :]  # [1, max_neighbors]
+    neighbor_mask = positions < degrees[:, None]  # [N, max_neighbors]
+
+    return neighbor_indices, neighbor_mask
 
 
 def extract_node_features(

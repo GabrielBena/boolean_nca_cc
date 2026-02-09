@@ -1,0 +1,322 @@
+% \chapter{Self-Organising Principles of Intelligence: Self-Organising Digital Circuits}
+\chapter{Self-Organising Digital Circuits}
+\label{chap4}
+
+\begin{abstract}
+
+\subsection*{Narrative Preamble}
+
+If \Cref{chap3} explored the computational potential of local rules, this chapter explores their adaptive potential. We move closer to the biological reality of a system that must not only compute, but also maintain itself and adapt to changes.
+Here, we utilize the principles of self-organization as a "meta-learning" mechanism. Instead of the NCA being the computer, it becomes the optimizer. We investigate a system where local rules navigate and configure a functional digital circuit, effectively replacing global backpropagation with a decentralized, graph-based optimization process. This architecture has implications for true scalable intelligence: a system where the "learning rule" is itself a local, robust policy. By demonstrating how such a system can recover from physical damage and reconfigure itself without global supervision, we provide a concrete instantiation of the "adaptive resilience" that characterizes biological intelligence, pointing the way toward systems that truly know how to learn and adapt.
+
+\subsection*{Publication Context}
+
+This chapter presents ongoing, unpublished collaborative work with Marcello Barylli from the group of Prof. Sebastian Risi at the IT University of Copenhagen. The project originated from a concept proposed by Alexander Mordvintsev at the 2025 Capocaccia Neuromorphic Intelligence Workshop.
+
+\subsection*{Contributions}
+
+Alexander Mordvintsev conceived the initial project idea and developed the foundational software, including the implementation of differentiable Boolean circuits and the graphical interface for observing standard backpropagation behaviour. The author and Marcello Barylli formalized the architectural shift to use a Transformer as a meta-optimizer. The author led the development and optimization of the framework, implementing graph-based models, the meta-learning infrastructure and the random pool mechanism, and conducted the random-wiring experiments. Marcello conducted the primary experiments regarding dynamic damage reconfiguration, parameter space trajectories, and recoverable damage analysis. Marcello also produced some of the experimental figures for this chapter.
+
+\end{abstract}
+
+\section{Abstract}
+% Abstract length should not exceed 250 words
+Fault tolerance in classical computing has traditionally relied on static strategies like hardware redundancy and error-correcting codes. Biological systems, in contrast, exhibit \textit{adaptive plasticity}, maintaining function through dynamic re-organisation around damage. Inspired by this principle, we introduce a framework for self-organising digital circuits that replaces rigid redundancy with learned, autonomous self-repair. We extend the \acf{NCA} paradigm from pattern formation on grids to functional logic generation on arbitrary graphs. Our architecture employs a topology-masked Transformer as a decentralized meta-optimizer that learns to configure the \acfp{LUT} of \acfp{LGN}. Unlike standard NCA which regenerate a fixed target state, our model learns a functional local policy that navigates the Boolean search space to satisfy a computational task. We demonstrate that this policy can self-assemble functional circuits from scratch and, crucially, rapidly \textit{re-route} logic around permanent, previously unseen hardware faults. This work bridges the principles of biological self-organisation with the practical domain of digital hardware, offering a blueprint for resilient systems capable of graceful degradation and real-time adaptation.
+
+\footnote{Data/Code + \textbf{Circuit Visualization} available \href{https://github.com/GabrielBena/boolean_nca_cc/tree/gabi}{here}}
+
+
+\section{Introduction}
+
+% Motivation: Engineering vs Biological Fault Tolerance
+\subsection{Motivation: From Prescriptive Redundancy to Adaptive Plasticity}
+Robustness is a central tenet of modern informatics. Decades of research have yielded systems capable of impressive fault tolerance, utilizing mechanisms such as Error Correcting Codes (ECC), modular redundancy, and sophisticated fallback protocols to ensure graceful degradation \citep{neumann_probabilistic_1956, schuster_robustness_2008}. However, these engineered successes typically rely on \textit{anticipation}: resources are pre-allocated and failure modes are modelled in advance. When a system encounters damage that exceeds its redundancy budget or defies its failure model, it might fail brittly.
+Biological intelligence offers a complementary paradigm: \textit{adaptive plasticity}. Natural automata, such as the mammalian cortex, do not rely solely on static backups. Instead, they exhibit the ability to dynamically re-purpose surviving components to compensate for injury, a phenomenon known as cortical remapping \citep{nudo_recovery_2013}. This form of resilience is not pre-programmed but emergent; the system "learns" its way around the damage.
+Inspired by these biological principles, and by early von Neumann's assumption that systems should "operate across errors" \citep{von_neumann_theory_1966}, we seek to endow digital hardware with similar capabilities. This work introduces a framework for self-organising digital circuits that complements traditional redundancy with dynamic, learned self-repair. 
+In this sense, it is a new take on the idea of self-repairing digital hardware, which has already been considered as a robustness mechanism, especially in FPGAs \citep{carter_user_1986, schuster_robustness_2008, gokhale_dynamic_2004}
+
+% Fault tolerance in classical computing has traditionally relied on rigid architectural strategies, such as hardware redundancy and error-correcting codes. While effective, these methods depend on static pre-allocation of resources—essentially anticipating failure before it occurs. 
+% Biological intelligence, in contrast, exhibits mechanisms that allow for \textit{adaptive resilience}. Natural automata, such as the brain, do not rely solely on backup components; rather, they maintain function through dynamic re-organisation around damaged areas, a phenomenon well-documented in neural recovery studies \citep{nudo_recovery_2013}.
+% Inspired by von Neumann's early postulates on systems that "operate across errors" \citep{von_neumann_theory_1966}, we seek to bridge this gap between biological plasticity and digital hardware. This chapter introduces a framework for self-organising digital circuits that replace static redundancy with dynamic, learned self-repair.
+
+\subsection{The Evolution of Automata: From Fixed Rules to Learned Dynamics}
+% CAs intro: Complexity and Turing Completeness
+The study of \acf{CA} has long served as a fertile ground for investigating the essence of computation and complexity. Fundamentally, a Cellular Automaton is a discrete computational system where a grid of cells, each holding a specific state, evolves in synchronized steps. The evolution of each cell follows the same local rule that dictates how every cell updates based on its immediate neighbours on the grid. From simple local rules, CAs can generate remarkably intricate patterns and have been proven to be Turing complete \citep{cook}. 
+% CAs limits: Hard to find rules
+However, CAs suffer from a significant control problem: while it is easy to observe complexity arising from pre-determined rules \citep{wolfram}, explicitly engineering specific local rules to achieve a desired global outcome is notoriously difficult.
+Attempts to extend these systems into the continuous domain, such as Lenia  or SmoothLife \citep{lenia, smoothlife}, introduced life-like fluidity but further complicated the stability and control of the system's outputs.
+
+% NCA intro: The Paradigm Shift
+Recently, \acf{NCA} have emerged as a paradigm shift that bridges the gap between self-organising systems and differentiable learning. In an NCA, the update rule is no longer hard-coded; it is a parameterised neural network \citep{mordvintsev_growing_2020}.
+Each cell in the system utilizes a "perception" network to gather information from its local neighbourhood (typically on a grid), and an "update" network to compute an incremental change to its state. 
+Because these operations are differentiable, the dynamics of the system can be "steered" via gradient descent towards specific goals. 
+Traditionally, NCA have been utilized as models of morphogenesis: growing target images by treating the final cell states as RGB values. In these architectures, cells also maintain a vector of "hidden states," allowing the local rule to encode arbitrary information required to coordinate global structure. This distinction already let us differentiate between part of the cells' states that are "functional" (such as the RGB channels) and other that are "latents".
+
+\subsection{Beyond the Grid: Growing Function over Form}
+While foundational, standard NCA remain topologically constrained to rigid grids and functionally constrained to pattern formation. To overcome these limitations, recent research has sought to extend the NCA paradigm into more flexible and general models of computation.
+% 1. The Topological Shift: From Grid to Graph
+First, the topological constraint: by reinterpreting the NCA update step as a message-passing operation on a graph, it is possible to generalise the concept of "neighbourhood" from spatial proximity to topological connectivity \citep{grattarola_learning_2021}. In this context, Graph Neural Networks (GNNs) provide the natural machinery for self-organisation: nodes "perceive" their neighbours via messages sent along edges, aggregate this information, and update their internal state (in an incremental manner, to stay true to the core NCA dynamics).
+% 2. The Functional Shift: From Data to Logic
+Second, the functional constraint: traditionally, NCA states represent the target pattern itself (e.g., RGB values), but this can also be extended. We've seen in \Cref{chap4} that we can move closer to general computation by interfacing continuous NCA with matrix tasks. While this demonstrated that NCA could learn a dynamic \textit{process} (e.g., matrix multiplication) rather than a static final state, it still conflated the CA's state with the computational data: effectively, the cells states were still holding the final result of the computation (the matrix values).
+We here propose a more fundamental shift: viewing the cellular state not as the data to be processed, but as the \textit{functional substrate} that performs the subsequent processing.
+
+% 3. The Implementation: Digital Boolean Circuits
+To implement this, we utilise digital Boolean circuits as our substrate. Adopting the framework of Differentiable \acf{LGN} \citep{petersen_deep_2022}, we treat nodes as Boolean gates defined by Lookup Tables (LUTs) and edges as functional wires.
+Here, the "state" of a node is not a pixel colour or a matrix value, but the functional logic (the LUT configuration) it implements. By recursively applying a decentralised message-passing scheme, our system acts as a meta-optimiser: it steers the substrate not toward a visual shape, but toward a configuration that is later-on able to implement a specific logic task (e.g., binary multiplication, addition, XOR etc).
+
+% Meta-Learning Context: Masked Self-Attention and In-Context Learning
+As we've just discussed, GNNs are well suited to update graphs residually, in a manner that extends the NCA paradigm to act on unconstrained topologies. Our architecture, however, employs a Transformer as the update rule. To see why this is natural, it is helpful to view self-attention through the lens of message passing.
+
+In a standard self-attention layer, each token updates its representation by computing a weighted sum over all other tokens, where the weights are determined by learned key-query interactions. This is, in essence, a message-passing operation on a \textit{complete graph}: every token sends a message to every other, and the receiver decides---via the attention weights---how much to listen to each sender. The crucial difference with classical GNNs is that the aggregation function is not fixed (e.g., sum or mean); instead, it is \textit{learned and input-dependent}, allowing the model to dynamically route information based on content.
+
+Now, the NCA paradigm requires strict locality: a node should only exchange information with its direct graph neighbours at each step. We enforce this by applying a \textit{topology mask} $M$ to the attention matrix, where $M_{ij}=1$ if and only if a wire connects gates $i$ and $j$ (or $i=j$), and $M_{ij}=0$ otherwise. Masked-out entries receive $-\infty$ before the softmax, ensuring zero attention weight. This single modification transforms the complete-graph communication pattern into message passing along the circuit's edges: each gate attends only to its wired neighbours and itself, with the key-query mechanism learning \textit{how} to weight and combine these neighbour messages at each step.
+
+
+We note that this is slightly distinct from ``Graph Transformer'' architectures \citep{dwivedi2020generalization, ying2021transformers}, which typically introduce graph-specific modifications such as structural encodings or edge features within the attention computation itself. Our approach is deliberately minimal: the topology enters \textit{only} through the attention mask, and all expressivity comes from the standard Transformer machinery. This simplicity is a feature, not a limitation---it ensures that the learned update rule is a generic local policy, agnostic to any particular graph encoding scheme.
+
+This design aligns with recent advances in meta-learning optimisers and general-purpose in-context learning \citep{kirsch_meta_2022, kirsch_general-purpose_2024}, which have demonstrated that Transformers can be meta-trained to internalise learning algorithms---effectively replacing explicit optimisers (like SGD) with a forward-pass policy.
+Similarly in our system, the topology-masked Transformer effectively becomes the optimiser: a single, shared-weight attention block is applied recurrently for many steps, gaining representational depth through \textit{time} rather than through stacked layers. It learns a robust, local policy that navigates the landscape of Boolean configurations to find functional solutions.
+
+\subsection{Contributions and Key Findings}
+% Synthesis and Hardware Implications
+By applying these self-organising principles to digital hardware, we present a concrete instantiation of "adaptive resilience". Unlike standard backpropagation, which requires global knowledge of the circuit and differentiable components to repair damage \citep{sunada_blending_2025}, our system relies solely on local forward passes of the topology-masked Transformer.
+This decoupling allows for potential deployment on re-programmable hardware, such as FPGAs, where the "repairing agent" can operate efficiently on-chip.
+We demonstrate that this meta-learned network can not only discover functions from scratch but also rapidly reconfigure circuits to recover from permanent, unseen physical damage, pointing the way toward autonomous systems that truly know how to learn and adapt.
+
+
+\section{Methods}
+
+\subsection{Differentiable Logic Gate Networks}
+\label{sec:LGNs}
+To enable gradient-based optimisation of digital logic, we adopt the \ac{LGN} framework \citep{petersen_deep_2022}.
+A LGN is a Directed Acyclic Graph (DAG) where nodes represent logic gates and edges represent wires carrying bit signals. Unlike standard digital circuits where gates have fixed truth tables (e.g., AND, XOR), our gates are parameterised by learnable Lookup Tables (LUTs).
+
+\begin{table}[h]
+    \centering
+    \caption{Standard Look-Up Tables (Truth Tables) for 2-Input Logic Gates}
+    \label{cha5:tab:std_luts}
+    \begin{tabular}{cc|cccccc}
+        \toprule
+        \multicolumn{2}{c}{\textbf{Inputs}} & \multicolumn{6}{c}{\textbf{Gate Output}} \\
+        \cmidrule(lr){1-2} \cmidrule(lr){3-8}
+        $A$ & $B$ & \textbf{AND} & \textbf{OR} & \textbf{XOR} & \textbf{NAND} & \textbf{NOR} & \textbf{L} \\
+        \midrule
+        0 & 0 & 0 & 0 & 0 & 1 & 1 & $l_{00}$ \\
+        0 & 1 & 0 & 1 & 1 & 1 & 0 & $l_{01}$ \\
+        1 & 0 & 0 & 1 & 1 & 1 & 0 & $l_{10}$ \\
+        1 & 1 & 1 & 1 & 0 & 0 & 0 & $l_{11}$ \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\textbf{Continuous Relaxation of a gate:}
+Standard Boolean operations are non-differentiable. We relax this by representing binary signals as continuous probabilities $x \in [0, 1]$.
+For a gate with arity $N$ (number of inputs), the LUT is a tensor of $2^N$ learnable logits (such as the $L$ column of \cref{cha5:tab:std_luts}).
+The "soft" output of a gate is computed via multilinear interpolation, effectively traversing the LUT as a probabilistic Binary Decision Diagram (BDD). For a gate with inputs $\mathbf{x} = [x_1, \dots, x_N]$ and LUT parameters $\mathbf{L}$, the forward pass recursively interpolates the table. For instance, with a 2-input gate, the first input $x_1$ interpolates between the two halves of the LUT to produce an intermediate tensor $L'$:
+$$L^{\prime}=\left(1-x_1\right) \cdot\left[l_{00}, l_{01}\right]+ x_1 \cdot\left[l_{10}, l_{11}\right]$$
+The second input $x_2$ does the same in $L^{\prime}$ and computes the final scalar output: 
+$$y =\left(1-x_2\right)\cdot L^{\prime}[0]+x_2 \cdot L^{\prime}[1]$$
+
+This operation is fully differentiable, allowing gradients from a loss on output $y$ to flow from back to the individual LUT entries. In practice, parameters are logits $\ell$, from which we get look-up table entries $L$ before functional execution. During training, we get $L = \sigma(\ell)$ with $\sigma$ being the sigmoid function. During inference however, the circuit can operate in "hard" mode by rounding LUT entries to $\{0, 1\}$ with $L = \Theta(\sigma(\ell))$, with $\Theta$ being a hard rounding function, thus recovering discrete Boolean logic.
+
+\textbf{Global Circuit Architecture and Execution:}
+The boolean gates are organised into a deep, feed-forward network of sequential layers. A critical architectural distinction exists between the global circuit inputs and the local inputs required by each gate. The circuit receives a global input vector $\mathbf{x} \in [0, 1]^{N_{in}}$, while individual gates operate with a fixed arity $k$ (fan-in).
+
+Signals propagate through the network via "wires," which, although they represent  physical connections, are implemented as integer indices selecting specific bits from the previous layer. For example, consider a first layer of three arity-2 gates ($G_1, G_2, G_3$) processing a 4-bit global input $\mathbf{x} = [x_0, \dots, x_3]$. The wiring mechanism might assign indices $(0, 3)$ to $G_1$ and $(1, 2)$ to $G_2$. Consequently, $G_1$ computes $\text{LUT}_1(x_0, x_3)$ while $G_2$ independently computes $\text{LUT}_2(x_1, x_2)$. This indexing allows for arbitrary connectivity and signal duplication. The collective outputs of these gates then form a vector $\mathbf{h}$, which serves as the input for the subsequent layer.
+
+\subsection{Graph Representation of Circuits}
+To apply self-organising principles, we lift the circuit instance into a graph representation suitable for processing by a Graph Neural Network.
+Given a circuit with a set of gates $G$ and wires $W$, we construct a graph $\mathcal{G} = (\mathcal{V}, \mathcal{E})$ where each node $v_i \in \mathcal{V}$ corresponds to a physical gate or an input/output node.
+
+\textbf{Node State:}
+The state of each node $v_i$ is a vector concatenation of functional and auxiliary features:
+$$\mathbf{s}_i = [\boldsymbol{\ell}_i, \mathbf{m}_i, \mathbf{p}_i]$$
+where:
+\begin{itemize}
+    \item $\boldsymbol{\ell}_i \in \mathbb{R}^{2^N}$ is the functional LUT logit vector defining the gate's logic.
+    \item $\mathbf{m}_i \in \mathbb{R}^{d_{hidden}}$ is a latent memory vector allowing the meta-learner to store recurrent state across timesteps (hidden states).
+    \item $\mathbf{p}_i$ is a sinusoidal positional encoding of the gate's normalised depth fraction $\frac{d_i}{D}$, where $d_i$ is the layer index and $D$ the total number of layers. By encoding depth as a ratio rather than an absolute index, this representation remains invariant to circuit scale: a gate at the midpoint of a 4-layer circuit receives the same encoding as one at the midpoint of a 10-layer circuit.
+\end{itemize}
+Optionally, a scalar local feedback signal $r_i$ (described in \S\ref{sec:node_loss}) can be appended to provide the meta-learner with per-node error context, yielding $\mathbf{s}_i = [\boldsymbol{\ell}_i, \mathbf{m}_i, \mathbf{p}_i, r_i]$.
+
+\textbf{Connectivity:}
+Crucially, the graph topology is dictated by the circuit wiring: 2 nodes are connected only if a wire exists between the corresponding gates. We enforce bidirectional message passing: if Gate A feeds Gate B, the graph contains edges $A \rightarrow B$ but also $B \rightarrow A$.
+This allows gradients and error information to flow "backwards" (upstream) through the circuit topology during the self-organisation process, even though the logic signals only flow forward.
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=0.9\linewidth]{Figures/chap5/channels.png}
+    \caption{Schematic of a circuit, and of a specific node's state}
+    \label{ch5:fig:node_state}
+\end{figure}
+
+\subsection{Meta-Learning Architecture: Topology-Masked Transformer}
+\label{sec:architecture}
+To parameterise the update rule, we employ a single-block Transformer whose attention is restricted by the circuit topology. Each gate corresponds to a token, and the attention mask enforces that information flows only along the circuit's wires---combining the expressivity of self-attention with the locality of graph message passing. The model operates on the graph $\mathcal{G}$ defined in \cref{sec:LGNs}, processing all nodes in parallel to compute parameter updates.
+
+\textbf{Feature Projection:}
+The input node state $\mathbf{s}_i$ (concatenating logits $\boldsymbol{\ell}_i$, hidden memory $\mathbf{m}_i$, positional encoding $\mathbf{p}_i$, and optionally $r_i$) is first normalised via LayerNorm \citep{ba2016layer} to harmonise the heterogeneous feature scales, then projected into a high-dimensional latent space:
+\begin{equation}
+    \mathbf{z}_i^{(0)} = W_{in}\, \text{LN}(\mathbf{s}_i)
+\end{equation}
+
+\textbf{Masked Self-Attention Block:}
+The core processing consists of a single Transformer block designed to respect the circuit topology. We enforce connectivity via a binary mask $M$, where $M_{ij} = 1$ if there is a wire between gates $j$ and $i$ (or if $i=j$), and $0$ otherwise.
+
+We adopt the \textbf{Pre-LN} Transformer convention \citep{xiong2020layer}, applying LayerNorm \textit{before} each sub-layer rather than after. This is complemented by \textbf{QK-normalisation} \citep{henry2020query}, which normalises the query and key vectors \textit{after} projection to stabilise attention logits---particularly important in our setting where the same block is applied recurrently for many steps. To ensure stable training dynamics, we further employ \textbf{ReZero} regularisation \citep{bachlechner_rezero_2020}, where residual branches are gated by learnable scalars ($\alpha$) initialised to zero. This allows the block to initially act as an identity function, gradually learning to modify nodes. Altogether, the block computes:
+
+\begin{align}
+    \mathbf{a}_i &= \text{MultiHeadAttn}\!\left(\text{LN}_Q(\mathbf{z}_i^{(0)}),\; \text{LN}_{KV}(\mathbf{z}_i^{(0)}),\; \text{Mask}{=}M\right) && \text{(Pre-LN + Masked Attention)} \\
+    \mathbf{z}_i' &= \mathbf{z}_i^{(0)} + \alpha_{attn} \cdot \mathbf{a}_i && \text{(ReZero Residual)} \\
+    \mathbf{f}_i &= \text{MLP}\!\left(\text{LN}(\mathbf{z}_i')\right) && \text{(Pre-LN + FFN)} \\
+    \mathbf{z}_i^{out} &= \mathbf{z}_i' + \alpha_{ffn} \cdot \mathbf{f}_i && \text{(ReZero Residual)}
+\end{align}
+where $\text{LN}_Q$ and $\text{LN}_{KV}$ are separate LayerNorms for query and key/value inputs respectively (distinct norms support cross-attention in extended architectures), and MLP is a two-layer network with GELU activation.
+
+\textbf{Updates:}
+A final LayerNorm is applied to the processed latent $\mathbf{z}_i^{out}$ before decoding into parameter updates via two separate linear heads ($W_{\ell}, W_{m}$), each governed by ReZero gating:
+
+\begin{align}
+    \hat{\mathbf{z}}_i &= \text{LN}_{out}(\mathbf{z}_i^{out}) \\
+    \Delta \boldsymbol{\ell}_i &= \alpha_{\ell} \cdot W_{\ell}\, \hat{\mathbf{z}}_i && \text{(Logit Updates)} \\
+    \Delta \mathbf{m}_i &= \alpha_{m} \cdot W_{m}\, \hat{\mathbf{z}}_i && \text{(Hidden State Updates)}
+\end{align}
+These delta updates are added back to the current node state, $\boldsymbol{\ell}_i \leftarrow \boldsymbol{\ell}_i + \Delta\boldsymbol{\ell}_i$ and $\mathbf{m}_i \leftarrow \mathbf{m}_i + \Delta\mathbf{m}_i$, while positional encodings remain fixed.
+
+\textbf{Recurrence as Depth: Computation in Time.}
+A defining feature of this architecture is that it employs a \textit{single} attention block, applied recurrently for $T$ optimisation steps, rather than stacking multiple layers within a single forward pass. Formally, the full state update across $T$ steps is:
+\begin{equation}
+    \mathbf{s}_i^{(t+1)} = \mathbf{s}_i^{(t)} + \Delta\mathbf{s}_i^{(t)}, \quad t = 1, \dots, T
+\end{equation}
+where $\Delta\mathbf{s}_i^{(t)}$ is computed by the \textit{same} shared-weight attention block at every step. This is functionally equivalent to a $T$-layer residual network with tied weights---a form of implicit depth through temporal unrolling rather than architectural stacking. Whereas a conventional deep Transformer gains expressivity by composing distinct layers, our model gains it through \textit{iterated refinement}: each step nudges every gate's configuration based on its current neighbourhood, and the accumulation of many such nudges achieves complex, globally coordinated solutions.
+
+This recurrent design enforces a strict notion of \textit{locality in time}. Due to the topology mask $M$, information propagates through the circuit graph at a rate of at most one hop per step. A gate that is $k$ edges distant from another requires at least $k$ steps to exert any influence upon it---a ``speed of light'' constraint analogous to the light cone in physical systems, and to the fixed receptive field growth of classical NCAs on grids. Global coordination must therefore emerge from iterated local interactions, mirroring the distributed, decentralised nature of biological self-repair. Crucially, this is not a limitation of the architecture but a deliberate inductive bias: it ensures that the learned policy is fundamentally \textit{local}, and that global solutions arise through the same mechanism that produces them in nature---repeated application of simple, local rules over time.
+
+\textbf{Scale-Free Architecture.}
+Because the Transformer operates at the node level with shared weights, its learned parameters are entirely independent of the circuit's size. The same update rule applies whether the circuit contains 20 or 200 gates, 3 or 10 layers. The only size-dependent component is the topology mask $M$, which is trivially recomputed from the wiring at inference time. Combined with the normalised positional encodings described above, this endows the architecture with a degree of \textit{scale-freedom}: a policy trained on circuits of a given size can, in principle, be deployed on larger or differently structured circuits without retraining---an essential property for practical deployment on diverse hardware substrates.
+
+\subsubsection{Providing Task Context: Per-Node Error Feedback}
+\label{sec:node_loss}
+The model, as described so far, operates on node states that encode only the current LUT configuration, hidden memory, and structural position---it has no direct information about how well the circuit is performing on the task at hand. In fixed-wiring experiments, this is sufficient: the topology is memorised and the policy can learn a stereotyped configuration strategy. However, when the pool contains \emph{random wirings}---requiring the meta-learner to generalise across unseen topologies---we found that this information is critically insufficient.
+
+To address this, we augment each output gate's state with a scalar feedback signal $r_i$ representing the \textit{average absolute residual} of that gate across a batch of task evaluations:
+\begin{equation}
+    r_i = \frac{1}{|\mathcal{D}|}\sum_{(\mathbf{x}, \mathbf{y}) \in \mathcal{D}} |y_i - \hat{y}_i(\mathbf{x})|
+\end{equation}
+where $\hat{y}_i$ is the soft output of gate $i$ when the circuit is executed on input $\mathbf{x}$. This signal is recomputed at every recurrent step (see below), providing the meta-learner with a continuously updated measure of each output gate's current error. Non-output gates receive $r_i = 0$, since they do not directly produce task outputs.
+
+Empirically, this simple feedback mechanism is essential for wiring-agnostic optimisation: without it, the policy cannot distinguish between topologies that require different configuration strategies. The signal propagates upstream through the recurrent attention steps, allowing interior gates to adjust in response to downstream error---a decentralised form of credit assignment.
+
+We note that this mechanism still leaves the meta-learner \textit{blind} to the actual input--output data that generated the residuals, limiting its ability to perform true in-context learning. Architectures capable of attending directly to task data (e.g., via cross-attention to input--output tokens, in the spirit of Perceiver IO \citep{jaegle2021perceiver}) represent a promising avenue for removing this limitation, and are the subject of ongoing work.
+
+\subsection{Training Framework: Pool-Based Meta-Learning}
+We treat the circuit optimisation problem as a dynamic system trained via Backpropagation Through Time (BPTT).
+
+\textbf{Pool Mechanism:}
+As in the original NCA paper, we maintain a persistent \textbf{Graph Pool} $\mathcal{P} = \{ \mathcal{G}_1, \dots, \mathcal{G}_K \}$ containing $K$ circuit instances being continually optimized. By persisting state across many training steps, this training mechanism favours policies that achieve and maintain homeostasis, as circuits must remain stable over potentially long durations. To ensure diversity and prevent stagnation, a portion of the pool is periodically reset, injecting ``fresh'' unoptimized circuits back into the process.
+
+\textbf{Inner Loop (Inference --- ``Growth''):}
+At each training step, a batch of circuits is sampled from the pool. A batch of Boolean input--output pairs $(\mathbf{X}, \mathbf{Y})$ is drawn for the current task. The Transformer is then applied iteratively for $T$ steps via a \texttt{scan} operation. Crucially, the circuit is functionally executed \textit{at every step}: at each tick $t$, the updated LUT logits are extracted, the circuit is run on $(\mathbf{X}, \mathbf{Y})$, and the resulting per-node residuals $r_i$ are written back into the graph before the next application. This creates a closed feedback loop where the meta-learner observes the consequences of its updates in real time.
+
+Regarding the temporal horizon, while stochastic update depths are possible (variable $T$ per sample of the batch), we found that backpropagating through a fixed number of steps yielded the best results. The optimal truncation horizon ($T$) varied by task complexity: simple experiments (e.g., fixed wiring) converged with short horizons ($T=5$), whereas complex, wiring-agnostic optimization required significantly deeper unrolling ($T=50$).
+
+\textbf{Outer Loop (Optimisation):}
+After the $T$-step scan, the circuit loss $\mathcal{L}$ (Binary Cross Entropy between circuit output and target $\mathbf{Y}$) at a selected step $t^{*}$ is used as the training objective. We support both fixed evaluation at $t^{*} = T$ and stochastic evaluation where $t^{*}$ is drawn uniformly from $\{T_{\min}, \dots, T\}$ per sample---the latter encouraging the policy to produce functional circuits at any point during the optimisation, not only at the final step. Gradients of $\mathcal{L}$ with respect to the GT parameters are computed via BPTT through the differentiable scan and circuit execution, and parameters are updated using Adam \citep{kingma2014adam}.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\linewidth]{Figures/chap5/methods_new.pdf}
+    \caption{Summary of training procedure}
+    \label{ch5:fig:training}
+\end{figure}
+
+% THIS WILL BE IN RESULTS INSTEAD
+
+% \textbf{Wiring Regimes:}
+% To evaluate different capabilities of the meta-learner, we employ two distinct wiring regimes for the pool:
+% \begin{enumerate}
+%     \item \textbf{Fixed Topology:} All circuits in the pool share a single, fixed wiring architecture. Variation is introduced via damage patterns, testing the optimizer's ability to handle Out-Of-Distribution (OOD) faults on a known structure.
+%     \item \textbf{Random Topology:} The pool contains circuits with randomized wirings. The meta-learner must learn a topology-agnostic policy that generalises to unseen architectures.
+% \end{enumerate}
+
+% \subsection{Damage Modelling and Robustness}
+% \label{sec:damage}
+% To train for and evaluate fault tolerance, we introduce structural perturbations during the meta-learning process.
+
+% \textbf{Recoverable Damage (Reversible Gate Corruption):}
+% To simulate temporary upsets, specific gates are forced to a faulty value (-10) but remain part of the computational graph. The optimizer can potentially recover the correct values for these gates in subsequent steps. 
+% % Interestingly, we observe that the recovery often propagates changes to downstream gates, resulting in a functionally equivalent but state-distinct circuit \cref{ch5:results}.
+
+% \textbf{Permanent Damage (Stuck-at Faults):}
+% To simulate hardware failure, we apply permanent gate knockouts. Damaged nodes have their logits permanently clamped to the faulty value (-10) and are banned out from receiving updates from the GT. However, they do remain in the graph topology and continue to emit messages, potentially signalling their faulty status to neighbours. This forces the system to be able to recognize and "work around" the dead components, re-routing information through the remaining functional substrate.
+
+% \subsection{NCA as functional "maintainer" only}
+
+% In order to place our systems in a different situation, we create a secondary experimental type where the NCA is not charged with "growing" the functional circuits, but with maintain them only. To this end, we seed the pool not with random, un-optimized circuits, but with functional circuits resulting from standard backpropagation optimization. The NCA is then task to maintain functional competence. 
+
+
+
+% \section{Experiments}
+% % Maybe the last methods sections  would work better here ? Growth vs Maintanance, fixed vs random wiring actually, we could do an "experiments" instead of "results" section describing the different growth / wiring / damage mode when we encounter them, then presenting results. Probably easier to digest in term of flow
+
+
+% - Step 1 : Like in the original NCA paper, we do a sanity check by doing pure growing of a pattern. In the NCA paper, there is no pool te beginning and this is introduced later for homeostasis. We nonethelss consider pool training is standard when it comes to NCA so introduce it by default. Nonethelss, we are in a way severely overfitting on a single functional wiring + single task. The only small source of variability comes from the little noise added to initial logits. We show we are capable of growing functional circuits from scratch, and we show on unseed boolean test data that the circuits extrapolate correctle. Accuracy is good and comparable to standard BP. Homeostasis looks good but could be brittle
+
+
+% - Step 2 : We introduce variations in the training process. Wiring is still fixed but now we introduce failures in gates. We define a probability of failure per gate and per timestep. This is computed to aim at roughly 10% of gates failing by the time the circuit is reset. Failure exist in 2 modes : revertible and permanent. We add the damage mechanism as part of the main training to enhance robustness of the NCA. In order to test it out of distribution, we switch to a "shotgun" style damage pattern, where 5% of gates are destroyed in one steps, twice over the course of the evaluation. We show the NCA exhibit good emergent behavior or robustness on this OOD damage pattern. We also show general homeostasis is improved by adding in damages to the main training process, probably acting as regularization against overfitting. We show that the NCA develops both adaptation (loss recovers after the hit of the damage) and redundancy (sigificantly smaller drop that on networks untrained for damages). We compare with BP and show good performance
+
+% \textbf{Mechanisms of Repair:}
+% Analysis of parameter trajectories reveals that repair is not a simple return to the status quo. Even when damage is reversible, the system does not "reset" to its pre-damage state. Instead, the distance from the original configuration increases over time, indicating that the policy actively navigates the solution manifold to find \textit{new} functional arrangements.
+
+% - Step 3 : NCA as pure maintanance. While growing functional circuits from scratch is interesting, we find another usecase for our method in the form of pure maintanance: we seed the pool with pre-optimized circuits (with standard BP) and the NCA's goal is only to maintain functionality in the face of damages
+
+% -Step 4: We test the boundaries of the meta-learner's capabilities by removing architectural constraints. We transition to a \textbf{Random Topology} regime, where every circuit in the pool possesses a unique, random wiring diagram. This denies the meta-learner the ability to memorize a specific graph structure. We find this regime significantly harder; while the policy makes progress, it struggles to match the performance of global backpropagation. This highlights the current difficulty of learning a truly universal, topology-agnostic local update rule.
+
+% Step 5: Scale-free optimization exploration. Because we learn a decentralized update rule, we can apply it to larger circuits that it was trained on !
+
+
+\section{Discussion}
+
+\subsection{Summary}
+
+We have presented a framework for self-organising digital circuits that replaces global backpropagation with a decentralised, learned update rule. By extending the NCA paradigm from grid-based pattern formation to functional logic generation on arbitrary graphs, we demonstrated that a single topology-masked Transformer block, applied recurrently, can learn to configure Boolean circuits to satisfy computational tasks.
+
+On fixed topologies, the meta-learner assembles functional circuits from scratch with accuracy comparable to standard backpropagation, and maintains homeostasis over extended time horizons. When stochastic gate failures are introduced during training, the policy develops emergent robustness---exhibiting both redundancy (reduced performance drops) and active adaptation (recovery after damage)---that generalises to unseen, out-of-distribution fault patterns. Notably, repair does not consist of returning to a memorised pre-damage configuration; instead, the system navigates the solution manifold to discover \textit{new} functional arrangements, consistent with the biological paradigm of adaptive plasticity.
+
+Extending to random topologies---where every circuit in the pool has a unique wiring diagram---we found that providing per-node error feedback (\S\ref{sec:node_loss}) is essential for the meta-learner to distinguish between structurally distinct circuits. While this regime remains significantly more challenging than fixed wiring, the policy makes meaningful progress toward topology-agnostic optimisation. The scale-free nature of the architecture further allows a policy trained on circuits of a given size to be deployed on larger or differently structured circuits without retraining.
+
+\subsection{Limitations}
+
+Several limitations of the current framework should be acknowledged. First, the recurrent unrolling required for complex tasks (up to $T=50$ steps for random wiring) makes training expensive: backpropagation through time across many differentiable circuit executions demands substantial memory and compute, despite gradient checkpointing. Second, the per-node error feedback $r_i$, while effective, is a coarse signal---it provides only a scalar average residual per output gate, leaving the meta-learner without direct access to the input--output data that generated it. This limits the policy's ability to perform true in-context reasoning about the task structure. Third, the current positional encoding scheme (normalised depth fraction) captures only vertical position in the circuit DAG, offering no information about the local graph topology or the structural role of each gate.
+
+\subsection{Future Directions}
+
+\textbf{Enriching the Graph Representation.}
+Our current architecture is deliberately minimal: the circuit topology enters only through the attention mask. While this simplicity ensures generality, it also means the meta-learner must reconstruct structural information about its local neighbourhood entirely through recurrent propagation---a slow process when the graph is large. Techniques from the Graph Transformer literature offer principled ways to accelerate this, while preserving the scale-free property that is central to our design.
+
+\textit{Random Walk Structural Encoding} (RWSE) \citep{dwivedi2022graph} is a particularly natural fit: for each node, one computes the diagonal entries of the $k$-step random walk matrix $\mathbf{A}^k$ for $k = 1, \dots, K$, yielding a $K$-dimensional structural fingerprint that captures local topology (e.g., whether a gate sits in a tightly clustered region, at a bottleneck, or at the end of a long chain). Crucially, RWSE is permutation-equivariant, inexpensive to compute from the adjacency matrix, and---because it characterises \textit{local structure} rather than absolute position---transfers naturally across circuits of different sizes. Similarly, encoding each gate's fan-out degree (the number of downstream consumers) would provide an immediate, zero-cost signal about structural importance.
+
+Another promising direction is to inject \textit{edge-type information} into the attention computation. Currently, the model cannot distinguish between forward wires (carrying logic signals downstream) and backward edges (carrying error information upstream). Introducing learned scalar biases per edge type---forward, backward, and self-loop---directly into the attention logits would allow the meta-learner to treat upstream and downstream messages differently, at the cost of only a handful of additional parameters.
+
+All of these enrichments respect the key constraint of scale-freedom: they are defined locally, do not depend on absolute graph size, and can be recomputed for any circuit at inference time.
+
+\textbf{Toward True In-Context Learning.}
+A more fundamental extension concerns the meta-learner's access to task information. As discussed in \S\ref{sec:node_loss}, the current system receives only a scalar residual per output gate---a compressed shadow of the full input--output relationship that generated it. This prevents the emergence of genuine in-context learning, where the optimiser would adapt its strategy based on the specific structure of the data.
+
+A natural remedy is to augment the architecture with \textit{cross-attention} to the task data itself, in the spirit of Perceiver IO \citep{jaegle2021perceiver}. In this setting, the input--output pairs $(\mathbf{x}, \mathbf{y})$ would be tokenised and made available as a separate key-value set that the gate tokens can attend to at each recurrent step. This would allow the meta-learner to directly inspect which input patterns cause which output errors, enabling it to make targeted, data-informed corrections rather than relying solely on aggregate residual signals.
+
+Stochastic subsampling of data tokens---attending to a random subset at each step---could further promote incremental in-context learning while controlling the computational cost of cross-attention. Preliminary experiments with this Perceiver-style architecture are ongoing, and early results on simple tasks are encouraging.
+
+\textbf{Sparse Attention as a Computational Advantage.}
+A practical limitation of the current implementation is that the topology mask is applied as a dense $N \times N$ matrix: the full attention score matrix is computed, and only then are disallowed entries zeroed out. This means the computational cost remains $\mathcal{O}(N^2 d)$ per step, even though the number of active (non-masked) entries scales as $\mathcal{O}(E)$, the number of edges in the circuit graph. For bounded-arity circuits, $E$ grows linearly with $N$, so the gap between the dense cost and the true information-theoretic cost is quadratic.
+
+To make this concrete: a typical circuit in our experiments has $N=264$ nodes (12 inputs, three hidden layers of 96, 96, and 48 gates with arity $k=4$, and 12 outputs) and $E=2{,}016$ bidirectional edges (including self-loops). The dense attention matrix contains $264^2 = 69{,}696$ entries, of which only $2{,}016$ are non-zero---a density of \textbf{2.9\%}. Over 97\% of the attention computation is wasted on entries that are guaranteed to be masked out.
+
+This inefficiency is compounded by the recurrent architecture. Each of the $T$ optimisation steps recomputes the full dense attention, and backpropagation through time requires storing these matrices at every step. For our setup with $T=50$ steps, the dense backward pass stores $50 \times 69{,}696 \approx 3.5$M attention entries; with true sparse attention this would be $50 \times 2{,}016 \approx 100$K---a \textbf{$\mathbf{35\times}$ memory reduction}. For scale-free deployment to larger circuits, the savings grow quadratically: doubling the circuit size quadruples the dense cost but only doubles the sparse cost.
+
+Importantly, the sparsity here is not approximate: it is \textit{exact and known a priori} from the circuit wiring. This makes it fundamentally different from the soft or learned sparsity pursued in efficient Transformer research \citep{tay2022efficient}. The topology mask defines a precise, fixed communication graph, and no information is lost by restricting attention to it. Implementing this as a native sparse operation---computing attention weights only along existing edges, in the style of Graph Attention Networks \citep{velickovic2018graph} but within the Transformer framework---would reduce both compute and memory to scale with the circuit's \textit{wiring} rather than its \textit{size}. This would make it practical to apply the learned policy to circuits with thousands of gates, where dense attention becomes prohibitive but the per-node edge count remains bounded by the arity.
+
+Finally, there is a suggestive connection to hardware deployment. On reconfigurable substrates such as FPGAs, sparse communication patterns can be physically routed into the fabric, instantiating only the compute paths that the topology requires. The same structural sparsity that currently goes unexploited on GPUs could become a natural efficiency advantage on the target hardware, aligning the computational structure of the meta-learner with the physical structure of the circuit it optimises.
+
+Together, these directions---richer graph encodings, direct data access, and sparse-native computation---point toward a meta-learner that is not only topology-agnostic and scale-free, but also \textit{task-aware} and \textit{computationally efficient}: a truly general-purpose, decentralised optimiser for digital substrates.
+

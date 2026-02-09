@@ -1,7 +1,8 @@
 """
 Aggregation functions for graph neural networks.
 
-This module provides different methods for aggregating messages in a graph neural network.
+This module provides different methods for aggregating messages in a graph neural network,
+including a sparse multi-head attention mechanism that operates in O(E) rather than O(N^2).
 """
 
 import jax.numpy as jp
@@ -9,110 +10,177 @@ import jraph
 from flax import nnx
 
 
-def aggregate_sum(messages, indices, num_segments):
+def aggregate_sum(messages, indices, num_segments, **kwargs):
     """
     Default aggregation function: sum messages per node.
 
     Args:
-        messages: Features of edges targeting a node
-        indices: Index of the node targeted by the edge
+        messages: Features of edges targeting a node [num_edges, feature_dim]
+        indices: Index of the receiver node per edge [num_edges]
         num_segments: Total number of nodes in the graph
 
     Returns:
-        Aggregated messages per node
+        Aggregated messages per node [num_nodes, feature_dim]
     """
     return jraph.segment_sum(messages, indices, num_segments)
 
 
-class AttentionAggregation(nnx.Module):
+class SparseMultiHeadAttention(nnx.Module):
     """
-    Attention-based message aggregation.
+    Sparse multi-head attention aggregation for graph message passing.
 
-    Implements a multi-head attention mechanism for aggregating messages in a GNN.
+    Computes attention weights ONLY along existing edges (O(E) instead of O(N^2)),
+    using receiver-node features as queries and sender-node features as keys/values.
+    This is functionally equivalent to masked self-attention in the Transformer model,
+    but with native sparse computation.
+
+    Supports:
+    - True multi-head attention with separate head projections
+    - QK-normalization for stable attention logits across recurrent steps
+    - Numerically stable sparse softmax via segment operations
     """
 
-    def __init__(self, feature_dim: int, num_heads: int = 4, *, rngs: nnx.Rngs):
+    def __init__(
+        self,
+        feature_dim: int,
+        num_heads: int = 4,
+        *,
+        rngs: nnx.Rngs,
+        normalize_qk: bool = True,
+    ):
         """
-        Initialize attention aggregation.
+        Initialize sparse multi-head attention.
 
         Args:
-            feature_dim: Dimension of feature vectors
+            feature_dim: Dimension of input feature vectors (message dim)
             num_heads: Number of attention heads
             rngs: Random number generators
+            normalize_qk: Whether to apply QK-normalization via per-head LayerNorm
+                          after projection, following the ViT-22B convention
+                          (arxiv.org/abs/2302.05442). Consistent with Flax's
+                          nnx.MultiHeadAttention normalize_qk implementation.
+                          Stabilises attention logits across recurrent steps.
         """
         self.feature_dim = feature_dim
         self.num_heads = num_heads
         self.head_dim = feature_dim // num_heads
+        self.normalize_qk = normalize_qk
 
-        # Projections for attention mechanism
-        self.key_proj = nnx.Linear(feature_dim, feature_dim, rngs=rngs)
-        self.value_proj = nnx.Linear(feature_dim, feature_dim, rngs=rngs)
+        if feature_dim % num_heads != 0:
+            raise ValueError(
+                f"feature_dim ({feature_dim}) must be divisible by num_heads ({num_heads})"
+            )
+
+        # Q projection: applied to RECEIVER node features (what am I looking for?)
         self.query_proj = nnx.Linear(feature_dim, feature_dim, rngs=rngs)
+        # K projection: applied to SENDER node features (what do I offer?)
+        self.key_proj = nnx.Linear(feature_dim, feature_dim, rngs=rngs)
+        # V projection: applied to SENDER node features (what information to send)
+        self.value_proj = nnx.Linear(feature_dim, feature_dim, rngs=rngs)
+        # Output projection after concatenating heads
         self.output_proj = nnx.Linear(feature_dim, feature_dim, rngs=rngs)
+
+        # QK-normalization: per-head LayerNorm (no bias), matching Flax's
+        # nnx.MultiHeadAttention implementation of normalize_qk
+        if normalize_qk:
+            self.query_ln = nnx.LayerNorm(self.head_dim, use_bias=False, rngs=rngs)
+            self.key_ln = nnx.LayerNorm(self.head_dim, use_bias=False, rngs=rngs)
 
     def __call__(
         self,
         messages: jp.ndarray,
         receivers: jp.ndarray,
         num_segments: int,
-    ):
+        receiver_features: jp.ndarray | None = None,
+        sender_features: jp.ndarray | None = None,
+    ) -> jp.ndarray:
         """
-        Apply attention-based message aggregation.
+        Apply sparse multi-head attention aggregation.
 
         Args:
-            messages: Features of edges targeting nodes [num_edges, feature_dim]
-            receivers: Index of the node targeted by each edge [num_edges]
-            num_segments: Total number of nodes in the graph
+            messages: Edge message features [num_edges, feature_dim]
+                      (used as keys/values if sender_features is None)
+            receivers: Receiver node index per edge [num_edges]
+            num_segments: Total number of nodes
+            receiver_features: Per-NODE features for query computation [num_nodes, feature_dim].
+            sender_features: Per-EDGE sender features [num_edges, feature_dim].
+                             If None, messages are used as both keys and values.
 
         Returns:
-            Aggregated messages per node [num_nodes, feature_dim]
+            Aggregated output per node [num_nodes, feature_dim]
         """
-        # Handle empty case
-        if messages.shape[0] == 0:
-            return jp.zeros((num_segments, self.feature_dim))
+        E = messages.shape[0]
+        N = num_segments
+        H = self.num_heads
+        D = self.head_dim
 
-        # Project messages to keys and values
-        keys = self.key_proj(messages)  # [num_edges, feature_dim]
-        values = self.value_proj(messages)  # [num_edges, feature_dim]
+        # Handle empty graph
+        if E == 0:
+            return jp.zeros((N, self.feature_dim))
 
-        # Get unique receiver nodes (first aggregate messages per receiver)
-        summed_messages = jraph.segment_sum(
-            messages, receivers, num_segments
-        )  # [num_nodes, feature_dim]
+        # --- Keys and Values from sender/edge features ---
+        kv_source = sender_features if sender_features is not None else messages
+        keys = self.key_proj(kv_source).reshape(E, H, D)  # [E, H, D]
+        values = self.value_proj(kv_source).reshape(E, H, D)  # [E, H, D]
 
-        # Generate queries for each node
-        queries = self.query_proj(summed_messages)  # [num_nodes, feature_dim]
+        # --- Queries from receiver NODE features ---
+        if receiver_features is not None:
+            # Proper: queries come from each receiver node's own state
+            node_queries = self.query_proj(receiver_features).reshape(N, H, D)  # [N, H, D]
+            # Gather per-edge queries: each edge gets its receiver's query
+            edge_queries = node_queries[receivers]  # [E, H, D]
+        else:
+            raise ValueError("receiver_features must be provided for SparseMultiHeadAttention")
 
-        # Get corresponding query for each message
-        message_queries = queries[receivers]  # [num_edges, feature_dim]
+        # --- QK-normalization via per-head LayerNorm (ViT-22B convention) ---
+        # Consistent with Flax's nnx.MultiHeadAttention normalize_qk implementation.
+        if self.normalize_qk:
+            edge_queries = self.query_ln(edge_queries)  # [E, H, D] → LN over D per head
+            keys = self.key_ln(keys)                     # [E, H, D] → LN over D per head
 
-        # Compute attention scores - shape: [num_edges]
-        attention_scores = jp.sum(message_queries * keys, axis=-1) / jp.sqrt(self.feature_dim)
+        # --- Attention logits (per edge, per head) ---
+        # [E, H] — dot product between receiver query and sender key
+        edge_logits = jp.sum(edge_queries * keys, axis=-1) / jp.sqrt(jp.float32(D))
 
-        # For each receiver, normalize scores with softmax
-        # Compute max per receiver for numerical stability
-        max_scores = jraph.segment_max(attention_scores, receivers, num_segments)  # [num_nodes]
-        edge_max_scores = max_scores[receivers]  # [num_edges]
+        # --- Sparse softmax per receiver node, per head ---
+        # Numerically stable: subtract max before exp
+        # segment_max over edges grouped by receiver, per head
+        max_logits = _segment_max_per_head(edge_logits, receivers, N, H)  # [N, H]
+        edge_max = max_logits[receivers]  # [E, H]
 
-        # Compute exp(score - max_score)
-        exp_scores = jp.exp(attention_scores - edge_max_scores)  # [num_edges]
+        exp_logits = jp.exp(edge_logits - edge_max)  # [E, H]
 
-        # Sum exp scores per receiver
-        sum_exp_scores = jraph.segment_sum(exp_scores, receivers, num_segments)  # [num_nodes]
-        edge_sum_exp_scores = sum_exp_scores[receivers]  # [num_edges]
+        # Sum of exp per receiver, per head
+        sum_exp = _segment_sum_per_head(exp_logits, receivers, N, H)  # [N, H]
+        edge_sum_exp = sum_exp[receivers]  # [E, H]
 
-        # Compute softmax weights
-        attention_weights = exp_scores / (edge_sum_exp_scores + 1e-8)  # [num_edges]
+        attention_weights = exp_logits / (edge_sum_exp + 1e-8)  # [E, H]
 
-        # Weight values by attention weights
-        weighted_values = values * attention_weights[:, None]  # [num_edges, feature_dim]
+        # --- Weighted aggregation of values ---
+        weighted_values = values * attention_weights[..., None]  # [E, H, D]
 
-        # Aggregate weighted values per receiver
-        aggregated_values = jraph.segment_sum(
-            weighted_values, receivers, num_segments
-        )  # [num_nodes, feature_dim]
+        # Flatten heads for segment_sum, then reshape back
+        weighted_flat = weighted_values.reshape(E, self.feature_dim)  # [E, H*D]
+        aggregated = jraph.segment_sum(weighted_flat, receivers, N)  # [N, H*D]
 
-        # Final projection
-        output = self.output_proj(aggregated_values)  # [num_nodes, feature_dim]
+        # Output projection
+        output = self.output_proj(aggregated)  # [N, feature_dim]
 
         return output
+
+
+def _segment_max_per_head(
+    data: jp.ndarray, segment_ids: jp.ndarray, num_segments: int, num_heads: int
+) -> jp.ndarray:
+    """Compute segment max independently per head. data: [E, H] -> [N, H]."""
+    # Use a very negative initial value for max
+    init = jp.full((num_segments, num_heads), -1e9)
+    return init.at[segment_ids].max(data)
+
+
+def _segment_sum_per_head(
+    data: jp.ndarray, segment_ids: jp.ndarray, num_segments: int, num_heads: int
+) -> jp.ndarray:
+    """Compute segment sum independently per head. data: [E, H] -> [N, H]."""
+    init = jp.zeros((num_segments, num_heads))
+    return init.at[segment_ids].add(data)

@@ -7,11 +7,10 @@ updating node features in a graph neural network.
 
 import itertools
 
-import jax
 import jax.numpy as jp
 from flax import nnx
 
-from boolean_nca_cc.models.attention.base import ReZero
+from boolean_nca_cc.models.attention.base import ReZero, extract_node_features
 
 # Type aliases for clarity
 NodeType = dict[str, jp.ndarray]
@@ -22,6 +21,8 @@ class NodeUpdateModule(nnx.Module):
     Node update module for GNN message passing.
 
     Updates node features based on current state and incoming messages.
+    Uses Pre-LN normalization and GELU activation, aligned with the
+    attention model conventions.
     """
 
     def __init__(
@@ -32,6 +33,10 @@ class NodeUpdateModule(nnx.Module):
         message_passing: bool = True,
         *,
         rngs: nnx.Rngs,
+        aggregated_message_dim: int | None = None,
+        use_intra_layer_PE: bool = False,
+        use_layer_PE: bool = True,
+        use_node_loss: bool = False,
     ):
         """
         Initialize the node update module.
@@ -42,92 +47,69 @@ class NodeUpdateModule(nnx.Module):
             arity: Number of inputs per gate in the boolean circuit
             message_passing: Whether to use message passing or only self-updates
             rngs: Random number generators
+            aggregated_message_dim: Dimension of aggregated messages from edge update +
+                                    aggregation. If None, defaults to logit_dim + circuit_hidden_dim.
+                                    Set to attention_dim for parity with the self-attention model.
+            use_intra_layer_PE: Whether to include intra-layer positional encodings
+            use_layer_PE: Whether to include layer depth positional encodings
+            use_node_loss: Whether to include per-node loss in features
         """
         self.arity = arity
         self.circuit_hidden_dim = circuit_hidden_dim
         self.message_passing = message_passing
         self.logit_dim = 2**arity
-        pe_dim = circuit_hidden_dim  # Dimension for positional encodings
+        self.use_intra_layer_PE = use_intra_layer_PE
+        self.use_layer_PE = use_layer_PE
+        self.use_node_loss = use_node_loss
 
-        # Calculate MLP input size
-        # Current features: Logits, Hidden, Layer PE, Intra-Layer PE, Loss
-        current_features_size = self.logit_dim + circuit_hidden_dim + pe_dim + pe_dim
+        # Compute node feature dim dynamically based on PE flags
+        node_feature_dim = self.logit_dim + circuit_hidden_dim  # logits + hidden (always)
+        if use_intra_layer_PE:
+            node_feature_dim += circuit_hidden_dim
+        if use_layer_PE:
+            node_feature_dim += circuit_hidden_dim
+        if use_node_loss:
+            node_feature_dim += 1
 
-        if message_passing:
-            # If using message passing, include aggregated messages
-            # Edge message contains logits + hidden derived features
-            aggregated_message_size = self.logit_dim + circuit_hidden_dim
-            mlp_input_size = current_features_size + aggregated_message_size
-        else:
-            # Without message passing, only use current node features
-            mlp_input_size = current_features_size
+        # Message dim: configurable (attention_dim) or default (logit_dim + hidden_dim)
+        msg_dim = (
+            aggregated_message_dim
+            if aggregated_message_dim is not None
+            else (self.logit_dim + circuit_hidden_dim)
+        )
 
-        # Output needs to contain updated logits and hidden features
+        mlp_input_size = node_feature_dim + msg_dim if message_passing else node_feature_dim
+
+        # Output: delta logits + delta hidden
         mlp_output_size = self.logit_dim + circuit_hidden_dim
 
-        # Add feature normalization layers
-        self.logits_norm = nnx.LayerNorm(
-            self.logit_dim,
-            epsilon=1e-5,
-            rngs=rngs,
-        )
-        self.hidden_norm = nnx.LayerNorm(
-            circuit_hidden_dim,
-            epsilon=1e-5,
-            rngs=rngs,
-        )
-        self.layer_pe_norm = nnx.LayerNorm(
-            pe_dim,
-            epsilon=1e-5,
-            rngs=rngs,
-        )
-        self.intra_layer_pe_norm = nnx.LayerNorm(
-            pe_dim,
-            epsilon=1e-5,
-            rngs=rngs,
-        )
+        # Pre-LN on input features (single LN on concatenated features,
+        # aligned with attention model's self.input_norm convention)
+        self.input_norm = nnx.LayerNorm(mlp_input_size, rngs=rngs)
 
-        if message_passing:
-            self.message_norm = nnx.LayerNorm(
-                aggregated_message_size,
-                epsilon=1e-5,
-                rngs=rngs,
-            )
-
-        # Define MLP architecture with batch normalization
+        # Node MLP with Pre-LN + GELU (aligned with attention model FFN)
         mlp_features = [mlp_input_size, *node_mlp_features, mlp_output_size]
         mlp_layers = []
 
         for i, (in_f, out_f) in enumerate(itertools.pairwise(mlp_features)):
-            # Special initialization for the final layer
             if i == len(mlp_features) - 2:
-                # Use small random initialization for weights to ensure gradient flow
-                # Keep logit outputs close to zero initially, but allow hidden features to learn
-                final_linear = nnx.Linear(
-                    in_f,
-                    out_f,
-                    # kernel_init=nnx.initializers.normal(
-                    #     stddev=1e-4
-                    # ),  # Small random init
-                    kernel_init=nnx.initializers.kaiming_normal(),
-                    rngs=rngs,
-                )
-                mlp_layers.append(final_linear)
-            else:
-                mlp_layers.append(nnx.Linear(in_f, out_f, rngs=rngs))
-                # Add BatchNorm and ReLU
+                # Final layer: no activation
                 mlp_layers.append(
-                    nnx.LayerNorm(
+                    nnx.Linear(
+                        in_f,
                         out_f,
-                        epsilon=1e-5,
+                        kernel_init=nnx.initializers.kaiming_normal(),
                         rngs=rngs,
                     )
                 )
-                mlp_layers.append(jax.nn.relu)
+            else:
+                mlp_layers.append(nnx.Linear(in_f, out_f, rngs=rngs))
+                mlp_layers.append(nnx.LayerNorm(out_f, rngs=rngs))
+                mlp_layers.append(nnx.gelu)
 
         self.mlp = nnx.Sequential(*mlp_layers)
 
-        # Re-zero learnable scaling parameters
+        # ReZero learnable scaling for residual updates
         self.logit_scale = ReZero(rngs=rngs)
         self.hidden_scale = ReZero(rngs=rngs)
 
@@ -136,100 +118,72 @@ class NodeUpdateModule(nnx.Module):
         nodes: NodeType,
         sent_attributes: jp.ndarray,
         received_attributes: jp.ndarray,
-        globals_=None,  # Keep for compatibility but ignore
+        globals_=None,
     ):
         """
         Update node features using incoming messages and current state.
 
         Args:
             nodes: Current node features
-            sent_attributes: Aggregated messages from incoming edges
-            received_attributes: Features of received messages (unused)
-            globals_: Global features (ignored, kept for compatibility)
+            sent_attributes: Aggregated messages from incoming edges [num_nodes, msg_dim]
+            received_attributes: Unused (kept for API compatibility)
+            globals_: Unused (kept for API compatibility)
 
         Returns:
-            Updated node features
+            Updated node features dict
         """
-        # Extract current node features
-        current_logits = nodes["logits"]  # Shape: [num_nodes, 2**arity]
-        current_hidden = nodes["hidden"]  # Shape: [num_nodes, circuit_hidden_dim]
-        current_layer_pe = nodes["layer_pe"]  # Shape: [num_nodes, pe_dim]
-        current_intra_layer_pe = nodes["intra_layer_pe"]  # Shape: [num_nodes, pe_dim]
-
-        # Normalize input features
-        normalized_logits = self.logits_norm(current_logits)
-        normalized_hidden = self.hidden_norm(current_hidden)
-        normalized_layer_pe = self.layer_pe_norm(current_layer_pe)
-        normalized_intra_layer_pe = self.intra_layer_pe_norm(current_intra_layer_pe)
-        # Add dimension for loss normalization: [num_nodes] -> [num_nodes, 1]
-
-        # Combine normalized features
-        current_node_combined_features = jp.concatenate(
-            [
-                normalized_logits,
-                normalized_hidden,
-                normalized_layer_pe,
-                normalized_intra_layer_pe,
-            ],
-            axis=-1,
+        # Extract node features using the shared utility (respects PE flags)
+        node_features = extract_node_features(
+            nodes, self.use_node_loss, self.use_intra_layer_PE, self.use_layer_PE
         )
 
-        # Determine inputs based on message passing flag
+        # Build MLP input
         if self.message_passing and sent_attributes is not None:
-            # Normalize messages
-            normalized_messages = self.message_norm(sent_attributes)
-            # Input = current_features + normalized_messages
-            mlp_input = jp.concatenate(
-                [current_node_combined_features, normalized_messages], axis=-1
-            )
+            mlp_input = jp.concatenate([node_features, sent_attributes], axis=-1)
         else:
-            # Input = current_features only
-            mlp_input = current_node_combined_features
+            mlp_input = node_features
 
-        # Apply MLP to get the delta (change) in features
-        delta_combined_features = self.mlp(mlp_input)
+        # Pre-LN on concatenated input
+        mlp_input = self.input_norm(mlp_input)
 
-        # Split the delta into logit and hidden components
-        delta_logits = delta_combined_features[..., : self.logit_dim]
-        delta_hidden = delta_combined_features[..., self.logit_dim :]
+        # Apply MLP to get delta updates
+        delta_combined = self.mlp(mlp_input)
 
-        # Apply re-zero scaling to deltas
+        # Split into logit and hidden deltas
+        delta_logits = delta_combined[..., : self.logit_dim]
+        delta_hidden = delta_combined[..., self.logit_dim :]
+
+        # Apply ReZero scaling
         scaled_delta_logits = self.logit_scale(delta_logits)
         scaled_delta_hidden = self.hidden_scale(delta_hidden)
 
-        # Apply residual update only to non-input nodes (layer > 0)
+        # Only update gate nodes (layer > 0), not input nodes
         is_gate_node = nodes["layer"] > 0
 
-        # Check for gate knockout mask to prevent updates to knocked-out gates
+        # Handle gate knockout mask (permanent damage)
         gate_knockout_mask = nodes.get("gate_knockout_mask", None)
         if gate_knockout_mask is not None:
-            # Knocked-out gates (mask == 0.0) should not receive updates
-            # Only allow updates to active gates (mask == 1.0) that are also gate nodes
-            update_allowed_logits = is_gate_node & (gate_knockout_mask == 1.0)
-            update_allowed_hidden = is_gate_node & (gate_knockout_mask == 1.0)
+            update_allowed = is_gate_node & (gate_knockout_mask == 1.0)
         else:
-            # No knockout mask, allow updates to all gate nodes
-            update_allowed_logits = is_gate_node
-            update_allowed_hidden = is_gate_node
+            update_allowed = is_gate_node
 
-        # Ensure mask matches feature dimensions for broadcasting
-        update_allowed_logits_mask = update_allowed_logits[:, None]
-        update_allowed_hidden_mask = update_allowed_hidden[:, None]
+        update_mask = update_allowed[:, None]
 
+        # Residual updates with masking
         updated_logits = jp.where(
-            update_allowed_logits_mask,
-            current_logits + scaled_delta_logits,
-            current_logits,
+            update_mask,
+            nodes["logits"] + scaled_delta_logits,
+            nodes["logits"],
         )
         updated_hidden = jp.where(
-            update_allowed_hidden_mask,
-            current_hidden + scaled_delta_hidden,
-            current_hidden,
+            update_mask,
+            nodes["hidden"] + scaled_delta_hidden,
+            nodes["hidden"],
         )
 
-        # Update only the 'logits' and 'hidden' fields, preserving others
-        new_node_features = dict(nodes.items())
-        new_node_features["logits"] = updated_logits
-        new_node_features["hidden"] = updated_hidden
+        # Preserve all other node features (PEs, layer, loss, etc.)
+        new_nodes = dict(nodes.items())
+        new_nodes["logits"] = updated_logits
+        new_nodes["hidden"] = updated_hidden
 
-        return new_node_features
+        return new_nodes

@@ -562,20 +562,30 @@ def plot_wandb_stepwise_results(
     C_HARD = "#E69F00"  # amber      — yellow-orange, distinct from blue
     C_DAMAGE_LINE = "#CC79A7"  # rose — pinkish, visible under deuteranopia
     C_DAMAGE_FRAC = "#999999"  # neutral grey — never confused with any hue
+    C_NO_REPAIR = "#D55E00"  # vermillion — strong contrast for no-repair baseline
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 4.), constrained_layout=True, dpi=200)
 
     # --- parse input -----------------------------------------------------
+    core_keys = ["step", "loss", "hard_loss", "accuracy", "hard_accuracy"]
+    no_repair_keys = [
+        "no_repair_loss", "no_repair_hard_loss",
+        "no_repair_accuracy", "no_repair_hard_accuracy",
+    ]
+
     if isinstance(step_metrics, dict):
-        step_dict = {
-            key: np.array(step_metrics[key])
-            for key in ["step", "loss", "hard_loss", "accuracy", "hard_accuracy"]
-        }
+        step_dict = {key: np.array(step_metrics[key]) for key in core_keys}
+        # Include no-repair baseline if present
+        has_no_repair = all(k in step_metrics for k in no_repair_keys)
+        if has_no_repair:
+            for k in no_repair_keys:
+                step_dict[k] = np.array(step_metrics[k])
     else:
         step_dict = {
             key: np.array([getattr(s, key) for s in step_metrics])
-            for key in ["step", "loss", "hard_loss", "accuracy", "hard_accuracy"]
+            for key in core_keys
         }
+        has_no_repair = False
 
     n = len(step_dict["step"])
     steps_x = np.arange(n)
@@ -612,6 +622,11 @@ def plot_wandb_stepwise_results(
 
     # --- Loss subplot (left) ---------------------------------------------
     axes[0].plot(steps_x, _smooth(step_dict["loss"]), color=C_SOFT, linewidth=1.2)
+    if has_no_repair:
+        axes[0].plot(
+            steps_x, _smooth(step_dict["no_repair_loss"]),
+            color=C_NO_REPAIR, linewidth=1.0, linestyle="--", alpha=0.7,
+        )
     axes[0].set_title("Loss", fontsize=11)
     axes[0].set_xlabel("Step")
     axes[0].set_ylabel("Loss")
@@ -620,6 +635,11 @@ def plot_wandb_stepwise_results(
     # --- Accuracy subplot (right) ----------------------------------------
     axes[1].plot(steps_x, _smooth(step_dict["accuracy"]), color=C_SOFT, linewidth=1.2)
     axes[1].plot(steps_x, _smooth(step_dict["hard_accuracy"]), color=C_HARD, linewidth=1.2)
+    if has_no_repair:
+        axes[1].plot(
+            steps_x, _smooth(step_dict["no_repair_hard_accuracy"]),
+            color=C_NO_REPAIR, linewidth=1.0, linestyle="--", alpha=0.7,
+        )
     axes[1].set_title("Accuracy", fontsize=11)
     axes[1].set_xlabel("Step")
     axes[1].set_ylabel("Accuracy")
@@ -632,6 +652,13 @@ def plot_wandb_stepwise_results(
         Line2D([], [], color=C_SOFT, linewidth=1.5, label="Soft metric"),
         Line2D([], [], color=C_HARD, linewidth=1.5, label="Hard metric"),
     ]
+    if has_no_repair:
+        handles.append(
+            Line2D(
+                [], [], color=C_NO_REPAIR, linewidth=1.5, linestyle="--",
+                alpha=0.7, label="No-repair baseline",
+            )
+        )
     if damage_fraction is not None:
         handles.append(
             Line2D([], [], color=C_DAMAGE_FRAC, linewidth=1.5, alpha=0.8, label="Damaged fraction")

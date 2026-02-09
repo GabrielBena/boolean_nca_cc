@@ -19,7 +19,12 @@ from boolean_nca_cc.circuits.train import (
     LossConfig,
     compute_loss_from_predictions,
 )
-from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention, PerceiverCircuitAttention
+from boolean_nca_cc.models import (
+    CircuitGatheredAttention,
+    CircuitGNN,
+    CircuitSelfAttention,
+    PerceiverCircuitAttention,
+)
 from boolean_nca_cc.training.pool.structural_perturbation import (
     apply_knockout_to_circuit,
     apply_probabilistic_gate_failure,
@@ -233,7 +238,7 @@ def apply_model_and_compute_loss(
 
 
 def _prepare_model_fn(
-    model: CircuitGNN | CircuitSelfAttention | PerceiverCircuitAttention,
+    model: CircuitGatheredAttention | CircuitGNN | CircuitSelfAttention | PerceiverCircuitAttention,
     graph,
     gradient_checkpointing: bool = False,
 ):
@@ -251,7 +256,7 @@ def _prepare_model_fn(
     Returns:
         Tuple of (model_fn, attention_mask) where:
         - model_fn: Callable[graph] -> updated_graph
-        - attention_mask: Precomputed mask (or None for GNN)
+        - attention_mask: Precomputed mask (or None for GNN/gathered)
     """
     attention_mask = None
     input_output_gate = None
@@ -285,6 +290,19 @@ def _prepare_model_fn(
         def base_fn(g):
             return model(g, attention_mask=attention_mask)
 
+    elif isinstance(model, CircuitGatheredAttention):
+        # Gathered attention: precompute neighbor indices from graph topology
+        from boolean_nca_cc.models.attention.base import build_neighbor_indices
+
+        n_node = graph.nodes["layer"].shape[0]
+        neighbor_indices, neighbor_mask = build_neighbor_indices(
+            graph.senders, graph.receivers, n_node,
+            model.max_neighbors, model.use_attention_mask,
+        )
+
+        def base_fn(g):
+            return model(g, neighbor_indices=neighbor_indices, neighbor_mask=neighbor_mask)
+
     else:
         # GNN: no preprocessing needed
         base_fn = model
@@ -296,7 +314,7 @@ def _prepare_model_fn(
 
 
 def run_model_scan_with_loss(
-    model: CircuitGNN | CircuitSelfAttention | PerceiverCircuitAttention,
+    model: CircuitGatheredAttention | CircuitGNN | CircuitSelfAttention | PerceiverCircuitAttention,
     graph,
     num_steps: int,
     logits_original_shapes: list[tuple],
@@ -315,6 +333,10 @@ def run_model_scan_with_loss(
     p_fault: float | None = None,
     faulty_value: float = -10.0,
     permanent_damage: bool = True,
+    # Delayed probabilistic damage onset
+    p_fault_onset_step: int = 0,
+    # No-repair baseline: compute loss right after damage, before NCA runs
+    compute_no_repair_baseline: bool = False,
 ):
     """
     Unified scan function for all model types with loss computation at each step.
@@ -350,6 +372,14 @@ def run_model_scan_with_loss(
         p_fault: Per-gate-per-step failure probability (None = disabled, 0.0 = no failures)
         faulty_value: Value to set for failed gate logits (large negative for zero output)
         permanent_damage: Whether to apply permanent damage to gates (True) or temporary damage (False)
+        p_fault_onset_step: Step at which probabilistic damage starts (0 = from the start).
+            Use to let the circuit converge first, then introduce faults for repair testing.
+        compute_no_repair_baseline: If True, compute loss/accuracy right after damage is
+            applied but before the NCA model runs. This measures the raw damage impact without
+            repair, enabling comparison of "damaged without NCA" vs "damaged with NCA recovery".
+            Adds keys ``no_repair_loss``, ``no_repair_hard_loss``, ``no_repair_accuracy``,
+            ``no_repair_hard_accuracy`` to the aux_data in step outputs.
+
     Returns:
         Tuple of (final_graph, step_outputs) where step_outputs contains
         (graphs, losses, logits, aux_data) for each step
@@ -460,14 +490,19 @@ def run_model_scan_with_loss(
         return jax.lax.cond(is_damage_step, do_damage, no_damage, None)
 
     def apply_probabilistic_damage(graph, step_idx, gate_mask):
-        """Apply probabilistic damage: each gate has p_fault chance of failure."""
+        """Apply probabilistic damage: each gate has p_fault chance of failure.
+
+        Respects ``p_fault_onset_step``: damage is only applied when
+        ``step_idx >= p_fault_onset_step``, allowing the circuit to converge
+        to a functional state before faults are introduced.
+        """
         if not prob_damage_enabled:
             return graph, gate_mask
 
         # Get the pre-split key for this step
         step_key = prob_damage_keys[step_idx]
 
-        # Apply probabilistic failure
+        # Apply probabilistic failure (always compute for JIT consistency)
         new_logits, new_mask = apply_probabilistic_gate_failure(
             step_key,
             graph.nodes["logits"],
@@ -479,57 +514,150 @@ def run_model_scan_with_loss(
 
         new_gate_mask = jax.lax.cond(permanent_damage, lambda: new_mask, lambda: gate_mask)
 
-        # Update graph if any gates failed
-        # (always update to maintain consistent graph structure in traced code)
+        # Gate on onset step: only actually apply damage if past the onset
+        past_onset = step_idx >= p_fault_onset_step
+        final_logits = jp.where(past_onset, new_logits, graph.nodes["logits"])
+        final_gate_mask = jp.where(past_onset, new_gate_mask, gate_mask)
+
         new_nodes = {
             **graph.nodes,
-            "logits": new_logits,
-            # If permanent damage, update the gate mask to the new mask, otherwise keep the original gate mask
-            # "gate_knockout_mask": new_mask if permanent_damage else gate_mask,
-            "gate_knockout_mask": new_gate_mask,
+            "logits": final_logits,
+            "gate_knockout_mask": final_gate_mask,
         }
 
-        return graph._replace(nodes=new_nodes), new_gate_mask
+        return graph._replace(nodes=new_nodes), final_gate_mask
 
-    def scan_step(carry, step_idx):
-        current_graph, current_gate_mask = carry
-
-        # 1. Apply probabilistic damage (could happen every step if enabled)
-        current_graph, current_gate_mask = apply_probabilistic_damage(
-            current_graph,
-            step_idx,
-            current_gate_mask,
-        )
-
-        # 2. Apply discrete damage if this is a damage step
-        current_graph, current_gate_mask = apply_discrete_damage_if_needed(
-            current_graph,
-            step_idx + 1,  # +1 because damage_steps are 1-indexed
-            current_gate_mask,
-        )
-
-        # 3. Apply model and compute loss using the unified step function
-        updated_graph, loss, current_logits, aux = apply_model_and_compute_loss(
-            model_fn,
-            current_graph,
-            logits_original_shapes,
-            wires,
-            x_batch,
-            y_batch,
-            loss_cfg,
-            layer_sizes,
-        )
-
-        return (updated_graph, current_gate_mask), (updated_graph, loss, current_logits, aux)
-
-    # Run scan with step indices
+    # Capture initial gate mask for damage detection
     initial_gate_mask = graph.nodes["gate_knockout_mask"]
-    (final_graph, _), step_outputs = jax.lax.scan(
-        scan_step,
-        (graph, initial_gate_mask),
-        xs=jp.arange(num_steps),
-        length=num_steps,
-    )
+
+    if compute_no_repair_baseline:
+        # ------------------------------------------------------------------
+        # No-repair baseline: carry a *forked* graph through the scan.
+        #
+        # Before the first damage event the no-repair ("nr") graph mirrors
+        # the NCA-updated main graph exactly (same logits, same hidden
+        # state).  The moment any gate is knocked out the nr graph "forks":
+        # it keeps accumulating damage identically to the main graph but
+        # *never* receives another NCA update.  This gives a clean
+        # comparison of "damaged + NCA repair" vs "damaged, no repair".
+        # ------------------------------------------------------------------
+
+        def scan_step(carry, step_idx):
+            (
+                current_graph, current_gate_mask,
+                nr_graph, nr_gate_mask, damage_started,
+            ) = carry
+
+            # --- Sync nr graph with main BEFORE this step's damage --------
+            # While no damage has occurred yet, the nr graph is an exact
+            # copy of the (NCA-updated) main graph.  Once damage_started
+            # flips to True the nr graph keeps its own (un-repaired) state.
+            synced_nodes = jax.tree.map(
+                lambda nr_v, main_v: jp.where(damage_started, nr_v, main_v),
+                nr_graph.nodes, current_graph.nodes,
+            )
+            nr_graph = nr_graph._replace(nodes=synced_nodes)
+            nr_gate_mask = jp.where(damage_started, nr_gate_mask, current_gate_mask)
+
+            # --- 1. Apply damage to BOTH graphs (same keys → same pattern) -
+            current_graph, current_gate_mask = apply_probabilistic_damage(
+                current_graph, step_idx, current_gate_mask,
+            )
+            nr_graph, nr_gate_mask = apply_probabilistic_damage(
+                nr_graph, step_idx, nr_gate_mask,
+            )
+
+            current_graph, current_gate_mask = apply_discrete_damage_if_needed(
+                current_graph, step_idx + 1, current_gate_mask,
+            )
+            nr_graph, nr_gate_mask = apply_discrete_damage_if_needed(
+                nr_graph, step_idx + 1, nr_gate_mask,
+            )
+
+            # --- 2. Detect whether damage has now started ------------------
+            # Any gate that was active in the initial mask and is now
+            # knocked out means real damage has occurred.
+            damage_started = damage_started | jp.any(nr_gate_mask < initial_gate_mask)
+
+            # --- 3. Compute no-repair baseline loss (no NCA model) ---------
+            nr_logits = extract_logits_from_graph(nr_graph, logits_original_shapes)
+            _, no_repair_aux = get_loss_from_wires_logits(
+                logits=nr_logits,
+                wires=wires,
+                x=x_batch,
+                y_target=y_batch,
+                loss_cfg=loss_cfg,
+            )
+
+            # --- 4. Apply NCA model ONLY to the main graph -----------------
+            updated_graph, loss, current_logits, aux = apply_model_and_compute_loss(
+                model_fn,
+                current_graph,
+                logits_original_shapes,
+                wires,
+                x_batch,
+                y_batch,
+                loss_cfg,
+                layer_sizes,
+            )
+
+            # Merge no-repair metrics into aux dict
+            aux = {
+                **aux,
+                "no_repair_loss": no_repair_aux["loss"],
+                "no_repair_hard_loss": no_repair_aux["hard_loss"],
+                "no_repair_accuracy": no_repair_aux["accuracy"],
+                "no_repair_hard_accuracy": no_repair_aux["hard_accuracy"],
+            }
+
+            new_carry = (
+                updated_graph, current_gate_mask,
+                nr_graph, nr_gate_mask, damage_started,
+            )
+            return new_carry, (updated_graph, loss, current_logits, aux)
+
+        # Initial carry: nr graph starts as a copy of the main graph
+        init_carry = (
+            graph, initial_gate_mask,
+            graph, initial_gate_mask, jp.bool_(False),
+        )
+        (final_graph, _, _, _, _), step_outputs = jax.lax.scan(
+            scan_step, init_carry,
+            xs=jp.arange(num_steps), length=num_steps,
+        )
+
+    else:
+        # ------------------------------------------------------------------
+        # Standard scan (no baseline tracking)
+        # ------------------------------------------------------------------
+        def scan_step(carry, step_idx):
+            current_graph, current_gate_mask = carry
+
+            current_graph, current_gate_mask = apply_probabilistic_damage(
+                current_graph, step_idx, current_gate_mask,
+            )
+            current_graph, current_gate_mask = apply_discrete_damage_if_needed(
+                current_graph, step_idx + 1, current_gate_mask,
+            )
+
+            updated_graph, loss, current_logits, aux = apply_model_and_compute_loss(
+                model_fn,
+                current_graph,
+                logits_original_shapes,
+                wires,
+                x_batch,
+                y_batch,
+                loss_cfg,
+                layer_sizes,
+            )
+
+            return (updated_graph, current_gate_mask), (updated_graph, loss, current_logits, aux)
+
+        (final_graph, _), step_outputs = jax.lax.scan(
+            scan_step,
+            (graph, initial_gate_mask),
+            xs=jp.arange(num_steps), length=num_steps,
+        )
 
     return final_graph, step_outputs
 
@@ -575,7 +703,7 @@ def create_damage_steps(
 
 
 def evaluate_model_stepwise_generator(
-    model: CircuitGNN | CircuitSelfAttention | PerceiverCircuitAttention,
+    model: CircuitGatheredAttention | CircuitGNN | CircuitSelfAttention | PerceiverCircuitAttention,
     wires: list[jp.ndarray],
     logits: list[jp.ndarray],
     x_data: jp.ndarray,
@@ -595,6 +723,8 @@ def evaluate_model_stepwise_generator(
     p_fault: float | None = None,
     faulty_value: float = -10.0,
     permanent_damage: bool = True,
+    # Delayed probabilistic damage onset
+    p_fault_onset_step: int = 0,
     verbose: bool = False,
 ) -> Generator[StepResult, None, None]:
     """
@@ -626,6 +756,8 @@ def evaluate_model_stepwise_generator(
         p_fault: Per-gate-per-step failure probability (None = disabled, 0.0 = no failures)
         faulty_value: Value to set for failed gate logits (large negative for zero output)
         permanent_damage: Whether to apply permanent damage to gates (True) or temporary damage (False)
+        p_fault_onset_step: Step at which probabilistic damage starts (0 = from the start)
+
     Yields:
         StepResult: Results from each step including loss, accuracy, predictions, and updated logits
     """
@@ -671,12 +803,38 @@ def evaluate_model_stepwise_generator(
 
     gate_mask = graph.nodes["gate_knockout_mask"]
 
+    # Prepare probabilistic damage resources (for generator, not JIT)
+    prob_damage_enabled = p_fault is not None and p_fault > 0.0
+    if prob_damage_enabled:
+        eligible_mask = create_eligible_gate_mask(layer_sizes)
+        prob_damage_key = jax.random.PRNGKey(99)  # separate key stream for prob damage
+
     # Run optimization steps
     step = 0
     while max_steps is None or step < max_steps:
         step += 1
 
-        # Apply damage if needed
+        # Apply probabilistic damage (respecting onset step)
+        if prob_damage_enabled and step >= p_fault_onset_step:
+            prob_damage_key, step_key = jax.random.split(prob_damage_key)
+            new_logits, new_mask = apply_probabilistic_gate_failure(
+                step_key,
+                graph.nodes["logits"],
+                gate_mask,
+                eligible_mask,
+                p_fault,
+                faulty_value,
+            )
+            new_gate_mask = new_mask if permanent_damage else gate_mask
+            new_nodes = {
+                **graph.nodes,
+                "logits": new_logits,
+                "gate_knockout_mask": new_gate_mask,
+            }
+            graph = graph._replace(nodes=new_nodes)
+            gate_mask = new_gate_mask
+
+        # Apply discrete damage if needed
         if damage_steps is not None and step in damage_steps:
             damage_key, new_damage_key = jax.random.split(damage_key)
             modified_logits, modified_gate_mask = apply_knockout_to_circuit(
@@ -724,7 +882,7 @@ def evaluate_model_stepwise_generator(
 
 
 def evaluate_model_stepwise(
-    model: CircuitGNN | CircuitSelfAttention | PerceiverCircuitAttention,
+    model: CircuitGatheredAttention | CircuitGNN | CircuitSelfAttention | PerceiverCircuitAttention,
     wires: list[jp.ndarray],
     logits: list[jp.ndarray],
     x_data: jp.ndarray,
@@ -746,6 +904,10 @@ def evaluate_model_stepwise(
     # Discrete damage parameters (for visualization)
     damage_key: jax.random.PRNGKey = jax.random.PRNGKey(42),
     damage_steps: list[int] | None = None,
+    # Delayed probabilistic damage onset
+    p_fault_onset_step: int = 0,
+    # No-repair baseline
+    compute_no_repair_baseline: bool = False,
 ) -> dict:
     """
     Evaluate model performance using the unified JIT-compiled scan.
@@ -774,6 +936,8 @@ def evaluate_model_stepwise(
         p_fault: Per-gate-per-step failure probability (None = disabled, 0.0 = no failures)
         faulty_value: Value to set for failed gate logits (large negative for zero output)
         permanent_damage: Whether to apply permanent damage to gates (True) or temporary damage (False)
+        p_fault_onset_step: Step at which probabilistic damage starts (0 = from the start)
+        compute_no_repair_baseline: If True, include no-repair baseline metrics in results
 
     Returns:
         Dictionary with metrics collected at each step
@@ -818,6 +982,8 @@ def evaluate_model_stepwise(
         p_fault=p_fault,
         faulty_value=faulty_value,
         permanent_damage=permanent_damage,
+        p_fault_onset_step=p_fault_onset_step,
+        compute_no_repair_baseline=compute_no_repair_baseline,
     )
 
     # Extract metrics from scan outputs
@@ -833,6 +999,15 @@ def evaluate_model_stepwise(
         "hard_accuracy": [float(a) for a in aux_data["hard_accuracy"]],
         "final_graph": final_graph,
     }
+
+    # Include no-repair baseline metrics if computed
+    if compute_no_repair_baseline and "no_repair_loss" in aux_data:
+        step_results["no_repair_loss"] = [float(v) for v in aux_data["no_repair_loss"]]
+        step_results["no_repair_hard_loss"] = [float(v) for v in aux_data["no_repair_hard_loss"]]
+        step_results["no_repair_accuracy"] = [float(v) for v in aux_data["no_repair_accuracy"]]
+        step_results["no_repair_hard_accuracy"] = [
+            float(v) for v in aux_data["no_repair_hard_accuracy"]
+        ]
 
     if verbose:
         print(f"Final loss: {step_results['loss'][-1]:.4f}")
@@ -852,7 +1027,7 @@ log = logging.getLogger(__name__)
 
 
 def evaluate_model_stepwise_batched(
-    model: CircuitGNN | CircuitSelfAttention | PerceiverCircuitAttention,
+    model: CircuitGatheredAttention | CircuitGNN | CircuitSelfAttention | PerceiverCircuitAttention,
     batch_wires: list[jp.ndarray],  # Shape: [batch_size, ...original_wire_shape...]
     batch_logits: list[jp.ndarray],  # Shape: [batch_size, ...original_logit_shape...]
     x_data: jp.ndarray,
@@ -872,6 +1047,10 @@ def evaluate_model_stepwise_batched(
     p_fault: float | None = None,
     faulty_value: float = -10.0,
     permanent_damage: bool = True,
+    # Delayed probabilistic damage onset
+    p_fault_onset_step: int = 0,
+    # No-repair baseline
+    compute_no_repair_baseline: bool = False,
     # Chunking and details
     chunk_size: int | None = None,
     return_first_circuit_details: bool = False,
@@ -944,6 +1123,8 @@ def evaluate_model_stepwise_batched(
                 p_fault=p_fault,
                 faulty_value=faulty_value,
                 permanent_damage=permanent_damage,
+                p_fault_onset_step=p_fault_onset_step,
+                compute_no_repair_baseline=compute_no_repair_baseline,
                 chunk_size=None,  # Don't recurse further
                 return_first_circuit_details=return_first_circuit_details and (i == 0),
             )
@@ -952,10 +1133,18 @@ def evaluate_model_stepwise_batched(
         total = sum(w for w, *_ in chunks)
         final_graphs = jax.tree.map(lambda x: jp.concat(x, axis=0), chunks[0][0])
         step_metrics = {"step": chunks[0][2]["step"]}
-        for k in ["loss", "hard_loss", "accuracy", "hard_accuracy"]:
-            step_metrics[k] = [
-                sum(w * r[k][s] for w, r in chunks) / total for s in range(n_message_steps)
+        avg_keys = ["loss", "hard_loss", "accuracy", "hard_accuracy"]
+        # Include no-repair metrics if present
+        if compute_no_repair_baseline:
+            avg_keys += [
+                "no_repair_loss", "no_repair_hard_loss",
+                "no_repair_accuracy", "no_repair_hard_accuracy",
             ]
+        for k in avg_keys:
+            if k in chunks[0][2]:
+                step_metrics[k] = [
+                    sum(w * r[k][s] for w, r in chunks) / total for s in range(n_message_steps)
+                ]
         if "first_circuit_results" in chunks[0][1]:
             step_metrics["first_circuit_results"] = chunks[0][1]["first_circuit_results"]
         return final_graphs, step_metrics
@@ -1017,6 +1206,9 @@ def evaluate_model_stepwise_batched(
             p_fault=p_fault,
             faulty_value=faulty_value,
             permanent_damage=permanent_damage,
+            # Delayed onset and no-repair baseline
+            p_fault_onset_step=p_fault_onset_step,
+            compute_no_repair_baseline=compute_no_repair_baseline,
         )
 
     # Vmap over batch
@@ -1039,6 +1231,22 @@ def evaluate_model_stepwise_batched(
         # Vmapped graphs: size [batch_size, n_steps, ...graph_shape...]
         "graphs": all_batch_graphs,
     }
+
+    # Include no-repair baseline metrics if computed
+    if compute_no_repair_baseline and "no_repair_loss" in aux_data:
+        step_metrics["no_repair_loss"] = [
+            float(jp.mean(aux_data["no_repair_loss"][:, i])) for i in range(n_message_steps)
+        ]
+        step_metrics["no_repair_hard_loss"] = [
+            float(jp.mean(aux_data["no_repair_hard_loss"][:, i])) for i in range(n_message_steps)
+        ]
+        step_metrics["no_repair_accuracy"] = [
+            float(jp.mean(aux_data["no_repair_accuracy"][:, i])) for i in range(n_message_steps)
+        ]
+        step_metrics["no_repair_hard_accuracy"] = [
+            float(jp.mean(aux_data["no_repair_hard_accuracy"][:, i]))
+            for i in range(n_message_steps)
+        ]
 
     # Optionally extract detailed results for first circuit (for visualization)
     if return_first_circuit_details:

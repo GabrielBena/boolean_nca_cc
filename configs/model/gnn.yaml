@@ -5,8 +5,28 @@ defaults:
   - _base
 
 type: "gnn"
-mlp_dim: null # If null, will be set to circuit_hidden_dim * 2
-mlp_dim_multiplier: 2
+
+# Latent dimension — same as in self_attention.yaml for parameter-count parity
+attention_dim: 96
+# FFN hidden dimension: set explicitly to ~match self-attention param count
+# (self_attention uses attention_dim * 2 = 192, but the GNN has an extra edge MLP
+# so we use a smaller FFN to compensate)
+mlp_dim: 128
+mlp_dim_multiplier: 2  # only used when mlp_dim is null
+mlp_n_layers: 1  # 1 hidden layer (matches self-attention's single-layer FFN)
+
+# Message passing
 message_passing: true
-use_attention: false 
-mlp_n_layers: 2
+
+# Aggregation: sparse multi-head attention (set false for sum aggregation)
+use_attention: true
+num_heads: 8
+
+# Node loss (adds one extra feature to the node features)
+use_node_loss: true
+
+# Positional encodings (aligned with self_attention config)
+# layer_PE: normalized depth fraction [0,1] — scale-free across circuit depths
+# intra_layer_PE: absolute gate index within layer — breaks scale-freedom for random wiring
+use_intra_layer_PE: false
+use_layer_PE: true

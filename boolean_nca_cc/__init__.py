@@ -17,7 +17,7 @@ from boolean_nca_cc.circuits.model import (
     run_layer,
 )
 from boolean_nca_cc.circuits.train import TrainState, train_step
-from boolean_nca_cc.models import CircuitGNN, run_gnn_scan
+from boolean_nca_cc.models import CircuitGNN
 from boolean_nca_cc.training import (
     evaluate_model_stepwise,
     train_model,
@@ -40,7 +40,6 @@ __all__ = [
     # Circuits
     "generate_layer_sizes",
     "run_circuit",
-    "run_gnn_scan",
     "run_layer",
     # Training
     "train_model",

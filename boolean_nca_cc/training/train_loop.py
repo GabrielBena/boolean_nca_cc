@@ -19,7 +19,7 @@ from tqdm.auto import tqdm
 import wandb
 from boolean_nca_cc.circuits.train import LOSS_L4, LossConfig
 from boolean_nca_cc.circuits.viz import plot_wandb_stepwise_results
-from boolean_nca_cc.models import CircuitGNN, CircuitSelfAttention
+from boolean_nca_cc.models import CircuitGatheredAttention, CircuitGNN, CircuitSelfAttention
 from boolean_nca_cc.training.checkpointing import (
     BestModelTracker,
     EarlyStopping,
@@ -165,6 +165,10 @@ def run_unified_periodic_evaluation(
     damage_steps=None,
     knockout_per_damage_step=1,
     damage_key=jax.random.PRNGKey(42),
+    # Delayed probabilistic damage onset
+    p_fault_onset_step: int = 0,
+    # No-repair baseline
+    compute_no_repair_baseline: bool = False,
 ) -> dict:
     """
     Run unified periodic evaluation with IN/OUT distribution and train/test data splits.
@@ -289,6 +293,8 @@ def run_unified_periodic_evaluation(
                 p_fault=p_fault if with_damage else None,
                 faulty_value=faulty_value,
                 permanent_damage=permanent_damage,
+                p_fault_onset_step=p_fault_onset_step if with_damage else 0,
+                compute_no_repair_baseline=compute_no_repair_baseline if with_damage else False,
                 chunk_size=datasets.target_batch_size,
                 return_first_circuit_details=False,
             )
@@ -301,6 +307,14 @@ def run_unified_periodic_evaluation(
                 f"{prefix}/final_hard_accuracy": result["hard_accuracy"][-1],
                 f"{prefix}/epoch": epoch,
             }
+
+            # Add no-repair baseline final metrics if available
+            if with_damage and compute_no_repair_baseline and "no_repair_hard_accuracy" in result:
+                metrics[f"{prefix}/final_no_repair_loss"] = result["no_repair_loss"][-1]
+                metrics[f"{prefix}/final_no_repair_hard_loss"] = result["no_repair_hard_loss"][-1]
+                metrics[f"{prefix}/final_no_repair_accuracy"] = result["no_repair_accuracy"][-1]
+                metrics[f"{prefix}/final_no_repair_hard_accuracy"] = result["no_repair_hard_accuracy"][-1]
+
             return result, metrics
 
         # Run evaluations: loop over wiring (in/out) x data (train/test)
@@ -418,6 +432,9 @@ def run_unified_periodic_evaluation(
                                     damage_key=damage_key,
                                     p_fault=None,  # Pure discrete damage, no probabilistic
                                     permanent_damage=permanent_damage,
+                                    # Always compute no-repair baseline for discrete damage
+                                    # (shotgun damage is where the repair benefit is most visible)
+                                    compute_no_repair_baseline=compute_no_repair_baseline,
                                     chunk_size=datasets.target_batch_size,
                                     return_first_circuit_details=False,
                                 )
@@ -614,7 +631,7 @@ def train_model(
     wiring_fixed_key: jax.random.PRNGKey = jax.random.PRNGKey(
         42
     ),  # Fixed key for generating wirings when wiring_mode='fixed'
-    init_model: CircuitGNN | CircuitSelfAttention | None = None,
+    init_model: CircuitGatheredAttention | CircuitGNN | CircuitSelfAttention | None = None,
     init_optimizer: nnx.Optimizer | None = None,
     initial_metrics: dict | None = None,
     # Checkpointing parameters
@@ -654,6 +671,11 @@ def train_model(
     faulty_logit_value: float = -10.0,
     n_damage_steps: int = 0,  # Discrete damage volleys during eval
     knockouts_per_event: int = 1,  # Gates per volley (auto-computed if null in config)
+    # Delayed probabilistic damage onset
+    p_fault_onset_step_train: int = 0,  # Onset step for training scan
+    p_fault_onset_step_eval: int = 0,  # Onset step for eval scan
+    # No-repair baseline (for eval only)
+    compute_no_repair_baseline: bool = False,
     # Debugging parameters
     do_check_gradients: bool = False,
 ):
@@ -730,6 +752,9 @@ def train_model(
         faulty_logit_value: Value for knocked-out gate logits (large negative)
         n_damage_steps: Number of discrete damage volleys during eval
         knockouts_per_event: Gates knocked out per discrete damage volley
+        p_fault_onset_step_train: Step at which probabilistic damage starts during training
+        p_fault_onset_step_eval: Step at which probabilistic damage starts during eval
+        compute_no_repair_baseline: Whether to compute no-repair baseline metrics during eval
         do_check_gradients: Whether to check gradients for zero values
     Returns:
         Dictionary with trained GNN model and training metrics
@@ -944,6 +969,8 @@ def train_model(
                 p_fault=p_fault,
                 faulty_value=faulty_value,
                 permanent_damage=permanent_damage,
+                # Delayed onset (let circuit converge before damage starts)
+                p_fault_onset_step=p_fault_onset_step_train,
             )
 
             loss_step = get_loss_step(loss_key)
@@ -1453,6 +1480,9 @@ def train_model(
                     damage_steps=damage_steps,
                     knockout_per_damage_step=knockouts_per_event,
                     damage_key=damage_key,
+                    # Delayed onset & no-repair baseline
+                    p_fault_onset_step=p_fault_onset_step_eval,
+                    compute_no_repair_baseline=compute_no_repair_baseline,
                 )
                 # Merge all final metrics into one dict for early stopping
                 # (covers IN-dist, OOD, damaged, etc.)
