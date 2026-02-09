@@ -2,8 +2,8 @@
 
 # Default parameters for experiment
 defaults:
-  - model: perceiver_attention  # Default model (gnn or self_attention or perceiver_attention)
-  - circuit: binary_multiply_large
+  - model: self_attention  # Default model (gnn or self_attention or perceiver_attention)
+  - circuit: reverse_large
   - loss: bce  # Options: l2, l4, bce, bce_w3, focal, asym, focal_asym
   - _self_  # For self-overrides
 
@@ -33,7 +33,7 @@ graph:
 # Training parameters
 training:
   # WIRING MODE : "random" or "fixed"
-  wiring_mode: "random"  # Options: "fixed", "genetic", or "random"
+  wiring_mode: "fixed"  # Options: "fixed", "genetic", or "random"
   # Diversity will always be fully random for random mode. This controls number of different wirings for fixed.
   initial_diversity: 1
   # INNER LOOP
@@ -57,7 +57,7 @@ training:
     num_devices: null  # Number of devices to use (null = all available)
   
   # OPTIMIZATION
-  learning_rate: 5e-4
+  learning_rate: 3e-4
   weight_decay: 1e-5
   # LEARNING RATE SCHEDULER
   # Options: "constant", "exponential", "cosine", "linear_warmup", "adaptive", "reduce_on_plateau"
@@ -99,7 +99,7 @@ training:
 
   # NUMBER OF EPOCHS
   epochs: null
-  epochs_power_of_2: 17 # 2^n
+  epochs_power_of_2: 16 # 2^n
   # USE SCAN
   use_scan: true
   # GRADIENT CHECKPOINTING (remat)
@@ -112,7 +112,7 @@ training:
 
 # Pool configuration for meta-learning
 pool:
-  noise_scale: 0.0
+  noise_scale: 0.1
 
   # size: 8192
   size: 4096
@@ -132,32 +132,34 @@ pool:
   initial_diversity: ${training.initial_diversity} # For genetic mutation number of initial wires
 
 # Gate damage configuration for resilience testing
-# Simulates permanent structural damage to gates during ongoing optimization
-# Damaged gates have faulty logits and cannot receive model updates (they still emit messages to neighbors)
+# Both modes target the same fraction of damaged gates for a fair comparison:
+#   - Training uses p_fault (probabilistic): gates fail independently each step
+#   - Evaluation uses discrete "shotgun" damage: N volleys of knockouts (OOD test)
+# The single `target_damage_fraction` drives both, auto-computing p_fault and knockouts.
 damage:
-  enabled: false  # Master switch for damage system
+  enabled: true  # Master switch for damage system
+  permanent: "random"  # true / false / "random" (coin flip per circuit)
   
-  # Damage mode: "probabilistic" or "discrete"
-  # - probabilistic: Each gate has p_fault probability of failing at each optimization step (during scan)
-  mode: "probabilistic"
-  permanent: true # Whether to apply permanent damage to gates (True) or temporary damage (False) or random (True/False)
+  # === TARGET DAMAGE (the single knob) ===
+  # Fraction of eligible (hidden) gates expected to be damaged by circuit reset.
+  # Drives BOTH p_fault and knockouts_per_event so they are directly comparable.
+  target_damage_fraction: 0.10  # e.g., 15% of hidden gates
   
-  # === PROBABILISTIC MODE PARAMETERS === (Used for training)
-  # Per-gate-per-step failure probability
-  p_fault: null  # Auto-computed from expected_faulty_gates_at_reset if null
-  # Target number of faulty gates when circuit is reset (used to compute p_fault)
-  expected_faulty_gates_at_reset: 16
+  # === PROBABILISTIC (training) ===
+  # Auto-computed: p_fault = 1 - (1 - target_damage_fraction)^(1/pool.expected_updates)
+  # For eval, p_fault is re-derived for eval.inner_steps so the final damage matches.
+  # Set explicitly to override auto-computation.
+  p_fault: null
   
-  # === DISCRETE MODE PARAMETERS === (Only used for visualization)
-  # Damage intensity - how many gates to knock out per damage event
-  knockouts_per_event: 8
+  # === DISCRETE "SHOTGUN" (evaluation / OOD testing) ===
+  # Number of damage volleys during evaluation stepwise run
+  n_damage_steps: 2
+  # Gates knocked out per volley. null = auto-computed:
+  #   knockouts_per_event = ceil(target_damage_fraction * n_eligible / n_damage_steps)
+  knockouts_per_event: null
   
-  # === SHARED PARAMETERS ===
-  # Behavior of damaged gates
+  # === SHARED ===
   faulty_logit_value: -10.0  # Large negative value -> sigmoid outputs ~0
-  
-  # Protection against over-damaging circuits
-  max_damage_per_circuit: null  # Max total knockouts per circuit (null = no limit)
 
 # Backpropagation baseline
 backprop:
@@ -182,8 +184,6 @@ eval:
   batch_size_out: 64  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
   log_pool_scatter: true
   do_ood_evaluation: null # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
-  damage_enabled: true # Whether to apply damage during evaluation (if damage.enabled is also true)
-  n_damage_steps: 2 # Number of damage steps to apply during evaluation
   get_all_wirings: true # Whether to get all wirings (True) or a subset (False)
   
 # Early stopping based on accuracy

@@ -680,75 +680,109 @@ def create_flat_active_mask(layer_sizes: list[tuple[int, int]]) -> jp.ndarray:
     return jp.ones(total_gates, dtype=jp.float32)
 
 
-def process_probabilistic_damage_configuration(cfg, layer_sizes, log=None):
-    """
-    Process probabilistic damage configuration to compute p_fault.
+def _p_fault_from_fraction(target_fraction: float, n_steps: int) -> float:
+    """Compute per-gate-per-step failure probability for a target damaged fraction.
 
-    Uses the formula from compute_p_fault_from_expected:
-        p_fault = 1 - (1 - k/n)^(1/L)
-
-    Where:
-        k = expected_faulty_gates_at_reset
-        n = number of eligible gates (hidden layers)
-        L = expected circuit lifetime in steps (pool.expected_updates * n_message_steps)
+    Inverts:  frac = 1 - (1 - p)^L   →   p = 1 - (1 - frac)^(1/L)
 
     Args:
-        cfg: Configuration object with damage and pool settings
-        layer_sizes: List of (gate_n, group_size) tuples for the circuit
+        target_fraction: Desired fraction of eligible gates damaged after n_steps.
+        n_steps: Number of optimisation steps (circuit lifetime).
 
     Returns:
-        Computed p_fault value, or None if damage is disabled or mode is discrete
+        Per-gate-per-step failure probability.
     """
-    from boolean_nca_cc.training.pool.structural_perturbation import (
-        compute_p_fault_from_expected,
-        count_eligible_gates,
-    )
+    if target_fraction <= 0.0 or n_steps <= 0:
+        return 0.0
+    frac = min(target_fraction, 1.0)
+    return float(1.0 - (1.0 - frac) ** (1.0 / n_steps))
 
-    # Skip if damage disabled or mode is discrete
-    if not cfg.damage.enabled:
-        if log is not None:
-            log.info("Damage system disabled, p_fault = None")
-        return None
 
-    damage_mode = cfg.damage.get("mode", "probabilistic")
-    if damage_mode != "probabilistic":
-        if log is not None:
-            log.info(f"Damage mode is '{damage_mode}', not computing p_fault")
-        return None
+def compute_damage_params(cfg, layer_sizes, log=None) -> dict:
+    """Derive all damage parameters from ``cfg.damage.target_damage_fraction``.
 
-    # If p_fault is explicitly set, use it
-    if cfg.damage.get("p_fault") is not None:
-        p_fault = float(cfg.damage.p_fault)
-        if log is not None:
-            log.info(f"Using explicit p_fault = {p_fault:.2e}")
-        return p_fault
+    Returns a dict with:
+        enabled             - master switch
+        target_fraction     - the configured fraction (echo)
+        n_eligible          - number of hidden-layer gates
+        p_fault_train       - p_fault tuned for pool.expected_updates steps
+        p_fault_eval        - p_fault tuned for eval.inner_steps steps
+        n_damage_steps      - number of discrete damage volleys in eval
+        knockouts_per_event - gates per volley (auto or explicit)
+        faulty_logit_value  - logit value for damaged gates
+        permanent           - permanence setting (bool | "random")
+    """
+    result = {
+        "enabled": bool(cfg.damage.enabled),
+        "target_fraction": 0.0,
+        "n_eligible": 0,
+        "p_fault_train": None,
+        "p_fault_eval": None,
+        "n_damage_steps": int(cfg.damage.get("n_damage_steps", 0)),
+        "knockouts_per_event": 0,
+        "faulty_logit_value": float(cfg.damage.get("faulty_logit_value", -10.0)),
+        "permanent": cfg.damage.get("permanent", True),
+    }
 
-    # Auto-compute p_fault from expected_faulty_gates_at_reset
-    expected_faulty = cfg.damage.get("expected_faulty_gates_at_reset", 4)
-    if expected_faulty is None or expected_faulty <= 0:
-        if log is not None:
-            log.info("expected_faulty_gates_at_reset not set or <= 0, p_fault = None")
-        return None
+    if not result["enabled"]:
+        if log:
+            log.info("Damage system disabled")
+        return result
 
-    # Count eligible gates (hidden layers only)
     n_eligible = count_eligible_gates(layer_sizes)
+    result["n_eligible"] = n_eligible
     if n_eligible <= 0:
-        if log is not None:
-            log.warning("No eligible gates for damage (no hidden layers?), p_fault = None")
-        return None
+        if log:
+            log.warning("No eligible gates for damage (no hidden layers?)")
+        return result
 
-    # Compute p_fault
-    p_fault = compute_p_fault_from_expected(
-        expected_faulty_gates=expected_faulty,
-        n_eligible_gates=n_eligible,
-        expected_lifetime_steps=cfg.pool.expected_updates,
-    )
+    target_frac = float(cfg.damage.get("target_damage_fraction", 0.0))
+    result["target_fraction"] = target_frac
+    if target_frac <= 0.0:
+        if log:
+            log.info("target_damage_fraction <= 0, damage effectively disabled")
+        return result
 
-    if log is not None:
+    train_steps = int(cfg.pool.expected_updates)
+    eval_steps = int(cfg.eval.inner_steps)
+
+    # --- p_fault (probabilistic) -----------------------------------------
+    explicit_p = cfg.damage.get("p_fault")
+    if explicit_p is not None:
+        result["p_fault_train"] = float(explicit_p)
+        # Re-derive eval p_fault from target fraction (not from the override)
+        result["p_fault_eval"] = _p_fault_from_fraction(target_frac, eval_steps)
+        if log:
+            log.info(f"Using explicit p_fault_train = {result['p_fault_train']:.2e}")
+    else:
+        result["p_fault_train"] = _p_fault_from_fraction(target_frac, train_steps)
+        result["p_fault_eval"] = _p_fault_from_fraction(target_frac, eval_steps)
+
+    # --- Discrete knockouts (shotgun) ------------------------------------
+    n_dmg = result["n_damage_steps"]
+    explicit_ko = cfg.damage.get("knockouts_per_event")
+    if explicit_ko is not None:
+        result["knockouts_per_event"] = int(explicit_ko)
+    elif n_dmg > 0:
+        import math
+        result["knockouts_per_event"] = max(1, math.ceil(target_frac * n_eligible / n_dmg))
+    else:
+        result["knockouts_per_event"] = 0
+
+    # --- Logging ---------------------------------------------------------
+    if log:
         log.info(
-            f"Computed p_fault = {p_fault:.2e} "
-            f"(target {expected_faulty} faulty gates, {n_eligible} eligible gates, "
-            f"{cfg.pool.expected_updates} updates lifetime)"
+            f"Damage params (target {target_frac:.1%} of {n_eligible} gates):\n"
+            f"  p_fault_train  = {result['p_fault_train']:.2e}  ({train_steps} steps)\n"
+            f"  p_fault_eval   = {result['p_fault_eval']:.2e}  ({eval_steps} steps)\n"
+            f"  discrete: {n_dmg} volleys x {result['knockouts_per_event']} knockouts"
         )
 
-    return p_fault
+    return result
+
+
+# --- Legacy wrapper (kept for notebook compatibility) ---------------------
+def process_probabilistic_damage_configuration(cfg, layer_sizes, log=None):
+    """Compute p_fault for training.  Delegates to ``compute_damage_params``."""
+    params = compute_damage_params(cfg, layer_sizes, log)
+    return params["p_fault_train"]

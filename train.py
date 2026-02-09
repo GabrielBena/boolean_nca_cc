@@ -46,7 +46,7 @@ from boolean_nca_cc.training.eval_datasets import (
     create_unified_evaluation_datasets,
 )
 from boolean_nca_cc.training.pool.structural_perturbation import (
-    process_probabilistic_damage_configuration,
+    compute_damage_params,
 )
 from boolean_nca_cc.training.train_loop import (
     run_unified_periodic_evaluation,
@@ -112,6 +112,11 @@ def extract_track_metrics_config(cfg) -> list[str] | None:
             for d in data_splits:
                 for m in metrics:
                     result.append(f"eval_{dp}{w}_{d}_{m}")
+
+    if result:
+        log.info(f"Tracking metrics: {' | '.join(result)}")
+    else:
+        log.info("No metrics to track")
 
     return result if result else None
 
@@ -561,24 +566,9 @@ def main(cfg: DictConfig) -> None:
 
     # Log damage configuration if enabled
     if cfg.damage.enabled:
-        damage_mode = cfg.damage.mode
-        log.info("Final Damage Configuration:")
-        log.info(f"  Mode: {damage_mode.upper()}")
-
-        if damage_mode == "probabilistic":
-            # p_fault will be computed later, but log the target
-            expected_faulty = cfg.damage.get("expected_faulty_gates_at_reset", 4)
-            log.info(f"  Expected Faulty Gates at Reset: {expected_faulty}")
-            log.info(
-                f"  Circuit Lifetime: {stats.expected_lifetime_epochs:.1f} epochs x {effective_n_message_steps} steps"
-            )
-            log.info("(p_fault will be auto-computed before training)")
-        else:
-            raise ValueError(f"Damage mode {damage_mode} not supported")
-
-        log.info(f"  Faulty Logit Value: {cfg.damage.faulty_logit_value}")
-        if cfg.damage.max_damage_per_circuit is not None:
-            log.info(f"  Max Damage per Circuit: {cfg.damage.max_damage_per_circuit}")
+        target_frac = cfg.damage.get("target_damage_fraction", 0.0)
+        log.info(f"Damage Configuration: target {target_frac:.1%} of hidden gates")
+        log.info("  (p_fault and knockouts will be auto-computed before training)")
     else:
         log.info("Damage Configuration: DISABLED")
 
@@ -781,11 +771,8 @@ def main(cfg: DictConfig) -> None:
     # Get track_metrics configuration for training
     track_metrics = extract_track_metrics_config(cfg)
 
-    # Compute p_fault for probabilistic damage mode
-    p_fault = process_probabilistic_damage_configuration(cfg, layer_sizes, log)
-    cfg.damage.p_fault = p_fault
-    if p_fault is not None:
-        log.info(f"Computed p_fault = {p_fault:.2e}")
+    # Compute all damage parameters from target_damage_fraction
+    damage_params = compute_damage_params(cfg, layer_sizes, log)
 
     # Train model
     log.info(f"Starting {cfg.model.type.upper()} training")
@@ -846,8 +833,6 @@ def main(cfg: DictConfig) -> None:
         periodic_eval_batch_size_out=cfg.eval.batch_size_out,
         periodic_eval_do_ood_evaluation=cfg.eval.do_ood_evaluation,
         periodic_eval_log_pool_scatter=cfg.eval.log_pool_scatter,
-        periodic_eval_damage_enabled=cfg.eval.damage_enabled,
-        periodic_eval_n_damage_steps=cfg.eval.n_damage_steps,
         periodic_eval_get_all_wirings=cfg.eval.get_all_wirings,
         # WandB parameters
         wandb_logging=cfg.wandb.enabled,
@@ -863,16 +848,14 @@ def main(cfg: DictConfig) -> None:
         # Best model tracking parameters
         save_best=cfg.checkpoint.save_best,
         track_metrics=track_metrics,
-        # Damage parameters for resilience testing
-        damage_enabled=cfg.damage.enabled,
-        damage_mode=cfg.damage.mode,
-        # Probabilistic damage parameters
-        p_fault=p_fault,
-        permanent_damage=cfg.damage.permanent,
-        max_damage_per_circuit=cfg.damage.max_damage_per_circuit,
-        faulty_logit_value=cfg.damage.faulty_logit_value,
-        # Discrete damage parameters (ised only for visualization for now)
-        knockouts_per_event=cfg.damage.knockouts_per_event,
+        # Damage parameters (derived from target_damage_fraction)
+        damage_enabled=damage_params["enabled"],
+        p_fault=damage_params["p_fault_train"],
+        p_fault_eval=damage_params["p_fault_eval"],
+        permanent_damage=damage_params["permanent"],
+        faulty_logit_value=damage_params["faulty_logit_value"],
+        n_damage_steps=damage_params["n_damage_steps"],
+        knockouts_per_event=damage_params["knockouts_per_event"],
         # Debugging parameters
         do_check_gradients=cfg.training.check_gradients,
     )

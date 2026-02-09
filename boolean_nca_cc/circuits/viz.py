@@ -531,50 +531,129 @@ def create_wandb_visualization(logits, wires, x, y0, title_prefix="", hard=True)
     }
 
 
-def plot_wandb_stepwise_results(step_metrics, damage_steps=None, smooth=False):
+def plot_wandb_stepwise_results(
+    step_metrics,
+    damage_steps=None,
+    smooth=False,
+    title=None,
+    damage_fraction=None,
+):
     """
-    Plot the step-wise results of a wandb run.
+    Plot step-wise loss and accuracy curves from evaluation results.
+
+    Supports batch-averaged dicts (from ``evaluate_model_stepwise_batched``) and
+    legacy lists of ``StepResult`` objects.
+
+    Args:
+        step_metrics: Either a list of StepResult objects or a dict with keys
+                      'step', 'loss', 'hard_loss', 'accuracy', 'hard_accuracy'.
+        damage_steps: Step indices where discrete damage was applied (red vlines,
+                      only used as fallback when ``damage_fraction`` is not provided).
+        smooth: EMA smoothing control.
+                - ``False``: no smoothing (default).
+                - ``True``: auto EMA with span ≈ len/20.
+                - ``int``: explicit EMA span (higher = smoother).
+        title: Figure suptitle (defaults to "Step-wise Results").
+        damage_fraction: Optional array-like [n_steps] of fraction of damaged gates
+                         per step. Plotted on a secondary y-axis when provided.
     """
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True, dpi=200)
+    # --- colours (colorblind-safe, Wong palette inspired) -----------------
+    C_SOFT = "#56B4E9"  # sky blue   — clearly blue under all CVD types
+    C_HARD = "#E69F00"  # amber      — yellow-orange, distinct from blue
+    C_DAMAGE_LINE = "#CC79A7"  # rose — pinkish, visible under deuteranopia
+    C_DAMAGE_FRAC = "#999999"  # neutral grey — never confused with any hue
 
-    step_dict = {
-        key: np.array([getattr(s, key) for s in step_metrics])
-        for key in ["step", "loss", "hard_loss", "accuracy", "hard_accuracy"]
-    }
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.), constrained_layout=True, dpi=200)
 
-    if damage_steps is not None or not smooth:
-        # We don't smooth the results to plot vlines at damage steps
-        smooth_step_dict = step_dict
+    # --- parse input -----------------------------------------------------
+    if isinstance(step_metrics, dict):
+        step_dict = {
+            key: np.array(step_metrics[key])
+            for key in ["step", "loss", "hard_loss", "accuracy", "hard_accuracy"]
+        }
     else:
-        v = len(step_dict["step"]) // 20
-
-        smooth_step_dict = {
-            key: np.convolve(step_dict[key], np.ones(v) / v, mode="valid")
-            for key in ["loss", "hard_loss", "accuracy", "hard_accuracy"]
+        step_dict = {
+            key: np.array([getattr(s, key) for s in step_metrics])
+            for key in ["step", "loss", "hard_loss", "accuracy", "hard_accuracy"]
         }
 
-    # Plot Loss
-    axes[0].plot(smooth_step_dict["loss"], label="Soft Loss")
-    # axes[0].plot(smooth_step_dict["hard_loss"], label="Hard Loss")
-    axes[0].set_title("Loss")
+    n = len(step_dict["step"])
+    steps_x = np.arange(n)
+
+    # --- EMA smoothing (preserves array length, no shift) ----------------
+    def _ema(arr, alpha):
+        """Exponential moving average. alpha ∈ (0,1], higher = less smoothing."""
+        out = np.empty_like(arr, dtype=float)
+        out[0] = arr[0]
+        for i in range(1, len(arr)):
+            out[i] = alpha * arr[i] + (1.0 - alpha) * out[i - 1]
+        return out
+
+    def _smooth(arr):
+        if not smooth:
+            return arr
+        span = smooth if isinstance(smooth, int) else max(n // 20, 2)
+        alpha = 2.0 / (span + 1.0)
+        return _ema(np.asarray(arr, dtype=float), alpha)
+
+    # --- helper: add damage twinx to an axis (no per-axis legend) ---------
+    def _add_damage_overlays(ax):
+        """Add damage fraction twinx (preferred) or vlines fallback."""
+        if damage_fraction is not None:
+            ax2 = ax.twinx()
+            frac = _smooth(np.asarray(damage_fraction, dtype=float))
+            ax2.plot(steps_x, frac, color=C_DAMAGE_FRAC, alpha=0.8, linewidth=1.5)
+            ax2.set_ylabel("Damaged gate fraction", color=C_DAMAGE_FRAC, fontsize=9)
+            ax2.tick_params(axis="y", colors=C_DAMAGE_FRAC, labelsize=8)
+            ax2.set_ylim(bottom=0)
+        elif damage_steps is not None:
+            for ds in damage_steps:
+                ax.axvline(ds - 1, color=C_DAMAGE_LINE, linestyle="--", alpha=0.45, linewidth=0.8)
+
+    # --- Loss subplot (left) ---------------------------------------------
+    axes[0].plot(steps_x, _smooth(step_dict["loss"]), color=C_SOFT, linewidth=1.2)
+    axes[0].set_title("Loss", fontsize=11)
     axes[0].set_xlabel("Step")
     axes[0].set_ylabel("Loss")
-    axes[0].legend()
-    if damage_steps is not None:
-        [axes[0].axvline(i - 1, color="r", linestyle="--") for i in damage_steps]
+    _add_damage_overlays(axes[0])
 
-    # Plot Accuracy
-    axes[1].plot(smooth_step_dict["accuracy"], label="Soft Accuracy")
-    axes[1].plot(smooth_step_dict["hard_accuracy"], label="Hard Accuracy")
-    axes[1].set_title("Accuracy")
+    # --- Accuracy subplot (right) ----------------------------------------
+    axes[1].plot(steps_x, _smooth(step_dict["accuracy"]), color=C_SOFT, linewidth=1.2)
+    axes[1].plot(steps_x, _smooth(step_dict["hard_accuracy"]), color=C_HARD, linewidth=1.2)
+    axes[1].set_title("Accuracy", fontsize=11)
     axes[1].set_xlabel("Step")
     axes[1].set_ylabel("Accuracy")
-    axes[1].legend()
-    if damage_steps is not None:
-        [axes[1].axvline(i - 1, color="r", linestyle="--") for i in damage_steps]
+    _add_damage_overlays(axes[1])
 
-    fig.suptitle("Step-wise Results")
+    # --- Unified legend below the plots ----------------------------------
+    from matplotlib.lines import Line2D
 
-    plt.show()
+    handles = [
+        Line2D([], [], color=C_SOFT, linewidth=1.5, label="Soft metric"),
+        Line2D([], [], color=C_HARD, linewidth=1.5, label="Hard metric"),
+    ]
+    if damage_fraction is not None:
+        handles.append(
+            Line2D([], [], color=C_DAMAGE_FRAC, linewidth=1.5, alpha=0.8, label="Damaged fraction")
+        )
+    elif damage_steps is not None:
+        handles.append(
+            Line2D(
+                [],
+                [],
+                color=C_DAMAGE_LINE,
+                linewidth=1.0,
+                linestyle="--",
+                alpha=0.6,
+                label="Damage event",
+            )
+        )
+
+    fig.legend(handles=handles, loc="lower center", ncol=len(handles), fontsize=9, frameon=False)
+    # adjust axes to make room for the title and legend
+    # fig.subplots_adjust(top=0.9, bottom=0.2)
+    fig.suptitle(title or "Step-wise Results", fontsize=12)
+    # Make room for the legend below
+    fig.get_layout_engine().set(rect=(0, 0.06, 1, 0.94))
 
     return fig

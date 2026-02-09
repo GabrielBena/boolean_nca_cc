@@ -4,18 +4,24 @@ defaults:
 
 sweep:
   grid:  # parameters to combine in all possible ways
-    training.n_message_steps: [5, 50]
-    model: [self_attention, perceiver_attention]
-    seed: [0, 1, 2]
+    model: [self_attention]
+    seed: [0, 1, 2, 4, 5]
     circuit: [reverse_large, add_large, binary_multiply_large]
-    training.meta_batch_size: [256]
-    training.epochs_power_of_2: [16]
     model.attention_dim: [96]
-    training.wiring_mode : [fixed, random]
+    pool.noise_scale: [0.1]
 
   paired:
     - damages:
-        damage.enabled : [false, true, true]
-        damage.permanent : [false, false, true]
+        damage.enabled : [false, true]
+        damage.permanent : [false, "random"]
+
+    - wiring:
+        training.wiring_mode : [fixed, random]
+        training.epochs_power_of_2: [16, 17]
+        training.n_message_steps: [5, 25]
+        training.learning_rate: [3e-4, 3e-4]
+        training.meta_batch_size: [256, 512]
+
+
     
         

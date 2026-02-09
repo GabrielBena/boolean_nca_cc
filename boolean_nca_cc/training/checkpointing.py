@@ -622,7 +622,7 @@ def save_best_checkpoint(
 
         # Log to wandb if enabled
         if wandb_run:
-            wandb_run.log({f"best/{best_metric}": current_metric_value, "best/epoch": epoch})
+            # wandb_run.log({f"best/{best_metric}": current_metric_value, "best/epoch": epoch})
 
             # Save the best model to wandb (will overwrite the previous best)
             wandb_run.save(os.path.join(checkpoint_path, best_filename))

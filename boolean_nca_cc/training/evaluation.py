@@ -393,9 +393,7 @@ def run_model_scan_with_loss(
     # Inject subsample key for stochastic token subsampling (Perceiver only)
     # The key is constant; per-step variation comes from fold_in(key, update_steps)
     if subsample_key is not None:
-        graph = graph._replace(
-            globals=graph.globals._replace(subsample_key=subsample_key)
-        )
+        graph = graph._replace(globals=graph.globals._replace(subsample_key=subsample_key))
 
     # === Discrete damage setup ===
     # Precompute damage keys for all potential damage steps
@@ -981,12 +979,24 @@ def evaluate_model_stepwise_batched(
 
     # Split damage keys for each batch element (use dummy key if no damage)
     batch_size = batch_logits[0].shape[0]
+    if permanent_damage == "random" and damage_key is not None:
+        damage_key, permanent_damage_key = jax.random.split(damage_key)
+        permanent_damage = jax.random.choice(
+            permanent_damage_key, jp.array([True, False]), (batch_size,)
+        )
+    elif permanent_damage == "random" and damage_key is None:
+        permanent_damage = jax.random.choice(
+            jax.random.PRNGKey(0), jp.array([True, False]), (batch_size,)
+        )
+    else:
+        permanent_damage = jax.numpy.full(batch_size, permanent_damage)
+
     if damage_key is None:
         damage_key = jax.random.PRNGKey(0)  # Dummy key, won't be used if no damage_steps
     damage_keys = jax.random.split(damage_key, batch_size)
 
     # Run unified scan for each circuit in batch
-    def run_single_scan(graph, wires, logits, scan_key):
+    def run_single_scan(graph, wires, logits, scan_key, permanent_damage):
         return run_model_scan_with_loss(
             model=model,
             graph=graph,
@@ -1011,11 +1021,11 @@ def evaluate_model_stepwise_batched(
 
     # Vmap over batch
     final_graphs, batch_step_outputs = nnx.vmap(run_single_scan)(
-        batch_graphs, batch_wires, batch_logits, damage_keys
+        batch_graphs, batch_wires, batch_logits, damage_keys, permanent_damage
     )
 
     # Extract and average metrics
-    _, losses, _, aux_data = batch_step_outputs
+    all_batch_graphs, losses, _, aux_data = batch_step_outputs
 
     # Average across batch dimension
     step_metrics = {
@@ -1026,6 +1036,8 @@ def evaluate_model_stepwise_batched(
         "hard_accuracy": [
             float(jp.mean(aux_data["hard_accuracy"][:, i])) for i in range(n_message_steps)
         ],
+        # Vmapped graphs: size [batch_size, n_steps, ...graph_shape...]
+        "graphs": all_batch_graphs,
     }
 
     # Optionally extract detailed results for first circuit (for visualization)
@@ -1042,6 +1054,23 @@ def evaluate_model_stepwise_batched(
         print(f"  Hard Acc: {step_metrics['hard_accuracy'][-1]:.4f}")
 
     return final_graphs, step_metrics
+
+
+def get_fraction_damaged_gates(batch_graphs_per_step: jp.ndarray) -> jp.ndarray:
+    """
+    Get the fraction of damaged gates for a given batch of graphs per step.
+    Assumes that graphs are vmapped as [batch_size, n_steps, ...graph_shape...]
+    Returns:
+    - [n_steps] array of fraction of damaged gates per step
+    """
+
+    damages_per_steps = (batch_graphs_per_step.nodes["gate_knockout_mask"] == 0).mean(0).sum(-1)
+    single_graph_layers = batch_graphs_per_step.nodes["layer"][0, 0]
+    n_eligible_gates = (
+        (single_graph_layers != 0) * (single_graph_layers != single_graph_layers.max())
+    ).sum()
+
+    return damages_per_steps / n_eligible_gates
 
 
 def _extract_single_circuit_step_results(

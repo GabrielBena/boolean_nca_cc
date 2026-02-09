@@ -30,7 +30,10 @@ from boolean_nca_cc.training.eval_datasets import (
     UnifiedEvaluationDatasets,
     create_unified_evaluation_datasets,
 )
-from boolean_nca_cc.training.evaluation import evaluate_model_stepwise_batched
+from boolean_nca_cc.training.evaluation import (
+    evaluate_model_stepwise_batched,
+    get_fraction_damaged_gates,
+)
 from boolean_nca_cc.training.pool.pool import GraphPool, initialize_graph_pool
 from boolean_nca_cc.training.schedulers import (
     get_learning_rate_schedule,
@@ -376,7 +379,8 @@ def run_unified_periodic_evaluation(
         else:
             n_test = None
 
-        if data_dict["x_train"] is not None and data_dict["y_train"] is not None:
+        # skip training data for now
+        if data_dict["x_train"] is not None and data_dict["y_train"] is not None and False:
             # restrict data to the size of n_test
             data_scenarios.append(
                 (
@@ -386,20 +390,6 @@ def run_unified_periodic_evaluation(
                 )
             )
             print(f"x_train shape: {data_scenarios[-1][1].shape}")
-
-        mid_point = data_dict["x_total"][:].shape[0] // 2
-        x_plot = data_dict["x_total"][
-            max(mid_point - n_test // 2, 0) : min(
-                mid_point + n_test // 2, data_dict["x_total"].shape[0]
-            )
-        ]
-        y_plot = data_dict["y_total"][
-            max(mid_point - n_test // 2, 0) : min(
-                mid_point + n_test // 2, data_dict["y_total"].shape[0]
-            )
-        ]
-
-        print(f"x_plot shape: {x_plot.shape}")
 
         # Results storage: step_metrics[key] where key is e.g. "in_test", "out_train"
         step_metrics = {}
@@ -439,7 +429,7 @@ def run_unified_periodic_evaluation(
                 faulty_value=faulty_value,
                 permanent_damage=permanent_damage,
                 chunk_size=datasets.target_batch_size,
-                return_first_circuit_details=not with_damage,
+                return_first_circuit_details=False,
             )
 
             prefix = f"eval_{full_key}"
@@ -500,113 +490,98 @@ def run_unified_periodic_evaluation(
             if log_pool_scatter:
                 _log_pool_scatter(pool, epoch, wandb_run)
 
-            # Create and log circuit visualizations
-            # Main plots use precomputed results (with p_fault, showing training conditions)
-            # Damaged plots need a SEPARATE clean run with fixed damage_steps (no p_fault)
-            try:
-                import matplotlib.pyplot as plt
+            # Create and log stepwise plots (averaged across batch, much less noisy)
+            if log_stepwise:
+                try:
+                    import matplotlib.pyplot as plt
 
-                for wiring_key, wires, logits, _, _ in wiring_scenarios:
-                    if wires is None:
-                        continue
+                    def _damage_frac(result_dict):
+                        """Extract damage fraction from graphs if available."""
+                        graphs = result_dict.get("graphs")
+                        if graphs is None:
+                            return None
+                        try:
+                            return get_fraction_damaged_gates(graphs)
+                        except Exception:
+                            return None
 
-                    # Only visualize test data (cleaner logs)
-                    for data_suffix, x, y in data_scenarios:
-                        # if data_suffix != "test":
-                        #     continue
-
-                        full_key = f"{wiring_key}_{data_suffix}"
-                        if step_metrics.get(full_key) is None:
+                    for wiring_key, wires, logits, batch_size, wiring_desc in wiring_scenarios:
+                        if wires is None:
                             continue
 
-                        # Use precomputed results for main visualization
-                        # (these include p_fault effects, showing true training conditions)
-                        main_results = step_metrics[full_key].get("first_circuit_results")
-
-                        # For damaged visualization, run a separate clean evaluation
-                        # with fixed damage_steps (no p_fault) for nice predictable plots
-                        viz_damage_results = None
-                        damaged_wandb_prefix = f"eval_damaged_{full_key}"
-                        if damage_steps is not None:
-                            viz_wires = [w[:1] for w in wires]  # Just first circuit
-                            viz_logits = [log[:1] for log in logits]
-
-                            _, viz_damage_result = evaluate_model_stepwise_batched(
-                                model=model,
-                                batch_wires=viz_wires,
-                                batch_logits=viz_logits,
-                                x_data=x,
-                                y_data=y,
-                                input_n=input_n,
-                                arity=arity,
-                                circuit_hidden_dim=circuit_hidden_dim,
-                                n_message_steps=n_message_steps,
-                                loss_cfg=loss_cfg,
-                                layer_sizes=layer_sizes,
-                                damage_steps=damage_steps,
-                                knockout_per_damage_step=knockout_per_damage_step,
-                                damage_key=damage_key,
-                                p_fault=None,  # No probabilistic damage for viz
-                                return_first_circuit_details=True,
-                                permanent_damage=permanent_damage,
-                            )
-                            viz_damage_results = viz_damage_result.get("first_circuit_results", [])
-
-                        viz = _create_single_circuit_visualization(
-                            wires_batch=wires,
-                            x_data=x_plot,
-                            y_data=y_plot,
-                            eval_type=f"eval_{full_key}",
-                            circuit_idx=0,
-                            log_stepwise=log_stepwise,
-                            precomputed_results=main_results,
-                            precomputed_damage_results=viz_damage_results,
-                            damage_steps=damage_steps,
-                        )
-
-                        if viz is not None:
+                        for data_suffix, x, y in data_scenarios:
+                            full_key = f"{wiring_key}_{data_suffix}"
                             prefix = f"eval_{full_key}"
-                            wandb_run.log(
-                                {
-                                    f"{prefix}/circuit_visualization": wandb_run.Image(
-                                        viz["figure"]
-                                    ),
-                                    f"{prefix}/viz_accuracy": viz["accuracy"],
-                                }
-                            )
-                            if viz.get("stepwise_fig") is not None:
-                                wandb_run.log(
-                                    {f"{prefix}/stepwise_fig": wandb_run.Image(viz["stepwise_fig"])}
-                                )
 
-                            # Log damaged visualizations (use same prefix as metrics)
-                            if viz.get("figure_damaged") is not None:
+                            # --- Undamaged stepwise (averaged across batch) ---
+                            if step_metrics.get(full_key) is not None:
+                                fig = plot_wandb_stepwise_results(
+                                    step_metrics[full_key],
+                                    title=f"{wiring_desc} ({data_suffix}) | {batch_size} circuits avg",
+                                )
+                                wandb_run.log({f"stepwise/{prefix}": wandb_run.Image(fig)})
+                                plt.close(fig)
+
+                            # --- p_fault damaged stepwise (averaged across batch) ---
+                            damaged_key = f"damaged_{full_key}"
+                            if step_metrics.get(damaged_key) is not None:
+                                fig = plot_wandb_stepwise_results(
+                                    step_metrics[damaged_key],
+                                    title=f"{wiring_desc} ({data_suffix}) | p_fault={p_fault:.1e} | {batch_size} circuits avg",
+                                    damage_fraction=_damage_frac(step_metrics[damaged_key]),
+                                )
+                                wandb_run.log(
+                                    {f"stepwise/eval_{damaged_key}": wandb_run.Image(fig)}
+                                )
+                                plt.close(fig)
+
+                            # --- Discrete damage stepwise (separate eval, averaged across batch) ---
+                            if damage_steps is not None and step_metrics.get(full_key) is not None:
+                                log.info(
+                                    f"Running discrete damage eval for {wiring_desc} ({data_suffix})..."
+                                )
+                                _, discrete_result = evaluate_model_stepwise_batched(
+                                    model=model,
+                                    batch_wires=wires,
+                                    batch_logits=logits,
+                                    x_data=x,
+                                    y_data=y,
+                                    input_n=input_n,
+                                    arity=arity,
+                                    circuit_hidden_dim=circuit_hidden_dim,
+                                    n_message_steps=n_message_steps,
+                                    loss_cfg=loss_cfg,
+                                    layer_sizes=layer_sizes,
+                                    damage_steps=damage_steps,
+                                    knockout_per_damage_step=knockout_per_damage_step,
+                                    damage_key=damage_key,
+                                    p_fault=None,  # Pure discrete damage, no probabilistic
+                                    permanent_damage=permanent_damage,
+                                    chunk_size=datasets.target_batch_size,
+                                    return_first_circuit_details=False,
+                                )
+                                fig = plot_wandb_stepwise_results(
+                                    discrete_result,
+                                    damage_steps=damage_steps,
+                                    title=f"{wiring_desc} ({data_suffix}) | damage steps={damage_steps} | {batch_size} circuits avg",
+                                    damage_fraction=_damage_frac(discrete_result),
+                                )
                                 wandb_run.log(
                                     {
-                                        f"{damaged_wandb_prefix}/circuit_visualization": wandb_run.Image(
-                                            viz["figure_damaged"]
-                                        ),
-                                        f"{damaged_wandb_prefix}/viz_accuracy": viz[
-                                            "accuracy_damaged"
-                                        ],
+                                        f"stepwise/eval_discrete_damaged_{full_key}": wandb_run.Image(
+                                            fig
+                                        )
                                     }
                                 )
-                                if viz.get("stepwise_fig_damaged") is not None:
-                                    wandb_run.log(
-                                        {
-                                            f"{damaged_wandb_prefix}/stepwise_fig": wandb_run.Image(
-                                                viz["stepwise_fig_damaged"]
-                                            )
-                                        }
-                                    )
+                                plt.close(fig)
 
-                            plt.close("all")
+                    plt.close("all")
 
-            except Exception as e:
-                import traceback
+                except Exception as e:
+                    import traceback
 
-                log.warning(f"Error creating wandb circuit visualizations: {e}")
-                log.warning(f"Traceback: {traceback.format_exc()}")
+                    log.warning(f"Error creating wandb stepwise plots: {e}")
+                    log.warning(f"Traceback: {traceback.format_exc()}")
 
         # Log summary to console
         training_config = datasets.training_config
@@ -801,8 +776,6 @@ def train_model(
     periodic_eval_do_ood_evaluation: bool
     | None = None,  # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
     periodic_eval_log_pool_scatter: bool = False,
-    periodic_eval_damage_enabled: bool = False,
-    periodic_eval_n_damage_steps: int = 1,
     periodic_eval_get_all_wirings: bool = False,
     # Wandb parameters
     wandb_logging: bool = False,
@@ -817,16 +790,14 @@ def train_model(
     stop_accuracy_min_epochs: int = 100,
     # Best model tracking parameters
     track_metrics: list[str] | None = None,
-    # Damage parameters for resilience testing
+    # Damage parameters (derived from target_damage_fraction by caller)
     damage_enabled: bool = False,
-    damage_mode: str = "probabilistic",  # "probabilistic" or "discrete"
-    # Probabilistic damage (applied during scan at every step)
-    p_fault: float | None = None,  # Per-gate-per-step failure probability
-    permanent_damage: bool = True,  # Whether to apply permanent damage to gates (True) or temporary damage (False)
-    max_damage_per_circuit: int | None = None,  # Max knockouts per circuit
-    faulty_logit_value: float = -10.0,  # Value for knocked-out gate logits
-    # Discrete damage (applied between epochs on pool)
-    knockouts_per_event: int = 1,  # Gates to knock out per damage event
+    p_fault: float | None = None,  # p_fault for training (tuned for pool.expected_updates)
+    p_fault_eval: float | None = None,  # p_fault for eval (tuned for eval.inner_steps)
+    permanent_damage: bool = True,
+    faulty_logit_value: float = -10.0,
+    n_damage_steps: int = 0,  # Discrete damage volleys during eval
+    knockouts_per_event: int = 1,  # Gates per volley (auto-computed if null in config)
     # Debugging parameters
     do_check_gradients: bool = False,
 ):
@@ -901,11 +872,12 @@ def train_model(
                       ["eval_in_hard_accuracy", "eval_out_hard_accuracy"]). If None,
                       tracks all available metrics during evaluation.
         damage_enabled: Whether to enable gate damage during training
-        damage_mode: Damage mode - "probabilistic" (per-step, during scan) or "discrete" (between epochs)
-        p_fault: Per-gate-per-step failure probability for probabilistic mode (None = use auto-computed)
-        permanent_damage: Whether to apply permanent damage to gates (True) or temporary damage (False)
-        max_damage_per_circuit: Maximum knockouts per circuit (None = no limit)
+        p_fault: Per-gate-per-step failure probability for training (tuned for pool.expected_updates)
+        p_fault_eval: Per-gate-per-step failure probability for eval (tuned for eval.inner_steps)
+        permanent_damage: Whether to apply permanent damage to gates (True / False / "random")
         faulty_logit_value: Value for knocked-out gate logits (large negative)
+        n_damage_steps: Number of discrete damage volleys during eval
+        knockouts_per_event: Gates knocked out per discrete damage volley
         do_check_gradients: Whether to check gradients for zero values
     Returns:
         Dictionary with trained GNN model and training metrics
@@ -1183,7 +1155,10 @@ def train_model(
             loss_fn = loss_fn_scan if use_scan else loss_fn_no_scan
 
             if permanent_damage == "random":
-                permanent_damage = jax.random.choice([True, False], graphs.n_node.shape[0])
+                loss_key, permanent_damage_key = jax.random.split(loss_key)
+                permanent_damage = jax.random.choice(
+                    permanent_damage_key, jp.array([True, False]), (graphs.n_node.shape[0],)
+                )
             else:
                 permanent_damage = jax.numpy.full(graphs.n_node.shape[0], permanent_damage)
 
@@ -1340,8 +1315,6 @@ def train_model(
     last_reset_epoch = -1  # Initialize to -1 so first check works correctly
 
     # Track damage application
-    last_damage_epoch = -1  # Initialize to -1 so first check works correctly
-    num_circuits_damaged = 0  # Track circuits damaged in most recent damage event
     avg_damage_count = 0.0  # Average knockouts per circuit across pool
 
     # Initialize evaluation datasets for periodic evaluation if enabled
@@ -1536,9 +1509,7 @@ def train_model(
                 "pool/wiring_diversity": float(diversity),
                 "pool/reset_steps": float(avg_steps_reset),
                 "pool/avg_update_steps": float(avg_steps),
-                "damage/circuits_damaged": int(num_circuits_damaged),
-                "damage/avg_knockouts": float(avg_damage_count),
-                "damage/enabled": damage_enabled,
+                "pool/avg_knockouts": float(avg_damage_count),
                 "pool/loss_steps": loss_steps,
             }
 
@@ -1592,11 +1563,12 @@ def train_model(
                 # The pool evaluation circuits are recreated with the same logic as training
                 current_datasets = eval_datasets
 
-                if periodic_eval_damage_enabled:
+                # Build discrete damage steps (evenly spaced within eval window)
+                if damage_enabled and n_damage_steps > 0:
                     damage_steps = jp.linspace(
                         0,
                         periodic_eval_inner_steps,
-                        periodic_eval_n_damage_steps + 1,
+                        n_damage_steps + 1,
                         endpoint=False,
                     ).astype(int)[1:]
                     damage_key = jax.random.PRNGKey(42)
@@ -1613,7 +1585,7 @@ def train_model(
                     input_n=input_n,
                     arity=arity,
                     circuit_hidden_dim=circuit_hidden_dim,
-                    n_message_steps=periodic_eval_inner_steps,  # Use fixed message steps
+                    n_message_steps=periodic_eval_inner_steps,
                     loss_cfg=loss_cfg,
                     epoch=epoch,
                     wandb_run=wandb_run,
@@ -1627,11 +1599,11 @@ def train_model(
                     optimizer=optimizer,
                     training_metrics=training_metrics,
                     track_metrics=track_metrics,
-                    # Probabilistic damage (training-consistent evaluation)
-                    p_fault=p_fault,
+                    # Probabilistic damage (adjusted for eval step count)
+                    p_fault=p_fault_eval,
                     faulty_value=faulty_logit_value,
                     permanent_damage=permanent_damage,
-                    # Discrete damage (for visualization)
+                    # Discrete damage (shotgun, for OOD visualization)
                     damage_steps=damage_steps,
                     knockout_per_damage_step=knockouts_per_event,
                     damage_key=damage_key,
