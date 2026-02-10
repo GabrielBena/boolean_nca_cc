@@ -2,15 +2,15 @@
 
 # Default parameters for experiment
 defaults:
-  - model: self_attention  # Default model (gnn or self_attention or perceiver_attention)
+  - model: gathered_attention  # Default model (gnn or self_attention or perceiver_attention)
   - circuit: reverse_large
   - loss: bce  # Options: l2, l4, bce, bce_w3, focal, asym, focal_asym
   - _self_  # For self-overrides
 
 # Random seed for reproducibility
-seed: 0
-test_seed: 42
- 
+seed: 0 # Seed for training
+eval_seed: null # Seed for evaluation (derived from training seed if null)
+
 # Output configuration
 output:
   dir: null  # Output directory (null means use current working directory)
@@ -192,9 +192,9 @@ eval:
   inner_steps: 256
   log_stepwise: true  # Whether to log detailed step-by-step metrics to wandb
   # batch_size_in: ${training.meta_batch_size}  # Batch size for IN-distribution evaluation (None means use initial_diversity)
-  batch_size_in: 64  # Batch size for IN-distribution evaluation (None means use initial_diversity)
+  batch_size_in: 32  # Batch size for IN-distribution evaluation (None means use initial_diversity)
   # batch_size_out: ${training.meta_batch_size}  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
-  batch_size_out: 64  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
+  batch_size_out: 32  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
   log_pool_scatter: true
   do_ood_evaluation: null # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
   get_all_wirings: true # Whether to get all wirings (True) or a subset (False)
@@ -207,7 +207,7 @@ stop_accuracy:
   source: "eval"  # "eval" (checks ALL matching eval metrics) or "training" (single metric)
   scope: null  # null = require ALL eval */final_{metric} to pass (damaged + undamaged).
                # Or a list of prefixes: ["eval_in_test", "eval_damaged_in_test"]
-  patience: 4  # Number of consecutive evals where ALL metrics are above threshold
+  patience: 6  # Number of consecutive evals where ALL metrics are above threshold
   min_epochs: 1025 # Minimum number of epochs before early stopping can occur (1st eval + 1 epochs)
 
 # Checkpointing

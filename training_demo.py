@@ -296,7 +296,7 @@ class CircuitOptimizationDemo:
         else:
             # Use original circuit generation
             self.wires, self.logits = gen_circuit(
-                self.wiring_key, self.layer_sizes, arity=self.arity
+                self.wiring_key, self.logits_key, self.layer_sizes, arity=self.arity, noise_scale=self.noise_scale
             )
             # Clear available wires when not using training wires
             self.available_wires = []
@@ -373,7 +373,7 @@ class CircuitOptimizationDemo:
             print(f"Traceback: {traceback.format_exc()}")
             # Fallback to original generation
             self.wires, self.logits = gen_circuit(
-                self.wiring_key, self.layer_sizes, arity=self.arity
+                self.wiring_key, self.logits_key, self.layer_sizes, arity=self.arity, noise_scale=self.noise_scale
             )
             self.available_wires = []
             self.available_logits = []

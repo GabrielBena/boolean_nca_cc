@@ -26,10 +26,7 @@ from boolean_nca_cc.training.checkpointing import (
     save_periodic_checkpoint,
     setup_checkpoint_dir,
 )
-from boolean_nca_cc.training.eval_datasets import (
-    UnifiedEvaluationDatasets,
-    create_unified_evaluation_datasets,
-)
+from boolean_nca_cc.training.eval_datasets import UnifiedEvaluationDatasets
 from boolean_nca_cc.training.evaluation import (
     evaluate_model_stepwise_batched,
     get_fraction_damaged_gates,
@@ -295,7 +292,7 @@ def run_unified_periodic_evaluation(
                 permanent_damage=permanent_damage,
                 p_fault_onset_step=p_fault_onset_step if with_damage else 0,
                 compute_no_repair_baseline=compute_no_repair_baseline
-                if( with_damage and p_fault_onset_step > 0)
+                if (with_damage and p_fault_onset_step > 0)
                 else False,
                 chunk_size=datasets.target_batch_size,
                 return_first_circuit_details=False,
@@ -366,7 +363,7 @@ def run_unified_periodic_evaluation(
         if wandb_run:
             wandb_run.log(combined_metrics)
 
-            if log_pool_scatter:
+            if log_pool_scatter and pool is not None:
                 _log_pool_scatter(pool, epoch, wandb_run)
 
             # Create and log stepwise plots (averaged across batch, much less noisy)
@@ -527,7 +524,6 @@ def run_unified_periodic_evaluation(
                     "target_batch_size": datasets.target_batch_size,
                     "training_wiring_mode": training_config["wiring_mode"],
                     "training_initial_diversity": training_config["initial_diversity"],
-                    "evaluation_base_seed": training_config["evaluation_base_seed"],
                 },
             }
 
@@ -574,7 +570,6 @@ def run_unified_periodic_evaluation(
                 and datasets.out_actual_batch_size > datasets.target_batch_size,
                 "training_wiring_mode": training_config["wiring_mode"],
                 "training_initial_diversity": training_config["initial_diversity"],
-                "evaluation_base_seed": training_config["evaluation_base_seed"],
             },
         }
 
@@ -587,37 +582,42 @@ def run_unified_periodic_evaluation(
 
 
 def train_model(
-    # Data parameters
+    # ── Data ────────────────────────────────────────────────────────────
     data_dict: dict[str, jp.ndarray],
     data_fraction: float = 1.0,
-    # Model architecture parameters
+    eval_datasets: UnifiedEvaluationDatasets | None = None,
+    # ── Initialization ──────────────────────────────────────────────────
+    train_key: jax.random.PRNGKey = jax.random.PRNGKey(0),
+    eval_key: jax.random.PRNGKey = jax.random.PRNGKey(42),
+    init_model: CircuitGatheredAttention | CircuitGNN | CircuitSelfAttention | None = None,
+    init_optimizer: nnx.Optimizer | None = None,
+    initial_metrics: dict | None = None,
+    # ── Model architecture ──────────────────────────────────────────────
     layer_sizes: list[tuple[int, int]] | None = None,
     arity: int = 2,
     circuit_hidden_dim: int = 16,
-    # Training hyperparameters
-    learning_rate: float = 1e-3,
-    weight_decay: float = 1e-4,
+    # ── Training: core loop ─────────────────────────────────────────────
     epochs: int = 100,
     n_message_steps: int = 1,
     use_scan: bool = False,
     gradient_checkpointing: bool = False,  # Recompute model activations during backward pass to save memory
-    # Loss parameters
+    # ── Training: optimization ──────────────────────────────────────────
+    learning_rate: float = 1e-3,
+    weight_decay: float = 1e-4,
+    lr_scheduler: str = "constant",  # Options: "constant", "exponential", "cosine", "linear_warmup"
+    lr_scheduler_params: dict | None = None,
+    # ── Training: loss ──────────────────────────────────────────────────
     loss_cfg=None,  # Loss config dict (default: LOSS_L4)
     random_loss_step: bool = False,  # Use random message passing step for loss computation
     random_loss_step_min: int = 0,
-    use_beta_loss_step: bool = False,  # Use beta distribution for random loss step (varies from early to late steps through training)
-    # Wiring mode parameters
+    use_beta_loss_step: bool = False,  # Use beta distribution for random loss step
+    # ── Wiring & batching ───────────────────────────────────────────────
     wiring_mode: str = "random",  # Options: 'fixed', 'random', or 'genetic'
     meta_batch_size: int = 64,
-    # Multi-GPU parameters
     multi_gpu_enabled: bool
     | None = None,  # None = auto (enable if >1 device), True/False = explicit
     multi_gpu_num_devices: int | None = None,  # Number of devices (None = all available)
-    # Genetic mutation parameters (only used when wiring_mode='genetic')
-    genetic_mutation_rate: float = 0.0,  # Fraction of connections to mutate (0.0 to 1.0)
-    genetic_swaps_per_layer: int = 1,  # Number of swaps per layer for genetic mutation
-    initial_diversity: int = 1,  # Number of initial wires for genetic mutation
-    # Pool parameters
+    # ── Pool ────────────────────────────────────────────────────────────
     pool_size: int = 1024,
     reset_pool_fraction: float = 0.05,
     reset_pool_interval: int = 128,
@@ -627,47 +627,10 @@ def train_model(
         0.5,
     ),  # Weights for [loss, steps] in combined strategy
     pool_noise_scale: float = 0.0,
-    # Learning rate scheduling
-    lr_scheduler: str = "constant",  # Options: "constant", "exponential", "cosine", "linear_warmup"
-    lr_scheduler_params: dict | None = None,
-    # Initialization parameters
-    key: int = 0,
-    wiring_fixed_key: jax.random.PRNGKey = jax.random.PRNGKey(
-        42
-    ),  # Fixed key for generating wirings when wiring_mode='fixed'
-    init_model: CircuitGatheredAttention | CircuitGNN | CircuitSelfAttention | None = None,
-    init_optimizer: nnx.Optimizer | None = None,
-    initial_metrics: dict | None = None,
-    # Checkpointing parameters
-    checkpoint_enabled: bool = False,
-    checkpoint_dir: str | None = None,
-    checkpoint_interval: int = 10,
-    save_best: bool = True,
-    best_metric: str = "hard_accuracy",  # Options: 'loss', 'hard_loss', 'accuracy', 'hard_accuracy'
-    best_metric_source: str = "training",  # Options: 'training' or 'eval'
-    # Periodic evaluation parameters
-    periodic_eval_enabled: bool = False,
-    periodic_eval_inner_steps: int = 100,
-    periodic_eval_interval: int = 1024,
-    periodic_eval_test_seed: int = 42,
-    periodic_eval_log_stepwise: bool = False,
-    periodic_eval_batch_size_in: int
-    | None = None,  # Batch size for IN-distribution evaluation (None means use initial_diversity)
-    periodic_eval_batch_size_out: int
-    | None = None,  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
-    periodic_eval_do_ood_evaluation: bool
-    | None = None,  # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
-    periodic_eval_log_pool_scatter: bool = False,
-    periodic_eval_get_all_wirings: bool = False,
-    # Wandb parameters
-    wandb_logging: bool = False,
-    log_interval: int = 1,
-    wandb_run_config: dict | None = None,
-    # Early stopping (pass None to disable)
-    early_stopping: EarlyStopping | None = None,
-    # Best model tracking parameters
-    track_metrics: list[str] | None = None,
-    # Damage parameters (derived from target_damage_fraction by caller)
+    initial_diversity: int = 1,  # Number of distinct initial wirings
+    genetic_mutation_rate: float = 0.0,  # Fraction of connections to mutate (0.0 to 1.0)
+    genetic_swaps_per_layer: int = 1,  # Number of swaps per layer for genetic mutation
+    # ── Damage / resilience ─────────────────────────────────────────────
     damage_enabled: bool = False,
     p_fault: float | None = None,  # p_fault for training (tuned for pool.expected_updates)
     p_fault_eval: float | None = None,  # p_fault for eval (tuned for eval.inner_steps)
@@ -675,19 +638,35 @@ def train_model(
     faulty_logit_value: float = -10.0,
     n_damage_steps: int = 0,  # Discrete damage volleys during eval
     knockouts_per_event: int = 1,  # Gates per volley (auto-computed if null in config)
-    # Delayed probabilistic damage onset
     p_fault_onset_step_train: int = 0,  # Onset step for training scan
     p_fault_onset_step_eval: int = 0,  # Onset step for eval scan
-    # No-repair baseline (for eval only)
     compute_no_repair_baseline: bool = False,
-    # Debugging parameters
+    # ── Periodic evaluation ─────────────────────────────────────────────
+    periodic_eval_enabled: bool = False,
+    periodic_eval_interval: int = 1024,
+    periodic_eval_inner_steps: int = 100,
+    periodic_eval_log_stepwise: bool = False,
+    periodic_eval_log_pool_scatter: bool = False,
+    # ── Early stopping ──────────────────────────────────────────────────
+    early_stopping: EarlyStopping | None = None,
+    # ── Checkpointing & best model tracking ─────────────────────────────
+    checkpoint_enabled: bool = False,
+    checkpoint_dir: str | None = None,
+    checkpoint_interval: int = 10,
+    save_best: bool = True,
+    track_metrics: list[str] | None = None,
+    # ── Logging & WandB ─────────────────────────────────────────────────
+    wandb_logging: bool = False,
+    log_interval: int = 1,
+    wandb_run_config: dict | None = None,
+    # ── Debugging ───────────────────────────────────────────────────────
     do_check_gradients: bool = False,
 ):
     """
     Train a GNN to optimize boolean circuit parameters.
 
     Args:
-        layer_sizes: List of tuples (nodes, group_size) for each layer
+        ── Data ──
         data_dict: Dictionary containing training and testing data
             "x_train": Input data for training [num_train, input_bits]
             "y_train": Target output data [num_train, output_bits]
@@ -696,59 +675,59 @@ def train_model(
             "x_total": Input data for total [num_total, input_bits]
             "y_total": Target output data [num_total, output_bits]
         data_fraction: Fraction of boolean circuit data to use for each training batch
+
+        ── Evaluation datasets ──
+        eval_datasets: UnifiedEvaluationDatasets for evaluation
+
+        ── Initialization ──
+        train_key: Random key for training
+        eval_key: Random key for evaluation
+        init_model: Optional pre-trained model to continue training
+        init_optimizer: Optional pre-trained optimizer to continue training
+        initial_metrics: Optional dictionary of metrics from previous training
+
+        ── Model architecture ──
+        layer_sizes: List of tuples (nodes, group_size) for each layer
         arity: Number of inputs per gate
         circuit_hidden_dim: Dimension of hidden features
-        message_passing: Whether to use message passing or only self-updates
-        node_mlp_features: Hidden layer sizes for the node MLP
-        edge_mlp_features: Hidden layer sizes for the edge MLP
-        use_attention: Whether to use attention-based message aggregation
-        learning_rate: Learning rate for optimization
+
+        ── Training: core loop ──
         epochs: Number of training epochs
         n_message_steps: Number of message passing steps per pool batch
+        use_scan: Whether to use jax.lax.scan for the inner loop
+        gradient_checkpointing: Recompute activations during backward pass to save memory
+
+        ── Training: optimization ──
+        learning_rate: Learning rate for optimization
+        weight_decay: L2 regularization weight
+        lr_scheduler: Learning rate scheduler type
+        lr_scheduler_params: Dictionary of parameters for the scheduler
+
+        ── Training: loss ──
         loss_cfg: Loss config dict
         random_loss_step: Use random message passing step for loss computation
         random_loss_step_min: Minimum message passing step for random loss computation
-        use_beta_loss_step: Use beta distribution for random loss step (varies from early to late steps through training)
+        use_beta_loss_step: Use beta distribution for random loss step
+
+        ── Wiring & batching ──
         wiring_mode: Mode for circuit wirings ('fixed', 'random', or 'genetic')
+        wiring_fixed_key: Fixed key for generating wirings when wiring_mode='fixed'
         meta_batch_size: Batch size for training
         multi_gpu_enabled: Multi-GPU mode (None = auto-enable if >1 GPU, True/False = explicit)
         multi_gpu_num_devices: Number of devices to use (None = all available)
-        genetic_mutation_rate: Fraction of connections to mutate (0.0 to 1.0)
-        genetic_swaps_per_layer: Number of swaps per layer for genetic mutation
+
+        ── Pool ──
         pool_size: Size of the graph pool
         reset_pool_fraction: Fraction of pool to reset periodically
         reset_pool_interval: Number of epochs between pool resets
         reset_strategy: Strategy for selecting graphs to reset ("uniform", "steps_biased", "loss_biased", or "combined")
-        combined_weights: Tuple of weights (loss_weight, steps_weight) for combining factors in "combined" strategy
-        key: Random seed
-        wiring_fixed_key: Fixed key for generating wirings when wiring_mode='fixed'
-        init_model: Optional pre-trained GNN model to continue training
-        init_optimizer: Optional pre-trained optimizer to continue training
-        initial_metrics: Optional dictionary of metrics from previous training
-        lr_scheduler: Learning rate scheduler type
-        lr_scheduler_params: Dictionary of parameters for the scheduler
-        checkpoint_dir: Directory to save checkpoints
-        checkpoint_interval: How often to save periodic checkpoints
-        save_best: Whether to track and save the best model
-        best_metric: Metric to use for determining the best model
-        best_metric_source: Source of the metric ('training' or 'eval')
-        periodic_eval_enabled: Whether to enable periodic evaluation
-        periodic_eval_inner_steps: Number of inner steps for periodic evaluation
-        periodic_eval_interval: Interval for periodic evaluation
-        periodic_eval_test_seed: Seed for periodic evaluation test circuit generation
-        periodic_eval_log_stepwise: Whether to log step-by-step evaluation metrics
-        periodic_eval_batch_size_in: Batch size for IN-distribution evaluation (None means use initial_diversity)
-        periodic_eval_batch_size_out: Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
-        periodic_eval_do_ood_evaluation: Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
-        periodic_eval_get_all_wirings: Whether to get all wirings (True) or a subset (False)
-        wandb_logging: Whether to log metrics to wandb
-        log_interval: Interval for logging metrics
-        wandb_run_config: Configuration to pass to wandb
-        early_stopping: EarlyStopping instance (or None to disable).
-            Counts consecutive evaluations above threshold; see EarlyStopping docstring.
-        track_metrics: List of specific metrics to track and save best models for (e.g.,
-                      ["eval_in_hard_accuracy", "eval_out_hard_accuracy"]). If None,
-                      tracks all available metrics during evaluation.
+        combined_weights: Tuple of weights (loss_weight, steps_weight) for "combined" strategy
+        pool_noise_scale: Scale of noise added to pool states
+        initial_diversity: Number of distinct initial wirings
+        genetic_mutation_rate: Fraction of connections to mutate (0.0 to 1.0)
+        genetic_swaps_per_layer: Number of swaps per layer for genetic mutation
+
+        ── Damage / resilience ──
         damage_enabled: Whether to enable gate damage during training
         p_fault: Per-gate-per-step failure probability for training (tuned for pool.expected_updates)
         p_fault_eval: Per-gate-per-step failure probability for eval (tuned for eval.inner_steps)
@@ -759,6 +738,33 @@ def train_model(
         p_fault_onset_step_train: Step at which probabilistic damage starts during training
         p_fault_onset_step_eval: Step at which probabilistic damage starts during eval
         compute_no_repair_baseline: Whether to compute no-repair baseline metrics during eval
+
+        ── Periodic evaluation ──
+        periodic_eval_enabled: Whether to enable periodic evaluation
+        periodic_eval_interval: Interval for periodic evaluation
+        periodic_eval_inner_steps: Number of inner steps for periodic evaluation
+        periodic_eval_log_stepwise: Whether to log step-by-step evaluation metrics
+        periodic_eval_log_pool_scatter: Whether to log pool scatter plots
+
+        ── Early stopping ──
+        early_stopping: EarlyStopping instance (or None to disable).
+            Counts consecutive evaluations above threshold; see EarlyStopping docstring.
+
+        ── Checkpointing & best model tracking ──
+        checkpoint_enabled: Whether to enable checkpointing
+        checkpoint_dir: Directory to save checkpoints
+        checkpoint_interval: How often to save periodic checkpoints
+        save_best: Whether to track and save the best model
+        track_metrics: List of specific metrics to track and save best models for (e.g.,
+                      ["eval_in_hard_accuracy", "eval_out_hard_accuracy"]). If None,
+                      tracks all available metrics during evaluation.
+
+        ── Logging & WandB ──
+        wandb_logging: Whether to log metrics to wandb
+        log_interval: Interval for logging metrics
+        wandb_run_config: Configuration to pass to wandb
+
+        ── Debugging ──
         do_check_gradients: Whether to check gradients for zero values
     Returns:
         Dictionary with trained GNN model and training metrics
@@ -771,9 +777,6 @@ def train_model(
 
     # Get data
     x_train, y_train = data_dict["x_train"], data_dict["y_train"]
-
-    # Initialize random key
-    rng = jax.random.PRNGKey(key)
 
     # Convert layer_sizes to tuple once for JAX static arguments
     # This avoids repeated conversions in the training loop
@@ -845,14 +848,16 @@ def train_model(
 
     # Initialize Graph Pool for training
     # Use consistent key generation: wiring_fixed_key for fixed/genetic modes, dynamic for random
-    if wiring_mode in ["fixed", "genetic"]:
-        training_pool_key = wiring_fixed_key
+    if wiring_mode == "random":
+        train_key, pool_key = jax.random.split(train_key)
     else:
-        # For random mode, use a portion of the main RNG to maintain consistency
-        rng, training_pool_key = jax.random.split(rng)
+        pool_key = eval_key
+
+    wires_key, logits_key = jax.random.split(pool_key)
 
     circuit_pool = initialize_graph_pool(
-        rng=training_pool_key,
+        wires_key=wires_key,
+        logits_key=logits_key,
         layer_sizes=layer_sizes,
         pool_size=pool_size,
         input_n=input_n,
@@ -1192,36 +1197,8 @@ def train_model(
     # Track last reset epoch for scheduling
     last_reset_epoch = -1  # Initialize to -1 so first check works correctly
 
-    # Track damage application
+    # Track damage application / diversity of pool
     avg_damage_count = 0.0  # Average knockouts per circuit across pool
-
-    # Initialize evaluation datasets for periodic evaluation if enabled
-    eval_datasets = None
-    if periodic_eval_enabled:
-        log.info("Creating standardized evaluation datasets for periodic evaluation")
-
-        # Create unified evaluation datasets
-        eval_datasets = create_unified_evaluation_datasets(
-            evaluation_base_seed=periodic_eval_test_seed,
-            training_wiring_mode=wiring_mode,
-            training_initial_diversity=initial_diversity,
-            layer_sizes=layer_sizes,
-            arity=arity,
-            eval_batch_size_in=periodic_eval_batch_size_in
-            if periodic_eval_batch_size_in is not None
-            else initial_diversity,
-            eval_batch_size_out=periodic_eval_batch_size_out
-            if periodic_eval_batch_size_out is not None
-            else meta_batch_size,
-            do_ood_evaluation=periodic_eval_do_ood_evaluation
-            if periodic_eval_do_ood_evaluation is not None
-            else wiring_mode == "random",
-            get_all_wirings=periodic_eval_get_all_wirings,
-            pool_noise_scale=pool_noise_scale,
-        )
-
-        log.info(eval_datasets.get_summary())
-
     diversity = 0.0
 
     # Training loop
@@ -1229,7 +1206,7 @@ def train_model(
         for epoch in pbar:
             # Pool-based training
             # Sample a batch from the pool using the current (potentially dynamic) batch size
-            rng, sample_key, loss_key = jax.random.split(rng, 3)
+            train_key, sample_key, loss_key = jax.random.split(train_key, 3)
             idxs, graphs, wires, logits, _gate_masks = circuit_pool.sample(
                 sample_key, meta_batch_size
             )
@@ -1273,9 +1250,8 @@ def train_model(
             # Reset a fraction of the pool using scheduled intervals
 
             if should_reset_pool(epoch, reset_pool_interval, last_reset_epoch):
-                rng, reset_key, fresh_key = jax.random.split(rng, 3)
-
                 if wiring_mode == "genetic":
+                    train_key, reset_key = jax.random.split(train_key)
                     # Use genetic mutations instead of completely fresh circuits
                     circuit_pool, avg_steps_reset = circuit_pool.reset_with_genetic_mutation(
                         key=reset_key,
@@ -1295,10 +1271,16 @@ def train_model(
 
                     # Use consistent key generation for pool resets
                     # Note: "genetic" mode is handled above, so only "fixed" uses wiring_fixed_key here
-                    reset_pool_key = wiring_fixed_key if wiring_mode == "fixed" else fresh_key
+                    if wiring_mode == "random":
+                        train_key, pool_key = jax.random.split(train_key)
+                    else:
+                        pool_key = eval_key
+
+                    wires_key, logits_key = jax.random.split(pool_key)
 
                     fresh_pool = initialize_graph_pool(
-                        rng=reset_pool_key,
+                        wires_key=wires_key,
+                        logits_key=logits_key,
                         layer_sizes=layer_sizes,
                         pool_size=pool_size,  # Use same size as circuit_pool
                         input_n=input_n,
@@ -1312,6 +1294,7 @@ def train_model(
                         noise_scale=pool_noise_scale,
                     )
 
+                    train_key, reset_key = jax.random.split(train_key)
                     # Reset a fraction of the pool and get avg steps of reset graphs
                     circuit_pool, avg_steps_reset = circuit_pool.reset_fraction(
                         key=reset_key,
@@ -1435,11 +1418,6 @@ def train_model(
                 and epoch % periodic_eval_interval == 0
             ):
                 # Run enhanced evaluations: fixed seed, pool sample (if diversity > 1), and OOD
-
-                # Use the same datasets created during initialization
-                # The pool evaluation circuits are recreated with the same logic as training
-                current_datasets = eval_datasets
-
                 # Build discrete damage steps (evenly spaced within eval window)
                 if n_damage_steps > 0:
                     damage_steps = jp.linspace(
@@ -1448,14 +1426,14 @@ def train_model(
                         n_damage_steps + 1,
                         endpoint=False,
                     ).astype(int)[1:]
-                    damage_key = jax.random.PRNGKey(42)
+                    damage_key = eval_key
                 else:
                     damage_steps = None
                     damage_key = None
 
                 eval_results = run_unified_periodic_evaluation(
                     model=model,
-                    datasets=current_datasets,
+                    datasets=eval_datasets,
                     pool=circuit_pool,
                     # Data
                     data_dict=data_dict,

@@ -150,7 +150,8 @@ def gen_wires_with_noise(key, in_n, out_n, arity, group_size, local_noise=None):
 
 
 def gen_circuit(
-    key,
+    wires_key,
+    logits_key,
     layer_sizes,
     arity=4,
     verbose=False,
@@ -161,31 +162,37 @@ def gen_circuit(
     Generate a complete circuit with random wiring and initial operations.
 
     Args:
-        key: JAX random key
+        key: JAX random key for wiring (used for both wiring and logits if logits_key is not provided)
+        logit_key: JAX random key for logits
         layer_sizes: List of tuples (nodes, group_size) for each layer
         arity: Number of inputs per gate (fan-in)
         local_noise: Amount of noise to add to local connections
         init_logits_fn: Function to initialize logits
+        logits_key: JAX random key for logits (if not provided, key is used for both wiring and logits)
 
     Returns:
         Tuple of (wires, logits) where each is a list per layer
     """
     in_n = layer_sizes[0][0]
     all_wires, all_logits = [], []
+    if logits_key is None:
+        wires_key, logits_key = jax.random.split(wires_key, 2)
+
     for out_n, group_size in layer_sizes[1:]:
         if verbose:
             print(f"in_n: {in_n}, out_n: {out_n}, group_size: {group_size}")
 
-        key, wires_key, logits_key = jax.random.split(key, 3)
         wires = gen_wires(
             wires_key, in_n, out_n, arity, group_size
         )  # Assuming gen_wires also takes local_noise if needed
         # Use the provided function to initialize logits:
+
+        logits_key, random_key = jax.random.split(logits_key)
         logits = init_logits_fn(
             gate_n=out_n,
             arity=arity,
             group_size=group_size,
-            key=logits_key,
+            key=random_key,
             noise_scale=noise_scale,
         )
         in_n = out_n

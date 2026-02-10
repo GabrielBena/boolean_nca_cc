@@ -602,8 +602,65 @@ class GraphPool(struct.PyTreeNode):
         return updated_pool, int(num_damaged)
 
 
+def get_wires_and_logits(
+    wires_key,
+    logits_key,
+    layer_sizes: list[tuple[int, int]],
+    pool_size: int,
+    arity: int = 2,
+    noise_scale: float = 0.0,
+    wiring_mode: str = "random",
+    initial_diversity: int = 1,
+) -> tuple[PyTree, PyTree]:
+    """
+    Get wires and logits for a pool of graphs.
+
+    Args:
+        wires_key: Random key for generating wires
+        logits_key: Random key for generating logits
+    """
+
+    # Generate circuit wirings based on wiring mode
+
+    vmap_gen_circuit = jax.vmap(
+        lambda wires_key, logits_key: gen_circuit(
+            wires_key=wires_key,
+            logits_key=logits_key,
+            layer_sizes=layer_sizes,
+            arity=arity,
+            noise_scale=noise_scale,
+        ),
+    )
+
+    logits_keys = jax.random.split(logits_key, pool_size)
+
+    if wiring_mode in ["fixed", "genetic"]:
+        effective_diversity = jp.clip(initial_diversity, 1, pool_size)
+
+        if effective_diversity == 1:
+            # Single wiring repeated
+            wires_keys = jp.repeat(wires_key[None, :], pool_size, axis=0)
+        elif effective_diversity >= pool_size:
+            # Unique wiring for each
+            wires_keys = jax.random.split(wires_key, pool_size)
+        else:
+            # N different wirings repeated
+            wires_keys = jax.random.split(wires_key, effective_diversity)
+            min_repeats = pool_size // effective_diversity + 1
+            wires_keys = jp.repeat(wires_key[None, :], min_repeats, axis=0)[:pool_size]
+
+        all_wires, all_logits = vmap_gen_circuit(wires_keys, logits_keys)
+
+    else:  # wiring_mode == "random"
+        wires_keys = jax.random.split(wires_key, pool_size)
+        all_wires, all_logits = vmap_gen_circuit(wires_keys, logits_keys)
+
+    return all_wires, all_logits
+
+
 def initialize_graph_pool(
-    rng: jax.random.PRNGKey,
+    wires_key,
+    logits_key,
     layer_sizes: list[tuple[int, int]],
     pool_size: int,
     input_n: int,
@@ -636,76 +693,17 @@ def initialize_graph_pool(
     Returns:
         Initialized GraphPool
     """
-    # Generate circuit wirings based on wiring mode
-    if wiring_mode in ["fixed", "genetic"]:
-        effective_diversity = jp.clip(initial_diversity, 1, pool_size)
 
-        if effective_diversity == 1:
-            # Single wiring repeated
-            single_wires, single_logits = gen_circuit(
-                rng, layer_sizes, arity=arity, noise_scale=noise_scale
-            )
-            all_wires = jax.tree.map(
-                lambda leaf: jp.repeat(leaf[None, ...], pool_size, axis=0), single_wires
-            )
-            all_logits = jax.tree.map(
-                lambda leaf: jp.repeat(leaf[None, ...], pool_size, axis=0), single_logits
-            )
-        elif effective_diversity >= pool_size:
-            # Unique wiring for each
-            rngs = jax.random.split(rng, pool_size)
-            vmap_gen_circuit = jax.vmap(
-                lambda rng: gen_circuit(rng, layer_sizes, arity=arity, noise_scale=noise_scale)
-            )
-            all_wires, all_logits = vmap_gen_circuit(rngs)
-        else:
-            # N different wirings repeated
-            diversity_rngs = jax.random.split(rng, effective_diversity)
-            vmap_gen_circuit = jax.vmap(
-                lambda rng: gen_circuit(rng, layer_sizes, arity=arity, noise_scale=noise_scale)
-            )
-            diverse_wires, diverse_logits = vmap_gen_circuit(diversity_rngs)
-
-            base_repeats = pool_size // effective_diversity
-            extra_repeats = pool_size % effective_diversity
-
-            repeat_counts = jp.concatenate(
-                [
-                    jp.full(extra_repeats, base_repeats + 1),
-                    jp.full(effective_diversity - extra_repeats, base_repeats),
-                ]
-            )
-
-            all_wires = []
-            all_logits = []
-
-            for layer_idx in range(len(diverse_wires)):
-                layer_wires = []
-                layer_logits = []
-
-                for diversity_idx in range(effective_diversity):
-                    n_repeats = repeat_counts[diversity_idx]
-                    repeated_wire = jp.repeat(
-                        diverse_wires[layer_idx][diversity_idx : diversity_idx + 1],
-                        n_repeats,
-                        axis=0,
-                    )
-                    repeated_logit = jp.repeat(
-                        diverse_logits[layer_idx][diversity_idx : diversity_idx + 1],
-                        n_repeats,
-                        axis=0,
-                    )
-                    layer_wires.append(repeated_wire)
-                    layer_logits.append(repeated_logit)
-
-                all_wires.append(jp.concatenate(layer_wires, axis=0))
-                all_logits.append(jp.concatenate(layer_logits, axis=0))
-    else:  # wiring_mode == "random"
-        rngs = jax.random.split(rng, pool_size)
-        vmap_gen_circuit = jax.vmap(
-            lambda rng: gen_circuit(rng, layer_sizes, arity=arity, noise_scale=noise_scale)
-        )
-        all_wires, all_logits = vmap_gen_circuit(rngs)
+    all_wires, all_logits = get_wires_and_logits(
+        wires_key=wires_key,
+        logits_key=logits_key,
+        layer_sizes=layer_sizes,
+        pool_size=pool_size,
+        arity=arity,
+        noise_scale=noise_scale,
+        wiring_mode=wiring_mode,
+        initial_diversity=initial_diversity,
+    )
 
     # Initialize gate masks
     if initialize_gate_masks:

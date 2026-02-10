@@ -121,7 +121,7 @@ def extract_track_metrics_config(cfg) -> list[str] | None:
     return result if result else None
 
 
-def run_backpropagation_training(cfg, x_data, y_data, loss_cfg=None):
+def run_backpropagation_training(cfg, eval_key, x_data, y_data, loss_cfg=None):
     """
     Run standard backpropagation training for comparison.
 
@@ -140,8 +140,14 @@ def run_backpropagation_training(cfg, x_data, y_data, loss_cfg=None):
     log.info("Running baseline backpropagation training")
 
     # Generate circuit
-    key = jax.random.PRNGKey(cfg.test_seed)
-    wires, logits = gen_circuit(key, cfg.circuit.layer_sizes, arity=cfg.circuit.arity)
+    wires_key, logits_key = jax.random.split(eval_key)
+    wires, logits = gen_circuit(
+        wires_key,
+        logits_key,
+        cfg.circuit.layer_sizes,
+        arity=cfg.circuit.arity,
+        noise_scale=cfg.pool.noise_scale,
+    )
 
     # Setup optimizer
     if cfg.backprop.optimizer == "adamw":
@@ -573,7 +579,12 @@ def main(cfg: DictConfig) -> None:
         log.info("Damage Configuration: DISABLED")
 
     # Set random seed
-    rng = jax.random.PRNGKey(cfg.seed)
+    train_key = jax.random.PRNGKey(cfg.seed)
+
+    if cfg.eval_seed is not None:
+        eval_key = jax.random.PRNGKey(cfg.eval_seed)
+    else:
+        eval_key = jax.random.fold_in(train_key, 1)
 
     # Create output directory
     if cfg.output.dir is not None:
@@ -616,8 +627,14 @@ def main(cfg: DictConfig) -> None:
         layer_sizes = cfg.circuit.layer_sizes
 
     # Generate dummy circuit
-    test_key = jax.random.PRNGKey(cfg.test_seed)
-    wires, logits = gen_circuit(test_key, cfg.circuit.layer_sizes, arity=cfg.circuit.arity)
+    wires_key, logits_key = jax.random.split(jax.random.PRNGKey(42))
+    wires, logits = gen_circuit(
+        wires_key,
+        logits_key,
+        cfg.circuit.layer_sizes,
+        arity=cfg.circuit.arity,
+        noise_scale=cfg.pool.noise_scale,
+    )
 
     # Generate dummy graph using globally configured function
     graph = configured_build_graph(
@@ -670,7 +687,7 @@ def main(cfg: DictConfig) -> None:
         text=cfg.circuit.get("text", None),
         train_test_split=test_ratio is not None,
         test_ratio=test_ratio,
-        seed=cfg.seed,
+        seed=eval_key,
     )
     data_dict = {
         "x_train": x_train,
@@ -706,16 +723,16 @@ def main(cfg: DictConfig) -> None:
     bp_results = None
     if cfg.backprop.enabled:
         bp_results = run_backpropagation_training(
-            cfg, x_train, y_train, loss_cfg=LossConfig.from_dict(dict(cfg.loss))
+            cfg, eval_key, x_train, y_train, loss_cfg=LossConfig.from_dict(dict(cfg.loss))
         )
         plot_training_curves(bp_results, "Backpropagation", os.path.join(output_dir, "plots"))
 
     # Initialize model
-    rng, init_rng = jax.random.split(rng)
+    train_key, init_key = jax.random.split(train_key)
 
     # Common overrides for hydra.instantiate
     # These are values computed in train.py or essential for all models
-    instantiate_overrides = {"arity": arity, "rngs": nnx.Rngs(params=init_rng)}
+    instantiate_overrides = {"arity": arity, "rngs": nnx.Rngs(params=init_key)}
 
     # Specific overrides based on model type, which should still be in the YAML.
     # Alternatively, we could inspect cfg.model._target_ if 'type' was removed.
@@ -774,83 +791,72 @@ def main(cfg: DictConfig) -> None:
     # Compute all damage parameters from target_damage_fraction
     damage_params = compute_damage_params(cfg, layer_sizes, log)
 
+    # Create evaluation datasets
+    eval_datasets = create_unified_evaluation_datasets(
+        eval_key=eval_key,
+        training_wiring_mode=cfg.training.wiring_mode,
+        training_initial_diversity=cfg.pool.initial_diversity,
+        layer_sizes=layer_sizes,
+        arity=cfg.circuit.arity,
+        eval_batch_size_in=cfg.eval.batch_size_in
+        if cfg.eval.batch_size_in is not None
+        else cfg.pool.initial_diversity,
+        eval_batch_size_out=cfg.eval.batch_size_out
+        if cfg.eval.batch_size_out is not None
+        else cfg.training.meta_batch_size,
+        do_ood_evaluation=cfg.eval.do_ood_evaluation
+        if cfg.eval.do_ood_evaluation is not None
+        else cfg.training.wiring_mode == "random",
+        pool_noise_scale=cfg.pool.noise_scale,
+    )
+
+    log.info(eval_datasets.get_summary())
+
     # Train model
     log.info(f"Starting {cfg.model.type.upper()} training")
     model_results = train_model(
-        # Initialization parameters
-        key=cfg.seed,
-        init_model=model,
-        # Data parameters
+        # ── Data ────────────────────────────────────────────────────────
         data_dict=data_dict,
         data_fraction=data_fraction,
-        # Model architecture parameters
+        eval_datasets=eval_datasets,
+        # ── Initialization ──────────────────────────────────────────────
+        train_key=train_key,
+        eval_key=eval_key,
+        init_model=model,
+        # ── Model architecture ──────────────────────────────────────────
         layer_sizes=layer_sizes,
-        circuit_hidden_dim=cfg.model.circuit_hidden_dim,
         arity=arity,
-        # Training hyperparameters
-        learning_rate=cfg.training.learning_rate,
-        weight_decay=cfg.training.weight_decay,
+        circuit_hidden_dim=cfg.model.circuit_hidden_dim,
+        # ── Training: core loop ─────────────────────────────────────────
         epochs=cfg.training.epochs or 2**cfg.training.epochs_power_of_2,
         n_message_steps=cfg.training.n_message_steps,
         use_scan=cfg.training.use_scan,
         gradient_checkpointing=cfg.training.gradient_checkpointing,
-        # Loss parameters
+        # ── Training: optimization ──────────────────────────────────────
+        learning_rate=cfg.training.learning_rate,
+        weight_decay=cfg.training.weight_decay,
+        lr_scheduler=cfg.training.lr_scheduler,
+        lr_scheduler_params=cfg.training.lr_scheduler_params,
+        # ── Training: loss ──────────────────────────────────────────────
         loss_cfg=LossConfig.from_dict(dict(cfg.loss)),
         random_loss_step=cfg.training.random_loss_step,
         random_loss_step_min=cfg.training.random_loss_step_min,
         use_beta_loss_step=cfg.training.use_beta_loss_step,
-        # Wiring mode parameters
+        # ── Wiring & batching ───────────────────────────────────────────
         wiring_mode=cfg.training.wiring_mode,
         meta_batch_size=cfg.training.meta_batch_size,
-        # Multi-GPU data parallelism
         multi_gpu_enabled=cfg.training.multi_gpu.enabled,
         multi_gpu_num_devices=cfg.training.multi_gpu.num_devices,
-        wiring_fixed_key=jax.random.PRNGKey(cfg.test_seed),
-        # Pool parameters
+        # ── Pool ────────────────────────────────────────────────────────
         pool_size=cfg.pool.size,
         reset_pool_fraction=cfg.pool.reset_fraction,
-        reset_strategy=cfg.pool.reset_strategy,
         reset_pool_interval=cfg.pool.reset_interval,
+        reset_strategy=cfg.pool.reset_strategy,
         pool_noise_scale=cfg.pool.noise_scale,
-        # Genetic mutation parameters
+        initial_diversity=cfg.pool.initial_diversity,
         genetic_mutation_rate=cfg.pool.mutation_rate,
         genetic_swaps_per_layer=cfg.pool.n_swaps_per_layer,
-        initial_diversity=cfg.pool.initial_diversity,
-        # Learning rate scheduling
-        lr_scheduler=cfg.training.lr_scheduler,
-        lr_scheduler_params=cfg.training.lr_scheduler_params,
-        # Checkpoint parameters
-        checkpoint_enabled=cfg.checkpoint.enabled,
-        checkpoint_dir=checkpoint_dir,
-        checkpoint_interval=cfg.checkpoint.interval,
-        # Periodic evaluation parameters
-        periodic_eval_enabled=cfg.eval.enabled,
-        periodic_eval_interval=cfg.eval.interval,
-        periodic_eval_inner_steps=cfg.eval.inner_steps,
-        periodic_eval_test_seed=cfg.test_seed,
-        periodic_eval_log_stepwise=cfg.eval.log_stepwise,
-        periodic_eval_batch_size_in=cfg.eval.batch_size_in,
-        periodic_eval_batch_size_out=cfg.eval.batch_size_out,
-        periodic_eval_do_ood_evaluation=cfg.eval.do_ood_evaluation,
-        periodic_eval_log_pool_scatter=cfg.eval.log_pool_scatter,
-        periodic_eval_get_all_wirings=cfg.eval.get_all_wirings,
-        # WandB parameters
-        wandb_logging=cfg.wandb.enabled,
-        log_interval=cfg.logging.log_interval,
-        wandb_run_config=OmegaConf.to_container(cfg, resolve=True),
-        # Early stopping
-        early_stopping=EarlyStopping(
-            metric=cfg.stop_accuracy.metric,
-            source=cfg.stop_accuracy.source,
-            threshold=cfg.stop_accuracy.threshold,
-            patience=cfg.stop_accuracy.patience,
-            min_epochs=cfg.stop_accuracy.min_epochs,
-            scope=cfg.stop_accuracy.get("scope", None),
-        ) if cfg.stop_accuracy.enabled else None,
-        # Best model tracking parameters
-        save_best=cfg.checkpoint.save_best,
-        track_metrics=track_metrics,
-        # Damage parameters (derived from target_damage_fraction)
+        # ── Damage / resilience ─────────────────────────────────────────
         damage_enabled=damage_params["enabled"],
         p_fault=damage_params["p_fault_train"],
         p_fault_eval=damage_params["p_fault_eval"],
@@ -858,11 +864,37 @@ def main(cfg: DictConfig) -> None:
         faulty_logit_value=damage_params["faulty_logit_value"],
         n_damage_steps=damage_params["n_damage_steps"],
         knockouts_per_event=damage_params["knockouts_per_event"],
-        # Delayed onset & no-repair baseline
         p_fault_onset_step_train=damage_params["p_fault_onset_step_train"],
         p_fault_onset_step_eval=damage_params["p_fault_onset_step_eval"],
         compute_no_repair_baseline=damage_params["compute_no_repair_baseline"],
-        # Debugging parameters
+        # ── Periodic evaluation ─────────────────────────────────────────
+        periodic_eval_enabled=cfg.eval.enabled,
+        periodic_eval_interval=cfg.eval.interval,
+        periodic_eval_inner_steps=cfg.eval.inner_steps,
+        periodic_eval_log_stepwise=cfg.eval.log_stepwise,
+        periodic_eval_log_pool_scatter=cfg.eval.log_pool_scatter,
+        # ── Early stopping ──────────────────────────────────────────────
+        early_stopping=EarlyStopping(
+            metric=cfg.stop_accuracy.metric,
+            source=cfg.stop_accuracy.source,
+            threshold=cfg.stop_accuracy.threshold,
+            patience=cfg.stop_accuracy.patience,
+            min_epochs=cfg.stop_accuracy.min_epochs,
+            scope=cfg.stop_accuracy.get("scope", None),
+        )
+        if cfg.stop_accuracy.enabled
+        else None,
+        # ── Checkpointing & best model tracking ────────────────────────
+        checkpoint_enabled=cfg.checkpoint.enabled,
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_interval=cfg.checkpoint.interval,
+        save_best=cfg.checkpoint.save_best,
+        track_metrics=track_metrics,
+        # ── Logging & WandB ─────────────────────────────────────────────
+        wandb_logging=cfg.wandb.enabled,
+        log_interval=cfg.logging.log_interval,
+        wandb_run_config=OmegaConf.to_container(cfg, resolve=True),
+        # ── Debugging ───────────────────────────────────────────────────
         do_check_gradients=cfg.training.check_gradients,
     )
 
@@ -885,37 +917,13 @@ def main(cfg: DictConfig) -> None:
             filename="final_model.pkl",
         )
 
-    # Get track_metrics configuration
-    track_metrics = extract_track_metrics_config(cfg)
-
     # Run comprehensive evaluation using standardized datasets
     if cfg.eval.enabled:
         # Create standardized evaluation datasets
-        log.info("Creating standardized evaluation datasets (seed + pool + OOD)")
 
-        # Create evaluation datasets using standardized approach
-        datasets = create_unified_evaluation_datasets(
-            evaluation_base_seed=cfg.test_seed,
-            training_wiring_mode=cfg.training.wiring_mode,
-            training_initial_diversity=cfg.pool.initial_diversity,
-            layer_sizes=layer_sizes,
-            arity=cfg.circuit.arity,
-            eval_batch_size_in=cfg.eval.batch_size_in
-            if cfg.eval.batch_size_in is not None
-            else cfg.training.initial_diversity,
-            eval_batch_size_out=cfg.eval.batch_size_out
-            if cfg.eval.batch_size_out is not None
-            else cfg.training.meta_batch_size,
-            do_ood_evaluation=cfg.eval.do_ood_evaluation
-            if cfg.eval.do_ood_evaluation is not None
-            else cfg.training.wiring_mode == "random",
-            get_all_wirings=cfg.eval.get_all_wirings,
-            pool_noise_scale=cfg.pool.noise_scale,
-        )
         eval_results = run_unified_periodic_evaluation(
             model=model_results["model"],
-            datasets=datasets,
-            pool=model_results.get("pool", None),
+            datasets=eval_datasets,
             data_dict={
                 "x_train": x_train,
                 "y_train": y_train,
@@ -931,12 +939,19 @@ def main(cfg: DictConfig) -> None:
             loss_cfg=LossConfig.from_dict(dict(cfg.loss)),
             epoch=-1,  # Final evaluation marker
             wandb_run=wandb_run,
-            log_stepwise=False,
+            log_stepwise=cfg.eval.log_stepwise,
             layer_sizes=layer_sizes,
             log_pool_scatter=False,
-            # Best model tracking parameters (final evaluation, so no saving)
-            track_metrics=track_metrics,
-            permanent_damage=cfg.damage.permanent,
+            # ── Damage / resilience ─────────────────────────────────────────
+            permanent_damage=damage_params["permanent"],
+            p_fault=damage_params["p_fault_eval"],
+            faulty_value=damage_params["faulty_logit_value"],
+            n_damage_steps=damage_params["n_damage_steps"],
+            knockouts_per_event=damage_params["knockouts_per_event"],
+            p_fault_onset_step=damage_params["p_fault_onset_step_eval"],
+            compute_no_repair_baseline=damage_params["compute_no_repair_baseline"],
+            # ── Pool ────────────────────────────────────────────────────────
+            pool=None,
         )
     else:
         eval_results = None

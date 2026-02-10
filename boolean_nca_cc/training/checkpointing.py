@@ -311,7 +311,10 @@ def instantiate_model_from_config(config, seed=0, **overrides: Any):
 
         # Generate dummy circuit
         test_key = jax.random.PRNGKey(config.get("test_seed", 42))
-        wires, logits = gen_circuit(test_key, layer_sizes, arity=arity)
+        wires_key, logits_key = jax.random.split(test_key)
+        wires, logits = gen_circuit(
+            wires_key, logits_key, layer_sizes, arity=arity, noise_scale=config.pool.noise_scale
+        )
 
         # Generate dummy graph
         graph = build_graph(
