@@ -470,9 +470,9 @@ def _perturb_and_recover_single(
     recovery_mode: str = "backprop",
     model: Optional[CircuitSelfAttention] = None,
     input_n: int = None,
-    circuit_hidden_dim: int = 16,
-    arity: int = 2,
-    max_steps: int = 15,
+    circuit_hidden_dim: int = 64,
+    arity: int = 4,
+    max_steps: int = 50,
     damage_behavior: str = "reversible",
     context: Optional[str] = None,  # Optional context string for logging
 ) -> Optional[Dict]:
@@ -729,9 +729,9 @@ def _execute_bfs_phase(
     reversible_bias: float = -10.0,
     model: Optional[CircuitSelfAttention] = None,
     input_n: int = None,
-    circuit_hidden_dim: int = 16,
-    arity: int = 2,
-    max_steps: int = 15,
+    circuit_hidden_dim: int = 64,
+    arity: int = 4,
+    max_steps: int = 50,
     damage_behavior: str = "reversible",
 ) -> Tuple[int, int]:
     """
@@ -883,9 +883,9 @@ def _execute_dfs_phase(
     reversible_bias: float = -10.0,
     model: Optional[CircuitSelfAttention] = None,
     input_n: int = None,
-    circuit_hidden_dim: int = 16,
-    arity: int = 2,
-    max_steps: int = 15,
+    circuit_hidden_dim: int = 64,
+    arity: int = 4,
+    max_steps: int = 50,
     damage_behavior: str = "reversible",
     max_retry_attempts: int = 0,
     # Checkpoint callback
@@ -1222,12 +1222,12 @@ def explore_degenerate_solutions(
     input_n: Optional[int] = None,
     circuit_hidden_dim: int = 64,
     arity: int = 4,
-    max_steps: int = 15,
+    max_steps: int = 50,
     damage_behavior: str = "reversible",
     max_retry_attempts: int = 0,
     # Checkpoint parameters
     output_dir: Optional[Path] = None,
-    checkpoint_interval: int = 1000,
+    checkpoint_interval: int = 100,
     task_name: str = "binary_multiply",
     exploration_config: Optional[Dict] = None,
 ) -> Dict:
@@ -1279,9 +1279,9 @@ def explore_degenerate_solutions(
         recovery_mode: Recovery mode ("backprop" or "self_attention", default: "backprop")
         model: CircuitSelfAttention model (required for self_attention mode)
         input_n: Number of input nodes (inferred from layer_sizes if not provided)
-        circuit_hidden_dim: Hidden dimension for graph (self_attention mode, default: 16)
-        arity: Gate arity (self_attention mode, default: 2)
-        max_steps: Maximum message passing steps (self_attention mode, default: 15)
+        circuit_hidden_dim: Hidden dimension for graph (self_attention mode, default: 64)
+        arity: Gate arity (self_attention mode, default: 4)
+        max_steps: Maximum message passing steps (self_attention mode, default: 50)
         damage_behavior: Damage behavior ("reversible" or "permanent", self_attention mode, default: "reversible")
         max_retry_attempts: When DFS perturbations_per_node==1 and a perturbation fails,
             retry up to this many times with different patterns before giving up.
@@ -1365,13 +1365,25 @@ def explore_degenerate_solutions(
             perturbations_per_node for _, _, perturbations_per_node, _, _ in phases
         )
         vocab_size = max(vocab_size, max_perturbations * 2)  # Add some buffer
+    # Number of gates damaged per perturbation is set by pool.damage_prob. Use a pool
+    # with at least that many entries so we don't cap at len(greedy_ordered_indices).
+    all_eligible = get_all_eligible_gate_indices(layer_sizes)
+    num_to_damage = min(int(damage_prob), len(all_eligible)) if all_eligible else 0
+    if greedy_indices is not None and len(greedy_indices) >= num_to_damage:
+        ordered_indices_for_vocab = greedy_indices
+    else:
+        ordered_indices_for_vocab = all_eligible
+        if greedy_indices is not None:
+            log.info(
+                f"Expanding pool from {len(greedy_indices)} greedy indices to {len(all_eligible)} eligible gates so damage_per_perturbation={int(damage_prob)} (pool.damage_prob) can be applied."
+            )
     knockout_vocabulary = create_knockout_vocabulary(
         rng=vocab_rng,
         vocabulary_size=vocab_size,
         layer_sizes=layer_sizes,
         damage_prob=damage_prob,
         damage_mode="greedy_vocabulary",
-        ordered_indices=greedy_indices,
+        ordered_indices=ordered_indices_for_vocab,
     )
     log.info(f"Generated vocabulary of {len(knockout_vocabulary)} perturbation patterns")
     
@@ -2133,21 +2145,34 @@ def apply_config_to_args(args, config_values: Dict, wandb_config=None):
         config_values: Dictionary of config values from config.yaml
         wandb_config: Optional wandb config object (takes precedence over config.yaml)
     """
-    # Helper to safely get nested config values
+    # Helper to safely get nested config values (supports Hydra .value wrapper in WandB)
     def get_wandb_value(path: str, default=None):
-        """Get value from wandb config using dot-separated path."""
+        """Get value from wandb config using dot-separated path.
+        Tries path as-is, then with .value before the last segment (e.g. circuit.task -> circuit.value.task).
+        """
         if wandb_config is None:
             return default
+        def get_at_path(p):
+            value = wandb_config
+            for part in p.split("."):
+                if hasattr(value, part):
+                    value = getattr(value, part)
+                elif isinstance(value, dict) and part in value:
+                    value = value[part]
+                else:
+                    return None
+            return value
+        out = get_at_path(path)
+        if out is not None:
+            return out
+        # Hydra/WandB often stores config as {"circuit": {"value": {"task": "add", ...}}}
         parts = path.split(".")
-        value = wandb_config
-        for part in parts:
-            if hasattr(value, part):
-                value = getattr(value, part)
-            elif isinstance(value, dict) and part in value:
-                value = value[part]
-            else:
-                return default
-        return value
+        if len(parts) >= 2:
+            value_path = ".".join(parts[:-1]) + ".value." + parts[-1]
+            out = get_at_path(value_path)
+            if out is not None:
+                return out
+        return default
     
     # Special handling for functional_threshold (from early_stop.threshold)
     if wandb_config is not None:
@@ -2159,8 +2184,9 @@ def apply_config_to_args(args, config_values: Dict, wandb_config=None):
                     args.functional_threshold = float(wandb_threshold)
                     log.info(f"Using functional_threshold from wandb config: {args.functional_threshold}")
     
-    # Special handling for max_steps (can come from training.n_message_steps or eval.periodic_eval_inner_steps)
-    if wandb_config is not None:
+    # Special handling for max_steps (can come from training.n_message_steps or eval.periodic_eval_inner_steps).
+    # Only apply WandB value when user did not explicitly pass --max-steps.
+    if wandb_config is not None and not getattr(args, "_max_steps_from_cli", False):
         wandb_max_steps = get_wandb_value("training.n_message_steps")
         if wandb_max_steps is None:
             wandb_max_steps = get_wandb_value("eval.periodic_eval_inner_steps")
@@ -2192,6 +2218,7 @@ def apply_config_to_args(args, config_values: Dict, wandb_config=None):
         "beta1": ("beta1", "backprop.beta1"),
         "beta2": ("beta2", "backprop.beta2"),
         "wiring_seed": ("wiring_seed", "test_seed"),
+        "reversible_bias": ("reversible_bias", "model.reversible_bias"),
     }
     
     # Apply other config values (wandb takes precedence)
@@ -2210,6 +2237,99 @@ def apply_config_to_args(args, config_values: Dict, wandb_config=None):
                     wandb_value = str(wandb_value)
                 setattr(args, arg_name, wandb_value)
                 log.info(f"Set {arg_name}={wandb_value} from wandb config (was {current_value})")
+
+
+def get_layer_sizes_from_wandb_config(wandb_config) -> Optional[List[Tuple[int, int]]]:
+    """
+    Extract layer_sizes from WandB run config (run-specific topology).
+    Supports both flat and Hydra .value wrapper structure.
+    Returns None if not present or invalid.
+    """
+    if wandb_config is None:
+        return None
+
+    def get_at_path(obj, path: str):
+        value = obj
+        for part in path.split("."):
+            if hasattr(value, part):
+                value = getattr(value, part)
+            elif isinstance(value, dict) and part in value:
+                value = value[part]
+            else:
+                return None
+        return value
+
+    raw = get_at_path(wandb_config, "layer_sizes") or get_at_path(wandb_config, "layer_sizes.value")
+    if raw is None:
+        return None
+    try:
+        # OmegaConf/dict: list of [gate_n, group_size] or (gate_n, group_size)
+        out = []
+        for row in raw:
+            if hasattr(row, "__iter__") and not isinstance(row, (str, bytes)):
+                row = list(row)
+                out.append((int(row[0]), int(row[1])))
+            else:
+                return None
+        return out if out else None
+    except (TypeError, IndexError, ValueError):
+        return None
+
+
+def get_all_eligible_gate_indices(layer_sizes: List[Tuple[int, int]]) -> List[int]:
+    """
+    Return all gate indices that are eligible for damage (middle layers only;
+    exclude input layer 0 and output layer -1). Used so that the number of
+    gates damaged per perturbation is set by pool.damage_prob, not by
+    len(greedy_ordered_indices).
+    """
+    if not layer_sizes:
+        return []
+    output_layer_idx = len(layer_sizes) - 1
+    eligible = []
+    current_idx = 0
+    for layer_idx, (total_gates, _) in enumerate(layer_sizes):
+        layer_end = current_idx + total_gates
+        if layer_idx == 0 or layer_idx == output_layer_idx:
+            current_idx = layer_end
+            continue
+        eligible.extend(range(current_idx, layer_end))
+        current_idx = layer_end
+    return eligible
+
+
+def get_greedy_ordered_indices_from_wandb_config(wandb_config) -> Optional[List[int]]:
+    """
+    Extract pool.greedy_ordered_indices from WandB run config (run-specific gate ordering).
+    Used only to define which gates are preferred when building knockout patterns.
+    The number of gates damaged per perturbation comes from pool.damage_prob.
+    Supports both flat and Hydra .value wrapper structure.
+    Returns None if not present or invalid.
+    """
+    if wandb_config is None:
+        return None
+
+    def get_at_path(obj, path: str):
+        value = obj
+        for part in path.split("."):
+            if hasattr(value, part):
+                value = getattr(value, part)
+            elif isinstance(value, dict) and part in value:
+                value = value[part]
+            else:
+                return None
+        return value
+
+    raw = get_at_path(wandb_config, "pool.greedy_ordered_indices") or get_at_path(
+        wandb_config, "pool.value.greedy_ordered_indices"
+    )
+    if raw is None:
+        return None
+    try:
+        out = [int(x) for x in raw]
+        return out if out else None
+    except (TypeError, ValueError):
+        return None
 
 
 def main():
@@ -2308,7 +2428,7 @@ def main():
         help=f"Random seed for wiring generation (default: {config_values.get('wiring_seed', 33)} from config.yaml)",
     )
     # functional_threshold: use early_stop.threshold if enabled, otherwise default
-    functional_threshold_default = config_values.get("functional_threshold", 0.999)
+    functional_threshold_default = config_values.get("functional_threshold", 1.00)
     parser.add_argument(
         "--functional-threshold",
         type=float,
@@ -2344,8 +2464,9 @@ def main():
     parser.add_argument(
         "--max-steps",
         type=int,
-        default=config_values.get("max_steps", 15),
-        help=f"Maximum message passing steps for self-attention recovery (default: {config_values.get('max_steps', 15)} from config.yaml training.n_message_steps or eval.periodic_eval_inner_steps)",
+        default=None,
+        metavar="N",
+        help="Maximum message passing steps for self-attention recovery (default: from config.yaml or WandB run; use this to override)",
     )
     parser.add_argument(
         "--damage-behavior",
@@ -2427,8 +2548,8 @@ def main():
     parser.add_argument(
         "--checkpoint-interval",
         type=int,
-        default=1000,
-        help="Save checkpoint every N unique solutions discovered (default: 1000). Checkpoints overwrite the same output directory, so visualize_umap.py can always use the latest results.",
+        default=100,
+        help="Save checkpoint every N unique solutions discovered (default: 100). Checkpoints overwrite the same output directory, so visualize_umap.py can always use the latest results.",
     )
     parser.add_argument(
         "--max-retry-attempts",
@@ -2439,6 +2560,12 @@ def main():
     
     args = parser.parse_args()
     
+    # Resolve --max-steps: if user did not pass it, take from config (WandB can override later)
+    max_steps_from_cli = args.max_steps is not None
+    if not max_steps_from_cli:
+        args.max_steps = config_values.get("max_steps", 50)
+    args._max_steps_from_cli = max_steps_from_cli
+
     # Log config source summary
     log.info("=" * 80)
     log.info("Configuration Summary")
@@ -2448,23 +2575,69 @@ def main():
         log.debug(f"  Parameters: {', '.join(config_values.keys())}")
     log.info("=" * 80)
     
-    # Generate task data
+    # When using self-attention recovery with a WandB run ID: load config and model first,
+    # then apply run-specific config to args so task, layer_sizes, and circuit match the run.
+    loaded_config = None
+    model = None
+    if args.recovery_mode == "self_attention":
+        model_path_or_run_id = args.model_path if args.model_path is not None else "yaw4da84"
+        is_file_path = Path(model_path_or_run_id).exists() or model_path_or_run_id.endswith(
+            (".pkl", ".npz", ".ckpt")
+        )
+        if not is_file_path:
+            log.info("Loading WandB run config and model first (run-specific task/layer_sizes will be applied)")
+            try:
+                from boolean_nca_cc.training.checkpointing import (
+                    load_config_from_wandb,
+                    load_model_from_config_and_checkpoint,
+                )
+                loaded_config, checkpoint_path, run_id = load_config_from_wandb(
+                    run_id=model_path_or_run_id,
+                    filters=None,
+                    project="boolean-nca-cc",
+                    entity="marcello-barylli-growai",
+                    download_dir="saves",
+                    filename="latest_checkpoint",
+                    select_by_best_metric=False,
+                    run_from_last=1,
+                    use_cache=True,
+                )
+                log.info(f"Loaded config from WandB run: {run_id}")
+                model, _ = load_model_from_config_and_checkpoint(
+                    config=loaded_config,
+                    checkpoint_path=checkpoint_path,
+                    run_id=run_id,
+                )
+                log.info("Model loaded successfully from WandB")
+                apply_config_to_args(args, config_values, wandb_config=loaded_config)
+                log.info("Applied WandB run config; task, layer_sizes, and circuit will match the run.")
+            except Exception as e:
+                log.error(f"Error loading model from WandB: {e}")
+                import traceback
+                log.error(traceback.format_exc())
+                raise
+    
+    # Generate task data (uses args, which may have been updated from WandB run config)
     case_n = 1 << args.input_bits
     x_data, y_data = get_task_data(
         args.task, case_n, input_bits=args.input_bits, output_bits=args.output_bits
     )
     log.info(f"Task: {args.task}, Input shape: {x_data.shape}, Output shape: {y_data.shape}")
     
-    # Generate layer sizes (simple structure for now)
-    # TODO: Make this configurable
+    # Layer sizes: use run-specific topology from WandB if available, else generate from args
     from boolean_nca_cc.circuits.model import generate_layer_sizes
     
-    layer_sizes = list(
-        generate_layer_sizes(
-            args.input_bits, args.output_bits, arity=args.arity, layer_n=3
+    wandb_layer_sizes = get_layer_sizes_from_wandb_config(loaded_config) if loaded_config is not None else None
+    if wandb_layer_sizes is not None:
+        layer_sizes = list(wandb_layer_sizes)
+        log.info(f"Layer sizes (from WandB run): {layer_sizes}")
+    else:
+        layer_sizes = list(
+            generate_layer_sizes(
+                args.input_bits, args.output_bits, arity=args.arity, layer_n=3
+            )
         )
-    )
-    log.info(f"Layer sizes: {layer_sizes}")
+        log.info(f"Layer sizes: {layer_sizes}")
     
     # Load or generate preconfigured circuit (using same optimizer settings as recovery)
     # Always generate fresh circuit using current configs unless explicitly loading from files
@@ -2599,30 +2772,20 @@ def main():
         phases = parse_phase_specification(args.phases)
         log.info(f"Parsed {len(phases)} phases from specification")
     
-    # Load model if using self-attention recovery
-    model = None
-    if args.recovery_mode == "self_attention":
-        # Default to WandB run ID if not provided
+    # Load model from local file if using self-attention and not already loaded from WandB
+    if args.recovery_mode == "self_attention" and model is None:
         model_path_or_run_id = args.model_path if args.model_path is not None else "yaw4da84"
-        
-        log.info(f"Loading self-attention model from: {model_path_or_run_id}")
-        try:
-            from flax import nnx
-            
-            # Check if it's a file path or WandB run ID
-            is_file_path = Path(model_path_or_run_id).exists() or model_path_or_run_id.endswith(('.pkl', '.npz', '.ckpt'))
-            
-            if is_file_path:
-                # Load from local file
+        is_file_path = Path(model_path_or_run_id).exists() or model_path_or_run_id.endswith(
+            (".pkl", ".npz", ".ckpt")
+        )
+        if is_file_path:
+            log.info(f"Loading self-attention model from local file: {model_path_or_run_id}")
+            try:
+                from flax import nnx
                 from boolean_nca_cc.training.checkpointing import load_checkpoint
 
-                log.info(f"Loading model from local file: {model_path_or_run_id}")
                 loaded_dict = load_checkpoint(model_path_or_run_id)
-                
-                # Create model instance with defaults (we need config for proper initialization)
-                input_n = args.input_bits
                 total_nodes = sum(size[0] for size in layer_sizes)
-                
                 model_key = jax.random.PRNGKey(42)
                 model = CircuitSelfAttention(
                     n_node=total_nodes,
@@ -2631,71 +2794,16 @@ def main():
                     rngs=nnx.Rngs(params=model_key),
                     damage_behavior=args.damage_behavior,
                 )
-                
-                # Update model with loaded state
                 if "model" in loaded_dict:
                     nnx.update(model, loaded_dict["model"])
                     log.info("Model loaded successfully from file")
                 else:
                     log.warning("No 'model' key in checkpoint, using initialized model")
-            else:
-                # Load from WandB
-                from boolean_nca_cc.training.checkpointing import (
-                    load_config_from_wandb,
-                    load_model_from_config_and_checkpoint,
-                )
-                from boolean_nca_cc.circuits.tasks import TASKS
-                
-                log.info(f"Loading model from WandB run ID: {model_path_or_run_id}")
-                
-                # Set up filters based on circuit configuration (matching GUI_minimal.py)
-                task_name = args.task
-                filters = {
-                    "config.circuit.input_bits": args.input_bits,
-                    "config.circuit.output_bits": args.output_bits,
-                    "config.circuit.arity": args.arity,
-                    "config.model.type": "self_attention",
-                    "config.circuit.task": task_name if task_name in TASKS else "binary_multiply",
-                    "config.training.training_mode": "repair",
-                    "config.pool.damage_mode": "greedy_vocabulary",
-                    "config.pool.damage_injection_mode": "multi",
-                }
-                
-                # Load config and checkpoint from WandB
-                # If run_id is provided, use it directly (ignore filters)
-                loaded_config, checkpoint_path, run_id = load_config_from_wandb(
-                    run_id=model_path_or_run_id,
-                    filters=None,  # Don't use filters when run_id is specified
-                    project="boolean-nca-cc",
-                    entity="marcello-barylli-growai",
-                    download_dir="saves",
-                    filename="latest_checkpoint",
-                    select_by_best_metric=False,
-                    run_from_last=1,
-                    use_cache=True,
-                )
-                
-                log.info(f"Loaded config from WandB run: {run_id}")
-                log.info(f"Checkpoint path: {checkpoint_path}")
-                
-                # Load model from config and checkpoint
-                model, loaded_dict = load_model_from_config_and_checkpoint(
-                    config=loaded_config,
-                    checkpoint_path=checkpoint_path,
-                    run_id=run_id,
-                )
-                
-                log.info("Model loaded successfully from WandB")
-                
-                # Apply all config values from wandb (takes precedence over config.yaml and argparse defaults)
-                log.info("Applying config values from WandB run (overriding config.yaml defaults)")
-                apply_config_to_args(args, config_values, wandb_config=loaded_config)
-        
-        except Exception as e:
-            log.error(f"Error loading model: {e}")
-            import traceback
-            log.error(f"Traceback: {traceback.format_exc()}")
-            raise
+            except Exception as e:
+                log.error(f"Error loading model from file: {e}")
+                import traceback
+                log.error(traceback.format_exc())
+                raise
     
     # Prepare exploration config and output directory BEFORE running exploration
     # (so checkpoints can be saved during exploration)
@@ -2746,6 +2854,18 @@ def main():
         else:
             output_dir = Path(args.output_dir)
     
+    # Run-specific greedy_ordered_indices from WandB (preferred gate set for patterns).
+    # Number of gates damaged per perturbation is always pool.damage_prob; if the run's
+    # greedy list has fewer entries than damage_prob, we use all eligible gates so we can
+    # damage damage_prob gates.
+    greedy_indices_for_explore = (
+        get_greedy_ordered_indices_from_wandb_config(loaded_config)
+        if loaded_config is not None
+        else None
+    )
+    if greedy_indices_for_explore is not None:
+        log.info(f"Using greedy_ordered_indices from WandB run ({len(greedy_indices_for_explore)} indices); damage per perturbation: {args.damage_prob} gates (pool.damage_prob)")
+
     # Run exploration
     results = explore_degenerate_solutions(
         root_wires=wires,
@@ -2755,6 +2875,7 @@ def main():
         layer_sizes=layer_sizes,
         num_perturbations=args.num_perturbations,
         damage_prob=args.damage_prob,
+        greedy_indices=greedy_indices_for_explore,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
         optimizer=args.optimizer,

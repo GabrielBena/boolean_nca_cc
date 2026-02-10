@@ -14,14 +14,14 @@ metric:
   goal: maximize
   name: eval_no_damage/final_hard_accuracy
 
-# set input and output bits to 12
-circuit.input_bits:
-  value: 12
-circuit.output_bits:
-  value: 12
-
 # Parameters to sweep over
 parameters:
+  # Set input and output bits to 12 (must be under parameters so WandB passes them to the program)
+  circuit.input_bits:
+    value: 12
+  circuit.output_bits:
+    value: 12
+
   # Vary model initialization seed (primary source of stochasticity)
   seed:
     values:
@@ -84,7 +84,7 @@ parameters:
   
   # Eval: short message passing only (30 steps)
   eval.periodic_eval_inner_steps:
-    value: 30
+    value: 50
 
   # Training: no horizon loss, fixed loss step, no message-step schedule
   training.long_horizon_enabled:
