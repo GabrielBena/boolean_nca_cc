@@ -238,7 +238,7 @@ def run_circuit(logits, wires, x, gate_mask=None, hard=False):
 ################## boolear circuit definition ##################
 
 
-def generate_layer_sizes(input_n, output_n, arity, layer_n=2, width_factor=2):
+def generate_layer_sizes(input_n, output_n, arity, layer_n=2, width_factor=2, layer_width=None):
     """
     Generate layer sizes for the boolean circuit with proper dimensioning.
     Ensures the last hidden layer properly connects to the output layer.
@@ -248,12 +248,13 @@ def generate_layer_sizes(input_n, output_n, arity, layer_n=2, width_factor=2):
         output_n: Number of output bits
         arity: Number of inputs per gate
         layer_n: Number of hidden layers
-
+        width_factor: Width factor for the hidden layers
+        layer_width: Width for the hidden layers (if not provided, it is calculated as input_n * arity * width_factor)
     Returns:
         A tuple of (gate_n, group_size) pairs for each layer
     """
     # Base width for hidden layers
-    layer_width = input_n * arity * width_factor
+    layer_width = layer_width or int(input_n * arity * width_factor)
 
     # Calculate the required size for the last hidden layer
     # to match the output layer's input requirements

@@ -121,7 +121,7 @@ def extract_track_metrics_config(cfg) -> list[str] | None:
     return result if result else None
 
 
-def run_backpropagation_training(cfg, eval_key, x_data, y_data, loss_cfg=None):
+def run_backpropagation_training(cfg, eval_key, x_data, y_data, loss_cfg=None, noise_scale=None):
     """
     Run standard backpropagation training for comparison.
 
@@ -146,7 +146,7 @@ def run_backpropagation_training(cfg, eval_key, x_data, y_data, loss_cfg=None):
         logits_key,
         cfg.circuit.layer_sizes,
         arity=cfg.circuit.arity,
-        noise_scale=cfg.pool.noise_scale,
+        noise_scale=cfg.pool.noise_scale if noise_scale is None else noise_scale,
     )
 
     # Setup optimizer
@@ -921,6 +921,19 @@ def main(cfg: DictConfig) -> None:
     if cfg.eval.enabled:
         # Create standardized evaluation datasets
 
+        n_damage_steps = damage_params["n_damage_steps"]
+        if n_damage_steps > 0:
+            damage_steps = jax.numpy.linspace(
+                0,
+                cfg.eval.inner_steps,
+                n_damage_steps + 1,
+                endpoint=False,
+            ).astype(int)[1:]
+            damage_key = eval_key
+        else:
+            damage_steps = None
+            damage_key = None
+
         eval_results = run_unified_periodic_evaluation(
             model=model_results["model"],
             datasets=eval_datasets,
@@ -946,8 +959,9 @@ def main(cfg: DictConfig) -> None:
             permanent_damage=damage_params["permanent"],
             p_fault=damage_params["p_fault_eval"],
             faulty_value=damage_params["faulty_logit_value"],
-            n_damage_steps=damage_params["n_damage_steps"],
-            knockouts_per_event=damage_params["knockouts_per_event"],
+            damage_steps=damage_steps,
+            knockout_per_damage_step=damage_params["knockouts_per_event"],
+            damage_key=damage_key,
             p_fault_onset_step=damage_params["p_fault_onset_step_eval"],
             compute_no_repair_baseline=damage_params["compute_no_repair_baseline"],
             # ── Pool ────────────────────────────────────────────────────────

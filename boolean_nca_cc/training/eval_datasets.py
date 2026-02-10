@@ -56,13 +56,18 @@ class UnifiedEvaluationDatasets:
 
     def get_summary(self) -> str:
         """Get a summary string of the evaluation datasets."""
-        summary = (
-            f"Unified Evaluation Datasets:\n"
-            f"  - IN-distribution: {self.in_actual_batch_size} circuits (matches training: "
-            f"mode={self.training_config['wiring_mode']}, "
-            f"diversity={self.training_config['initial_diversity']})\n"
-            f"  - OUT-of-distribution: {self.out_actual_batch_size} circuits (random wiring)\n"
-        )
+        summary = f"Unified Evaluation Datasets:\n"
+        if self.in_distribution_wires is not None:
+            summary += (
+                f"  - IN-distribution: {self.in_actual_batch_size} circuits (matches training: "
+                f"mode={self.training_config['wiring_mode']}, "
+                f"diversity={self.training_config['initial_diversity']})\n"
+            )
+        if self.out_of_distribution_wires is not None:
+            summary += (
+                f"  - OUT-of-distribution: {self.out_actual_batch_size} circuits (random wiring)\n"
+            )
+
         if (
             self.in_actual_batch_size is not None
             and self.in_actual_batch_size > self.target_batch_size

@@ -296,8 +296,11 @@ def _prepare_model_fn(
 
         n_node = graph.nodes["layer"].shape[0]
         neighbor_indices, neighbor_mask = build_neighbor_indices(
-            graph.senders, graph.receivers, n_node,
-            model.max_neighbors, model.use_attention_mask,
+            graph.senders,
+            graph.receivers,
+            n_node,
+            model.max_neighbors,
+            model.use_attention_mask,
         )
 
         def base_fn(g):
@@ -544,8 +547,11 @@ def run_model_scan_with_loss(
 
         def scan_step(carry, step_idx):
             (
-                current_graph, current_gate_mask,
-                nr_graph, nr_gate_mask, damage_started,
+                current_graph,
+                current_gate_mask,
+                nr_graph,
+                nr_gate_mask,
+                damage_started,
             ) = carry
 
             # --- Sync nr graph with main BEFORE this step's damage --------
@@ -554,24 +560,33 @@ def run_model_scan_with_loss(
             # flips to True the nr graph keeps its own (un-repaired) state.
             synced_nodes = jax.tree.map(
                 lambda nr_v, main_v: jp.where(damage_started, nr_v, main_v),
-                nr_graph.nodes, current_graph.nodes,
+                nr_graph.nodes,
+                current_graph.nodes,
             )
             nr_graph = nr_graph._replace(nodes=synced_nodes)
             nr_gate_mask = jp.where(damage_started, nr_gate_mask, current_gate_mask)
 
             # --- 1. Apply damage to BOTH graphs (same keys → same pattern) -
             current_graph, current_gate_mask = apply_probabilistic_damage(
-                current_graph, step_idx, current_gate_mask,
+                current_graph,
+                step_idx,
+                current_gate_mask,
             )
             nr_graph, nr_gate_mask = apply_probabilistic_damage(
-                nr_graph, step_idx, nr_gate_mask,
+                nr_graph,
+                step_idx,
+                nr_gate_mask,
             )
 
             current_graph, current_gate_mask = apply_discrete_damage_if_needed(
-                current_graph, step_idx + 1, current_gate_mask,
+                current_graph,
+                step_idx + 1,
+                current_gate_mask,
             )
             nr_graph, nr_gate_mask = apply_discrete_damage_if_needed(
-                nr_graph, step_idx + 1, nr_gate_mask,
+                nr_graph,
+                step_idx + 1,
+                nr_gate_mask,
             )
 
             # --- 2. Detect whether damage has now started ------------------
@@ -611,19 +626,27 @@ def run_model_scan_with_loss(
             }
 
             new_carry = (
-                updated_graph, current_gate_mask,
-                nr_graph, nr_gate_mask, damage_started,
+                updated_graph,
+                current_gate_mask,
+                nr_graph,
+                nr_gate_mask,
+                damage_started,
             )
             return new_carry, (updated_graph, loss, current_logits, aux)
 
         # Initial carry: nr graph starts as a copy of the main graph
         init_carry = (
-            graph, initial_gate_mask,
-            graph, initial_gate_mask, jp.bool_(False),
+            graph,
+            initial_gate_mask,
+            graph,
+            initial_gate_mask,
+            jp.bool_(False),
         )
         (final_graph, _, _, _, _), step_outputs = jax.lax.scan(
-            scan_step, init_carry,
-            xs=jp.arange(num_steps), length=num_steps,
+            scan_step,
+            init_carry,
+            xs=jp.arange(num_steps),
+            length=num_steps,
         )
 
     else:
@@ -634,10 +657,14 @@ def run_model_scan_with_loss(
             current_graph, current_gate_mask = carry
 
             current_graph, current_gate_mask = apply_probabilistic_damage(
-                current_graph, step_idx, current_gate_mask,
+                current_graph,
+                step_idx,
+                current_gate_mask,
             )
             current_graph, current_gate_mask = apply_discrete_damage_if_needed(
-                current_graph, step_idx + 1, current_gate_mask,
+                current_graph,
+                step_idx + 1,
+                current_gate_mask,
             )
 
             updated_graph, loss, current_logits, aux = apply_model_and_compute_loss(
@@ -656,7 +683,8 @@ def run_model_scan_with_loss(
         (final_graph, _), step_outputs = jax.lax.scan(
             scan_step,
             (graph, initial_gate_mask),
-            xs=jp.arange(num_steps), length=num_steps,
+            xs=jp.arange(num_steps),
+            length=num_steps,
         )
 
     return final_graph, step_outputs
@@ -1137,8 +1165,10 @@ def evaluate_model_stepwise_batched(
         # Include no-repair metrics if present
         if compute_no_repair_baseline:
             avg_keys += [
-                "no_repair_loss", "no_repair_hard_loss",
-                "no_repair_accuracy", "no_repair_hard_accuracy",
+                "no_repair_loss",
+                "no_repair_hard_loss",
+                "no_repair_accuracy",
+                "no_repair_hard_accuracy",
             ]
         for k in avg_keys:
             if k in chunks[0][2]:
@@ -1230,6 +1260,12 @@ def evaluate_model_stepwise_batched(
         ],
         # Vmapped graphs: size [batch_size, n_steps, ...graph_shape...]
         "graphs": all_batch_graphs,
+        "all_metrics": {
+            "loss": jp.stack(losses),
+            "hard_loss": jp.stack(aux_data["hard_loss"]),
+            "accuracy": jp.stack(aux_data["accuracy"]),
+            "hard_accuracy": jp.stack(aux_data["hard_accuracy"]),
+        },
     }
 
     # Include no-repair baseline metrics if computed
