@@ -57,7 +57,7 @@ training:
     num_devices: null  # Number of devices to use (null = all available)
   
   # OPTIMIZATION
-  learning_rate: 3e-4
+  learning_rate: 4e-4
   weight_decay: 1e-5
   # LEARNING RATE SCHEDULER
   # Options: "constant", "exponential", "cosine", "linear_warmup", "adaptive", "reduce_on_plateau"
@@ -193,9 +193,9 @@ eval:
   inner_steps: 256
   log_stepwise: true  # Whether to log detailed step-by-step metrics to wandb
   # batch_size_in: ${training.meta_batch_size}  # Batch size for IN-distribution evaluation (None means use initial_diversity)
-  batch_size_in: 32  # Batch size for IN-distribution evaluation (None means use initial_diversity)
+  batch_size_in: 24  # Batch size for IN-distribution evaluation (None means use initial_diversity)
   # batch_size_out: ${training.meta_batch_size}  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
-  batch_size_out: 32  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
+  batch_size_out: 24  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
   log_pool_scatter: true
   do_ood_evaluation: null # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
   get_all_wirings: true # Whether to get all wirings (True) or a subset (False)

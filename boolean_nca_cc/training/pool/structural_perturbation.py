@@ -736,10 +736,10 @@ def compute_damage_params(cfg, layer_sizes, log=None) -> dict:
         "compute_no_repair_baseline": bool(cfg.damage.get("compute_no_repair_baseline", False)),
     }
 
-    if not result["enabled"]:
-        if log:
-            log.info("Damage system disabled")
-        return result
+    # if not result["enabled"]:
+    #     if log:
+    #         log.info("Damage system disabled")
+    #     return result
 
     n_eligible = count_eligible_gates(layer_sizes)
     result["n_eligible"] = n_eligible
@@ -799,13 +799,13 @@ def compute_damage_params(cfg, layer_sizes, log=None) -> dict:
             f"{onset_msg}{baseline_msg}"
         )
 
-    # if not result["enabled"]:
-    #     if log:
-    #         log.info("Damage system disabled: setting p_fault_train to None")
+    if not result["enabled"]:
+        if log:
+            log.info("Damage system disabled: setting p_fault_train to None")
 
-    #     # Training will use p_fault_train
-    #     result["p_fault_train"] = None
-    #     # We still leave p_fault_eval as is, to plot damaged/undamaged performance
+        # Training will use p_fault_train
+        result["p_fault_train"] = None
+        # We still leave p_fault_eval as is, to plot damaged/undamaged performance
 
     return result
 

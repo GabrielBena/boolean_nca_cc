@@ -946,6 +946,8 @@ def _select_best_artifact(artifacts: list, prefer_metric: str | None = None):
         # Hard vs soft (0 = hard, 1 = soft)
         hard_score = 0 if "hard" in metric else 1
 
+        damaged_score = 0 if "damaged" in metric else 1
+
         # In vs out distribution (0 = in, 1 = out, 2 = neither)
         if "eval_in" in metric:
             dist_score = 0
@@ -958,7 +960,7 @@ def _select_best_artifact(artifacts: list, prefer_metric: str | None = None):
         acc_score = 0 if "accuracy" in metric else 1
 
         # Sort by version number (newest first)
-        return (eval_score, hard_score, dist_score, acc_score, -int(version[1:]))
+        return (eval_score, hard_score, damaged_score, dist_score, acc_score, -int(version[1:]))
 
     # Sort artifacts by priority
     artifact_metrics.sort(key=lambda x: metric_priority(x))
