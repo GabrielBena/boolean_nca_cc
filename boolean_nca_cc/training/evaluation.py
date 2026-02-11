@@ -1228,7 +1228,7 @@ def evaluate_model_stepwise_batched(
             layer_sizes=layer_sizes,
             data_fraction=1.0,
             scan_key=scan_key,
-            gradient_checkpointing=False,
+            gradient_checkpointing=True,
             # Discrete damage (for visualization)
             damage_steps=damage_steps,
             knockout_per_damage_step=knockout_per_damage_step,

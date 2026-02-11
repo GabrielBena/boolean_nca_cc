@@ -259,43 +259,62 @@ def run_unified_periodic_evaluation(
 
         # Helper to run evaluation and extract final metrics
         def run_eval(
-            wiring_key, data_suffix, wires, logits, batch_size, x, y, wiring_desc, with_damage=False
+            wiring_key,
+            data_suffix,
+            wires,
+            logits,
+            batch_size,
+            x,
+            y,
+            wiring_desc,
+            with_damage=False,
+            discrete_damage=False,
         ):
             if wires is None:
                 return None, None
 
             # Build full key: e.g., "in_test", "damaged_in_test"
-            full_key = (
-                f"damaged_{wiring_key}_{data_suffix}"
-                if with_damage
-                else f"{wiring_key}_{data_suffix}"
+            full_key = f"{'discrete_' if discrete_damage else ''}{'damaged_' if with_damage else ''}{wiring_key}_{data_suffix}"
+            damage_suffix = (
+                "DAMAGED "
+                if (with_damage and not discrete_damage)
+                else "DISCRETE DAMAGED "
+                if discrete_damage
+                else ""
             )
-            damage_suffix = "DAMAGED " if with_damage else ""
 
             log.info(
                 f"Running {damage_suffix}{wiring_desc} ({data_suffix}) evaluation ({batch_size} circuits)..."
             )
             _, result = evaluate_model_stepwise_batched(
+                # ── Model ──
                 model=model,
+                # ── Data ──
                 batch_wires=wires,
                 batch_logits=logits,
                 x_data=x,
                 y_data=y,
+                chunk_size=datasets.target_batch_size,
+                # ── Params ──
                 input_n=input_n,
                 arity=arity,
                 circuit_hidden_dim=circuit_hidden_dim,
                 n_message_steps=n_message_steps,
                 loss_cfg=loss_cfg,
                 layer_sizes=layer_sizes,
-                p_fault=p_fault if with_damage else None,
+                # ── Damage ──
+                p_fault=p_fault if (with_damage and not discrete_damage) else None,
                 faulty_value=faulty_value,
                 permanent_damage=permanent_damage,
-                p_fault_onset_step=p_fault_onset_step if with_damage else 0,
+                p_fault_onset_step=p_fault_onset_step
+                if (with_damage and not discrete_damage)
+                else 0,
                 compute_no_repair_baseline=compute_no_repair_baseline
-                if (with_damage and p_fault_onset_step > 0)
+                if ((with_damage and p_fault_onset_step > 0) or discrete_damage)
                 else False,
-                chunk_size=datasets.target_batch_size,
-                return_first_circuit_details=False,
+                damage_steps=damage_steps if discrete_damage else None,
+                knockout_per_damage_step=knockout_per_damage_step,
+                damage_key=damage_key,
             )
 
             prefix = f"eval_{full_key}"
@@ -346,6 +365,21 @@ def run_unified_periodic_evaluation(
                         y,
                         wiring_desc,
                         with_damage=True,
+                        discrete_damage=False,
+                    )
+
+                    full_key = f"discrete_damaged_{wiring_key}_{data_suffix}"
+                    step_metrics[full_key], final_metrics[full_key] = run_eval(
+                        wiring_key,
+                        data_suffix,
+                        wires,
+                        logits,
+                        batch_size,
+                        x,
+                        y,
+                        wiring_desc,
+                        with_damage=True,
+                        discrete_damage=True,
                     )
 
         # Check if any evaluation ran
@@ -412,45 +446,15 @@ def run_unified_periodic_evaluation(
                                 plt.close(fig)
 
                             # --- Discrete damage stepwise (separate eval, averaged across batch) ---
-                            if damage_steps is not None and step_metrics.get(full_key) is not None:
-                                log.info(
-                                    f"Running discrete damage eval for {wiring_desc} ({data_suffix})..."
-                                )
-                                _, discrete_result = evaluate_model_stepwise_batched(
-                                    model=model,
-                                    batch_wires=wires,
-                                    batch_logits=logits,
-                                    x_data=x,
-                                    y_data=y,
-                                    input_n=input_n,
-                                    arity=arity,
-                                    circuit_hidden_dim=circuit_hidden_dim,
-                                    n_message_steps=n_message_steps,
-                                    loss_cfg=loss_cfg,
-                                    layer_sizes=layer_sizes,
-                                    damage_steps=damage_steps,
-                                    knockout_per_damage_step=knockout_per_damage_step,
-                                    damage_key=damage_key,
-                                    p_fault=None,  # Pure discrete damage, no probabilistic
-                                    permanent_damage=permanent_damage,
-                                    # Always compute no-repair baseline for discrete damage
-                                    # (shotgun damage is where the repair benefit is most visible)
-                                    compute_no_repair_baseline=compute_no_repair_baseline,
-                                    chunk_size=datasets.target_batch_size,
-                                    return_first_circuit_details=False,
-                                )
+                            discrete_key = f"discrete_damaged_{full_key}"
+                            if step_metrics.get(discrete_key) is not None:
                                 fig = plot_wandb_stepwise_results(
-                                    discrete_result,
-                                    damage_steps=damage_steps,
+                                    step_metrics[discrete_key],
                                     title=f"{wiring_desc} ({data_suffix}) | damage steps={damage_steps} | {batch_size} circuits avg",
-                                    damage_fraction=_damage_frac(discrete_result),
+                                    damage_fraction=_damage_frac(step_metrics[discrete_key]),
                                 )
                                 wandb_run.log(
-                                    {
-                                        f"stepwise/eval_discrete_damaged_{full_key}": wandb_run.Image(
-                                            fig
-                                        )
-                                    }
+                                    {f"stepwise/eval_{discrete_key}": wandb_run.Image(fig)}
                                 )
                                 plt.close(fig)
 
