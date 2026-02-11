@@ -176,13 +176,14 @@ damage:
 
 # Backpropagation baseline
 backprop:
-  enabled: false
-  epochs: 100 
+  enabled: true
+  epochs: ${eval.inner_steps}
   learning_rate: 1
   weight_decay: 1e-1
   optimizer: "adamw"
   beta1: 0.8
   beta2: 0.8
+  log_stepwise: false
   
 # Evaluation parameters
 eval:

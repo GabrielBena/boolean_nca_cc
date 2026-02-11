@@ -1413,6 +1413,7 @@ def run_bp_scan(
     verbose=True,
     x_test=None,
     y_test=None,
+    compile=True,
 ):
     """
     Fully compiled BP baseline: scan(time) × vmap(batch) × jit.
@@ -1578,6 +1579,7 @@ def run_bp_scan(
             new_carry = (new_p, new_os, gate_mask)
             outputs = (
                 flat_log,
+                gate_mask,
                 loss,
                 aux["hard_loss"],
                 aux["accuracy"],
@@ -1591,14 +1593,15 @@ def run_bp_scan(
         return outputs  # each element: (n_steps, ...)
 
     # ── Vmap over batch + JIT ────────────────────────────────────
-    compiled_optimize = jax.jit(
-        jax.vmap(
-            optimize_circuit,
-            in_axes=(0, 0, 0, 0, 1),
-            #         params wires opt_st mask keys
-            # keys shape: (n_steps, batch, 2) → vmap over axis 1
-        )
+    compiled_optimize = jax.vmap(
+        optimize_circuit,
+        in_axes=(0, 0, 0, 0, 1),
+        #         params wires opt_st mask keys
+        # keys shape: (n_steps, batch, 2) → vmap over axis 1
     )
+
+    if compile:
+        compiled_optimize = jax.jit(compiled_optimize)
 
     if verbose:
         print(
@@ -1606,7 +1609,7 @@ def run_bp_scan(
         )
 
     # ── Single call → entire optimization ────────────────────────
-    all_logits, all_loss, all_hl, all_acc, all_ha = compiled_optimize(
+    all_logits, all_gate_mask, all_loss, all_hl, all_acc, all_ha = compiled_optimize(
         batch_params,
         batch_wires,
         batch_opt_state,
@@ -1633,7 +1636,9 @@ def run_bp_scan(
         "hard_accuracy": mean_ha.tolist(),
         "soft_accuracy": mean_acc.tolist(),
         "soft_loss": mean_loss.tolist(),
-        "graphs": SimpleNamespace(nodes={"logits": all_logits}),
+        "graphs": SimpleNamespace(
+            nodes={"logits": all_logits, "gate_knockout_mask": all_gate_mask}
+        ),
         # ── All metrics ── #batch, #steps
         "all_metrics": {
             "loss": all_loss,

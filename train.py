@@ -39,6 +39,7 @@ from boolean_nca_cc import generate_layer_sizes
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.circuits.tasks import get_task_data
 from boolean_nca_cc.circuits.train import LossConfig
+from boolean_nca_cc.circuits.viz import plot_wandb_stepwise_results
 from boolean_nca_cc.training.checkpointing import EarlyStopping, save_checkpoint
 from boolean_nca_cc.training.eval_datasets import (
     create_unified_evaluation_datasets,
@@ -688,28 +689,70 @@ def main(cfg: DictConfig) -> None:
         )
 
         loss_cfg = LossConfig.from_dict(dict(cfg.loss))
-        bp_results = run_bp_scan(
-            # Engine
-            opt=opt,
-            batch_params=eval_datasets.in_distribution_logits
-            if eval_datasets.in_distribution_logits is not None
-            else eval_datasets.out_of_distribution_logits,
-            batch_wires=eval_datasets.in_distribution_wires
-            if eval_datasets.in_distribution_wires is not None
-            else eval_datasets.out_of_distribution_wires,
-            # Data
-            x_data=x_train,
-            y_data=y_train,
-            x_test=x_test,
-            y_test=y_test,
-            # Configuration
-            n_steps=cfg.eval.inner_steps,
-            layer_sizes=layer_sizes,
-            input_n=input_n,
-            arity=arity,
-            loss_cfg=loss_cfg,
-            # Damage
+        damage_modes = (
+            ["none", "probabilistic", "deterministic"] if cfg.damage.enabled else ["none"]
         )
+        print(
+            f"Running backpropagation for {cfg.eval.inner_steps} steps on {damage_modes} damage modes"
+        )
+        n_damage_steps = damage_params["n_damage_steps"]
+        if n_damage_steps > 0:
+            damage_steps = jax.numpy.linspace(
+                0,
+                cfg.eval.inner_steps,
+                n_damage_steps + 1,
+                endpoint=False,
+            ).astype(int)[1:]
+        else:
+            damage_steps = None
+        bp_results = {
+            damage_mode: run_bp_scan(
+                # Engine
+                opt=opt,
+                batch_params=eval_datasets.in_distribution_logits
+                if eval_datasets.in_distribution_logits is not None
+                else eval_datasets.out_of_distribution_logits,
+                batch_wires=eval_datasets.in_distribution_wires
+                if eval_datasets.in_distribution_wires is not None
+                else eval_datasets.out_of_distribution_wires,
+                # Data
+                x_data=x_train,
+                y_data=y_train,
+                x_test=x_test,
+                y_test=y_test,
+                # Configuration
+                n_steps=cfg.eval.inner_steps,
+                layer_sizes=layer_sizes,
+                input_n=input_n,
+                arity=arity,
+                loss_cfg=loss_cfg,
+                # Damage
+                damage_mode=damage_mode,
+                permanent=cfg.damage.permanent,
+                p_fault=damage_params["p_fault_eval"] if damage_mode == "probabilistic" else None,
+                p_fault_onset_step=0,
+                damage_steps=damage_steps,
+                knockouts_per_event=damage_params["knockouts_per_event"],
+                faulty_value=damage_params["faulty_logit_value"],
+            )
+            for damage_mode in damage_modes
+        }
+
+        if cfg.wandb.enabled:
+            for damage_mode, (_, result) in bp_results.items():
+                key_prefix = f"BP_results/{damage_mode}"
+                for metric in ["loss", "hard_loss", "accuracy", "hard_accuracy"]:
+                    wandb.log({f"{key_prefix}/{metric}": result[metric][-1]})
+
+                if cfg.backprop.log_stepwise:
+                    import matplotlib.pyplot as plt
+
+                    fig = plot_wandb_stepwise_results(
+                        result,
+                        title=f"BP Results: {damage_mode}",
+                    )
+                    wandb.log({f"stepwise/{key_prefix}": wandb.Image(fig)})
+                    plt.close(fig)
 
     # Train model
     log.info(f"Starting {cfg.model.type.upper()} training")
