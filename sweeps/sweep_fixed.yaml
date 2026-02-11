@@ -2,11 +2,13 @@
 defaults:
   - override hydra/launcher: basic
 
+
 sweep:
   grid:  # parameters to combine in all possible ways
+    training.wiring_mode: [fixed, random]
+
     seed: [0, 1, 2, 4, 5]
     circuit: [reverse_large, add_large, binary_multiply_large]
-
 
     # FIXED PARAMETERS
     # model: [self_attention]
@@ -14,12 +16,10 @@ sweep:
     circuit.circuit_hidden_dim: [64]
     model.attention_dim: [128]
     pool.noise_scale: [0.1]
-    training.wiring_mode: [fixed]
     training.epochs_power_of_2: [17]
     training.n_message_steps: [5]
     training.learning_rate: [4e-4]
     training.meta_batch_size: [256]
-    damage.target_damage_fraction: [0.25]
+    damage.target_damage_fraction: [0.2]
     pool.expected_updates: [256]
-
     damage.enabled: [true]
