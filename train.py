@@ -26,7 +26,6 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 
 import logging
-from functools import partial
 
 import hydra
 import jax
@@ -34,17 +33,17 @@ import optax
 import pandas as pd
 from flax import nnx
 from omegaconf import DictConfig, OmegaConf, open_dict
-from tqdm.auto import tqdm
 
 import wandb
 from boolean_nca_cc import generate_layer_sizes
 from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.circuits.tasks import get_task_data
-from boolean_nca_cc.circuits.train import LOSS_L4, LossConfig, TrainState, loss_f, train_step
+from boolean_nca_cc.circuits.train import LossConfig
 from boolean_nca_cc.training.checkpointing import EarlyStopping, save_checkpoint
 from boolean_nca_cc.training.eval_datasets import (
     create_unified_evaluation_datasets,
 )
+from boolean_nca_cc.training.evaluation import run_bp_scan
 from boolean_nca_cc.training.pool.structural_perturbation import (
     compute_damage_params,
 )
@@ -54,7 +53,6 @@ from boolean_nca_cc.training.train_loop import (
 )
 from boolean_nca_cc.training.utils import (
     cleanup_redundant_wandb_artifacts,
-    plot_training_curves,
 )
 from boolean_nca_cc.utils.configured_graph_builder import (
     configure_build_graph,
@@ -119,131 +117,6 @@ def extract_track_metrics_config(cfg) -> list[str] | None:
         log.info("No metrics to track")
 
     return result if result else None
-
-
-def run_backpropagation_training(cfg, eval_key, x_data, y_data, loss_cfg=None, noise_scale=None):
-    """
-    Run standard backpropagation training for comparison.
-
-    Args:
-        cfg: Configuration object
-        x_data: Input data
-        y_data: Target data
-        loss_cfg: Loss config dict (default: LOSS_L4)
-
-    Returns:
-        Dictionary of training results
-    """
-    if loss_cfg is None:
-        loss_cfg = LOSS_L4
-
-    log.info("Running baseline backpropagation training")
-
-    # Generate circuit
-    wires_key, logits_key = jax.random.split(eval_key)
-    wires, logits = gen_circuit(
-        wires_key,
-        logits_key,
-        cfg.circuit.layer_sizes,
-        arity=cfg.circuit.arity,
-        noise_scale=cfg.pool.noise_scale if noise_scale is None else noise_scale,
-    )
-
-    # Setup optimizer
-    if cfg.backprop.optimizer == "adamw":
-        opt = optax.adamw(
-            cfg.backprop.learning_rate,
-            b1=cfg.backprop.beta1,
-            b2=cfg.backprop.beta2,
-            weight_decay=cfg.backprop.weight_decay,
-        )
-    else:
-        opt = optax.adam(cfg.backprop.learning_rate)
-
-    state = TrainState(params=logits, opt_state=opt.init(logits))
-
-    # Training loop
-    losses = []
-    hard_losses = []
-    accuracies = []
-    hard_accuracies = []
-
-    # Partial function for train_step to avoid passing opt and wires repeatedly
-    # Note: optax optimizers are not JAX types, so they cannot be static arguments for JIT
-    # if we were to JIT the loop here. train_step itself handles JITting of grad computation.
-    _train_step_fn = partial(
-        train_step,
-        opt=opt,
-        wires=wires,
-        x=x_data,
-        y0=y_data,
-        loss_cfg=loss_cfg,
-        do_train=True,
-    )
-
-    pbar = tqdm(range(cfg.backprop.epochs), desc="Backprop training")
-    for i in pbar:
-        loss, aux_metrics, new_state = _train_step_fn(state=state)
-        state = new_state  # Update state for the next iteration
-
-        accuracy = float(aux_metrics["accuracy"])
-        hard_accuracy = float(aux_metrics["hard_accuracy"])
-        hard_loss = float(aux_metrics["hard_loss"])
-
-        # Log metrics
-        if i % cfg.logging.log_interval == 0:
-            log.info(
-                f"BP Epoch {i}: Loss={loss:.4f}, Acc={accuracy:.4f}, Hard Acc={hard_accuracy:.4f}"
-            )
-            if cfg.wandb.enabled:
-                wandb.log(
-                    {
-                        "bp/loss": float(loss),
-                        "bp/hard_loss": hard_loss,
-                        "bp/accuracy": accuracy,
-                        "bp/hard_accuracy": hard_accuracy,
-                        "bp/epoch": i,
-                    }
-                )
-
-        # Store metrics
-        losses.append(float(loss))
-        hard_losses.append(hard_loss)
-        accuracies.append(accuracy)
-        hard_accuracies.append(hard_accuracy)
-
-        # Update tqdm postfix
-        pbar.set_postfix(
-            loss=loss,
-            acc=accuracy,
-            hard_acc=hard_accuracy,
-            hard_loss=hard_loss,
-        )
-
-    # Final evaluation (using the unified loss function)
-    final_loss, final_aux_metrics = loss_f(state.params, wires, x_data, y_data, loss_cfg=loss_cfg)
-    final_accuracy = float(final_aux_metrics["accuracy"])
-    final_hard_accuracy = float(final_aux_metrics["hard_accuracy"])
-    final_hard_loss = float(final_aux_metrics["hard_loss"])
-
-    log.info(
-        f"BP Final: Loss={final_loss:.4f}, Acc={final_accuracy:.4f}, Hard Acc={final_hard_accuracy:.4f}"
-    )
-
-    results = {
-        "losses": losses,
-        "hard_losses": hard_losses,
-        "accuracies": accuracies,
-        "hard_accuracies": hard_accuracies,
-        "final_loss": float(final_loss),
-        "final_hard_loss": final_hard_loss,
-        "final_accuracy": final_accuracy,
-        "final_hard_accuracy": final_hard_accuracy,
-        "params": state.params,
-        "wires": wires,
-    }
-
-    return results
 
 
 def create_and_save_final_results(
@@ -719,14 +592,6 @@ def main(cfg: DictConfig) -> None:
                 f"Test Ratio: {test_ratio:.4f} | Sizes = {x_train.shape[0]}, {x_total.shape[0]}"
             )
 
-    # Run backpropagation training for comparison if enabled
-    bp_results = None
-    if cfg.backprop.enabled:
-        bp_results = run_backpropagation_training(
-            cfg, eval_key, x_train, y_train, loss_cfg=LossConfig.from_dict(dict(cfg.loss))
-        )
-        plot_training_curves(bp_results, "Backpropagation", os.path.join(output_dir, "plots"))
-
     # Initialize model
     train_key, init_key = jax.random.split(train_key)
 
@@ -811,6 +676,40 @@ def main(cfg: DictConfig) -> None:
     )
 
     log.info(eval_datasets.get_summary())
+
+    # Run backpropagation training for comparison if enabled
+    bp_results = None
+    if cfg.backprop.enabled:
+        opt = optax.adamw(
+            cfg.backprop.learning_rate,
+            cfg.backprop.beta1,
+            cfg.backprop.beta2,
+            weight_decay=cfg.backprop.weight_decay,
+        )
+
+        loss_cfg = LossConfig.from_dict(dict(cfg.loss))
+        bp_results = run_bp_scan(
+            # Engine
+            opt=opt,
+            batch_params=eval_datasets.in_distribution_logits
+            if eval_datasets.in_distribution_logits is not None
+            else eval_datasets.out_of_distribution_logits,
+            batch_wires=eval_datasets.in_distribution_wires
+            if eval_datasets.in_distribution_wires is not None
+            else eval_datasets.out_of_distribution_wires,
+            # Data
+            x_data=x_train,
+            y_data=y_train,
+            x_test=x_test,
+            y_test=y_test,
+            # Configuration
+            n_steps=cfg.eval.inner_steps,
+            layer_sizes=layer_sizes,
+            input_n=input_n,
+            arity=arity,
+            loss_cfg=loss_cfg,
+            # Damage
+        )
 
     # Train model
     log.info(f"Starting {cfg.model.type.upper()} training")

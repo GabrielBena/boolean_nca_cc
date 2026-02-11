@@ -138,7 +138,7 @@ pool:
 # The single `target_damage_fraction` drives both, auto-computing p_fault and knockouts.
 damage:
   enabled: true  # Master switch for damage system
-  permanent: "random"  # true / false / "random" (coin flip per circuit)
+  permanent: 0.5 # probability of permanent damage per step and per gate (coin flip)
   
   # === TARGET DAMAGE (the single knob) ===
   # Fraction of eligible (hidden) gates expected to be damaged by circuit reset.

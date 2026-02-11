@@ -157,7 +157,7 @@ def run_unified_periodic_evaluation(
     # Probabilistic damage (for training-consistent evaluation)
     p_fault: float | None = None,
     faulty_value: float = -10.0,
-    permanent_damage: bool = True,
+    permanent_damage: float | str = 1.0,
     # Discrete damage (for visualization with fixed steps)
     damage_steps=None,
     knockout_per_damage_step=1,
@@ -202,7 +202,10 @@ def run_unified_periodic_evaluation(
         track_metrics: List of specific metrics to track and save (optional)
         p_fault: Per-gate-per-step failure probability for training-consistent evaluation
         faulty_value: Value to set for failed gate logits
-        permanent_damage: Whether to apply permanent damage to gates (True) or temporary damage (False)
+        permanent_damage: Per-gate probability that damage is permanent (float in [0, 1]).
+            1.0 = always permanent, 0.0 = always temporary, 0.5 = independent coin flip
+            per gate per timestep.
+            Also accepts "random" (equivalent to 0.5) or bool (True=1.0, False=0.0).
         damage_steps: Fixed damage steps for visualization (discrete mode)
         knockout_per_damage_step: Gates to knock out at each discrete damage step
         damage_key: Random key for damage
@@ -638,7 +641,7 @@ def train_model(
     damage_enabled: bool = False,
     p_fault: float | None = None,  # p_fault for training (tuned for pool.expected_updates)
     p_fault_eval: float | None = None,  # p_fault for eval (tuned for eval.inner_steps)
-    permanent_damage: bool = True,
+    permanent_damage: float | str = 1.0,
     faulty_logit_value: float = -10.0,
     n_damage_steps: int = 0,  # Discrete damage volleys during eval
     knockouts_per_event: int = 1,  # Gates per volley (auto-computed if null in config)
@@ -735,7 +738,10 @@ def train_model(
         damage_enabled: Whether to enable gate damage during training
         p_fault: Per-gate-per-step failure probability for training (tuned for pool.expected_updates)
         p_fault_eval: Per-gate-per-step failure probability for eval (tuned for eval.inner_steps)
-        permanent_damage: Whether to apply permanent damage to gates (True / False / "random")
+        permanent_damage: Per-gate probability that damage is permanent (float in [0, 1]).
+            1.0 = always permanent, 0.0 = always temporary, 0.5 = independent coin flip
+            per gate per timestep.
+            Also accepts "random" (equivalent to 0.5) or bool (True=1.0, False=0.0).
         faulty_logit_value: Value for knocked-out gate logits (large negative)
         n_damage_steps: Number of discrete damage volleys during eval
         knockouts_per_event: Gates knocked out per discrete damage volley
@@ -912,7 +918,7 @@ def train_model(
         # Probabilistic damage parameters
         p_fault: float | None = None,
         faulty_value: float = -10.0,
-        permanent_damage: bool = True,
+        permanent_damage: float | str = 1.0,
     ):
         """
         Core loss and gradient computation logic.
@@ -935,7 +941,10 @@ def train_model(
             data_fraction: Fraction of data to use for loss computation
             p_fault: Per-gate-per-step failure probability (None = disabled)
             faulty_value: Value to set for failed gate logits
-            permanent_damage: Whether to apply permanent damage to gates (True) or temporary damage (False)
+            permanent_damage: Per-gate probability that damage is permanent (float in [0, 1]).
+                1.0 = always permanent, 0.0 = always temporary, 0.5 = independent coin flip
+                per gate per timestep.
+                Also accepts "random" (equivalent to 0.5) or bool (True=1.0, False=0.0).
         Returns:
             Tuple of (loss, aux, updated_graphs, updated_logits, loss_steps, grads)
         """
@@ -1046,13 +1055,15 @@ def train_model(
         def batch_loss_fn(model, graphs, logits, wires, loss_key, permanent_damage):
             loss_fn = loss_fn_scan if use_scan else loss_fn_no_scan
 
+            # Resolve permanent_damage to a float probability per batch element:
+            # "random" -> 0.5, True -> 1.0, False -> 0.0, float -> as-is
             if permanent_damage == "random":
-                loss_key, permanent_damage_key = jax.random.split(loss_key)
-                permanent_damage = jax.random.choice(
-                    permanent_damage_key, jp.array([True, False]), (graphs.n_node.shape[0],)
-                )
+                permanent_damage_val = 0.5
+            elif isinstance(permanent_damage, bool):
+                permanent_damage_val = 1.0 if permanent_damage else 0.0
             else:
-                permanent_damage = jax.numpy.full(graphs.n_node.shape[0], permanent_damage)
+                permanent_damage_val = float(permanent_damage)
+            permanent_damage = jax.numpy.full(graphs.n_node.shape[0], permanent_damage_val)
 
             loss_keys = jax.random.split(loss_key, graphs.n_node.shape[0])
             loss, (aux, updated_graphs, updated_logits, loss_steps) = nnx.vmap(
@@ -1102,7 +1113,7 @@ def train_model(
         # Probabilistic damage parameters
         p_fault: float | None = None,
         faulty_value: float = -10.0,
-        permanent_damage: bool = True,
+        permanent_damage: float | str = 1.0,
     ):
         """
         Single training step using graphs from the pool.
@@ -1126,7 +1137,10 @@ def train_model(
             data_fraction: Fraction of data to use for loss computation
             p_fault: Per-gate-per-step failure probability (None = disabled)
             faulty_value: Value to set for failed gate logits
-            permanent_damage: Whether to apply permanent damage to gates (True) or temporary damage (False)
+            permanent_damage: Per-gate probability that damage is permanent (float in [0, 1]).
+                1.0 = always permanent, 0.0 = always temporary, 0.5 = independent coin flip
+                per gate per timestep.
+                Also accepts "random" (equivalent to 0.5) or bool (True=1.0, False=0.0).
         Returns:
             Tuple of (loss, (aux, updated_pool, loss_steps))
         """

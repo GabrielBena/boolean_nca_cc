@@ -7,10 +7,12 @@ models on optimizing boolean circuits.
 
 import logging
 from collections.abc import Generator
+from types import SimpleNamespace
 from typing import NamedTuple
 
 import jax
 import jax.numpy as jp
+import optax
 from flax import nnx
 
 from boolean_nca_cc.circuits.model import run_circuit
@@ -18,6 +20,7 @@ from boolean_nca_cc.circuits.train import (
     LOSS_L4,
     LossConfig,
     compute_loss_from_predictions,
+    loss_f,
 )
 from boolean_nca_cc.models import (
     CircuitGatheredAttention,
@@ -29,6 +32,8 @@ from boolean_nca_cc.training.pool.structural_perturbation import (
     apply_knockout_to_circuit,
     apply_probabilistic_gate_failure,
     create_eligible_gate_mask,
+    create_flat_knockout_pattern,
+    flat_to_layered_mask,
 )
 from boolean_nca_cc.utils import (
     extract_logits_from_graph,
@@ -335,7 +340,7 @@ def run_model_scan_with_loss(
     # Probabilistic damage parameters (for training)
     p_fault: float | None = None,
     faulty_value: float = -10.0,
-    permanent_damage: bool = True,
+    permanent_damage: float = 1.0,
     # Delayed probabilistic damage onset
     p_fault_onset_step: int = 0,
     # No-repair baseline: compute loss right after damage, before NCA runs
@@ -374,7 +379,9 @@ def run_model_scan_with_loss(
         knockout_per_damage_step: Number of gates to knock out at each discrete damage step
         p_fault: Per-gate-per-step failure probability (None = disabled, 0.0 = no failures)
         faulty_value: Value to set for failed gate logits (large negative for zero output)
-        permanent_damage: Whether to apply permanent damage to gates (True) or temporary damage (False)
+        permanent_damage: Per-gate probability that damage is permanent (float in [0, 1]).
+            1.0 = always permanent, 0.0 = always temporary, 0.5 = independent coin flip
+            per gate per timestep.
         p_fault_onset_step: Step at which probabilistic damage starts (0 = from the start).
             Use to let the circuit converge first, then introduce faults for repair testing.
         compute_no_repair_baseline: If True, compute loss/accuracy right after damage is
@@ -467,22 +474,24 @@ def run_model_scan_with_loss(
         damage_idx = jp.clip(damage_idx, 0, len(discrete_damage_keys) - 1)
 
         def do_damage(_):
+            # Split key: one for knockout, one for permanent_damage coin flip
+            knockout_key, perm_key = jax.random.split(discrete_damage_keys[damage_idx])
             # Apply knockout
             modified_logits, modified_gate_mask = apply_knockout_to_circuit(
-                discrete_damage_keys[damage_idx],
+                knockout_key,
                 graph.nodes["logits"],
                 layer_sizes,
                 num_knockouts=knockout_per_damage_step,
                 flat=True,
             )
             new_gate_mask = gate_mask * modified_gate_mask
-            new_gate_mask = jax.lax.cond(permanent_damage, lambda: new_gate_mask, lambda: gate_mask)
+            # Per-gate coin flip: each damaged gate independently decides if permanent
+            perm_mask = jax.random.uniform(perm_key, shape=gate_mask.shape) < permanent_damage
+            new_gate_mask = jp.where(perm_mask, new_gate_mask, gate_mask)
 
             new_nodes = {
                 **graph.nodes,
                 "logits": modified_logits,
-                # If permanent damage, update the gate mask to the new mask, otherwise keep the original gate mask
-                # "gate_knockout_mask": new_gate_mask if permanent_damage else gate_mask,
                 "gate_knockout_mask": new_gate_mask,
             }
             return graph._replace(nodes=new_nodes), new_gate_mask
@@ -502,12 +511,12 @@ def run_model_scan_with_loss(
         if not prob_damage_enabled:
             return graph, gate_mask
 
-        # Get the pre-split key for this step
-        step_key = prob_damage_keys[step_idx]
+        # Split key: one for gate failure, one for permanent_damage coin flip
+        fault_key, perm_key = jax.random.split(prob_damage_keys[step_idx])
 
         # Apply probabilistic failure (always compute for JIT consistency)
         new_logits, new_mask = apply_probabilistic_gate_failure(
-            step_key,
+            fault_key,
             graph.nodes["logits"],
             gate_mask,
             eligible_mask,
@@ -515,7 +524,9 @@ def run_model_scan_with_loss(
             faulty_value,
         )
 
-        new_gate_mask = jax.lax.cond(permanent_damage, lambda: new_mask, lambda: gate_mask)
+        # Per-gate coin flip: each damaged gate independently decides if permanent
+        perm_mask = jax.random.uniform(perm_key, shape=gate_mask.shape) < permanent_damage
+        new_gate_mask = jp.where(perm_mask, new_mask, gate_mask)
 
         # Gate on onset step: only actually apply damage if past the onset
         past_onset = step_idx >= p_fault_onset_step
@@ -750,7 +761,7 @@ def evaluate_model_stepwise_generator(
     # Probabilistic damage parameters (for training)
     p_fault: float | None = None,
     faulty_value: float = -10.0,
-    permanent_damage: bool = True,
+    permanent_damage: float = 1.0,
     # Delayed probabilistic damage onset
     p_fault_onset_step: int = 0,
     verbose: bool = False,
@@ -783,7 +794,9 @@ def evaluate_model_stepwise_generator(
         verbose: Print damage info
         p_fault: Per-gate-per-step failure probability (None = disabled, 0.0 = no failures)
         faulty_value: Value to set for failed gate logits (large negative for zero output)
-        permanent_damage: Whether to apply permanent damage to gates (True) or temporary damage (False)
+        permanent_damage: Per-gate probability that damage is permanent (float in [0, 1]).
+            1.0 = always permanent, 0.0 = always temporary, 0.5 = independent coin flip
+            per gate per timestep.
         p_fault_onset_step: Step at which probabilistic damage starts (0 = from the start)
 
     Yields:
@@ -837,6 +850,9 @@ def evaluate_model_stepwise_generator(
         eligible_mask = create_eligible_gate_mask(layer_sizes)
         prob_damage_key = jax.random.PRNGKey(99)  # separate key stream for prob damage
 
+    # Separate key stream for permanent_damage coin flips
+    perm_damage_key = jax.random.PRNGKey(77)
+
     # Run optimization steps
     step = 0
     while max_steps is None or step < max_steps:
@@ -853,7 +869,10 @@ def evaluate_model_stepwise_generator(
                 p_fault,
                 faulty_value,
             )
-            new_gate_mask = new_mask if permanent_damage else gate_mask
+            # Per-gate coin flip: each damaged gate independently decides if permanent
+            perm_damage_key, perm_key = jax.random.split(perm_damage_key)
+            perm_mask = jax.random.uniform(perm_key, shape=gate_mask.shape) < permanent_damage
+            new_gate_mask = jp.where(perm_mask, new_mask, gate_mask)
             new_nodes = {
                 **graph.nodes,
                 "logits": new_logits,
@@ -874,7 +893,10 @@ def evaluate_model_stepwise_generator(
             )
 
             new_gate_mask = gate_mask * modified_gate_mask
-            gate_mask = new_gate_mask if permanent_damage else gate_mask
+            # Per-gate coin flip: each damaged gate independently decides if permanent
+            perm_damage_key, perm_key = jax.random.split(perm_damage_key)
+            perm_mask = jax.random.uniform(perm_key, shape=gate_mask.shape) < permanent_damage
+            gate_mask = jp.where(perm_mask, new_gate_mask, gate_mask)
 
             # Update graph nodes with new damage
             new_nodes = {
@@ -928,7 +950,7 @@ def evaluate_model_stepwise(
     # Probabilistic damage parameters (for training)
     p_fault: float | None = None,
     faulty_value: float = -10.0,
-    permanent_damage: bool = True,
+    permanent_damage: float = 1.0,
     # Discrete damage parameters (for visualization)
     damage_key: jax.random.PRNGKey = jax.random.PRNGKey(42),
     damage_steps: list[int] | None = None,
@@ -963,7 +985,9 @@ def evaluate_model_stepwise(
         damage_steps: List of step indices at which to apply damage
         p_fault: Per-gate-per-step failure probability (None = disabled, 0.0 = no failures)
         faulty_value: Value to set for failed gate logits (large negative for zero output)
-        permanent_damage: Whether to apply permanent damage to gates (True) or temporary damage (False)
+        permanent_damage: Per-gate probability that damage is permanent (float in [0, 1]).
+            1.0 = always permanent, 0.0 = always temporary, 0.5 = independent coin flip
+            per gate per timestep.
         p_fault_onset_step: Step at which probabilistic damage starts (0 = from the start)
         compute_no_repair_baseline: If True, include no-repair baseline metrics in results
 
@@ -1074,7 +1098,7 @@ def evaluate_model_stepwise_batched(
     # Probabilistic damage (for training-consistent evaluation)
     p_fault: float | None = None,
     faulty_value: float = -10.0,
-    permanent_damage: bool = True,
+    permanent_damage: float | str = 1.0,
     # Delayed probabilistic damage onset
     p_fault_onset_step: int = 0,
     # No-repair baseline
@@ -1198,17 +1222,15 @@ def evaluate_model_stepwise_batched(
 
     # Split damage keys for each batch element (use dummy key if no damage)
     batch_size = batch_logits[0].shape[0]
-    if permanent_damage == "random" and damage_key is not None:
-        damage_key, permanent_damage_key = jax.random.split(damage_key)
-        permanent_damage = jax.random.choice(
-            permanent_damage_key, jp.array([True, False]), (batch_size,)
-        )
-    elif permanent_damage == "random" and damage_key is None:
-        permanent_damage = jax.random.choice(
-            jax.random.PRNGKey(0), jp.array([True, False]), (batch_size,)
-        )
+    # Resolve permanent_damage to a float probability per batch element:
+    # "random" -> 0.5, True -> 1.0, False -> 0.0, float -> as-is
+    if permanent_damage == "random":
+        permanent_damage_val = 0.5
+    elif isinstance(permanent_damage, bool):
+        permanent_damage_val = 1.0 if permanent_damage else 0.0
     else:
-        permanent_damage = jax.numpy.full(batch_size, permanent_damage)
+        permanent_damage_val = float(permanent_damage)
+    permanent_damage = jax.numpy.full(batch_size, permanent_damage_val)
 
     if damage_key is None:
         damage_key = jax.random.PRNGKey(0)  # Dummy key, won't be used if no damage_steps
@@ -1355,3 +1377,275 @@ def _extract_single_circuit_step_results(
         )
 
     return [make_step_result(s) for s in range(n_message_steps)]
+
+
+# =====================================================================
+# BP baseline functions
+# =====================================================================
+def _logits_to_flat_nodes(logits_list, input_n, arity):
+    logit_dim = 2**arity
+    parts = [jp.zeros((input_n, logit_dim))]
+    for l in logits_list:
+        gn, gs, ls = l.shape
+        parts.append(l.reshape(gn * gs, ls))
+    return jp.concatenate(parts, axis=0)
+
+
+def run_bp_scan(
+    opt,
+    batch_params,
+    batch_wires,
+    x_data,
+    y_data,
+    n_steps,
+    layer_sizes,
+    input_n,
+    arity,
+    loss_cfg,
+    damage_mode="none",
+    permanent: float | str | bool = 0.0,
+    damage_steps=None,
+    knockouts_per_event=0,
+    p_fault=None,
+    p_fault_onset_step=0,
+    faulty_value=-10.0,
+    key=jax.random.PRNGKey(42),
+    verbose=True,
+    x_test=None,
+    y_test=None,
+):
+    """
+    Fully compiled BP baseline: scan(time) × vmap(batch) × jit.
+
+    The entire optimization compiles to ONE XLA program.
+    First call is slow (compilation), subsequent calls are instant.
+
+    Args:
+        permanent: Per-gate probability that damage is permanent (float in [0, 1]).
+            1.0 = always permanent, 0.0 = always temporary, 0.5 = independent coin flip
+            per gate per timestep.
+            Also accepts "random" (equivalent to 0.5) or bool (True=1.0, False=0.0).
+    """
+    # Resolve permanent to a float probability
+    if permanent == "random":
+        permanent = 0.5
+    elif isinstance(permanent, bool):
+        permanent = 1.0 if permanent else 0.0
+    else:
+        permanent = float(permanent)
+
+    if isinstance(loss_cfg, dict):
+        loss_cfg = LossConfig.from_dict(loss_cfg)
+
+    batch_size = batch_wires[0].shape[0]
+    total_gates = sum(n for n, _ in layer_sizes)
+    input_gates = layer_sizes[0][0]
+    output_gates = layer_sizes[-1][0]
+    eligible_start = input_gates
+    eligible_end = total_gates - output_gates
+    eligible_flat = create_eligible_gate_mask(layer_sizes)
+
+    eval_x = x_test if x_test is not None else x_data
+    eval_y = y_test if y_test is not None else y_data
+
+    # ── Pre-compute scan inputs (shared across batch) ────────────
+    step_indices = jp.arange(n_steps)
+
+    damage_flags = jp.zeros(n_steps, dtype=jp.int32)
+    if damage_steps is not None:
+        for s in damage_steps:
+            damage_flags = damage_flags.at[int(s)].set(1)
+
+    # Per-circuit-per-step keys: (n_steps, batch, 2)
+    all_keys = jax.random.split(key, n_steps * batch_size + 1)[1:]
+    all_keys = all_keys.reshape(n_steps, batch_size, -1)
+
+    # ── Initial batched state ────────────────────────────────────
+    batch_opt_state = jax.vmap(opt.init)(batch_params)
+    batch_gate_mask = jp.ones((batch_size, total_gates), dtype=jp.float32)
+
+    # ── Pure helpers (all JAX-traceable) ─────────────────────────
+
+    def _preserve(new_params, old_params, gmask_flat):
+        idx = input_gates
+        out = []
+        for new_l, old_l in zip(new_params, old_params, strict=False):
+            gn, gs, ls = new_l.shape
+            n = gn * gs
+            m = gmask_flat[idx : idx + n].reshape(gn, gs, 1)
+            out.append(jp.where(m == 0.0, old_l, new_l))
+            idx += n
+        return out
+
+    def _det_damage(params, gmask, k):
+        knockout_key, perm_key = jax.random.split(k)
+        ko = create_flat_knockout_pattern(
+            knockout_key, total_gates, eligible_start, eligible_end, knockouts_per_event
+        )
+        idx = input_gates
+        new_p = []
+        for ll in params:
+            gn, gs, ls = ll.shape
+            m = ko[idx : idx + gn * gs].reshape(gn, gs, 1)
+            new_p.append(jp.where(m == 0.0, faulty_value, ll))
+            idx += gn * gs
+        # Per-gate coin flip: each damaged gate independently decides if permanent
+        perm_mask = jax.random.uniform(perm_key, shape=gmask.shape) < permanent
+        new_m = jp.where(perm_mask, gmask * ko, gmask)
+        return new_p, new_m
+
+    def _prob_damage(params, gmask, k):
+        fault_key, perm_key = jax.random.split(k)
+        ld = params[0].shape[-1]
+        parts = [jp.zeros((input_n, ld))]
+        for l in params:
+            gn, gs, ls = l.shape
+            parts.append(l.reshape(gn * gs, ls))
+        full = jp.concatenate(parts)
+        # Always pass the current (accumulated) mask — gates permanently
+        # damaged in earlier steps stay dead; temporary damage was never
+        # recorded in the mask so it doesn't affect eligibility.
+        new_full, new_m = apply_probabilistic_gate_failure(
+            fault_key, full, gmask, eligible_flat, p_fault, faulty_value
+        )
+        # Per-gate coin flip: each damaged gate independently decides if permanent
+        perm_mask = jax.random.uniform(perm_key, shape=gmask.shape) < permanent
+        final_m = jp.where(perm_mask, new_m, gmask)
+        idx = input_n
+        new_p = []
+        for ll in params:
+            gn, gs, ls = ll.shape
+            n = gn * gs
+            new_p.append(new_full[idx : idx + n].reshape(gn, gs, ls))
+            idx += n
+        return new_p, final_m
+
+    # ── Single-circuit full optimization (scan over time) ────────
+
+    def optimize_circuit(params, wires, opt_state, gate_mask, keys):
+        """Scan over n_steps for one circuit. Will be vmapped over batch."""
+
+        def scan_body(carry, inputs):
+            params, opt_state, gate_mask = carry
+            step_idx, step_key, dmg_flag = inputs
+
+            # ── Damage ──
+            if damage_mode == "deterministic":
+                params, gate_mask = jax.lax.cond(
+                    dmg_flag > 0,
+                    lambda p, gm, k: _det_damage(p, gm, k),
+                    lambda p, gm, _k: (p, gm),
+                    params,
+                    gate_mask,
+                    step_key,
+                )
+            elif damage_mode == "probabilistic" and p_fault is not None:
+                new_p, new_m = _prob_damage(params, gate_mask, step_key)
+                past = step_idx >= p_fault_onset_step
+                params = jax.tree.map(lambda n, o: jp.where(past, n, o), new_p, params)
+                gate_mask = jp.where(past, new_m, gate_mask)
+
+            # ── Gradient step (on train data) ──
+            gml = flat_to_layered_mask(gate_mask, layer_sizes)
+            (_, _), grad = jax.value_and_grad(
+                lambda p: loss_f(
+                    p,
+                    wires,
+                    x_data,
+                    y_data,
+                    loss_cfg=loss_cfg,
+                    gate_mask=gml,
+                ),
+                has_aux=True,
+            )(params)
+            upd, new_os = opt.update(grad, opt_state, params)
+            new_p = optax.apply_updates(params, upd)
+            new_p = _preserve(new_p, params, gate_mask)
+
+            # ── Eval (on test data, post-update) ──
+            loss, aux = loss_f(
+                new_p,
+                wires,
+                eval_x,
+                eval_y,
+                loss_cfg=loss_cfg,
+                gate_mask=gml,
+            )
+
+            # ── Record ──
+            flat_log = _logits_to_flat_nodes(new_p, input_n, arity)
+
+            new_carry = (new_p, new_os, gate_mask)
+            outputs = (
+                flat_log,
+                loss,
+                aux["hard_loss"],
+                aux["accuracy"],
+                aux["hard_accuracy"],
+            )
+            return new_carry, outputs
+
+        init_carry = (params, opt_state, gate_mask)
+        scan_inputs = (step_indices, keys, damage_flags)
+        _, outputs = jax.lax.scan(scan_body, init_carry, scan_inputs)
+        return outputs  # each element: (n_steps, ...)
+
+    # ── Vmap over batch + JIT ────────────────────────────────────
+    compiled_optimize = jax.jit(
+        jax.vmap(
+            optimize_circuit,
+            in_axes=(0, 0, 0, 0, 1),
+            #         params wires opt_st mask keys
+            # keys shape: (n_steps, batch, 2) → vmap over axis 1
+        )
+    )
+
+    if verbose:
+        print(
+            f"Compiling scan+vmap BP (batch={batch_size}, steps={n_steps}, damage={damage_mode})..."
+        )
+
+    # ── Single call → entire optimization ────────────────────────
+    all_logits, all_loss, all_hl, all_acc, all_ha = compiled_optimize(
+        batch_params,
+        batch_wires,
+        batch_opt_state,
+        batch_gate_mask,
+        all_keys,
+    )
+    # all_logits: (batch, n_steps, n_nodes, logit_dim)
+    # all_loss:   (batch, n_steps)
+
+    if verbose:
+        print("Done.")
+
+    # ── Pack into standard format ────────────────────────────────
+    mean_loss = jp.array(all_loss.mean(axis=0))
+    mean_hl = jp.array(all_hl.mean(axis=0))
+    mean_acc = jp.array(all_acc.mean(axis=0))
+    mean_ha = jp.array(all_ha.mean(axis=0))
+
+    step_metrics = {
+        "step": list(range(1, n_steps + 1)),
+        "loss": mean_loss.tolist(),
+        "hard_loss": mean_hl.tolist(),
+        "accuracy": mean_acc.tolist(),
+        "hard_accuracy": mean_ha.tolist(),
+        "soft_accuracy": mean_acc.tolist(),
+        "soft_loss": mean_loss.tolist(),
+        "graphs": SimpleNamespace(nodes={"logits": all_logits}),
+        # ── All metrics ── #batch, #steps
+        "all_metrics": {
+            "loss": all_loss,
+            "hard_loss": all_hl,
+            "accuracy": all_acc,
+            "hard_accuracy": all_ha,
+        },
+    }
+
+    if verbose:
+        print(
+            f"Final: Loss={mean_loss[-1]:.4f}, Acc={mean_acc[-1]:.4f}, Hard Acc={mean_ha[-1]:.4f}"
+        )
+
+    return None, step_metrics
