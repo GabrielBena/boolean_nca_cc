@@ -9,6 +9,9 @@ Usage:
     # Basic visualization (points only)
     python experiments/visualize_umap.py --results-dir <path>
     
+    # Load from checkpoint with ~200 solutions (rounds to nearest checkpoint_*_solutions)
+    python experiments/visualize_umap.py --results-dir <path> --solutions 200
+    
     # With exploration graph edges overlaid
     python experiments/visualize_umap.py --results-dir <path> --show-edges
     
@@ -19,9 +22,11 @@ Usage:
 import argparse
 import logging
 import os
+import re
 import sys
 import warnings
 from pathlib import Path
+from typing import List, Optional, Tuple
 from collections import deque
 
 # Suppress TensorFlow CUDA plugin registration warnings
@@ -54,6 +59,68 @@ from experiments.explore_degenerate_solutions import load_exploration_results
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
+
+
+def _find_checkpoints(checkpoints_dir: Path) -> List[Tuple[int, Path]]:
+    """Find all checkpoint_*_solutions folders, return [(count, path), ...] sorted by count."""
+    pattern = re.compile(r"checkpoint_(\d+)_solutions")
+    candidates = []
+    for subdir in checkpoints_dir.iterdir():
+        if subdir.is_dir():
+            m = pattern.match(subdir.name)
+            if m:
+                candidates.append((int(m.group(1)), subdir))
+    return sorted(candidates, key=lambda x: x[0])
+
+
+def resolve_results_path(results_dir: Path, solutions: Optional[int] = None) -> Path:
+    """
+    Resolve the path to load exploration results from.
+
+    - If solutions is None: load from results_dir (root - final results). If root has no
+      solutions.npz (e.g. interrupted run), fall back to latest checkpoint.
+    - If solutions is int: load from results_dir/checkpoints/checkpoint_X_solutions
+      where X is the checkpoint whose solution count is closest to the requested value.
+      Handles "weird" checkpoint numbers (e.g. 201, 303) by rounding to nearest.
+    """
+    results_dir = Path(results_dir)
+
+    if solutions is not None:
+        # Explicit checkpoint selection
+        checkpoints_dir = results_dir / "checkpoints"
+        if not checkpoints_dir.exists():
+            raise FileNotFoundError(
+                f"No checkpoints directory found at {checkpoints_dir}. "
+                "Use --solutions only when exploration saved checkpoints."
+            )
+        candidates = _find_checkpoints(checkpoints_dir)
+        if not candidates:
+            raise FileNotFoundError(f"No checkpoint folders found in {checkpoints_dir}")
+        best = min(candidates, key=lambda x: abs(x[0] - solutions))
+        log.info(f"Requested ~{solutions} solutions, using checkpoint_{best[0]}_solutions")
+        return best[1]
+
+    # Default: root (final results)
+    root_solutions = results_dir / "solutions.npz"
+    if root_solutions.exists():
+        return results_dir
+
+    # Root missing (interrupted run) -> fall back to latest checkpoint
+    checkpoints_dir = results_dir / "checkpoints"
+    if checkpoints_dir.exists():
+        candidates = _find_checkpoints(checkpoints_dir)
+        if candidates:
+            latest = candidates[-1]
+            log.info(
+                f"Root has no solutions.npz (run may have been interrupted). "
+                f"Using latest checkpoint: checkpoint_{latest[0]}_solutions"
+            )
+            return latest[1]
+
+    raise FileNotFoundError(
+        f"No exploration results found at {results_dir}. "
+        "Expected solutions.npz or checkpoints/checkpoint_*_solutions/"
+    )
 
 
 def compute_distances_from_root(
@@ -138,7 +205,7 @@ def visualize_umap(
     save_dir: Path = None,
     exploration_graph: dict = None,
     show_edges: bool = False,
-    edge_alpha: float = 0.2,
+    edge_alpha: float = 0.05,
     edge_linewidth: float = 0.5,
     edge_color: str = None,
     highlight_cycles: bool = False,
@@ -225,19 +292,7 @@ def visualize_umap(
     if n_components == 2:
         fig, ax = plt.subplots(figsize=figsize)
         
-        # Scatter plot with depth coloring
-        scatter = ax.scatter(
-            embedding[:, 0],
-            embedding[:, 1],
-            c=depth_array,
-            cmap=cmap,
-            alpha=0.6,
-            s=50,
-            edgecolors='black',
-            linewidths=0.5,
-        )
-        
-        # Overlay exploration graph edges if requested
+        # Draw edges first (background) so points render on top
         if show_edges and exploration_graph is not None:
             edges_drawn = 0
             cycles_drawn = 0
@@ -269,7 +324,7 @@ def visualize_umap(
                             alpha=min(edge_alpha * 2, 1.0),  # More visible for cycles
                             linewidth=edge_linewidth * 2,
                             linestyle='--',
-                            zorder=1,
+                            zorder=0,
                         )
                         cycles_drawn += 1
                     else:
@@ -279,11 +334,24 @@ def visualize_umap(
                             color=color,
                             alpha=edge_alpha,
                             linewidth=edge_linewidth,
-                            zorder=1,
+                            zorder=0,
                         )
                         edges_drawn += 1
             
             log.info(f"  Drawn {edges_drawn} edges, {cycles_drawn} cycles")
+        
+        # Scatter plot with depth coloring (foreground, on top of edges)
+        scatter = ax.scatter(
+            embedding[:, 0],
+            embedding[:, 1],
+            c=depth_array,
+            cmap=cmap,
+            alpha=0.6,
+            s=50,
+            edgecolors='black',
+            linewidths=0.5,
+            zorder=2,
+        )
         
         # Highlight root circuit
         if root_idx is not None:
@@ -321,20 +389,7 @@ def visualize_umap(
         fig = plt.figure(figsize=figsize)
         ax = fig.add_subplot(111, projection='3d')
         
-        # 3D scatter plot with depth coloring
-        scatter = ax.scatter(
-            embedding[:, 0],
-            embedding[:, 1],
-            embedding[:, 2],
-            c=depth_array,
-            cmap=cmap,
-            alpha=0.6,
-            s=50,
-            edgecolors='black',
-            linewidths=0.5,
-        )
-        
-        # Overlay exploration graph edges if requested
+        # Draw edges first (background) so points render on top
         if show_edges and exploration_graph is not None:
             edges_drawn = 0
             cycles_drawn = 0
@@ -367,6 +422,7 @@ def visualize_umap(
                             alpha=min(edge_alpha * 2, 1.0),  # More visible for cycles
                             linewidth=edge_linewidth * 2,
                             linestyle='--',
+                            zorder=0,
                         )
                         cycles_drawn += 1
                     else:
@@ -377,10 +433,25 @@ def visualize_umap(
                             color=color,
                             alpha=edge_alpha,
                             linewidth=edge_linewidth,
+                            zorder=0,
                         )
                         edges_drawn += 1
             
             log.info(f"  Drawn {edges_drawn} edges, {cycles_drawn} cycles")
+        
+        # 3D scatter plot with depth coloring (foreground, on top of edges)
+        scatter = ax.scatter(
+            embedding[:, 0],
+            embedding[:, 1],
+            embedding[:, 2],
+            c=depth_array,
+            cmap=cmap,
+            alpha=0.6,
+            s=50,
+            edgecolors='black',
+            linewidths=0.5,
+            zorder=2,
+        )
         
         # Highlight root circuit
         if root_idx is not None:
@@ -456,6 +527,14 @@ def main():
         help="Path to exploration results directory (default: exploration_results/exploration_20251113_152000)",
     )
     parser.add_argument(
+        "--solutions",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Load from checkpoint with ~N solutions (rounds to nearest checkpoint_*_solutions). "
+        "If omitted, load from root (final results).",
+    )
+    parser.add_argument(
         "--output-file",
         type=str,
         default=None,
@@ -506,8 +585,8 @@ def main():
     parser.add_argument(
         "--edge-alpha",
         type=float,
-        default=0.2,
-        help="Transparency for edges (0-1, default: 0.2)",
+        default=0.08,
+        help="Transparency for edges (0-1, default: 0.08)",
     )
     parser.add_argument(
         "--edge-linewidth",
@@ -536,20 +615,23 @@ def main():
         log.warning(f"Invalid figsize '{args.figsize}', using default (10, 8)")
         figsize = (10, 8)
     
-    # Load exploration results
+    # Resolve path: root or nearest checkpoint by solution count
     results_dir = Path(args.results_dir)
-    log.info(f"Loading exploration results from: {results_dir}")
-    results = load_exploration_results(results_dir)
-    
-    # Derive UMAP visualization directory from exploration directory name
-    # e.g., exploration_20251113_152000 -> umap_viz_20251113_152000
+    load_path = resolve_results_path(results_dir, args.solutions)
+    log.info(f"Loading exploration results from: {load_path}")
+    results = load_exploration_results(load_path)
+    num_solutions = len(results["unique_solutions"])
+
+    # Derive UMAP visualization directory from exploration directory name + solution count
+    # e.g., DFS_10_4_ROOT_SA_8zzudzmv_20260211_085457 -> umap_viz_DFS_10_4_ROOT_SA_8zzudzmv_20260211_085457_1108_solutions
     exploration_dir_name = results_dir.name
     if exploration_dir_name.startswith("exploration_"):
-        umap_viz_dir = results_dir.parent / exploration_dir_name.replace("exploration_", "umap_viz_", 1)
+        base_name = exploration_dir_name.replace("exploration_", "umap_viz_", 1)
     else:
-        umap_viz_dir = results_dir.parent / f"umap_viz_{exploration_dir_name}"
-    
-    log.info(f"Loaded {len(results['unique_solutions'])} unique solutions")
+        base_name = f"umap_viz_{exploration_dir_name}"
+    umap_viz_dir = results_dir.parent / f"{base_name}_{num_solutions}_solutions"
+
+    log.info(f"Loaded {num_solutions} unique solutions")
     log.info(f"Exploration graph has {len(results['exploration_graph'])} nodes")
     log.info(f"Total edges: {len(results['edges'])}")
     

@@ -1,0 +1,40 @@
+# Training Toggle Ablation Sweep
+# This sweep runs a full 2x2x2 grid over three training toggles:
+# - training.long_horizon_enabled
+# - training.random_loss_step
+# - training.message_steps_schedule.enabled
+#
+# Useful for isolating the impact of horizon loss, random loss-step sampling,
+# and dynamic message-step scheduling.
+
+# Program to run for the sweep (relative to project root where wandb sweep is run)
+program: train.py
+
+# Method for the sweep
+method: grid
+
+# Metric to track (not optimizing, just for comparison)
+metric:
+  goal: maximize
+  name: eval_ko_in/final_hard_accuracy
+
+# Parameters to sweep over
+parameters:
+  # Toggle horizon-window loss (mean over last H steps)
+  training.long_horizon_enabled:
+    values: [true, false]
+
+  # Toggle random loss-step sampling within message steps
+  training.random_loss_step:
+    values: [true, false]
+
+  # Toggle epoch-wise message-step schedule
+  training.message_steps_schedule.enabled:
+    values: [true, false]
+
+# Add this command block to format arguments correctly for Hydra
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args_no_hyphens}

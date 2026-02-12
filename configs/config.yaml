@@ -26,8 +26,8 @@ wandb:
 # Circuit configuration
 circuit:
   task: "add"
-  input_bits: 8
-  output_bits: 8
+  input_bits: 12
+  output_bits: 12
   arity: 4
   num_layers: 3
   layer_sizes: null  # Auto-generate if null 
@@ -70,7 +70,7 @@ training:
   use_remat: true
   # Message steps schedule (recompilation): when enabled, n_message_steps and optionally meta_batch_size vary per epoch
   message_steps_schedule:
-    enabled: false
+    enabled: true
     type: "step"
     initial_steps: 5
     final_steps: 100
@@ -99,7 +99,7 @@ pool:
   
   # Unified damage control system
   damage_injection_mode: "multi"  # "single" (static) or "multi" (periodic)
-  max_damage_per_circuit: 30      # Maximum damage events per circuit
+  max_damage_per_circuit: 20      # Maximum damage events per circuit
   # Number of message passing steps for damage evaluation (baseline and recovery trajectories)
   # This should typically match or be close to the training n_message_steps for realistic recovery assessment
   damage_eval_steps: ${eval.periodic_eval_inner_steps}
@@ -112,7 +112,7 @@ pool:
 eval:
   # Periodic evaluation parameters
   periodic_eval_enabled: true
-  periodic_eval_inner_steps: 200
+  periodic_eval_inner_steps: 250
   periodic_eval_interval: 1024 # 16
   periodic_eval_test_seed: ${test_seed}
   periodic_eval_log_stepwise: true
@@ -136,7 +136,7 @@ eval:
     max_damage_per_circuit: 10 # ${pool.max_damage_per_circuit}         # NEW: Maximum damage events per circuit (replaces greedy_num_injections)
     # Periodic injection timing (controlled by damage_mode)
     greedy_window_size: ${pool.greedy_window_size}  # Reuse pool's window size
-    greedy_injection_recover_steps: 25     # N recovery steps between injections
+    greedy_injection_recover_steps: 15     # N recovery steps between injections
     # Damage start offset (warm-up period before first damage)
     damage_start_offset: 5  # Number of steps to run before first damage injection (0 = damage at step 1)
     damage_start_offset_random: false  # If true, randomize offset per circuit (0 to damage_start_offset)

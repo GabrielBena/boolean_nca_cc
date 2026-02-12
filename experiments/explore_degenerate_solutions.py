@@ -1427,17 +1427,18 @@ def explore_degenerate_solutions(
                         },
                         "root_hash": kwargs.get("root_hash", root_hash),
                     }
-                    # Use save_exploration_results to maintain same format
+                    # Append checkpoint to checkpoints/ subfolder (don't overwrite root)
+                    checkpoint_subdir = output_dir / "checkpoints" / f"checkpoint_{current_count}_solutions"
                     save_exploration_results(
                         results=results_dict,
-                        output_dir=output_dir,
+                        output_dir=checkpoint_subdir,
                         wires=wires,
                         layer_sizes=layer_sizes,
                         task_name=task_name,
                         exploration_config=exploration_config or {},
                     )
                     last_checkpoint_count[0] = current_count
-                    log.info(f"Checkpoint saved: {current_count} solutions in {output_dir}")
+                    log.info(f"Checkpoint saved: {current_count} solutions in {checkpoint_subdir}")
             return callback
         
         checkpoint_callback = create_checkpoint_callback(
@@ -2541,6 +2542,12 @@ def main():
         help="Directory to save exploration results (default: ./exploration_results/{timestamp})",
     )
     parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Run ID to include in output naming (e.g. WandB run ID). Overrides WandB-derived run_id when loading from WandB.",
+    )
+    parser.add_argument(
         "--no-save-results",
         action="store_true",
         help="Don't save exploration results to disk (default: save results)",
@@ -2549,7 +2556,7 @@ def main():
         "--checkpoint-interval",
         type=int,
         default=100,
-        help="Save checkpoint every N unique solutions discovered (default: 100). Checkpoints overwrite the same output directory, so visualize_umap.py can always use the latest results.",
+        help="Save checkpoint every N unique solutions discovered (default: 100). Checkpoints are appended to output_dir/checkpoints/checkpoint_{N}_solutions/; final results overwrite the root output_dir for visualize_umap.py.",
     )
     parser.add_argument(
         "--max-retry-attempts",
@@ -2579,6 +2586,7 @@ def main():
     # then apply run-specific config to args so task, layer_sizes, and circuit match the run.
     loaded_config = None
     model = None
+    wandb_run_id = None
     if args.recovery_mode == "self_attention":
         model_path_or_run_id = args.model_path if args.model_path is not None else "yaw4da84"
         is_file_path = Path(model_path_or_run_id).exists() or model_path_or_run_id.endswith(
@@ -2602,6 +2610,7 @@ def main():
                     run_from_last=1,
                     use_cache=True,
                 )
+                wandb_run_id = run_id
                 log.info(f"Loaded config from WandB run: {run_id}")
                 model, _ = load_model_from_config_and_checkpoint(
                     config=loaded_config,
@@ -2807,7 +2816,9 @@ def main():
     
     # Prepare exploration config and output directory BEFORE running exploration
     # (so checkpoints can be saved during exploration)
+    run_id = args.run_id if args.run_id is not None else wandb_run_id
     exploration_config = {
+        "run_id": run_id,
         "exploration_strategy": args.exploration_strategy,
         "bfs_depth": args.bfs_depth,
         "bfs_perturbations_per_level": args.bfs_perturbations_per_level,
@@ -2850,7 +2861,11 @@ def main():
                 phases_string=args.phases if args.exploration_strategy == "phases" else None,
                 recovery_mode=args.recovery_mode,
             )
-            output_dir = workspace_root / "exploration_results" / f"{exploration_name}_{timestamp}"
+            # Include run_id in naming when available (from WandB or --run-id)
+            if run_id is not None:
+                output_dir = workspace_root / "exploration_results" / f"{exploration_name}_{run_id}_{timestamp}"
+            else:
+                output_dir = workspace_root / "exploration_results" / f"{exploration_name}_{timestamp}"
         else:
             output_dir = Path(args.output_dir)
     
