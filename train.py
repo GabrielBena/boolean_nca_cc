@@ -822,7 +822,12 @@ def main(cfg: DictConfig) -> None:
             threshold=cfg.stop_accuracy.threshold,
             patience=cfg.stop_accuracy.patience,
             min_epochs=cfg.stop_accuracy.min_epochs,
-            scope=cfg.stop_accuracy.get("scope", None),
+            scope=cfg.stop_accuracy.get(
+                "scope",
+                ["eval_in_test", "eval_damaged_in_test"]
+                if cfg.damage.enabled
+                else ["eval_in_test"],
+            ),
         )
         if cfg.stop_accuracy.enabled
         else None,
