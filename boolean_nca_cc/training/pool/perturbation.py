@@ -149,42 +149,47 @@ def mutate_wires_batch(
     return [mutated_batch[i] for i in range(len(batch_wires))]
 
 
-def shuffle_wires(rng: jax.random.PRNGKey, wires: list, logits: list) -> tuple[list, list]:
-    """
-    Randomly shuffle some wire connections in the circuit.
+def shuffle_wires(
+    rng: jax.random.PRNGKey,
+    wires: list[jp.ndarray],
+    layer_sizes: list[tuple[int, int]],
+    fraction: float = 0.1,
+) -> list[jp.ndarray]:
+    """Randomly reassign a fraction of wire connections in each layer.
+
+    For every layer, each connection independently has ``fraction`` probability
+    of being replaced with a uniformly random valid index into the previous
+    layer.  Fully JIT-compatible (no dynamic shapes or Python-level traced
+    conditionals).
 
     Args:
-        rng: Random key
-        wires: List of wire connections for each layer
-        logits: List of logits for each layer
+        rng: Random key.
+        wires: List of wire arrays, one per layer.  Each has shape
+            ``(arity, out_n // group_size)`` with values in ``[0, in_n)``.
+        layer_sizes: Circuit topology — list of ``(nodes, group_size)``
+            tuples (input layer first).  ``layer_sizes[i][0]`` gives the
+            number of nodes feeding into ``wires[i]``.
+        fraction: Fraction of connections to shuffle (0.0 - 1.0).
 
     Returns:
-        Tuple of (shuffled_wires, logits)
+        New list of wire arrays with the same shapes.
     """
-    # Make a copy of wires to avoid modifying the original
-    shuffled_wires = [w.copy() for w in wires]
-
-    # For each layer (except input layer), shuffle some connections
-    for i in range(1, len(wires)):
+    shuffled_wires = []
+    for i, w in enumerate(wires):
         layer_rng, rng = jax.random.split(rng)
+        mask_rng, val_rng = jax.random.split(layer_rng)
 
-        # Get the shape of the current layer's wires
-        layer_shape = wires[i].shape
+        # Which connections to replace (Bernoulli per entry)
+        shuffle_mask = jax.random.uniform(mask_rng, w.shape) < fraction
 
-        # Decide which connections to shuffle (random 10%)
-        shuffle_mask = jax.random.uniform(layer_rng, layer_shape) < 0.1
+        # Random replacement indices — valid range is [0, in_n)
+        in_n = layer_sizes[i][0]
+        new_values = jax.random.randint(val_rng, shape=w.shape, minval=0, maxval=in_n)
 
-        if jp.any(shuffle_mask):
-            # For selected connections, randomly reassign them to other nodes in previous layer
-            prev_layer_size = wires[i - 1].shape[0]
-            new_connections = jax.random.randint(
-                layer_rng, shape=jp.sum(shuffle_mask), minval=0, maxval=prev_layer_size
-            )
+        # Replace only masked positions; rest stay unchanged
+        shuffled_wires.append(jp.where(shuffle_mask, new_values, w))
 
-            # Update the connections
-            shuffled_wires[i] = shuffled_wires[i].at[shuffle_mask].set(new_connections)
-
-    return shuffled_wires, logits
+    return shuffled_wires
 
 
 def perturb_logits(

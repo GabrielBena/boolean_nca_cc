@@ -15,7 +15,7 @@ import jax.numpy as jp
 import optax
 from flax import nnx
 
-from boolean_nca_cc.circuits.model import run_circuit
+from boolean_nca_cc.circuits.model import gen_wires, run_circuit
 from boolean_nca_cc.circuits.train import (
     LOSS_L4,
     LossConfig,
@@ -28,6 +28,7 @@ from boolean_nca_cc.models import (
     CircuitSelfAttention,
     PerceiverCircuitAttention,
 )
+from boolean_nca_cc.training.pool.perturbation import shuffle_wires as _shuffle_wires_partial
 from boolean_nca_cc.training.pool.structural_perturbation import (
     apply_knockout_to_circuit,
     apply_probabilistic_gate_failure,
@@ -345,6 +346,10 @@ def run_model_scan_with_loss(
     p_fault_onset_step: int = 0,
     # No-repair baseline: compute loss right after damage, before NCA runs
     compute_no_repair_baseline: bool = False,
+    # Wire shuffling parameters
+    wire_shuffle_steps: list[int] | None = None,
+    wire_shuffle_key: jax.random.PRNGKey = jax.random.PRNGKey(42),
+    wire_shuffle_fraction: float = 1.0,
 ):
     """
     Unified scan function for all model types with loss computation at each step.
@@ -389,6 +394,11 @@ def run_model_scan_with_loss(
             repair, enabling comparison of "damaged without NCA" vs "damaged with NCA recovery".
             Adds keys ``no_repair_loss``, ``no_repair_hard_loss``, ``no_repair_accuracy``,
             ``no_repair_hard_accuracy`` to the aux_data in step outputs.
+        wire_shuffle_steps: List of step indices at which to shuffle wires (None = disabled)
+        wire_shuffle_key: Random key for wire shuffling
+        wire_shuffle_fraction: Fraction of wires to shuffle (0.0-1.0).
+            1.0 (default) = regenerate all wires from scratch.
+            < 1.0 = randomly reassign that fraction of connections per layer.
 
     Returns:
         Tuple of (final_graph, step_outputs) where step_outputs contains
@@ -501,6 +511,58 @@ def run_model_scan_with_loss(
 
         return jax.lax.cond(is_damage_step, do_damage, no_damage, None)
 
+    # === Wire shuffling setup ===
+    wire_shuffle_enabled = wire_shuffle_steps is not None and len(wire_shuffle_steps) > 0
+    if wire_shuffle_enabled:
+        wire_shuffle_steps_array = jp.asarray(wire_shuffle_steps, dtype=jp.int32)
+        arity = wires[0].shape[0]  # Infer arity from existing wires
+        wire_shuffle_keys = jax.random.split(wire_shuffle_key, len(wire_shuffle_steps))
+    else:
+        wire_shuffle_steps_array = None
+        wire_shuffle_keys = None
+
+    def shuffle_wires_if_needed(current_wires, step_idx):
+        """Shuffle circuit wires at specific steps using vectorized conditional.
+
+        Follows the same pattern as ``apply_discrete_damage_if_needed``:
+        pre-split keys + ``jax.lax.cond`` for JIT-safe conditional execution.
+
+        When ``wire_shuffle_fraction < 1.0``, only that fraction of
+        connections are randomly reassigned (partial shuffle).  At 1.0
+        all wires are regenerated from scratch.
+        """
+        if not wire_shuffle_enabled:
+            return current_wires
+
+        # Check if current step is a shuffle step (1-indexed, same as damage_steps)
+        is_shuffle_step = jp.any(wire_shuffle_steps_array == step_idx)
+
+        # Find the matching key index via searchsorted
+        shuffle_idx = jp.searchsorted(wire_shuffle_steps_array, step_idx)
+        shuffle_idx = jp.clip(shuffle_idx, 0, len(wire_shuffle_keys) - 1)
+
+        def do_shuffle(_):
+            key = wire_shuffle_keys[shuffle_idx]
+            if wire_shuffle_fraction < 1.0:
+                # Partial shuffle: randomly reassign a fraction of connections
+                return _shuffle_wires_partial(
+                    key, current_wires, layer_sizes, fraction=wire_shuffle_fraction
+                )
+            # Full shuffle: regenerate all wires from scratch
+            new_wires = []
+            in_n = layer_sizes[0][0]
+            keys = jax.random.split(key, len(layer_sizes) - 1)
+            for i, (out_n, group_size) in enumerate(layer_sizes[1:]):
+                w = gen_wires(keys[i], in_n, out_n, arity, group_size)
+                in_n = out_n
+                new_wires.append(w)
+            return new_wires
+
+        def no_shuffle(_):
+            return current_wires
+
+        return jax.lax.cond(is_shuffle_step, do_shuffle, no_shuffle, None)
+
     def apply_probabilistic_damage(graph, step_idx, gate_mask):
         """Apply probabilistic damage: each gate has p_fault chance of failure.
 
@@ -563,6 +625,7 @@ def run_model_scan_with_loss(
                 nr_graph,
                 nr_gate_mask,
                 damage_started,
+                current_wires,
             ) = carry
 
             # --- Sync nr graph with main BEFORE this step's damage --------
@@ -600,6 +663,9 @@ def run_model_scan_with_loss(
                 nr_gate_mask,
             )
 
+            # --- 1b. Shuffle wires if needed (1-indexed, same as damage_steps)
+            current_wires = shuffle_wires_if_needed(current_wires, step_idx + 1)
+
             # --- 2. Detect whether damage has now started ------------------
             # Any gate that was active in the initial mask and is now
             # knocked out means real damage has occurred.
@@ -609,7 +675,7 @@ def run_model_scan_with_loss(
             nr_logits = extract_logits_from_graph(nr_graph, logits_original_shapes)
             _, no_repair_aux = get_loss_from_wires_logits(
                 logits=nr_logits,
-                wires=wires,
+                wires=current_wires,
                 x=x_batch,
                 y_target=y_batch,
                 loss_cfg=loss_cfg,
@@ -620,7 +686,7 @@ def run_model_scan_with_loss(
                 model_fn,
                 current_graph,
                 logits_original_shapes,
-                wires,
+                current_wires,
                 x_batch,
                 y_batch,
                 loss_cfg,
@@ -642,6 +708,7 @@ def run_model_scan_with_loss(
                 nr_graph,
                 nr_gate_mask,
                 damage_started,
+                current_wires,
             )
             return new_carry, (updated_graph, loss, current_logits, aux)
 
@@ -652,8 +719,9 @@ def run_model_scan_with_loss(
             graph,
             initial_gate_mask,
             jp.bool_(False),
+            wires,
         )
-        (final_graph, _, _, _, _), step_outputs = jax.lax.scan(
+        (final_graph, _, _, _, _, _), step_outputs = jax.lax.scan(
             scan_step,
             init_carry,
             xs=jp.arange(num_steps),
@@ -665,7 +733,7 @@ def run_model_scan_with_loss(
         # Standard scan (no baseline tracking)
         # ------------------------------------------------------------------
         def scan_step(carry, step_idx):
-            current_graph, current_gate_mask = carry
+            current_graph, current_gate_mask, current_wires = carry
 
             current_graph, current_gate_mask = apply_probabilistic_damage(
                 current_graph,
@@ -678,22 +746,30 @@ def run_model_scan_with_loss(
                 current_gate_mask,
             )
 
+            # Shuffle wires if needed (1-indexed, same convention as damage_steps)
+            current_wires = shuffle_wires_if_needed(current_wires, step_idx + 1)
+
             updated_graph, loss, current_logits, aux = apply_model_and_compute_loss(
                 model_fn,
                 current_graph,
                 logits_original_shapes,
-                wires,
+                current_wires,
                 x_batch,
                 y_batch,
                 loss_cfg,
                 layer_sizes,
             )
 
-            return (updated_graph, current_gate_mask), (updated_graph, loss, current_logits, aux)
+            return (updated_graph, current_gate_mask, current_wires), (
+                updated_graph,
+                loss,
+                current_logits,
+                aux,
+            )
 
-        (final_graph, _), step_outputs = jax.lax.scan(
+        (final_graph, _, _), step_outputs = jax.lax.scan(
             scan_step,
-            (graph, initial_gate_mask),
+            (graph, initial_gate_mask, wires),
             xs=jp.arange(num_steps),
             length=num_steps,
         )
@@ -1103,6 +1179,10 @@ def evaluate_model_stepwise_batched(
     p_fault_onset_step: int = 0,
     # No-repair baseline
     compute_no_repair_baseline: bool = False,
+    # Wire shuffling parameters
+    wire_shuffle_steps: list[int] | None = None,
+    wire_shuffle_key: jax.random.PRNGKey = jax.random.PRNGKey(42),
+    wire_shuffle_fraction: float = 1.0,
     # Chunking and details
     chunk_size: int | None = None,
     return_first_circuit_details: bool = False,
@@ -1177,6 +1257,9 @@ def evaluate_model_stepwise_batched(
                 permanent_damage=permanent_damage,
                 p_fault_onset_step=p_fault_onset_step,
                 compute_no_repair_baseline=compute_no_repair_baseline,
+                wire_shuffle_steps=wire_shuffle_steps,
+                wire_shuffle_key=wire_shuffle_key,
+                wire_shuffle_fraction=wire_shuffle_fraction,
                 chunk_size=None,  # Don't recurse further
                 return_first_circuit_details=return_first_circuit_details and (i == 0),
             )
@@ -1236,8 +1319,11 @@ def evaluate_model_stepwise_batched(
         damage_key = jax.random.PRNGKey(0)  # Dummy key, won't be used if no damage_steps
     damage_keys = jax.random.split(damage_key, batch_size)
 
+    # Split wire shuffle keys per batch element (each circuit gets different new wires)
+    wire_shuffle_keys = jax.random.split(wire_shuffle_key, batch_size)
+
     # Run unified scan for each circuit in batch
-    def run_single_scan(graph, wires, logits, scan_key, permanent_damage):
+    def run_single_scan(graph, wires, logits, scan_key, permanent_damage, ws_key):
         return run_model_scan_with_loss(
             model=model,
             graph=graph,
@@ -1261,11 +1347,15 @@ def evaluate_model_stepwise_batched(
             # Delayed onset and no-repair baseline
             p_fault_onset_step=p_fault_onset_step,
             compute_no_repair_baseline=compute_no_repair_baseline,
+            # Wire shuffling
+            wire_shuffle_steps=wire_shuffle_steps,
+            wire_shuffle_key=ws_key,
+            wire_shuffle_fraction=wire_shuffle_fraction,
         )
 
     # Vmap over batch
     final_graphs, batch_step_outputs = nnx.vmap(run_single_scan)(
-        batch_graphs, batch_wires, batch_logits, damage_keys, permanent_damage
+        batch_graphs, batch_wires, batch_logits, damage_keys, permanent_damage, wire_shuffle_keys
     )
 
     # Extract and average metrics
@@ -1414,14 +1504,27 @@ def run_bp_scan(
     x_test=None,
     y_test=None,
     compile=True,
+    use_scan=True,
 ):
     """
     Fully compiled BP baseline: scan(time) × vmap(batch) × jit.
 
-    The entire optimization compiles to ONE XLA program.
-    First call is slow (compilation), subsequent calls are instant.
+    When ``use_scan=True`` (default) the entire optimization compiles to
+    ONE XLA program via ``jax.lax.scan``.  First call is slow
+    (compilation), subsequent calls are instant.
+
+    When ``use_scan=False`` a Python-level for-loop replaces the scan.
+    Each step is still vmapped and (optionally) JIT-compiled, but the
+    compilation unit is a *single* step instead of the whole trajectory.
+    This is **much** faster on CPU because:
+
+    * XLA compilation is orders of magnitude cheaper (one step vs. N steps).
+    * Progress is reported every ~10 % of steps so you can monitor the run.
+    * Memory usage is lower (no need to materialise the full scan).
 
     Args:
+        use_scan: If True, use ``jax.lax.scan`` (fast on GPU, slow
+            compilation). If False, use a Python for-loop (CPU-friendly).
         permanent: Per-gate probability that damage is permanent (float in [0, 1]).
             1.0 = always permanent, 0.0 = always temporary, 0.5 = independent coin flip
             per gate per timestep.
@@ -1521,106 +1624,168 @@ def run_bp_scan(
             idx += n
         return new_p, final_m
 
-    # ── Single-circuit full optimization (scan over time) ────────
+    # ── Shared single-step body (used by both scan & loop) ──────
 
-    def optimize_circuit(params, wires, opt_state, gate_mask, keys):
-        """Scan over n_steps for one circuit. Will be vmapped over batch."""
+    def _step_body(params, wires, opt_state, gate_mask, step_idx, step_key, dmg_flag):
+        """One optimisation step for a single circuit."""
+        # ── Damage ──
+        if damage_mode == "deterministic":
+            params, gate_mask = jax.lax.cond(
+                dmg_flag > 0,
+                lambda p, gm, k: _det_damage(p, gm, k),
+                lambda p, gm, _k: (p, gm),
+                params,
+                gate_mask,
+                step_key,
+            )
+        elif damage_mode == "probabilistic" and p_fault is not None:
+            new_p, new_m = _prob_damage(params, gate_mask, step_key)
+            past = step_idx >= p_fault_onset_step
+            params = jax.tree.map(lambda n, o: jp.where(past, n, o), new_p, params)
+            gate_mask = jp.where(past, new_m, gate_mask)
 
-        def scan_body(carry, inputs):
-            params, opt_state, gate_mask = carry
-            step_idx, step_key, dmg_flag = inputs
-
-            # ── Damage ──
-            if damage_mode == "deterministic":
-                params, gate_mask = jax.lax.cond(
-                    dmg_flag > 0,
-                    lambda p, gm, k: _det_damage(p, gm, k),
-                    lambda p, gm, _k: (p, gm),
-                    params,
-                    gate_mask,
-                    step_key,
-                )
-            elif damage_mode == "probabilistic" and p_fault is not None:
-                new_p, new_m = _prob_damage(params, gate_mask, step_key)
-                past = step_idx >= p_fault_onset_step
-                params = jax.tree.map(lambda n, o: jp.where(past, n, o), new_p, params)
-                gate_mask = jp.where(past, new_m, gate_mask)
-
-            # ── Gradient step (on train data) ──
-            gml = flat_to_layered_mask(gate_mask, layer_sizes)
-            (_, _), grad = jax.value_and_grad(
-                lambda p: loss_f(
-                    p,
-                    wires,
-                    x_data,
-                    y_data,
-                    loss_cfg=loss_cfg,
-                    gate_mask=gml,
-                ),
-                has_aux=True,
-            )(params)
-            upd, new_os = opt.update(grad, opt_state, params)
-            new_p = optax.apply_updates(params, upd)
-            new_p = _preserve(new_p, params, gate_mask)
-
-            # ── Eval (on test data, post-update) ──
-            loss, aux = loss_f(
-                new_p,
+        # ── Gradient step (on train data) ──
+        gml = flat_to_layered_mask(gate_mask, layer_sizes)
+        (_, _), grad = jax.value_and_grad(
+            lambda p: loss_f(
+                p,
                 wires,
-                eval_x,
-                eval_y,
+                x_data,
+                y_data,
                 loss_cfg=loss_cfg,
                 gate_mask=gml,
-            )
+            ),
+            has_aux=True,
+        )(params)
+        upd, new_os = opt.update(grad, opt_state, params)
+        new_p = optax.apply_updates(params, upd)
+        new_p = _preserve(new_p, params, gate_mask)
 
-            # ── Record ──
-            flat_log = _logits_to_flat_nodes(new_p, input_n, arity)
-
-            new_carry = (new_p, new_os, gate_mask)
-            outputs = (
-                flat_log,
-                gate_mask,
-                loss,
-                aux["hard_loss"],
-                aux["accuracy"],
-                aux["hard_accuracy"],
-            )
-            return new_carry, outputs
-
-        init_carry = (params, opt_state, gate_mask)
-        scan_inputs = (step_indices, keys, damage_flags)
-        _, outputs = jax.lax.scan(scan_body, init_carry, scan_inputs)
-        return outputs  # each element: (n_steps, ...)
-
-    # ── Vmap over batch + JIT ────────────────────────────────────
-    compiled_optimize = jax.vmap(
-        optimize_circuit,
-        in_axes=(0, 0, 0, 0, 1),
-        #         params wires opt_st mask keys
-        # keys shape: (n_steps, batch, 2) → vmap over axis 1
-    )
-
-    if compile:
-        compiled_optimize = jax.jit(compiled_optimize)
-
-    if verbose:
-        print(
-            f"Compiling scan+vmap BP (batch={batch_size}, steps={n_steps}, damage={damage_mode})..."
+        # ── Eval (on test data, post-update) ──
+        loss, aux = loss_f(
+            new_p,
+            wires,
+            eval_x,
+            eval_y,
+            loss_cfg=loss_cfg,
+            gate_mask=gml,
         )
 
-    # ── Single call → entire optimization ────────────────────────
-    all_logits, all_gate_mask, all_loss, all_hl, all_acc, all_ha = compiled_optimize(
-        batch_params,
-        batch_wires,
-        batch_opt_state,
-        batch_gate_mask,
-        all_keys,
-    )
-    # all_logits: (batch, n_steps, n_nodes, logit_dim)
-    # all_loss:   (batch, n_steps)
+        # ── Record ──
+        flat_log = _logits_to_flat_nodes(new_p, input_n, arity)
 
-    if verbose:
-        print("Done.")
+        carry = (new_p, new_os, gate_mask)
+        outputs = (
+            flat_log,
+            gate_mask,
+            loss,
+            aux["hard_loss"],
+            aux["accuracy"],
+            aux["hard_accuracy"],
+        )
+        return carry, outputs
+
+    # ==============================================================
+    #  Path A: jax.lax.scan  (fast on GPU, heavy compilation)
+    # ==============================================================
+    if use_scan:
+
+        def optimize_circuit(params, wires, opt_state, gate_mask, keys):
+            """Scan over n_steps for one circuit. Will be vmapped over batch."""
+
+            def scan_fn(carry, inputs):
+                params, opt_state, gate_mask = carry
+                step_idx, step_key, dmg_flag = inputs
+                return _step_body(params, wires, opt_state, gate_mask, step_idx, step_key, dmg_flag)
+
+            init_carry = (params, opt_state, gate_mask)
+            scan_inputs = (step_indices, keys, damage_flags)
+            _, outputs = jax.lax.scan(scan_fn, init_carry, scan_inputs)
+            return outputs  # each element: (n_steps, ...)
+
+        compiled_optimize = jax.vmap(
+            optimize_circuit,
+            in_axes=(0, 0, 0, 0, 1),
+            #         params wires opt_st mask keys
+            # keys shape: (n_steps, batch, 2) → vmap over axis 1
+        )
+
+        if compile:
+            compiled_optimize = jax.jit(compiled_optimize)
+
+        if verbose:
+            print(
+                f"Compiling scan+vmap BP "
+                f"(batch={batch_size}, steps={n_steps}, damage={damage_mode})..."
+            )
+
+        all_logits, all_gate_mask, all_loss, all_hl, all_acc, all_ha = compiled_optimize(
+            batch_params,
+            batch_wires,
+            batch_opt_state,
+            batch_gate_mask,
+            all_keys,
+        )
+        # all_*: (batch, n_steps, ...)
+
+        if verbose:
+            print("Done.")
+
+    # ==============================================================
+    #  Path B: Python for-loop  (CPU-friendly, lightweight compile)
+    # ==============================================================
+    else:
+        batched_step = jax.vmap(
+            _step_body,
+            in_axes=(0, 0, 0, 0, None, 0, None),
+            #        params wires opt_st mask step_idx step_key dmg_flag
+        )
+
+        if compile:
+            batched_step = jax.jit(batched_step)
+
+        if verbose:
+            print(f"Running loop BP (batch={batch_size}, steps={n_steps}, damage={damage_mode})...")
+
+        b_params, b_opt_state, b_gate_mask = (
+            batch_params,
+            batch_opt_state,
+            batch_gate_mask,
+        )
+        collect = [[] for _ in range(6)]
+        report_every = max(1, n_steps // 10)
+
+        for t in range(n_steps):
+            (b_params, b_opt_state, b_gate_mask), step_out = batched_step(
+                b_params,
+                batch_wires,
+                b_opt_state,
+                b_gate_mask,
+                step_indices[t],
+                all_keys[t],
+                damage_flags[t],
+            )
+            for i, o in enumerate(step_out):
+                collect[i].append(o)
+
+            if verbose and (t + 1) % report_every == 0:
+                step_loss = float(collect[2][-1].mean())
+                step_acc = float(collect[4][-1].mean())
+                print(
+                    f"  Step {t + 1:>{len(str(n_steps))}}/{n_steps}  "
+                    f"loss={step_loss:.4f}  acc={step_acc:.4f}"
+                )
+
+        # Stack per-step outputs → (batch, n_steps, ...)
+        all_logits = jp.stack(collect[0], axis=1)
+        all_gate_mask = jp.stack(collect[1], axis=1)
+        all_loss = jp.stack(collect[2], axis=1)
+        all_hl = jp.stack(collect[3], axis=1)
+        all_acc = jp.stack(collect[4], axis=1)
+        all_ha = jp.stack(collect[5], axis=1)
+
+        if verbose:
+            print("Done.")
 
     # ── Pack into standard format ────────────────────────────────
     mean_loss = jp.array(all_loss.mean(axis=0))

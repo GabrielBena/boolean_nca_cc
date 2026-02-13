@@ -537,6 +537,8 @@ def plot_wandb_stepwise_results(
     smooth=False,
     title=None,
     damage_fraction=None,
+    bp_step_metrics=None,
+    figaxs=None,
 ):
     """
     Plot step-wise loss and accuracy curves from evaluation results.
@@ -556,21 +558,37 @@ def plot_wandb_stepwise_results(
         title: Figure suptitle (defaults to "Step-wise Results").
         damage_fraction: Optional array-like [n_steps] of fraction of damaged gates
                          per step. Plotted on a secondary y-axis when provided.
+        bp_step_metrics: Optional dict with keys 'step', 'loss', 'hard_loss', 'accuracy', 'hard_accuracy'.
+                         Used to plot the BP baseline results.
     """
-    # --- colours (colorblind-safe, Wong palette inspired) -----------------
-    C_SOFT = "#56B4E9"  # sky blue   — clearly blue under all CVD types
-    C_HARD = "#E69F00"  # amber      — yellow-orange, distinct from blue
-    C_DAMAGE_LINE = "#CC79A7"  # rose — pinkish, visible under deuteranopia
-    C_DAMAGE_FRAC = "#999999"  # neutral grey — never confused with any hue
-    C_NO_REPAIR = "#D55E00"  # vermillion — strong contrast for no-repair baseline
+    # # --- colours (colorblind-safe, Wong palette inspired) -----------------
+    # C_SOFT = "#56B4E9"  # sky blue   — clearly blue under all CVD types
+    # C_HARD = "#E69F00"  # amber      — yellow-orange, distinct from blue
+    # C_DAMAGE_LINE = "#CC79A7"  # rose — pinkish, visible under deuteranopia
+    # C_DAMAGE_FRAC = "#999999"  # neutral grey — never confused with any hue
+    # C_NO_REPAIR = "#D55E00"  # vermillion — strong contrast for no-repair baseline
+    # C_BP = "#009E73"  # sea green — strong contrast for BP baseline
+    # --- colours (Veridis palette from matplotlib, perceptually uniform) ---
+    C_SOFT = "#482878"  # deep purple/blue start of viridis
+    C_HARD = "#35b779"  # green mid-point of viridis
+    C_DAMAGE_LINE = "#fde725"  # bright yellow end of viridis
+    C_DAMAGE_FRAC = "#a5db36"  # light greenish yellow near top of viridis
+    C_NO_REPAIR = "#277f8e"  # teal, middle of viridis
+    C_BP = "#414487"  # blue-violet, lower-middle of viridis
 
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4.), constrained_layout=True, dpi=200)
+    fig, axes = (
+        plt.subplots(1, 2, figsize=(6, 3.0), constrained_layout=True, dpi=300)
+        if figaxs is None
+        else figaxs
+    )
 
     # --- parse input -----------------------------------------------------
     core_keys = ["step", "loss", "hard_loss", "accuracy", "hard_accuracy"]
     no_repair_keys = [
-        "no_repair_loss", "no_repair_hard_loss",
-        "no_repair_accuracy", "no_repair_hard_accuracy",
+        "no_repair_loss",
+        "no_repair_hard_loss",
+        "no_repair_accuracy",
+        "no_repair_hard_accuracy",
     ]
 
     if isinstance(step_metrics, dict):
@@ -581,10 +599,7 @@ def plot_wandb_stepwise_results(
             for k in no_repair_keys:
                 step_dict[k] = np.array(step_metrics[k])
     else:
-        step_dict = {
-            key: np.array([getattr(s, key) for s in step_metrics])
-            for key in core_keys
-        }
+        step_dict = {key: np.array([getattr(s, key) for s in step_metrics]) for key in core_keys}
         has_no_repair = False
 
     n = len(step_dict["step"])
@@ -620,12 +635,21 @@ def plot_wandb_stepwise_results(
             for ds in damage_steps:
                 ax.axvline(ds - 1, color=C_DAMAGE_LINE, linestyle="--", alpha=0.45, linewidth=0.8)
 
+    # --- BP baseline subplot (left) ---------------------------------------------
+    if bp_step_metrics is not None:
+        axes[0].plot(steps_x, _smooth(bp_step_metrics["hard_loss"]), color=C_BP, linewidth=1.2)
+
     # --- Loss subplot (left) ---------------------------------------------
-    axes[0].plot(steps_x, _smooth(step_dict["loss"]), color=C_SOFT, linewidth=1.2)
+    # axes[0].plot(steps_x, _smooth(step_dict["loss"]), color=C_SOFT, linewidth=1.2)
+    axes[0].plot(steps_x, _smooth(step_dict["hard_loss"]), color=C_HARD, linewidth=1.2)
     if has_no_repair:
         axes[0].plot(
-            steps_x, _smooth(step_dict["no_repair_loss"]),
-            color=C_NO_REPAIR, linewidth=1.0, linestyle="--", alpha=0.7,
+            steps_x,
+            _smooth(step_dict["no_repair_hard_loss"]),
+            color=C_NO_REPAIR,
+            linewidth=1.0,
+            linestyle="--",
+            alpha=0.7,
         )
     axes[0].set_title("Loss", fontsize=11)
     axes[0].set_xlabel("Step")
@@ -633,30 +657,43 @@ def plot_wandb_stepwise_results(
     _add_damage_overlays(axes[0])
 
     # --- Accuracy subplot (right) ----------------------------------------
-    axes[1].plot(steps_x, _smooth(step_dict["accuracy"]), color=C_SOFT, linewidth=1.2)
+    # axes[1].plot(steps_x, _smooth(step_dict["accuracy"]), color=C_SOFT, linewidth=1.2)
     axes[1].plot(steps_x, _smooth(step_dict["hard_accuracy"]), color=C_HARD, linewidth=1.2)
     if has_no_repair:
         axes[1].plot(
-            steps_x, _smooth(step_dict["no_repair_hard_accuracy"]),
-            color=C_NO_REPAIR, linewidth=1.0, linestyle="--", alpha=0.7,
+            steps_x,
+            _smooth(step_dict["no_repair_hard_accuracy"]),
+            color=C_NO_REPAIR,
+            linewidth=1.0,
+            linestyle="--",
+            alpha=0.7,
         )
     axes[1].set_title("Accuracy", fontsize=11)
     axes[1].set_xlabel("Step")
     axes[1].set_ylabel("Accuracy")
     _add_damage_overlays(axes[1])
 
+    # --- BP baseline subplot (right) ---------------------------------------------
+    if bp_step_metrics is not None:
+        axes[1].plot(steps_x, _smooth(bp_step_metrics["hard_accuracy"]), color=C_BP, linewidth=1.2)
+
     # --- Unified legend below the plots ----------------------------------
     from matplotlib.lines import Line2D
 
     handles = [
-        Line2D([], [], color=C_SOFT, linewidth=1.5, label="Soft metric"),
-        Line2D([], [], color=C_HARD, linewidth=1.5, label="Hard metric"),
+        # Line2D([], [], color=C_SOFT, linewidth=1.5, label="Soft metric"),
+        Line2D([], [], color=C_HARD, linewidth=1.5, label="NCA"),
     ]
     if has_no_repair:
         handles.append(
             Line2D(
-                [], [], color=C_NO_REPAIR, linewidth=1.5, linestyle="--",
-                alpha=0.7, label="No-repair baseline",
+                [],
+                [],
+                color=C_NO_REPAIR,
+                linewidth=1.5,
+                linestyle="--",
+                alpha=0.7,
+                label="No-repair baseline",
             )
         )
     if damage_fraction is not None:
@@ -675,12 +712,15 @@ def plot_wandb_stepwise_results(
                 label="Damage event",
             )
         )
+    if bp_step_metrics is not None:
+        handles.append(Line2D([], [], color=C_BP, linewidth=1.5, label="BP baseline"))
 
-    fig.legend(handles=handles, loc="lower center", ncol=len(handles), fontsize=9, frameon=False)
+    fig.legend(handles=handles, loc="lower center", ncol=len(handles), fontsize=11, frameon=False)
     # adjust axes to make room for the title and legend
     # fig.subplots_adjust(top=0.9, bottom=0.2)
     fig.suptitle(title or "Step-wise Results", fontsize=12)
     # Make room for the legend below
-    fig.get_layout_engine().set(rect=(0, 0.06, 1, 0.94))
+    fig.get_layout_engine().set(rect=(0, 0.08, 1, 0.94))
+    
 
     return fig
