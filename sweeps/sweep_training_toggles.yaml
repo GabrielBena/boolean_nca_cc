@@ -32,6 +32,10 @@ parameters:
   training.message_steps_schedule.enabled:
     values: [true, false]
 
+  # Keep scheduled steps but avoid dynamic batch inflation (prevents early OOM at low T)
+  training.message_steps_schedule.constant_product:
+    value: null
+
 # Add this command block to format arguments correctly for Hydra
 command:
   - ${env}

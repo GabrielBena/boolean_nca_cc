@@ -16,7 +16,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 dependencies = [
     # Core JAX ecosystem
     "jax>=0.4.0",
@@ -77,6 +77,8 @@ all = [
 "Homepage" = "https://github.com/yourusername/boolean_nca_cc"
 "Bug Tracker" = "https://github.com/yourusername/boolean_nca_cc/issues"
 "Documentation" = "https://github.com/yourusername/boolean_nca_cc#readme"
+
+[tool.uv]
 
 [tool.setuptools]
 packages = ["boolean_nca_cc"]
