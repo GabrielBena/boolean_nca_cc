@@ -1,4 +1,4 @@
 ---
 alwaysApply: true
 ---
-**IMPORTANT**: Before executing any terminal command, always ensure the conda environment 'metabool' is activated. If a command doesn't already include conda activation, prepend it with: `conda activate metabool && `
+**IMPORTANT**: Before executing any terminal command that runs Python or project tools, use the project's virtual environment. From the repo root: `source .venv/bin/activate` (created by `uv sync` per `docs/environment_setup.md`). Do not activate the obsolete conda environment `metabool`.

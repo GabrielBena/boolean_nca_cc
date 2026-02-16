@@ -1,7 +1,9 @@
-# Usage: python train.py --config sweeps/singles/self_attention_repair_dam40_hydra.yaml
+# Usage: python train.py --config-path sweeps/singles --config-name self_attention_repair_dam40_hydra
 #
-# This is a fully self-contained config (no defaults references)
+# Standalone config aligned with wandb run (dam40, seed 14, 8-bit add, self-attention 3L/4H).
+# Eval: single-damage knockout, damage_start_offset 15, 200 inner steps, hamming dir mbs64_div256_dam40.
 
+# No defaults: standalone sweep (config-path=sweeps/singles has no configs/model/).
 seed: 14
 test_seed: 14
 damage_seed: 481
@@ -18,37 +20,38 @@ wandb:
   run_name: null
 
 circuit:
-  task: binary_multiply
+  task: add
   arity: 4
-  input_bits: 8
+  input_bits: 12
   num_layers: 3
   layer_sizes: null
-  output_bits: 8
+  output_bits: 12
   max_task_samples: 100000
   circuit_hidden_dim: 64
+
+model:
+  _target_: boolean_nca_cc.models.CircuitSelfAttention
+  type: self_attention
+  attention_dim: 128
+  mlp_dim: null
+  mlp_dim_multiplier: 2
+  num_heads: 4
+  num_layers: 1
+  dropout_rate: 0
+  zero_init: false
+  re_zero_update: true
+  damage_behavior: reversible
+  reversible_bias: -10
+  circuit_hidden_dim: ${circuit.circuit_hidden_dim}
 
 logging:
   level: INFO
   log_interval: 16
 
-model:
-  type: self_attention
-  mlp_dim: null
-  _target_: boolean_nca_cc.models.CircuitSelfAttention
-  num_heads: 4
-  zero_init: false
-  num_layers: 3
-  dropout_rate: 0
-  attention_dim: 128
-  re_zero_update: true
-  damage_behavior: reversible
-  reversible_bias: -10
-  circuit_hidden_dim: 64
-  mlp_dim_multiplier: 2
-
 training:
   epochs: 8193
   use_scan: false
+  use_remat: false
   loss_type: l4
   lr_scheduler: linear_warmup
   weight_decay: 0.00001
@@ -57,6 +60,10 @@ training:
   layer_neighbors: false
   meta_batch_size: 64
   n_message_steps: 5
+  random_loss_step: false
+  long_horizon_enabled: false
+  message_steps_schedule:
+    enabled: false
   lr_scheduler_params:
     alpha: 0.1
     exponent: 1
@@ -66,14 +73,14 @@ training:
 pool:
   size: 1024
   damage_mode: shotgun
-  damage_prob: 5
+  damage_prob: 40
   reset_fraction: 0.15
   reset_interval: 128
   reset_strategy: combined
   damage_strategy: loss_biased
   combined_weights: [0.5, 0.5]
   damage_eval_steps: ${eval.periodic_eval_inner_steps}
-  greedy_window_size: 40
+  greedy_window_size: ${pool.damage_prob}
   damage_pool_enabled: true
   damage_pool_fraction: 0.15
   damage_pool_interval: 128
@@ -89,20 +96,20 @@ eval:
     enabled: true
     damage_mode: shotgun
     damage_prob: ${pool.damage_prob}
-    greedy_window_size: 40
-    damage_start_offset: 15
+    greedy_window_size: ${pool.greedy_window_size}
+    damage_start_offset: 5
     damage_injection_mode: single
     max_damage_per_circuit: 1
-    damage_start_offset_seed: 14
+    damage_start_offset_seed: ${test_seed}
     damage_start_offset_random: false
     greedy_injection_recover_steps: 30
-  input_split_seed: 14
+  input_split_seed: ${seed}
   final_eval_enabled: true
   input_split_enabled: false
-  hamming_analysis_dir: results/hamming_analysis_mbs64_div256_dam40
+  hamming_analysis_dir: results/hamming_analysis_mbs${training.meta_batch_size}_div${pool.damage_knockout_diversity}_dam${pool.damage_prob}
   input_train_fraction: 0.8
   periodic_eval_enabled: true
-  final_eval_inner_steps: 500
+  final_eval_inner_steps: 1000
   periodic_eval_interval: 1024
   periodic_eval_test_seed: 14
   periodic_eval_batch_size: 256
@@ -120,7 +127,7 @@ checkpoint:
 
 early_stop:
   metric: hard_accuracy
-  source: eval_ko_in
+  source: ${checkpoint.best_metric_source}
   enabled: false
   patience: 2
   threshold: 1
@@ -137,7 +144,6 @@ backprop:
   weight_decay: 0.1
   learning_rate: 1
   knockout_vocabulary:
-    size: 256
+    size: ${pool.damage_knockout_diversity}
     enabled: true
     damage_prob: ${pool.damage_prob}
-

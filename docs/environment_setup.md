@@ -21,4 +21,19 @@ To get only the main dependencies (no dev/notebook extras), use:
 uv sync --no-dev
 ```
 
+**GPU (NVIDIA CUDA):** Default `uv sync` installs JAX with CPU-only jaxlib. On a machine with NVIDIA drivers (≥ 525 for CUDA 12), use:
+```bash
+uv sync --extra cuda
+```
+This installs `jax[cuda12]` so JAX can use the GPU. For CUDA 13, edit `pyproject.toml` optional-dependencies `cuda` to use `jax[cuda13]` and run `uv sync --extra cuda`.
+
+**Notebooks / plotting extras:** For jupyter, seaborn, and dev tools:
+```bash
+uv sync --extra notebooks
+# or
+uv sync --extra all
+```
+
+Main dependencies already include matplotlib and umap-learn for scripts like `experiments/visualize_umap.py` and `experiments/run_umap_sweep.sh`.
+
 If you still use the conda `metabool` env on a machine, `conda activate metabool` continues to work; `uv sync` is an alternative that stays in sync via the shared `uv.lock` in the repo.

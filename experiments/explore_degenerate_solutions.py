@@ -733,6 +733,7 @@ def _execute_bfs_phase(
     arity: int = 4,
     max_steps: int = 50,
     damage_behavior: str = "reversible",
+    max_solutions: Optional[int] = None,
 ) -> Tuple[int, int]:
     """
     Execute a BFS phase starting from given nodes.
@@ -748,6 +749,9 @@ def _execute_bfs_phase(
     visited_at_depth: Dict[int, Set[str]] = {}
     
     while queue:
+        if max_solutions is not None and len(unique_solutions) >= max_solutions:
+            log.info(f"{phase_name}: Reached max_solutions={max_solutions}, stopping BFS phase")
+            return total_perturbations, functional_recoveries
         circuit_hash, circuit_logits, depth = queue.popleft()
         
         if depth >= base_depth + depth_limit:
@@ -836,12 +840,19 @@ def _execute_bfs_phase(
                     unique_solutions[recovered_hash] = recovered_logits
                     discovered_circuits.append((recovered_hash, recovered_logits))
                     circuit_depths[recovered_hash] = depth + 1
-                
-                # Add to queue for next depth
-                if depth + 1 < base_depth + depth_limit:
-                    next_depth_visited = visited_at_depth.get(depth + 1, set())
-                    if recovered_hash not in next_depth_visited:
-                        queue.append((recovered_hash, recovered_logits, depth + 1))
+                    if max_solutions is not None and len(unique_solutions) >= max_solutions:
+                        exploration_results.append({
+                            "pattern_idx": int(pattern_idx),
+                            "source_hash": circuit_hash,
+                            "recovered_hash": recovered_hash,
+                            "final_accuracy": final_accuracy,
+                            "is_functional": is_func,
+                            "is_unique": is_func and is_unique,
+                            "depth": depth,
+                            "phase": phase_name,
+                        })
+                        log.info(f"{phase_name}: Reached max_solutions={max_solutions}, stopping BFS phase")
+                        return total_perturbations, functional_recoveries
             
             exploration_results.append({
                 "pattern_idx": int(pattern_idx),
@@ -891,6 +902,7 @@ def _execute_dfs_phase(
     # Checkpoint callback
     checkpoint_callback: Optional[Callable] = None,
     root_hash: Optional[str] = None,
+    max_solutions: Optional[int] = None,
 ) -> Tuple[int, int]:
     """
     Execute a DFS phase starting from given nodes.
@@ -911,6 +923,9 @@ def _execute_dfs_phase(
     visited_dfs: Set[str] = set()
     
     while stack:
+        if max_solutions is not None and len(unique_solutions) >= max_solutions:
+            log.info(f"{phase_name}: Reached max_solutions={max_solutions}, stopping DFS phase")
+            return total_perturbations, functional_recoveries
         circuit_hash, circuit_logits, depth = stack.pop()
         
         if depth >= base_depth + depth_limit:
@@ -1017,6 +1032,19 @@ def _execute_dfs_phase(
                     circuit_depths[recovered_hash] = depth + 1
                     # Track unique functional recoveries for DFS continuation
                     unique_functional_recoveries.append((recovered_hash, recovered_logits))
+                    if max_solutions is not None and len(unique_solutions) >= max_solutions:
+                        exploration_results.append({
+                            "pattern_idx": int(pattern_idx),
+                            "source_hash": circuit_hash,
+                            "recovered_hash": recovered_hash,
+                            "final_accuracy": final_accuracy,
+                            "is_functional": is_func,
+                            "is_unique": is_func and is_unique,
+                            "depth": depth,
+                            "phase": phase_name,
+                        })
+                        log.info(f"{phase_name}: Reached max_solutions={max_solutions}, stopping DFS phase")
+                        return total_perturbations, functional_recoveries
                 
                 # For single perturbation mode, break early after first success
                 if perturbations_per_node == 1:
@@ -1124,6 +1152,9 @@ def _execute_dfs_phase(
                             circuit_depths[recovered_hash] = depth + 1
                             # Track unique functional recoveries for DFS continuation
                             unique_functional_recoveries.append((recovered_hash, recovered_logits))
+                            if max_solutions is not None and len(unique_solutions) >= max_solutions:
+                                log.info(f"{phase_name}: Reached max_solutions={max_solutions}, stopping DFS phase (retry)")
+                                return total_perturbations, functional_recoveries
                         
                         # Stop retrying once we get a successful recovery
                         break
@@ -1227,9 +1258,10 @@ def explore_degenerate_solutions(
     max_retry_attempts: int = 0,
     # Checkpoint parameters
     output_dir: Optional[Path] = None,
-    checkpoint_interval: int = 100,
+    checkpoint_interval: int = 1000,
     task_name: str = "binary_multiply",
     exploration_config: Optional[Dict] = None,
+    max_solutions: Optional[int] = None,
 ) -> Dict:
     """
     Explore degenerate solutions using flexible phase-based or legacy strategies.
@@ -1286,6 +1318,8 @@ def explore_degenerate_solutions(
         max_retry_attempts: When DFS perturbations_per_node==1 and a perturbation fails,
             retry up to this many times with different patterns before giving up.
             Default 0 (no retries).
+        max_solutions: If set, stop exploration once this many unique solutions are found
+            (e.g. 50 or 100). Default None (no cap).
         
     Returns:
         Dictionary with exploration results including:
@@ -1310,6 +1344,8 @@ def explore_degenerate_solutions(
     log.info(f"Root circuit hash: {hash_circuit_logits(root_logits)}")
     log.info(f"Damage per perturbation: {damage_prob} gates")
     log.info(f"Functional threshold: {functional_threshold}")
+    if max_solutions is not None:
+        log.info(f"Max solutions cap: {max_solutions} (exploration will stop when reached)")
     
     if recovery_mode == "backprop":
         log.info(f"Recovery epochs: {epochs}")
@@ -1552,6 +1588,7 @@ def explore_degenerate_solutions(
                     arity=arity,
                     max_steps=max_steps,
                     damage_behavior=damage_behavior,
+                    max_solutions=max_solutions,
                 )
             elif phase_type == "dfs":
                 phase_perturbations, phase_functional = _execute_dfs_phase(
@@ -1586,6 +1623,7 @@ def explore_degenerate_solutions(
                     max_retry_attempts=max_retry_attempts,
                     checkpoint_callback=checkpoint_callback,
                     root_hash=root_hash,
+                    max_solutions=max_solutions,
                 )
             else:
                 raise ValueError(f"Invalid phase_type: {phase_type}")
@@ -1593,6 +1631,10 @@ def explore_degenerate_solutions(
             total_perturbations += phase_perturbations
             functional_recoveries += phase_functional
             successful_recoveries += phase_perturbations  # Approximate (some may fail)
+            
+            if max_solutions is not None and len(unique_solutions) >= max_solutions:
+                log.info(f"Reached max_solutions={max_solutions}, stopping phase-based exploration")
+                break
             
             current_max_depth = max(circuit_depths.values())
             
@@ -1619,6 +1661,9 @@ def explore_degenerate_solutions(
         visited_at_depth: Dict[int, Set[str]] = {}  # Track visited circuits per depth
         
         while queue:
+            if max_solutions is not None and len(unique_solutions) >= max_solutions:
+                log.info(f"Reached max_solutions={max_solutions}, stopping BFS")
+                break
             circuit_hash, circuit_logits, depth = queue.popleft()
             
             if depth >= bfs_depth:
@@ -1712,6 +1757,8 @@ def explore_degenerate_solutions(
                             f"  ✓ Unique functional solution! Hash: {recovered_hash[:16]}..., "
                             f"Accuracy: {final_accuracy:.4f}"
                         )
+                        if max_solutions is not None and len(unique_solutions) >= max_solutions:
+                            break
                     else:
                         log.info(
                             f"  → Recovered to known solution (hash: {recovered_hash[:16]}...), "
@@ -1738,8 +1785,12 @@ def explore_degenerate_solutions(
                     "depth": depth,
                     "phase": "bfs",
                 })
+                if max_solutions is not None and len(unique_solutions) >= max_solutions:
+                    break
             
             log.info(f"  New unique circuits at depth {depth}: {len(new_circuits_at_depth)}")
+            if max_solutions is not None and len(unique_solutions) >= max_solutions:
+                break
         
         log.info(f"\nBFS Phase Complete:")
         log.info(f"  Total perturbations: {total_perturbations}")
@@ -1758,6 +1809,9 @@ def explore_degenerate_solutions(
         rw_rng = jax.random.PRNGKey(random_walk_seed)
         
         for iteration in range(random_walk_iterations):
+            if max_solutions is not None and len(unique_solutions) >= max_solutions:
+                log.info(f"Reached max_solutions={max_solutions}, stopping random walk")
+                break
             if iteration % 50 == 0:
                 log.info(f"\nRandom Walk iteration {iteration + 1}/{random_walk_iterations}")
                 log.info(f"  Discovered circuits: {len(unique_solutions)}")
@@ -1849,6 +1903,9 @@ def explore_degenerate_solutions(
                     "phase": "random_walk",
                     "iteration": iteration,
                 })
+                if max_solutions is not None and len(unique_solutions) >= max_solutions:
+                    log.info(f"Reached max_solutions={max_solutions}, stopping random walk")
+                    break
             else:
                 exploration_results.append({
                     "pattern_idx": pattern_idx,
@@ -1929,6 +1986,18 @@ def explore_degenerate_solutions(
                         f"  ✓ Unique functional solution! Hash: {recovered_hash[:16]}..., "
                         f"Accuracy: {final_accuracy:.4f}"
                     )
+                    if max_solutions is not None and len(unique_solutions) >= max_solutions:
+                        exploration_results.append({
+                            "pattern_idx": pattern_idx,
+                            "source_hash": root_hash,
+                            "recovered_hash": recovered_hash,
+                            "final_accuracy": final_accuracy,
+                            "is_functional": is_func,
+                            "is_unique": is_func and is_unique,
+                            "phase": "single_root",
+                        })
+                        log.info(f"Reached max_solutions={max_solutions}, stopping single_root exploration")
+                        break
                 else:
                     log.info(
                         f"  → Recovered to known solution (hash: {recovered_hash[:16]}...), "
@@ -1944,6 +2013,8 @@ def explore_degenerate_solutions(
                 "is_unique": is_func and is_unique,
                 "phase": "single_root",
             })
+            if max_solutions is not None and len(unique_solutions) >= max_solutions:
+                break
     
     # ============================================================================
     # Summary Statistics
@@ -2555,14 +2626,21 @@ def main():
     parser.add_argument(
         "--checkpoint-interval",
         type=int,
-        default=100,
-        help="Save checkpoint every N unique solutions discovered (default: 100). Checkpoints are appended to output_dir/checkpoints/checkpoint_{N}_solutions/; final results overwrite the root output_dir for visualize_umap.py.",
+        default=1000,
+        help="Save checkpoint every N unique solutions discovered (default: 1000). Checkpoints are appended to output_dir/checkpoints/checkpoint_{N}_solutions/; final results overwrite the root output_dir for visualize_umap.py.",
     )
     parser.add_argument(
         "--max-retry-attempts",
         type=int,
         default=0,
         help="When DFS perturbations_per_node=1 and a perturbation fails, retry up to this many times with different patterns (default: 0, no retries)",
+    )
+    parser.add_argument(
+        "--max-solutions",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Stop exploration once this many unique solutions are found (e.g. 50 or 100). Default: no cap.",
     )
     
     args = parser.parse_args()
@@ -2834,6 +2912,7 @@ def main():
         "functional_threshold": args.functional_threshold,
         "input_bits": args.input_bits,
         "output_bits": args.output_bits,
+        "max_solutions": args.max_solutions,
     }
     if args.exploration_strategy == "phases" and phases is not None:
         exploration_config["phases"] = [
@@ -2918,6 +2997,7 @@ def main():
         checkpoint_interval=args.checkpoint_interval,
         task_name=args.task,
         exploration_config=exploration_config,
+        max_solutions=args.max_solutions,
     )
     
     # Final save (overwrites last checkpoint with final results)
@@ -2946,4 +3026,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

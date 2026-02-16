@@ -40,18 +40,18 @@ def plot_accuracy_vs_distance(
         gnn_data = summary_df[summary_df['method'] == 'gnn']
         bp_data = summary_df[summary_df['method'] == 'bp']
         
-        # Plot GNN data
+        # Plot GNN (SA) data - colour aligned with plot_stepwise_metrics COLOR_UNSEEN
         if len(gnn_data) > 0:
             ax.scatter(gnn_data['overall_bitwise_fraction_diff'], 
                       gnn_data['final_hard_accuracy'], 
-                      c='red', marker='o', s=100, alpha=0.7, 
+                      c='#e9ad39', marker='o', s=100, alpha=0.7, 
                       edgecolors='black', linewidth=0.5, label='GNN')
         
         # Plot BP data
         if len(bp_data) > 0:
             ax.scatter(bp_data['overall_bitwise_fraction_diff'], 
                       bp_data['final_hard_accuracy'], 
-                      c='blue', marker='s', s=100, alpha=0.7, 
+                      c='#019e73', marker='s', s=100, alpha=0.7, 
                       edgecolors='black', linewidth=0.5, label='BP')
         
         # Add legend with font size matching Figure 3
@@ -89,7 +89,7 @@ def plot_damage_size_vs_hamming(
 ) -> str:
     """
     Create line plot with error bars of damage size (knockout_size) vs hamming distance.
-    Shows trendlines with error bars, colored by method (GNN vs BP): red for GNN, blue for BP.
+    Shows trendlines with error bars, colored by method (GNN vs BP): #e9ad39 for GNN (SA), #019e73 for BP.
     
     Args:
         summary_df: DataFrame with knockout results (must have 'knockout_size', 
@@ -116,10 +116,10 @@ def plot_damage_size_vs_hamming(
         grouped = summary_df.groupby(['knockout_size', 'method'])['per_gate_mean_hamming'].agg(['mean', 'std', 'count']).reset_index()
         
         # Plot each method separately with different colors and markers
-        # Matching standard: GNN = red, BP = blue (from plot_accuracy_vs_distance)
+        # SA (GNN) = #e9ad39 (aligned with plot_stepwise_metrics COLOR_UNSEEN), BP = #019e73
         for method, color, marker in [
-            ('gnn', 'red', 'o'), 
-            ('bp', 'blue', 's')
+            ('gnn', '#e9ad39', 'o'), 
+            ('bp', '#019e73', 's')
         ]:
             method_data = grouped[grouped['method'] == method]
             if len(method_data) > 0:
@@ -216,7 +216,7 @@ def plot_damage_size_vs_accuracy(
 ) -> str:
     """
     Create scatter plot of damage size (knockout_size) vs hard accuracy.
-    Shows individual data points, colored by method (GNN vs BP): red for GNN, blue for BP.
+    Shows individual data points, colored by method (GNN vs BP): #e9ad39 for GNN (SA), #019e73 for BP.
     
     Args:
         summary_df: DataFrame with knockout results (must have 'knockout_size', 
@@ -249,10 +249,10 @@ def plot_damage_size_vs_accuracy(
     
     if color_by_method and 'method' in summary_df.columns:
         # Plot each method separately with different colors and markers
-        # Matching standard: GNN = red, BP = blue (from plot_accuracy_vs_distance)
+        # SA (GNN) = #e9ad39 (aligned with plot_stepwise_metrics COLOR_UNSEEN), BP = #019e73
         for method, color, marker, jitter_offset in [
-            ('gnn', 'red', 'o', -jitter_amount),  # GNN slightly to the left
-            ('bp', 'blue', 's', jitter_amount)    # BP slightly to the right
+            ('gnn', '#e9ad39', 'o', -jitter_amount),  # GNN slightly to the left
+            ('bp', '#019e73', 's', jitter_amount)    # BP slightly to the right
         ]:
             method_data = summary_df[summary_df['method'] == method]
             if len(method_data) > 0:

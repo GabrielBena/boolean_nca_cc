@@ -15,8 +15,20 @@ Usage:
     python train.py --config path/to/config.yaml training.epochs=1000 seed=42
 """
 
+import argparse
 import os
 import sys
+
+# Python 3.14+ argparse requires help to be a string; Hydra uses LazyCompletionHelp().
+# Coerce non-string help to str so Hydra's get_args_parser() does not raise.
+_orig_add_argument = argparse.ArgumentParser.add_argument
+
+def _add_argument_patched(self, *args, **kwargs):
+    if "help" in kwargs and not isinstance(kwargs["help"], str):
+        kwargs["help"] = str(kwargs["help"])
+    return _orig_add_argument(self, *args, **kwargs)
+
+argparse.ArgumentParser.add_argument = _add_argument_patched
 
 import logging
 import jax

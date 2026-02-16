@@ -496,7 +496,8 @@ def visualize_umap(
         plt.savefig(figure_path, dpi=300, bbox_inches='tight')
         log.info(f"  Saved figure.png")
     
-    plt.show()
+    if output_file is None:
+        plt.show()
     
     # Print statistics
     log.info("\n" + "=" * 80)
@@ -624,12 +625,13 @@ def main():
 
     # Derive UMAP visualization directory from exploration directory name + solution count
     # e.g., DFS_10_4_ROOT_SA_8zzudzmv_20260211_085457 -> umap_viz_DFS_10_4_ROOT_SA_8zzudzmv_20260211_085457_1108_solutions
+    # When --output-file is set (e.g. parameter sweep), skip saving artifacts to avoid overwriting.
     exploration_dir_name = results_dir.name
     if exploration_dir_name.startswith("exploration_"):
         base_name = exploration_dir_name.replace("exploration_", "umap_viz_", 1)
     else:
         base_name = f"umap_viz_{exploration_dir_name}"
-    umap_viz_dir = results_dir.parent / f"{base_name}_{num_solutions}_solutions"
+    umap_viz_dir = None if args.output_file else (results_dir.parent / f"{base_name}_{num_solutions}_solutions")
 
     log.info(f"Loaded {num_solutions} unique solutions")
     log.info(f"Exploration graph has {len(results['exploration_graph'])} nodes")
@@ -664,7 +666,7 @@ def main():
         metric=args.metric,
         cmap=args.cmap,
         figsize=figsize,
-        save_dir=umap_viz_dir,
+        save_dir=umap_viz_dir,  # None when --output-file is set (sweep mode)
         exploration_graph=results["exploration_graph"] if args.show_edges else None,
         show_edges=args.show_edges,
         edge_alpha=args.edge_alpha,
@@ -673,7 +675,8 @@ def main():
         highlight_cycles=args.highlight_cycles,
     )
     
-    log.info(f"\nUMAP results saved to: {umap_viz_dir}")
+    if umap_viz_dir is not None:
+        log.info(f"\nUMAP results saved to: {umap_viz_dir}")
 
 
 if __name__ == "__main__":

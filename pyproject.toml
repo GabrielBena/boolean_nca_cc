@@ -40,12 +40,19 @@ dependencies = [
     # Image processing and visualization
     "Pillow>=9.0.0",
     "imgui-bundle>=1.0.0",
+    "matplotlib>=3.5.0",
+    "umap-learn>=0.5.0",
     
     # Interactive development
     "IPython>=8.0.0",
 ]
 
 [project.optional-dependencies]
+# GPU support: use `uv sync --extra cuda` on machines with NVIDIA CUDA 12.
+# Requires NVIDIA driver >= 525. For CUDA 13 use jax[cuda13] instead.
+cuda = [
+    "jax[cuda12]",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",

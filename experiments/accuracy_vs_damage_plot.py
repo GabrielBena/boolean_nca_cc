@@ -470,7 +470,7 @@ def main():
                     beta1=backprop_cfg.get("beta1", 0.9),
                     beta2=backprop_cfg.get("beta2", 0.999),
                     weight_decay=backprop_cfg.get("weight_decay", 0.0),
-                    epochs=backprop_cfg.get("epochs", 200),
+                    epochs=max(backprop_cfg.get("epochs", 200), 300),
                 ),
                 circuit=SimpleNamespace(
                     layer_sizes=layer_sizes,
@@ -490,7 +490,7 @@ def main():
                 beta1=backprop_cfg.get("beta1", 0.9),
                 beta2=backprop_cfg.get("beta2", 0.999),
                 weight_decay=backprop_cfg.get("weight_decay", 0.0),
-                epochs=backprop_cfg.get("epochs", 200),
+                epochs=max(backprop_cfg.get("epochs", 200), 300),
             ),
             circuit=SimpleNamespace(
                 layer_sizes=layer_sizes,
@@ -546,7 +546,7 @@ def main():
                     beta1=backprop_cfg.get("beta1", 0.9),
                     beta2=backprop_cfg.get("beta2", 0.999),
                     weight_decay=backprop_cfg.get("weight_decay", 0.0),
-                    epochs=backprop_cfg.get("epochs", 200),
+                    epochs=max(backprop_cfg.get("epochs", 200), 300),
                 ),
                 circuit=SimpleNamespace(
                     layer_sizes=layer_sizes,
