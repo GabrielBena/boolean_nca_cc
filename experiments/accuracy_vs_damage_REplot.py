@@ -27,8 +27,10 @@ def main():
                         help="Path to summary.csv file")
     parser.add_argument("--output", type=str, default=None,
                         help="Output path for plot (default: same directory as CSV with name 'damage_size_vs_accuracy_REplot.png')")
-    parser.add_argument("--ylim-min", type=float, default=0.5,
-                        help="Minimum y-axis limit (default: 0.5)")
+    parser.add_argument("--ylim-min", type=float, default=0.97,
+                        help="Minimum y-axis limit (default: 0.97)")
+    parser.add_argument("--ylim-max", type=float, default=1.01,
+                        help="Maximum y-axis limit (default: 1.01)")
     parser.add_argument("--no-method-colors", action="store_true",
                         help="Don't color by method (single line plot)")
     parser.add_argument("--baseline-accuracy", type=float, default=None,
@@ -37,6 +39,8 @@ def main():
                         help="Baseline loss (unused, kept for compatibility)")
     parser.add_argument("--also-plot-distance", action="store_true",
                         help="Also generate accuracy_vs_distance.png plot")
+    parser.add_argument("--gnn-label", type=str, default=None,
+                        help="Legend label for GNN method (e.g. 'NCA'). Default: 'GNN'")
     
     args = parser.parse_args()
     
@@ -78,15 +82,22 @@ def main():
             except Exception as e:
                 print(f"Warning: Could not load report.json: {e}")
     
+    # Optional method label override (e.g. GNN -> NCA)
+    method_label_map = None
+    if args.gnn_label is not None:
+        method_label_map = {"gnn": args.gnn_label, "bp": "BP"}
+
     # Generate the main plot (damage size vs accuracy)
-    print(f"\nGenerating plot with ylim_min={args.ylim_min}...")
+    print(f"\nGenerating plot with ylim=({args.ylim_min}, {args.ylim_max})...")
     plot_damage_size_vs_accuracy(
         summary_df=df,
         output_path=output_path,
         color_by_method=not args.no_method_colors,
         baseline_accuracy=baseline_accuracy,
         baseline_loss=baseline_loss,
-        ylim_min=args.ylim_min
+        ylim_min=args.ylim_min,
+        ylim_max=args.ylim_max,
+        method_label_map=method_label_map,
     )
     
     print(f"Plot saved to: {output_path}")

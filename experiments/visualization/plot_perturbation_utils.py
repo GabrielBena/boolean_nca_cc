@@ -7,7 +7,7 @@ This module provides plotting functions for accuracy vs hamming distance analysi
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
-from typing import Optional
+from typing import Dict, Optional
 
 
 def plot_accuracy_vs_distance(
@@ -15,7 +15,8 @@ def plot_accuracy_vs_distance(
     output_path: str,
     figsize: tuple = (8, 3),
     dpi: int = 300,
-    color_by_method: bool = True
+    color_by_method: bool = True,
+    ylim: Optional[tuple[float, float]] = (0.97, 1.02),
 ) -> str:
     """
     Create scatter plot of final accuracy vs hamming distance.
@@ -26,6 +27,8 @@ def plot_accuracy_vs_distance(
         figsize: Figure dimensions
         dpi: Image resolution
         color_by_method: Whether to color points by method (GNN vs BP)
+        ylim: Optional (ymin, ymax) for y-axis. Use None for auto-scale (e.g. when
+              accuracy drops below 0.97). Use e.g. (0.6, 1.02) for a generous range.
     
     Returns:
         Path to saved image file
@@ -36,23 +39,22 @@ def plot_accuracy_vs_distance(
     fig, ax = plt.subplots(1, 1, figsize=figsize)
     
     if color_by_method and 'method' in summary_df.columns:
-        # Separate scatter plots with different colors/markers for each method
+        # Separate scatter plots with different colors/markers for each method.
+        # Plot BP first, then GNN so GNN points are drawn on top and visible.
         gnn_data = summary_df[summary_df['method'] == 'gnn']
         bp_data = summary_df[summary_df['method'] == 'bp']
         
-        # Plot GNN (SA) data - colour aligned with plot_stepwise_metrics COLOR_UNSEEN
-        if len(gnn_data) > 0:
-            ax.scatter(gnn_data['overall_bitwise_fraction_diff'], 
-                      gnn_data['final_hard_accuracy'], 
-                      c='#e9ad39', marker='o', s=100, alpha=0.7, 
-                      edgecolors='black', linewidth=0.5, label='GNN')
-        
-        # Plot BP data
         if len(bp_data) > 0:
             ax.scatter(bp_data['overall_bitwise_fraction_diff'], 
                       bp_data['final_hard_accuracy'], 
                       c='#019e73', marker='s', s=100, alpha=0.7, 
                       edgecolors='black', linewidth=0.5, label='BP')
+        
+        if len(gnn_data) > 0:
+            ax.scatter(gnn_data['overall_bitwise_fraction_diff'], 
+                      gnn_data['final_hard_accuracy'], 
+                      c='#e9ad39', marker='o', s=100, alpha=0.7, 
+                      edgecolors='black', linewidth=0.5, label='GNN')
         
         # Add legend with font size matching Figure 3
         ax.legend(loc='lower right', fontsize=16)
@@ -68,7 +70,8 @@ def plot_accuracy_vs_distance(
     ax.set_title('Circuit Performance vs Perturbation Response', fontsize=20)
     ax.tick_params(axis='both', which='major', labelsize=16)
     ax.grid(True, alpha=0.3)
-    ax.set_ylim(0.97, 1.02)
+    if ylim is not None:
+        ax.set_ylim(ylim[0], ylim[1])
     
     plt.tight_layout()
     plt.savefig(output_path, dpi=dpi, bbox_inches='tight')
@@ -212,12 +215,14 @@ def plot_damage_size_vs_accuracy(
     color_by_method: bool = True,
     baseline_accuracy: Optional[float] = None,
     baseline_loss: Optional[float] = None,
-    ylim_min: Optional[float] = None
+    ylim_min: Optional[float] = None,
+    ylim_max: Optional[float] = None,
+    method_label_map: Optional[Dict[str, str]] = None,
 ) -> str:
     """
     Create scatter plot of damage size (knockout_size) vs hard accuracy.
     Shows individual data points, colored by method (GNN vs BP): #e9ad39 for GNN (SA), #019e73 for BP.
-    
+
     Args:
         summary_df: DataFrame with knockout results (must have 'knockout_size', 
                    'final_hard_accuracy', and 'method' columns)
@@ -228,7 +233,9 @@ def plot_damage_size_vs_accuracy(
         baseline_accuracy: Optional baseline accuracy to plot as horizontal reference line
         baseline_loss: Optional baseline loss (unused, kept for compatibility)
         ylim_min: Optional minimum y-axis limit (default: 0.97)
-    
+        ylim_max: Optional maximum y-axis limit (default: 1.02)
+        method_label_map: Optional dict mapping method key (e.g. 'gnn', 'bp') to legend label (e.g. 'NCA', 'BP')
+
     Returns:
         Path to saved image file
     """
@@ -256,6 +263,7 @@ def plot_damage_size_vs_accuracy(
         ]:
             method_data = summary_df[summary_df['method'] == method]
             if len(method_data) > 0:
+                legend_label = (method_label_map or {}).get(method, method.upper())
                 # Add minimal jitter to x-coordinates
                 x_coords = method_data['knockout_size'].values + jitter_offset
                 # Plot individual points
@@ -264,7 +272,7 @@ def plot_damage_size_vs_accuracy(
                           color=color,
                           marker=marker,
                           s=50,  # marker size
-                          label=method.upper(),
+                          label=legend_label,
                           alpha=0.6,
                           edgecolors='black',
                           linewidths=0.5)
@@ -309,7 +317,8 @@ def plot_damage_size_vs_accuracy(
     ax.set_xlabel(f'{damage_type} Damage Size', fontsize=18)
     ax.set_ylabel('Final Hard Accuracy', fontsize=18)
     ylim_lower = ylim_min if ylim_min is not None else 0.97
-    ax.set_ylim(ylim_lower, 1.02)
+    ylim_upper = ylim_max if ylim_max is not None else 1.02
+    ax.set_ylim(ylim_lower, ylim_upper)
     ax.tick_params(axis='both', which='major', labelsize=16)
     ax.grid(True, alpha=0.3)
     

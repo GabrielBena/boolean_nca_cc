@@ -1,0 +1,31 @@
+# Sweep over model.num_layers and eval.periodic_eval_batch_size for multi-damage repair (dam40).
+# Base config: sweeps/singles/multi_damage_repair_dam40_hydra.yaml
+#
+# Usage (Wandb):
+#   wandb sweep sweeps/sweep_multi_damage_repair_dam40.yaml
+#   wandb agent <sweep_id>
+#
+# Usage (Hydra multirun, 2×2 = 4 runs):
+#   python train.py --config-path sweeps/singles --config-name multi_damage_repair_dam40_hydra \
+#     -m model.num_layers=1,3 eval.periodic_eval_batch_size=256,512
+
+program: train.py
+method: grid
+metric:
+  goal: maximize
+  name: eval_ko_in/final_hard_accuracy
+
+parameters:
+  model.num_layers:
+    values: [1, 3]
+  eval.periodic_eval_batch_size:
+    values: [256, 512]
+
+# Use multi_damage_repair_dam40_hydra as base; sweep params are appended as overrides
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - --config-path=sweeps/singles
+  - --config-name=multi_damage_repair_dam40_hydra
+  - ${args_no_hyphens}
