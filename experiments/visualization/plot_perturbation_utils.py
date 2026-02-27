@@ -69,7 +69,6 @@ def plot_accuracy_vs_distance(
     ax.set_ylabel('Final Hard Accuracy', fontsize=18)
     ax.set_title('Circuit Performance vs Perturbation Response', fontsize=20)
     ax.tick_params(axis='both', which='major', labelsize=16)
-    ax.grid(True, alpha=0.3)
     if ylim is not None:
         ax.set_ylim(ylim[0], ylim[1])
     
@@ -136,13 +135,14 @@ def plot_damage_size_vs_hamming(
                 # Fill NaN std values with 0 (happens when only one data point)
                 y_stds = np.nan_to_num(y_stds, nan=0.0)
                 
-                # Plot line with markers
+                # Plot line with markers (legend: gnn -> NCA, bp -> BP)
+                legend_label = 'NCA' if method == 'gnn' else method.upper()
                 ax.plot(x_coords, y_means, 
                        color=color,
                        marker=marker,
                        markersize=8,
                        linewidth=2,
-                       label=method.upper(),
+                       label=legend_label,
                        alpha=0.9)
                 
                 # Add error bars
@@ -198,7 +198,6 @@ def plot_damage_size_vs_hamming(
     ylim_upper = ylim_max if ylim_max is not None else 0.325
     ax.set_ylim(0, ylim_upper)
     ax.tick_params(axis='both', which='major', labelsize=16)
-    ax.grid(True, alpha=0.3)
     
     plt.tight_layout()
     plt.savefig(output_path, dpi=dpi, bbox_inches='tight')
@@ -320,7 +319,6 @@ def plot_damage_size_vs_accuracy(
     ylim_upper = ylim_max if ylim_max is not None else 1.02
     ax.set_ylim(ylim_lower, ylim_upper)
     ax.tick_params(axis='both', which='major', labelsize=16)
-    ax.grid(True, alpha=0.3)
     
     plt.tight_layout()
     plt.savefig(output_path, dpi=dpi, bbox_inches='tight')

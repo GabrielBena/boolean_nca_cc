@@ -17,6 +17,10 @@ This script implements a streamlined, run ID-driven analysis:
 
 CLI: Only requires --run-id (defaults to "nypyrbwh") and --methods selection.
 All other parameters (vocab size, damage prob, loss type, etc.) come from GNN config.
+
+Note: final_hard_accuracy is always computed over circuit outputs (pred vs target);
+it does not use any gate mask. The --exclude-knocked-out-gates flag is only relevant
+for the complementary hamming_distance_plot.py (Hamming distance over truth tables).
 """
 
 import os
@@ -331,9 +335,9 @@ def main():
     else:
         damage_start_offset = 5  # Default: damage at step 6, 20 recovery steps (with 26 total)
     
-    # Include all gates mode: Default is True (include all gates), unless --exclude-knocked-out-gates is set
-    include_all_gates = not args.exclude_knocked_out_gates
-    
+    # Hamming metrics in this script always use all gates (exclude-knocked-out-gates is only
+    # relevant for the complementary hamming_distance_plot.py analysis).
+    include_all_gates = True
 
     # Only load GNN model if GNN is in the methods
     gnn_model = None
@@ -389,8 +393,7 @@ def main():
     # Set output directory with f-string if not provided
     if args.output is None:
         ko_sizes_str = "_".join(map(str, knockout_sizes))
-        gates_mode = "allgates" if include_all_gates else "activeonly"
-        args.output = f"reports/figures/rev_damage_scale/accuracy_scaled{ko_sizes_str}_p{patterns_per_size}_{damage_behavior}_{gates_mode}_run{args.run_id}"
+        args.output = f"reports/figures/rev_damage_scale/accuracy_scaled{ko_sizes_str}_p{patterns_per_size}_{damage_behavior}_run{args.run_id}"
     log.info(f"Output directory: {args.output}")
     log.info(f"Analysis mode: accuracy vs damage size")
 
