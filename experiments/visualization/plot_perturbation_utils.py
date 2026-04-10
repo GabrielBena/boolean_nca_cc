@@ -47,14 +47,14 @@ def plot_accuracy_vs_distance(
         if len(bp_data) > 0:
             ax.scatter(bp_data['overall_bitwise_fraction_diff'], 
                       bp_data['final_hard_accuracy'], 
-                      c='#019e73', marker='s', s=100, alpha=0.7, 
+                      c='#414487', marker='s', s=100, alpha=0.7,
                       edgecolors='black', linewidth=0.5, label='BP')
         
         if len(gnn_data) > 0:
             ax.scatter(gnn_data['overall_bitwise_fraction_diff'], 
                       gnn_data['final_hard_accuracy'], 
-                      c='#e9ad39', marker='o', s=100, alpha=0.7, 
-                      edgecolors='black', linewidth=0.5, label='GNN')
+                      c='#34b779', marker='o', s=100, alpha=0.7,
+                      edgecolors='black', linewidth=0.5, label='TMT')
         
         # Add legend with font size matching Figure 3
         ax.legend(loc='lower right', fontsize=16)
@@ -91,7 +91,7 @@ def plot_damage_size_vs_hamming(
 ) -> str:
     """
     Create line plot with error bars of damage size (knockout_size) vs hamming distance.
-    Shows trendlines with error bars, colored by method (GNN vs BP): #e9ad39 for GNN (SA), #019e73 for BP.
+    Shows trendlines with error bars, colored by method (GNN vs BP): #34b779 for GNN (SA), #414487 for BP.
     
     Args:
         summary_df: DataFrame with knockout results (must have 'knockout_size', 
@@ -118,10 +118,10 @@ def plot_damage_size_vs_hamming(
         grouped = summary_df.groupby(['knockout_size', 'method'])['per_gate_mean_hamming'].agg(['mean', 'std', 'count']).reset_index()
         
         # Plot each method separately with different colors and markers
-        # SA (GNN) = #e9ad39 (aligned with plot_stepwise_metrics COLOR_UNSEEN), BP = #019e73
+        # SA (GNN) = #34b779, BP = #414487
         for method, color, marker in [
-            ('gnn', '#e9ad39', 'o'), 
-            ('bp', '#019e73', 's')
+            ('gnn', '#34b779', 'o'),
+            ('bp', '#414487', 's')
         ]:
             method_data = grouped[grouped['method'] == method]
             if len(method_data) > 0:
@@ -136,7 +136,7 @@ def plot_damage_size_vs_hamming(
                 y_stds = np.nan_to_num(y_stds, nan=0.0)
                 
                 # Plot line with markers (legend: gnn -> NCA, bp -> BP)
-                legend_label = 'NCA' if method == 'gnn' else method.upper()
+                legend_label = 'TMT' if method == 'gnn' else method.upper()
                 ax.plot(x_coords, y_means, 
                        color=color,
                        marker=marker,
@@ -220,7 +220,7 @@ def plot_damage_size_vs_accuracy(
 ) -> str:
     """
     Create scatter plot of damage size (knockout_size) vs hard accuracy.
-    Shows individual data points, colored by method (GNN vs BP): #e9ad39 for GNN (SA), #019e73 for BP.
+    Shows individual data points, colored by method (GNN vs BP): #34b779 for GNN (SA), #414487 for BP.
 
     Args:
         summary_df: DataFrame with knockout results (must have 'knockout_size', 
@@ -255,14 +255,15 @@ def plot_damage_size_vs_accuracy(
     
     if color_by_method and 'method' in summary_df.columns:
         # Plot each method separately with different colors and markers
-        # SA (GNN) = #e9ad39 (aligned with plot_stepwise_metrics COLOR_UNSEEN), BP = #019e73
+        # SA (GNN) = #34b779, BP = #414487
         for method, color, marker, jitter_offset in [
-            ('gnn', '#e9ad39', 'o', -jitter_amount),  # GNN slightly to the left
-            ('bp', '#019e73', 's', jitter_amount)    # BP slightly to the right
+            ('gnn', '#34b779', 'o', -jitter_amount),  # GNN slightly to the left
+            ('bp', '#414487', 's', jitter_amount)    # BP slightly to the right
         ]:
             method_data = summary_df[summary_df['method'] == method]
             if len(method_data) > 0:
-                legend_label = (method_label_map or {}).get(method, method.upper())
+                _default_labels = {'gnn': 'TMT', 'bp': 'BP'}
+                legend_label = (method_label_map or {}).get(method, _default_labels.get(method, method.upper()))
                 # Add minimal jitter to x-coordinates
                 x_coords = method_data['knockout_size'].values + jitter_offset
                 # Plot individual points

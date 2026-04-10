@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 
 # Colors matching Figure 3 trajectory style
 COLOR_SEEN = "black"
-COLOR_UNSEEN = "#e9ad39"
+COLOR_UNSEEN = "#34b779"
 ALPHA_BAND = 0.2
 
 
