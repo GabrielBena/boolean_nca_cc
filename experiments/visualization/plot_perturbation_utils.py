@@ -6,6 +6,7 @@ This module provides plotting functions for accuracy vs hamming distance analysi
 
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import pandas as pd
 from typing import Dict, Optional
 
@@ -79,6 +80,63 @@ def plot_accuracy_vs_distance(
     return output_path
 
 
+def _plot_damage_size_vs_hamming_on_ax(
+    ax,
+    summary_df: pd.DataFrame,
+    color_by_method: bool = True,
+    ylim_max: Optional[float] = None,
+    show_xlabel: bool = True,
+):
+    """Plot damage size vs hamming distance onto an existing axes."""
+    if color_by_method and 'method' in summary_df.columns:
+        grouped = summary_df.groupby(['knockout_size', 'method'])['per_gate_mean_hamming'].agg(['mean', 'std', 'count']).reset_index()
+
+        for method, color, marker in [
+            ('gnn', '#34b779', 'o'),
+            ('bp', '#414487', 's')
+        ]:
+            method_data = grouped[grouped['method'] == method]
+            if len(method_data) > 0:
+                method_data = method_data.sort_values('knockout_size')
+                x_coords = method_data['knockout_size'].values
+                y_means = method_data['mean'].values
+                y_stds = np.nan_to_num(method_data['std'].values, nan=0.0)
+
+                legend_label = 'TMT' if method == 'gnn' else method.upper()
+                ax.plot(x_coords, y_means,
+                       color=color, marker=marker, markersize=8,
+                       linewidth=2, label=legend_label, alpha=0.9)
+                ax.errorbar(x_coords, y_means, yerr=y_stds,
+                           color=color, alpha=0.5, capsize=4,
+                           capthick=1.5, linestyle='None', elinewidth=1.5)
+
+        ax.legend(loc='best', fontsize=16)
+    else:
+        grouped = summary_df.groupby('knockout_size')['per_gate_mean_hamming'].agg(['mean', 'std']).reset_index()
+        grouped = grouped.sort_values('knockout_size')
+        x_coords = grouped['knockout_size'].values
+        y_means = grouped['mean'].values
+        y_stds = np.nan_to_num(grouped['std'].values, nan=0.0)
+
+        ax.plot(x_coords, y_means, marker='o', markersize=8, linewidth=2, alpha=0.9)
+        ax.errorbar(x_coords, y_means, yerr=y_stds,
+                   alpha=0.5, capsize=4, capthick=1.5, linestyle='None', elinewidth=1.5)
+
+    damage_behavior = None
+    if 'damage_behavior' in summary_df.columns:
+        damage_behavior_values = summary_df['damage_behavior'].unique()
+        if len(damage_behavior_values) > 0:
+            damage_behavior = damage_behavior_values[0]
+    damage_type = damage_behavior.capitalize() if damage_behavior else "Damage"
+
+    if show_xlabel:
+        ax.set_xlabel(f'{damage_type} Damage Size', fontsize=18)
+    ax.set_ylabel('Hamming Distance (Mean per Gate)', fontsize=18)
+    ylim_upper = ylim_max if ylim_max is not None else 0.325
+    ax.set_ylim(0, ylim_upper)
+    ax.tick_params(axis='both', which='major', labelsize=16)
+
+
 def plot_damage_size_vs_hamming(
     summary_df: pd.DataFrame,
     output_path: str,
@@ -92,118 +150,84 @@ def plot_damage_size_vs_hamming(
     """
     Create line plot with error bars of damage size (knockout_size) vs hamming distance.
     Shows trendlines with error bars, colored by method (GNN vs BP): #34b779 for GNN (SA), #414487 for BP.
-    
-    Args:
-        summary_df: DataFrame with knockout results (must have 'knockout_size', 
-                   'per_gate_mean_hamming', and 'method' columns)
-        output_path: Path to save the plot image
-        figsize: Figure dimensions
-        dpi: Image resolution
-        color_by_method: Whether to color lines by method (GNN vs BP)
-        baseline_accuracy: Optional baseline accuracy (unused, kept for compatibility)
-        baseline_loss: Optional baseline loss (unused, kept for compatibility)
-    
-    Returns:
-        Path to saved image file
     """
     required_cols = ['knockout_size', 'per_gate_mean_hamming']
     missing_cols = [col for col in required_cols if col not in summary_df.columns]
     if missing_cols:
         raise ValueError(f"DataFrame must contain columns: {missing_cols}")
-    
+
     fig, ax = plt.subplots(1, 1, figsize=figsize)
-    
+    _plot_damage_size_vs_hamming_on_ax(ax, summary_df, color_by_method, ylim_max)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=dpi, bbox_inches='tight')
+    plt.close()
+
+    return output_path
+
+
+def _plot_damage_size_vs_accuracy_on_ax(
+    ax,
+    summary_df: pd.DataFrame,
+    color_by_method: bool = True,
+    baseline_accuracy: Optional[float] = None,
+    ylim_min: Optional[float] = None,
+    ylim_max: Optional[float] = None,
+    method_label_map: Optional[Dict[str, str]] = None,
+    show_xlabel: bool = True,
+):
+    """Plot damage size vs accuracy onto an existing axes."""
+    unique_sizes = sorted(summary_df['knockout_size'].unique())
+    if len(unique_sizes) > 1:
+        typical_spacing = unique_sizes[1] - unique_sizes[0]
+        jitter_amount = typical_spacing * 0.06
+    else:
+        jitter_amount = 1.0
+
     if color_by_method and 'method' in summary_df.columns:
-        # Group by knockout_size and method, calculate mean and std
-        grouped = summary_df.groupby(['knockout_size', 'method'])['per_gate_mean_hamming'].agg(['mean', 'std', 'count']).reset_index()
-        
-        # Plot each method separately with different colors and markers
-        # SA (GNN) = #34b779, BP = #414487
-        for method, color, marker in [
-            ('gnn', '#34b779', 'o'),
-            ('bp', '#414487', 's')
+        for method, color, marker, jitter_offset in [
+            ('gnn', '#34b779', 'o', -jitter_amount),
+            ('bp', '#414487', 's', jitter_amount)
         ]:
-            method_data = grouped[grouped['method'] == method]
+            method_data = summary_df[summary_df['method'] == method]
             if len(method_data) > 0:
-                # Sort by knockout_size for proper line plotting
-                method_data = method_data.sort_values('knockout_size')
-                
-                x_coords = method_data['knockout_size'].values
-                y_means = method_data['mean'].values
-                y_stds = method_data['std'].values
-                
-                # Fill NaN std values with 0 (happens when only one data point)
-                y_stds = np.nan_to_num(y_stds, nan=0.0)
-                
-                # Plot line with markers (legend: gnn -> NCA, bp -> BP)
-                legend_label = 'TMT' if method == 'gnn' else method.upper()
-                ax.plot(x_coords, y_means, 
-                       color=color,
-                       marker=marker,
-                       markersize=8,
-                       linewidth=2,
-                       label=legend_label,
-                       alpha=0.9)
-                
-                # Add error bars
-                ax.errorbar(x_coords, y_means, yerr=y_stds,
-                           color=color,
-                           alpha=0.5,
-                           capsize=4,
-                           capthick=1.5,
-                           linestyle='None',
-                           elinewidth=1.5)
-        
-        # Add legend
+                _default_labels = {'gnn': 'TMT', 'bp': 'BP'}
+                legend_label = (method_label_map or {}).get(method, _default_labels.get(method, method.upper()))
+                x_coords = method_data['knockout_size'].values + jitter_offset
+                ax.scatter(x_coords,
+                          method_data['final_hard_accuracy'],
+                          color=color, marker=marker, s=50,
+                          label=legend_label, alpha=0.6,
+                          edgecolors='black', linewidths=0.5)
+
         ax.legend(loc='best', fontsize=16)
     else:
-        # Fallback: group by knockout_size only
-        grouped = summary_df.groupby('knockout_size')['per_gate_mean_hamming'].agg(['mean', 'std']).reset_index()
-        grouped = grouped.sort_values('knockout_size')
-        
-        x_coords = grouped['knockout_size'].values
-        y_means = grouped['mean'].values
-        y_stds = grouped['std'].values
-        y_stds = np.nan_to_num(y_stds, nan=0.0)
-        
-        ax.plot(x_coords, y_means, 
-               marker='o',
-               markersize=8,
-               linewidth=2,
-               alpha=0.9)
-        
-        ax.errorbar(x_coords, y_means, yerr=y_stds,
-                   alpha=0.5,
-                   capsize=4,
-                   capthick=1.5,
-                   linestyle='None',
-                   elinewidth=1.5)
-    
-    # Determine damage behavior type from dataframe
+        ax.scatter(summary_df['knockout_size'],
+                  summary_df['final_hard_accuracy'],
+                  marker='o', s=50, alpha=0.6,
+                  edgecolors='black', linewidths=0.5)
+
+    if baseline_accuracy is not None:
+        ax.axhline(y=baseline_accuracy,
+                  color='gray', linestyle='--', linewidth=1.5,
+                  alpha=0.7, label=f'Baseline ({baseline_accuracy:.3f})')
+        if not (color_by_method and 'method' in summary_df.columns):
+            ax.legend(loc='best', fontsize=16)
+
     damage_behavior = None
     if 'damage_behavior' in summary_df.columns:
         damage_behavior_values = summary_df['damage_behavior'].unique()
         if len(damage_behavior_values) > 0:
             damage_behavior = damage_behavior_values[0]
-    
-    # Capitalize first letter for label
-    if damage_behavior:
-        damage_type = damage_behavior.capitalize()
-    else:
-        damage_type = "Damage"  # Fallback
-    
-    # Customize plot
-    ax.set_xlabel(f'{damage_type} Damage Size', fontsize=18)
-    ax.set_ylabel('Hamming Distance (Mean per Gate)', fontsize=18)
-    ylim_upper = ylim_max if ylim_max is not None else 0.325
-    ax.set_ylim(0, ylim_upper)
+    damage_type = damage_behavior.capitalize() if damage_behavior else "Damage"
+
+    if show_xlabel:
+        ax.set_xlabel(f'{damage_type} Damage Size', fontsize=18)
+    ax.set_ylabel('Final Hard Accuracy', fontsize=18)
+    ylim_lower = ylim_min if ylim_min is not None else 0.97
+    ylim_upper = ylim_max if ylim_max is not None else 1.02
+    ax.set_ylim(ylim_lower, ylim_upper)
     ax.tick_params(axis='both', which='major', labelsize=16)
-    
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=dpi, bbox_inches='tight')
-    plt.close()
-    
-    return output_path
 
 
 def plot_damage_size_vs_accuracy(
@@ -221,109 +245,70 @@ def plot_damage_size_vs_accuracy(
     """
     Create scatter plot of damage size (knockout_size) vs hard accuracy.
     Shows individual data points, colored by method (GNN vs BP): #34b779 for GNN (SA), #414487 for BP.
-
-    Args:
-        summary_df: DataFrame with knockout results (must have 'knockout_size', 
-                   'final_hard_accuracy', and 'method' columns)
-        output_path: Path to save the plot image
-        figsize: Figure dimensions
-        dpi: Image resolution
-        color_by_method: Whether to color lines by method (GNN vs BP)
-        baseline_accuracy: Optional baseline accuracy to plot as horizontal reference line
-        baseline_loss: Optional baseline loss (unused, kept for compatibility)
-        ylim_min: Optional minimum y-axis limit (default: 0.97)
-        ylim_max: Optional maximum y-axis limit (default: 1.02)
-        method_label_map: Optional dict mapping method key (e.g. 'gnn', 'bp') to legend label (e.g. 'NCA', 'BP')
-
-    Returns:
-        Path to saved image file
     """
     required_cols = ['knockout_size', 'final_hard_accuracy']
     missing_cols = [col for col in required_cols if col not in summary_df.columns]
     if missing_cols:
         raise ValueError(f"DataFrame must contain columns: {missing_cols}")
-    
+
     fig, ax = plt.subplots(1, 1, figsize=figsize)
-    
-    # Calculate minimal jitter amount based on typical spacing between knockout sizes
-    unique_sizes = sorted(summary_df['knockout_size'].unique())
-    if len(unique_sizes) > 1:
-        typical_spacing = unique_sizes[1] - unique_sizes[0]  # Use first spacing as reference
-        jitter_amount = typical_spacing * 0.06  # 1.5% of typical spacing - minimal jitter
-    else:
-        jitter_amount = 1.0  # Fallback if only one size
-    
-    if color_by_method and 'method' in summary_df.columns:
-        # Plot each method separately with different colors and markers
-        # SA (GNN) = #34b779, BP = #414487
-        for method, color, marker, jitter_offset in [
-            ('gnn', '#34b779', 'o', -jitter_amount),  # GNN slightly to the left
-            ('bp', '#414487', 's', jitter_amount)    # BP slightly to the right
-        ]:
-            method_data = summary_df[summary_df['method'] == method]
-            if len(method_data) > 0:
-                _default_labels = {'gnn': 'TMT', 'bp': 'BP'}
-                legend_label = (method_label_map or {}).get(method, _default_labels.get(method, method.upper()))
-                # Add minimal jitter to x-coordinates
-                x_coords = method_data['knockout_size'].values + jitter_offset
-                # Plot individual points
-                ax.scatter(x_coords, 
-                          method_data['final_hard_accuracy'],
-                          color=color,
-                          marker=marker,
-                          s=50,  # marker size
-                          label=legend_label,
-                          alpha=0.6,
-                          edgecolors='black',
-                          linewidths=0.5)
-        
-        # Add legend
-        ax.legend(loc='best', fontsize=16)
-    else:
-        # Fallback: plot all points without method distinction
-        ax.scatter(summary_df['knockout_size'], 
-                  summary_df['final_hard_accuracy'],
-                  marker='o',
-                  s=50,
-                  alpha=0.6,
-                  edgecolors='black',
-                  linewidths=0.5)
-    
-    # Add baseline accuracy as horizontal reference line if provided
-    if baseline_accuracy is not None:
-        ax.axhline(y=baseline_accuracy, 
-                  color='gray', 
-                  linestyle='--', 
-                  linewidth=1.5, 
-                  alpha=0.7, 
-                  label=f'Baseline ({baseline_accuracy:.3f})')
-        if not (color_by_method and 'method' in summary_df.columns):
-            ax.legend(loc='best', fontsize=16)
-    
-    # Determine damage behavior type from dataframe
-    damage_behavior = None
-    if 'damage_behavior' in summary_df.columns:
-        damage_behavior_values = summary_df['damage_behavior'].unique()
-        if len(damage_behavior_values) > 0:
-            damage_behavior = damage_behavior_values[0]
-    
-    # Capitalize first letter for label
-    if damage_behavior:
-        damage_type = damage_behavior.capitalize()
-    else:
-        damage_type = "Damage"  # Fallback
-    
-    # Customize plot
-    ax.set_xlabel(f'{damage_type} Damage Size', fontsize=18)
-    ax.set_ylabel('Final Hard Accuracy', fontsize=18)
-    ylim_lower = ylim_min if ylim_min is not None else 0.97
-    ylim_upper = ylim_max if ylim_max is not None else 1.02
-    ax.set_ylim(ylim_lower, ylim_upper)
-    ax.tick_params(axis='both', which='major', labelsize=16)
-    
+    _plot_damage_size_vs_accuracy_on_ax(
+        ax, summary_df, color_by_method, baseline_accuracy,
+        ylim_min, ylim_max, method_label_map,
+    )
+
     plt.tight_layout()
-    plt.savefig(output_path, dpi=dpi, bbox_inches='tight')
+    plt.savefig(output_path, dpi=dpi, bbox_inches='tight', pad_inches=0.15)
     plt.close()
-    
+
     return output_path
 
+
+def plot_combined_hamming_accuracy(
+    summary_df: pd.DataFrame,
+    output_path: str,
+    width: float = 8,
+    dpi: int = 300,
+    color_by_method: bool = True,
+    hamming_ylim_max: Optional[float] = None,
+    accuracy_ylim_min: Optional[float] = 0.99,
+    accuracy_ylim_max: Optional[float] = 1.01,
+    baseline_accuracy: Optional[float] = None,
+    height_ratio: tuple = (2, 1),
+    method_label_map: Optional[Dict[str, str]] = None,
+) -> str:
+    """
+    Combined two-panel figure: hamming distance (top) and accuracy (bottom).
+    Shared x-axis ensures horizontal alignment between panels.
+    """
+    total_height = width * (sum(height_ratio) / height_ratio[0]) * 0.75
+    fig, (ax_hamming, ax_acc) = plt.subplots(
+        2, 1, figsize=(width, total_height),
+        gridspec_kw={'height_ratios': list(height_ratio)},
+        sharex=True,
+    )
+
+    _plot_damage_size_vs_hamming_on_ax(
+        ax_hamming, summary_df, color_by_method,
+        ylim_max=hamming_ylim_max, show_xlabel=False,
+    )
+    _plot_damage_size_vs_accuracy_on_ax(
+        ax_acc, summary_df, color_by_method,
+        baseline_accuracy=baseline_accuracy,
+        ylim_min=accuracy_ylim_min, ylim_max=accuracy_ylim_max,
+        method_label_map=method_label_map, show_xlabel=True,
+    )
+
+    # Only show legend on the top panel to avoid duplication
+    if ax_acc.get_legend() is not None:
+        ax_acc.get_legend().remove()
+
+    # Align y-axis tick decimal places across both panels
+    ax_hamming.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.2f'))
+    ax_acc.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.2f'))
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=dpi, bbox_inches='tight', pad_inches=0.15)
+    plt.close()
+
+    return output_path
