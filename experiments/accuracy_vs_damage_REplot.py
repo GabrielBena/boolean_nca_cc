@@ -41,6 +41,8 @@ def main():
                         help="Also generate accuracy_vs_distance.png plot")
     parser.add_argument("--gnn-label", type=str, default=None,
                         help="Legend label for GNN method (e.g. 'NCA'). Default: 'GNN'")
+    parser.add_argument("--figsize", type=str, default=None,
+                        help="Figure size as 'width,height' (e.g. '8,3'). Default: 8,6")
     
     args = parser.parse_args()
     
@@ -87,8 +89,14 @@ def main():
     if args.gnn_label is not None:
         method_label_map = {"gnn": args.gnn_label, "bp": "BP"}
 
+    # Optional figsize override
+    figsize = (8, 6)
+    if args.figsize is not None:
+        w, h = [float(x.strip()) for x in args.figsize.split(",")]
+        figsize = (w, h)
+
     # Generate the main plot (damage size vs accuracy)
-    print(f"\nGenerating plot with ylim=({args.ylim_min}, {args.ylim_max})...")
+    print(f"\nGenerating plot with ylim=({args.ylim_min}, {args.ylim_max}), figsize={figsize}...")
     plot_damage_size_vs_accuracy(
         summary_df=df,
         output_path=output_path,
@@ -98,6 +106,7 @@ def main():
         ylim_min=args.ylim_min,
         ylim_max=args.ylim_max,
         method_label_map=method_label_map,
+        figsize=figsize,
     )
     
     print(f"Plot saved to: {output_path}")
