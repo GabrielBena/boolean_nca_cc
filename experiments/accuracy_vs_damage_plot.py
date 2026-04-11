@@ -145,6 +145,8 @@ def _run_bp_with_knockouts(
 
         opt = optax.adam(cfg.backprop.learning_rate)
 
+    loss_fn = loss_f_l4 if loss_type == "l4" else loss_f_bce
+
     results = []
     from tqdm.auto import tqdm
     for pattern in tqdm(knockout_patterns, desc="Training knockout patterns"):
@@ -179,20 +181,28 @@ def _run_bp_with_knockouts(
                 apply_damage_now=apply_damage_now,
             )
 
+        # Each train_step returns (loss, aux, new_state); aux["hard_accuracy"]
+        # reflects the accuracy of the logits FED INTO that step (including bias
+        # at the damage step), i.e. the state BEFORE the gradient update.
+        # This captures the raw damage drop without an extra forward pass.
+        # Index 0 = initial params, index D = biased (the V bottom).
+        step_hard_accuracies = []
         for step_count in range(cfg.backprop.epochs):
-            _, _, state = _step(state, step_count)
+            _, step_aux, state = _step(state, step_count)
+            step_hard_accuracies.append(float(step_aux["hard_accuracy"]))
 
-        # Final evaluation without persistent masks (reversible only)
-        loss_fn = loss_f_l4 if loss_type == "l4" else loss_f_bce
+        # Append final accuracy (after the last gradient update)
         final_loss, final_aux = loss_fn(state.params, wires, x_data, y_data)
         final_hard_accuracy = float(final_aux["hard_accuracy"])
         final_hard_loss = float(final_aux["hard_loss"])
+        step_hard_accuracies.append(final_hard_accuracy)
 
         results.append(dict(
             params=state.params, 
             pattern=pattern,
             final_hard_accuracy=final_hard_accuracy,
-            final_hard_loss=final_hard_loss
+            final_hard_loss=final_hard_loss,
+            step_hard_accuracies=step_hard_accuracies,
         ))
 
     return dict(wires=wires, per_pattern=results)
@@ -392,8 +402,10 @@ def main():
 
     # Set output directory with f-string if not provided
     if args.output is None:
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         ko_sizes_str = "_".join(map(str, knockout_sizes))
-        args.output = f"reports/figures/rev_damage_scale/accuracy_scaled{ko_sizes_str}_p{patterns_per_size}_{damage_behavior}_run{args.run_id}"
+        args.output = f"reports/figures/rev_damage_scale/accuracy_scaled{ko_sizes_str}_p{patterns_per_size}_{damage_behavior}_run{args.run_id}_{ts}"
     log.info(f"Output directory: {args.output}")
     log.info(f"Analysis mode: accuracy vs damage size")
 
@@ -519,6 +531,7 @@ def main():
     # Storage
     os.makedirs(args.output, exist_ok=True)
     summary_rows = []
+    traj_rows = []  # Per-step accuracy trajectories for summary_traj.csv
     last_method_ko_tables: List[List[jp.ndarray]] = []
     last_method_active_masks: List[List[jp.ndarray]] = []
 
@@ -597,6 +610,16 @@ def main():
                 summary_rows.append(row)
                 method_ko_tables.append(pert_tables)
                 method_active_masks.append(active_masks)
+
+                # Collect per-step trajectory for this pattern
+                for step, acc in enumerate(item["step_hard_accuracies"]):
+                    traj_rows.append({
+                        "method": "bp",
+                        "knockout_size": ko_size,
+                        "pattern_idx": idx,
+                        "step": step,
+                        "hard_accuracy": acc,
+                    })
 
             last_method_ko_tables = method_ko_tables
             last_method_active_masks = method_active_masks
@@ -757,6 +780,20 @@ def main():
                 method_ko_tables.append(pert_tables)
                 method_active_masks.append(active_masks)
 
+            # Collect per-step trajectories from the batched evaluation
+            # pattern_hard_accuracies shape: [n_steps, batch_size]
+            if final_hard_accuracies is not None:
+                n_steps_recorded = final_hard_accuracies.shape[0]
+                for idx in range(patterns_per_size):
+                    for s in range(n_steps_recorded):
+                        traj_rows.append({
+                            "method": "gnn",
+                            "knockout_size": ko_size,
+                            "pattern_idx": idx,
+                            "step": s,
+                            "hard_accuracy": float(final_hard_accuracies[s, idx]),
+                        })
+
             last_method_ko_tables = method_ko_tables
             last_method_active_masks = method_active_masks
 
@@ -766,6 +803,16 @@ def main():
     df = pd.DataFrame(summary_rows)
     csv_path = os.path.join(args.output, "summary.csv")
     df.to_csv(csv_path, index=False)
+
+    # Save per-step accuracy trajectories
+    if traj_rows:
+        df_traj = pd.DataFrame(traj_rows)
+        traj_csv_path = os.path.join(args.output, "summary_traj.csv")
+        df_traj.to_csv(traj_csv_path, index=False)
+        log.info(f"Trajectory CSV saved to: {traj_csv_path} ({len(df_traj)} rows)")
+    else:
+        traj_csv_path = None
+        log.warning("No trajectory data collected; summary_traj.csv not written.")
 
     # Pairwise all-to-all matrix among KO patterns using intersection masks
     pairwise = []
