@@ -250,14 +250,14 @@ def plot_stepwise_trajectory(
         if eval_type == "ko_in":
             _plot_eval("ko_in", COLOR_SEEN, "Seen")
         elif eval_type == "ko_out":
-            _plot_eval("ko_out", COLOR_UNSEEN, "Unseen")
+            _plot_eval("ko_out", COLOR_UNSEEN, "Unseen damage patterns")
         else:
             raise ValueError(f"eval_type must be 'ko_in' or 'ko_out', got {eval_type}")
     else:
         if show_seen:
             _plot_eval("ko_in", COLOR_SEEN, "Seen")
         if show_unseen:
-            _plot_eval("ko_out", COLOR_UNSEEN, "Unseen")
+            _plot_eval("ko_out", COLOR_UNSEEN, "Unseen damage patterns")
 
     ax_acc.set_xlabel("Message Steps", fontsize=18)
     ax_acc.set_ylabel("Hard Accuracy", fontsize=18)
