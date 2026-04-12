@@ -367,21 +367,17 @@ def visualize_umap(
                 zorder=10,
             )
         
-        title_suffix = ""
-        if show_edges:
-            title_suffix = " (with Exploration Trajectories)"
-        
-        ax.set_xlabel('UMAP Dimension 1', fontsize=12)
-        ax.set_ylabel('UMAP Dimension 2', fontsize=12)
-        ax.set_title(f'UMAP Embedding of Circuit Solutions\n(Colored by Distance from Root){title_suffix}', fontsize=14)
+        ax.set_xlabel('UMAP Dimension 1', fontsize=18)
+        ax.set_ylabel('UMAP Dimension 2', fontsize=18)
+        ax.tick_params(axis='both', labelsize=10)
         
         # Add colorbar
         cbar = plt.colorbar(scatter, ax=ax)
-        cbar.set_label('Distance from Root', fontsize=12)
+        cbar.set_label('Perturbations from Root', fontsize=18)
+        cbar.ax.tick_params(labelsize=10)
         
-        # Add legend
         if root_idx is not None:
-            ax.legend(loc='best')
+            ax.legend(loc='best', fontsize=16)
         
         plt.tight_layout()
         
@@ -474,11 +470,11 @@ def visualize_umap(
         ax.set_xlabel('UMAP Dimension 1', fontsize=12)
         ax.set_ylabel('UMAP Dimension 2', fontsize=12)
         ax.set_zlabel('UMAP Dimension 3', fontsize=12)
-        ax.set_title(f'UMAP Embedding of Circuit Solutions\n(Colored by Distance from Root){title_suffix}', fontsize=14)
+        ax.set_title(f'UMAP Embedding of Circuit Solutions\n(Colored by Perturbations from Root){title_suffix}', fontsize=14)
         
         # Add colorbar
         cbar = plt.colorbar(scatter, ax=ax)
-        cbar.set_label('Distance from Root', fontsize=12)
+        cbar.set_label('Perturbations from Root', fontsize=12)
         
         # Add legend
         if root_idx is not None:
@@ -488,12 +484,12 @@ def visualize_umap(
     if output_file:
         output_file = Path(output_file)
         output_file.parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        plt.savefig(output_file, dpi=600, bbox_inches='tight')
         log.info(f"Saved figure to: {output_file}")
     elif save_dir is not None:
         # Auto-save figure to save_dir if no explicit output_file
         figure_path = save_dir / "figure.png"
-        plt.savefig(figure_path, dpi=300, bbox_inches='tight')
+        plt.savefig(figure_path, dpi=600, bbox_inches='tight')
         log.info(f"  Saved figure.png")
     
     if output_file is None:

@@ -8,6 +8,7 @@ import pandas as pd
 import numpy as np
 import sys
 import os
+import re
 import argparse
 import json
 
@@ -30,6 +31,24 @@ from experiments.visualization.plot_perturbation_utils import (
 
 METHOD_COLORS = {"bp": "#1f77b4", "gnn": "#ff7f0e"}
 METHOD_LABELS_DEFAULT = {"bp": "BP", "gnn": "GNN"}
+# Distinct from viridis and from METHOD_COLORS["gnn"] (#ff7f0e)
+HIGHLIGHT_COLOR = "#ff8c00"
+
+
+def infer_training_knockout_from_report_dir(csv_dir: str):
+    """
+    Parse folders like accuracy_scaled10_40_70_90_... → first knockout size (40).
+    Returns None if the pattern does not match.
+    """
+    base = os.path.basename(os.path.abspath(csv_dir))
+    m = re.match(r"accuracy_scaled[^_]+_(.+)", base)
+    if not m:
+        return None
+    first_token = m.group(1).split("_")[0]
+    try:
+        return int(first_token)
+    except ValueError:
+        return None
 
 
 def plot_accuracy_trajectories(
@@ -38,12 +57,16 @@ def plot_accuracy_trajectories(
     method_label_map: dict = None,
     figsize: tuple = None,
     alpha: float = 0.15,
+    highlight_ko_size: int = None,
 ):
     """
     Plot per-step accuracy trajectories showing V-shaped damage and recovery.
 
     One subplot per method. Within each subplot, every (knockout_size, pattern_idx)
     trajectory is drawn as a thin line coloured by knockout_size.
+
+    If highlight_ko_size is set, trajectories at that knockout size are drawn
+    with higher opacity/width in non-BP subplots (to mark the training size).
     """
     labels = {**METHOD_LABELS_DEFAULT, **(method_label_map or {})}
     methods = sorted(traj_df["method"].unique(), key=lambda m: m != "gnn")
@@ -57,25 +80,37 @@ def plot_accuracy_trajectories(
         figsize = (7 * n_methods, 4.5)
     fig, axes = plt.subplots(1, n_methods, figsize=figsize, squeeze=False)
 
+    hl_alpha = min(alpha * 1.75, 0.38)
+
     for ax, method in zip(axes[0], methods):
         mdf = traj_df[traj_df["method"] == method]
+        do_highlight = highlight_ko_size is not None and method != "bp"
+
         for ko_size in ko_sizes:
             kdf = mdf[mdf["knockout_size"] == ko_size]
-            color = cmap(ko_norm(ko_size))
+            is_train = do_highlight and ko_size == highlight_ko_size
+            color = HIGHLIGHT_COLOR if is_train else cmap(ko_norm(ko_size))
+            lw = 1.6 if is_train else 0.6
+            a = hl_alpha if is_train else alpha
             for _, grp in kdf.groupby("pattern_idx"):
                 ax.plot(
                     grp["step"].values,
                     grp["hard_accuracy"].values,
                     color=color,
-                    alpha=alpha,
-                    linewidth=0.6,
+                    alpha=a,
+                    linewidth=lw,
                 )
 
         ax.set_title(labels.get(method, method), fontsize=13)
         ax.set_xlabel("Step")
         ax.set_ylabel("Hard accuracy")
-        ax.set_ylim(-0.02, 1.05)
+        ax.set_ylim(0.65, 1.05)
         ax.axhline(1.0, color="grey", linewidth=0.5, linestyle="--")
+
+        if do_highlight:
+            ax.plot([], [], color=HIGHLIGHT_COLOR, linewidth=2.5, alpha=hl_alpha,
+                    label=f"training size ({highlight_ko_size})")
+            ax.legend(fontsize=8, loc="lower right")
 
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=ko_norm)
     sm.set_array([])
@@ -94,10 +129,14 @@ def plot_accuracy_trajectories_zoomed(
     figsize: tuple = None,
     alpha: float = 0.25,
     window: int = 30,
+    highlight_ko_size: int = None,
 ):
     """
     Zoomed view around the damage injection step, showing only the
     bottom of the V and the first part of recovery.
+
+    If highlight_ko_size is set, trajectories at that knockout size are drawn
+    with higher opacity/width in non-BP subplots (to mark the training size).
     """
     labels = {**METHOD_LABELS_DEFAULT, **(method_label_map or {})}
     methods = sorted(traj_df["method"].unique(), key=lambda m: m != "gnn")
@@ -111,8 +150,11 @@ def plot_accuracy_trajectories_zoomed(
         figsize = (7 * n_methods, 4.5)
     fig, axes = plt.subplots(1, n_methods, figsize=figsize, squeeze=False)
 
+    hl_alpha = min(alpha * 1.75, 0.38)
+
     for ax, method in zip(axes[0], methods):
         mdf = traj_df[traj_df["method"] == method]
+        do_highlight = highlight_ko_size is not None and method != "bp"
 
         # Detect damage step: the step with the global minimum accuracy
         mean_by_step = mdf.groupby("step")["hard_accuracy"].mean()
@@ -122,16 +164,24 @@ def plot_accuracy_trajectories_zoomed(
 
         mdf_zoom = mdf[(mdf["step"] >= step_lo) & (mdf["step"] <= step_hi)]
 
-        for ko_size in ko_sizes:
+        # Draw non-highlighted trajectories first, then highlighted on top
+        draw_order = [s for s in ko_sizes if s != highlight_ko_size] if do_highlight else ko_sizes
+        if do_highlight:
+            draw_order.append(highlight_ko_size)
+
+        for ko_size in draw_order:
             kdf = mdf_zoom[mdf_zoom["knockout_size"] == ko_size]
-            color = cmap(ko_norm(ko_size))
+            is_train = do_highlight and ko_size == highlight_ko_size
+            color = HIGHLIGHT_COLOR if is_train else cmap(ko_norm(ko_size))
+            lw = 2.0 if is_train else 0.8
+            a = hl_alpha if is_train else alpha
             for _, grp in kdf.groupby("pattern_idx"):
                 ax.plot(
                     grp["step"].values,
                     grp["hard_accuracy"].values,
                     color=color,
-                    alpha=alpha,
-                    linewidth=0.8,
+                    alpha=a,
+                    linewidth=lw,
                 )
 
         ax.set_title(f"{labels.get(method, method)} (zoomed)", fontsize=13)
@@ -139,7 +189,14 @@ def plot_accuracy_trajectories_zoomed(
         ax.set_ylabel("Hard accuracy")
         ax.axhline(1.0, color="grey", linewidth=0.5, linestyle="--")
         ax.axvline(damage_step, color="red", linewidth=0.7, linestyle=":", label="damage step")
-        ax.legend(fontsize=8, loc="lower right")
+
+        legend_handles = [Line2D([0], [0], color="red", linewidth=0.7, linestyle=":", label="damage step")]
+        if do_highlight:
+            legend_handles.append(
+                Line2D([0], [0], color=HIGHLIGHT_COLOR, linewidth=2.5, alpha=hl_alpha,
+                        label=f"training size ({highlight_ko_size})")
+            )
+        ax.legend(handles=legend_handles, fontsize=8, loc="lower right")
 
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=ko_norm)
     sm.set_array([])
@@ -181,6 +238,24 @@ def main():
                         help="Number of steps after damage to show in zoomed plot (default: 30)")
     parser.add_argument("--skip-traj", action="store_true",
                         help="Skip trajectory plots even if summary_traj.csv exists")
+    parser.add_argument(
+        "--highlight-ko-size",
+        type=int,
+        default=None,
+        help="Highlight this knockout in non-BP trajectory plots only. Omit to disable (unless --highlight-training).",
+    )
+    parser.add_argument(
+        "--highlight-training",
+        action="store_true",
+        help="Same as highlighting the training knockout: use --training-ko-size or infer from report folder name "
+        "(e.g. accuracy_scaled10_40_70_... → 40). Ignored if --highlight-ko-size is set.",
+    )
+    parser.add_argument(
+        "--training-ko-size",
+        type=int,
+        default=None,
+        help="Training knockout size when using --highlight-training (overrides folder-name inference).",
+    )
 
     args = parser.parse_args()
     
@@ -190,6 +265,23 @@ def main():
         raise FileNotFoundError(f"CSV file not found: {csv_path}")
     
     csv_dir = os.path.dirname(csv_path)
+
+    if args.highlight_ko_size is not None:
+        highlight_ko_size = args.highlight_ko_size
+    elif args.highlight_training:
+        highlight_ko_size = (
+            args.training_ko_size
+            if args.training_ko_size is not None
+            else infer_training_knockout_from_report_dir(csv_dir)
+        )
+        if highlight_ko_size is None:
+            print(
+                "Warning: --highlight-training set but no training knockout found "
+                "(folder name did not match accuracy_scaled*_KO_...; pass --training-ko-size). "
+                "Trajectory highlight disabled."
+            )
+    else:
+        highlight_ko_size = None
 
     # Set output path
     if args.output is None:
@@ -274,6 +366,8 @@ def main():
             traj_df = pd.read_csv(traj_path)
             print(f"  {len(traj_df)} rows, methods={traj_df['method'].unique().tolist()}, "
                   f"KO sizes={sorted(traj_df['knockout_size'].unique())}")
+            if highlight_ko_size is not None:
+                print(f"  Trajectory highlight knockout size: {highlight_ko_size}")
 
             # Full trajectory
             full_traj_path = os.path.join(csv_dir, "accuracy_trajectories_REplot.png")
@@ -283,6 +377,7 @@ def main():
                 full_traj_path,
                 method_label_map=method_label_map,
                 alpha=args.traj_alpha,
+                highlight_ko_size=highlight_ko_size,
             )
             print(f"  Saved: {full_traj_path}")
 
@@ -295,6 +390,7 @@ def main():
                 method_label_map=method_label_map,
                 alpha=args.traj_alpha,
                 window=args.traj_zoom_window,
+                highlight_ko_size=highlight_ko_size,
             )
             print(f"  Saved: {zoom_traj_path}")
         else:
