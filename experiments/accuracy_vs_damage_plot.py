@@ -275,6 +275,8 @@ def main():
                         help="Number of steps before damage injection (default: 5, damage at step 6)")
     parser.add_argument("--exclude-knocked-out-gates", action="store_true", default=False,
                         help="Exclude knocked-out gates from hamming distance calculation (default: False, i.e., include all gates).")
+    parser.add_argument("--bp-epochs", type=int, default=None,
+                        help="Override backprop epochs for baseline and knockout BP runs.")
     args = parser.parse_args()
 
     # Parse methods selection early to determine what needs to be loaded
@@ -348,6 +350,10 @@ def main():
     # Hamming metrics in this script always use all gates (exclude-knocked-out-gates is only
     # relevant for the complementary hamming_distance_plot.py analysis).
     include_all_gates = True
+
+    # BP epochs: CLI override > config value, with a minimum of 300 by default
+    backprop_cfg = cfg.get("backprop", {})
+    bp_epochs = args.bp_epochs if args.bp_epochs is not None else max(backprop_cfg.get("epochs", 200), 300)
 
     # Only load GNN model if GNN is in the methods
     gnn_model = None
@@ -477,7 +483,6 @@ def main():
             log.info("GNN was trained in growth mode - using standard BP baseline")
             # Create a mock config object for backprop training
             from types import SimpleNamespace
-            backprop_cfg = cfg.get("backprop", {})
             mock_cfg = SimpleNamespace(
                 backprop=SimpleNamespace(
                     optimizer=backprop_cfg.get("optimizer", "adam"),
@@ -485,7 +490,7 @@ def main():
                     beta1=backprop_cfg.get("beta1", 0.9),
                     beta2=backprop_cfg.get("beta2", 0.999),
                     weight_decay=backprop_cfg.get("weight_decay", 0.0),
-                    epochs=max(backprop_cfg.get("epochs", 200), 300),
+                    epochs=bp_epochs,
                 ),
                 circuit=SimpleNamespace(
                     layer_sizes=layer_sizes,
@@ -497,7 +502,6 @@ def main():
     else:
         # No GNN or no training config - use standard BP baseline
         from types import SimpleNamespace
-        backprop_cfg = cfg.get("backprop", {})
         mock_cfg = SimpleNamespace(
             backprop=SimpleNamespace(
                 optimizer=backprop_cfg.get("optimizer", "adam"),
@@ -505,7 +509,7 @@ def main():
                 beta1=backprop_cfg.get("beta1", 0.9),
                 beta2=backprop_cfg.get("beta2", 0.999),
                 weight_decay=backprop_cfg.get("weight_decay", 0.0),
-                epochs=max(backprop_cfg.get("epochs", 200), 300),
+                epochs=bp_epochs,
             ),
             circuit=SimpleNamespace(
                 layer_sizes=layer_sizes,
@@ -554,7 +558,6 @@ def main():
         if "bp" in methods:
             # Create a mock config object for backprop training
             from types import SimpleNamespace
-            backprop_cfg = cfg.get("backprop", {})
             mock_cfg = SimpleNamespace(
                 backprop=SimpleNamespace(
                     optimizer=backprop_cfg.get("optimizer", "adam"),
@@ -562,7 +565,7 @@ def main():
                     beta1=backprop_cfg.get("beta1", 0.9),
                     beta2=backprop_cfg.get("beta2", 0.999),
                     weight_decay=backprop_cfg.get("weight_decay", 0.0),
-                    epochs=max(backprop_cfg.get("epochs", 200), 300),
+                    epochs=bp_epochs,
                 ),
                 circuit=SimpleNamespace(
                     layer_sizes=layer_sizes,

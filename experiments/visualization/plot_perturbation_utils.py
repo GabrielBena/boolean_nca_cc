@@ -131,7 +131,7 @@ def _plot_damage_size_vs_hamming_on_ax(
 
     if show_xlabel:
         ax.set_xlabel(f'{damage_type} Damage Size', fontsize=18)
-    ax.set_ylabel('Hamming Distance (Mean per Gate)', fontsize=18)
+    ax.set_ylabel('Hamming Distance', fontsize=18)
     ylim_upper = ylim_max if ylim_max is not None else 0.325
     ax.set_ylim(0, ylim_upper)
     ax.tick_params(axis='both', which='major', labelsize=16)
@@ -264,44 +264,71 @@ def plot_damage_size_vs_accuracy(
     return output_path
 
 
+# Reference (bottom, top) grid weights used only to pin the top panel's height in inches
+# to the historical layout: hamming:accuracy = 2:1 with the old total_height formula.
+_COMBINED_PLOT_REF_HEIGHT_RATIO = (2, 1)
+
+
 def plot_combined_hamming_accuracy(
     summary_df: pd.DataFrame,
     output_path: str,
     width: float = 8,
-    dpi: int = 300,
+    dpi: int = 600,
     color_by_method: bool = True,
-    hamming_ylim_max: Optional[float] = None,
+    hamming_ylim_max: Optional[float] = 0.37,
     accuracy_ylim_min: Optional[float] = 0.99,
     accuracy_ylim_max: Optional[float] = 1.01,
     baseline_accuracy: Optional[float] = None,
-    height_ratio: tuple = (2, 1),
+    height_ratio: tuple = (1.5, 1),
     method_label_map: Optional[Dict[str, str]] = None,
+    vlines: Optional[list] = None,
 ) -> str:
     """
-    Combined two-panel figure: hamming distance (top) and accuracy (bottom).
+    Combined two-panel figure: accuracy (top, shorter) and hamming distance (bottom).
     Shared x-axis ensures horizontal alignment between panels.
+    ``height_ratio`` is (bottom hamming, top accuracy) gridspec weights. The top panel
+    keeps the same absolute height as under ``(2, 1)`` with the legacy figure-height rule;
+    shrinking the bottom weight shortens only the bottom panel and the overall figure.
     """
-    total_height = width * (sum(height_ratio) / height_ratio[0]) * 0.75
-    fig, (ax_hamming, ax_acc) = plt.subplots(
+    ref = _COMBINED_PLOT_REF_HEIGHT_RATIO
+    legacy_total = width * (sum(ref) / ref[0]) * 0.75
+    fixed_top_height = legacy_total * (ref[1] / sum(ref))
+    total_height = fixed_top_height * sum(height_ratio) / height_ratio[1]
+
+    reversed_ratio = (height_ratio[1], height_ratio[0])
+    fig, (ax_acc, ax_hamming) = plt.subplots(
         2, 1, figsize=(width, total_height),
-        gridspec_kw={'height_ratios': list(height_ratio)},
+        gridspec_kw={'height_ratios': list(reversed_ratio)},
         sharex=True,
     )
 
-    _plot_damage_size_vs_hamming_on_ax(
-        ax_hamming, summary_df, color_by_method,
-        ylim_max=hamming_ylim_max, show_xlabel=False,
-    )
     _plot_damage_size_vs_accuracy_on_ax(
         ax_acc, summary_df, color_by_method,
         baseline_accuracy=baseline_accuracy,
         ylim_min=accuracy_ylim_min, ylim_max=accuracy_ylim_max,
-        method_label_map=method_label_map, show_xlabel=True,
+        method_label_map=method_label_map, show_xlabel=False,
+    )
+    _plot_damage_size_vs_hamming_on_ax(
+        ax_hamming, summary_df, color_by_method,
+        ylim_max=hamming_ylim_max, show_xlabel=True,
     )
 
-    # Only show legend on the top panel to avoid duplication
-    if ax_acc.get_legend() is not None:
-        ax_acc.get_legend().remove()
+    # Only show legend on the top panel (accuracy) to avoid duplication
+    if ax_hamming.get_legend() is not None:
+        ax_hamming.get_legend().remove()
+
+    if vlines:
+        for i, vx in enumerate(vlines):
+            label = 'Training Size' if i == 0 else None
+            for ax in (ax_acc, ax_hamming):
+                ax.axvline(vx, color='#404040', linewidth=1.8, linestyle='--', alpha=0.7,
+                           label=label if ax is ax_acc else None)
+        handles, labels = ax_acc.get_legend_handles_labels()
+        vline_idx = labels.index('Training Size') if 'Training Size' in labels else None
+        if vline_idx is not None:
+            handles = [handles[vline_idx]] + handles[:vline_idx] + handles[vline_idx+1:]
+            labels = [labels[vline_idx]] + labels[:vline_idx] + labels[vline_idx+1:]
+        ax_acc.legend(handles, labels, loc='best', fontsize=16, ncol=len(labels))
 
     # Align y-axis tick decimal places across both panels
     ax_hamming.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.2f'))

@@ -29,18 +29,23 @@ def main():
                         help="Output path (default: same dir as CSV, 'combined_hamming_accuracy.png')")
     parser.add_argument("--width", type=float, default=8,
                         help="Figure width (default: 8)")
-    parser.add_argument("--hamming-ylim-max", type=float, default=0.45,
-                        help="Max y-axis for hamming panel (default: 0.45)")
+    parser.add_argument("--hamming-ylim-max", type=float, default=0.37,
+                        help="Max y-axis for hamming panel (default: 0.37)")
     parser.add_argument("--accuracy-ylim-min", type=float, default=0.99,
                         help="Min y-axis for accuracy panel (default: 0.99)")
     parser.add_argument("--accuracy-ylim-max", type=float, default=1.01,
                         help="Max y-axis for accuracy panel (default: 1.01)")
-    parser.add_argument("--height-ratio", type=str, default="2,1",
-                        help="Height ratio top:bottom as 'a,b' (default: '2,1')")
+    parser.add_argument("--height-ratio", type=str, default="1.5,1",
+                        help="Gridspec bottom:top (hamming:accuracy); top height stays fixed like legacy (2,1), "
+                        "figure shortens if bottom weight is reduced (default '1.5,1')")
     parser.add_argument("--no-method-colors", action="store_true",
                         help="Don't color by method (single color)")
     parser.add_argument("--baseline-accuracy", type=float, default=None,
                         help="Baseline accuracy horizontal line on accuracy panel")
+    parser.add_argument("--vline", type=float, action="append", default=None,
+                        help="Add vertical dashed line at this x value (repeatable)")
+    parser.add_argument("--max-knockout", type=int, default=None,
+                        help="Exclude knockout sizes above this value")
 
     args = parser.parse_args()
 
@@ -56,12 +61,16 @@ def main():
     print(f"Loading CSV from: {csv_path}")
     df = pd.read_csv(csv_path)
     print(f"Loaded {len(df)} rows")
+    if args.max_knockout is not None and 'knockout_size' in df.columns:
+        before = len(df)
+        df = df[df['knockout_size'] <= args.max_knockout]
+        print(f"Filtered knockout_size <= {args.max_knockout}: {before} → {len(df)} rows")
     if 'knockout_size' in df.columns:
         print(f"Knockout sizes: {sorted(df['knockout_size'].unique())}")
     if 'method' in df.columns:
         print(f"Methods: {df['method'].unique().tolist()}")
 
-    height_ratio = tuple(int(x.strip()) for x in args.height_ratio.split(","))
+    height_ratio = tuple(float(x.strip()) for x in args.height_ratio.split(","))
 
     plot_combined_hamming_accuracy(
         summary_df=df,
@@ -73,6 +82,7 @@ def main():
         accuracy_ylim_max=args.accuracy_ylim_max,
         baseline_accuracy=args.baseline_accuracy,
         height_ratio=height_ratio,
+        vlines=args.vline,
     )
 
     print(f"Combined plot saved to: {output_path}")
