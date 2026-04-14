@@ -52,6 +52,9 @@ def plot_combined_bp_sa_stepwise_performance(
     damage_start_offset_seed: int = 42,  # Seed for random offset generation
     knockout_vocabulary: Optional[jp.ndarray] = None,
     training_mode: str = "growth",  # Add this parameter
+    # Threshold-triggered reinjection parameters
+    reinject_threshold: float = 1.0,
+    reinject_cooldown_steps: int = 5,
 ):
     """
     Create a plot showing SA stepwise performance, optionally with backpropagation comparison.
@@ -174,6 +177,8 @@ def plot_combined_bp_sa_stepwise_performance(
                 damage_start_offset_random=damage_start_offset_random,
                 damage_start_offset_seed=damage_start_offset_seed,
                 knockout_vocabulary=knockout_vocabulary,
+                reinject_threshold=reinject_threshold,
+                reinject_cooldown_steps=reinject_cooldown_steps,
             )
         except Exception as e:
             log.error(f"Error during SA evaluation (multi-damage mode): {e}")
@@ -224,6 +229,8 @@ def plot_combined_bp_sa_stepwise_performance(
                 damage_start_offset_random=damage_start_offset_random,
                 damage_start_offset_seed=damage_start_offset_seed,
                 knockout_vocabulary=knockout_vocabulary,
+                reinject_threshold=reinject_threshold,
+                reinject_cooldown_steps=reinject_cooldown_steps,
             )
         except Exception as e:
             log.error(f"Error during SA evaluation (static damage mode): {e}")
@@ -274,6 +281,8 @@ def plot_combined_bp_sa_stepwise_performance(
                 damage_start_offset_random=damage_start_offset_random,
                 damage_start_offset_seed=damage_start_offset_seed,
                 knockout_vocabulary=None,  # Force unseen patterns for OOD evaluation
+                reinject_threshold=reinject_threshold,
+                reinject_cooldown_steps=reinject_cooldown_steps,
             )
         else:
             # Static damage mode: Use pre-generated OOD patterns (backward compatible)
@@ -333,6 +342,8 @@ def plot_combined_bp_sa_stepwise_performance(
                 damage_start_offset_random=damage_start_offset_random,
                 damage_start_offset_seed=damage_start_offset_seed,
                 knockout_vocabulary=None,  # Force unseen patterns for OOD evaluation
+                reinject_threshold=reinject_threshold,
+                reinject_cooldown_steps=reinject_cooldown_steps,
             )
         log.info("OOD SA evaluation completed")
     

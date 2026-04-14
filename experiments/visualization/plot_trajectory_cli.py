@@ -104,9 +104,21 @@ def main():
     parser.add_argument(
         "--damage-injection-mode",
         type=str,
-        choices=["single", "multi"],
+        choices=["single", "multi", "threshold_reinject"],
         default="single",
-        help="Single or multi damage injection",
+        help="Single, multi (fixed interval), or threshold_reinject (threshold-triggered) damage injection",
+    )
+    parser.add_argument(
+        "--reinject-threshold",
+        type=float,
+        default=1.0,
+        help="Hard accuracy that counts as 'recovered' (threshold_reinject mode)",
+    )
+    parser.add_argument(
+        "--reinject-cooldown-steps",
+        type=int,
+        default=5,
+        help="Clean steps after recovery before next damage (threshold_reinject mode)",
     )
     parser.add_argument(
         "--damage-mode",

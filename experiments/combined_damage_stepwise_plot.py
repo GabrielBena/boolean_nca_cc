@@ -102,8 +102,9 @@ def _plot_stepwise_accuracy_on_ax(
     ax.set_yticks(np.arange(0.8, 1.03, 0.05))
     ax.set_ylim(0.8, 1.03)
     if ax.get_legend_handles_labels()[0]:
-        ax.legend(loc="lower right", fontsize=13)
-        ax.get_legend().get_frame().set_alpha(1.0)
+        leg = ax.legend(loc="lower right", fontsize=13)
+        leg.get_frame().set_alpha(1.0)
+        leg.get_frame().set_facecolor("white")
 
 
 def plot_combined_damage_stepwise(
@@ -161,6 +162,9 @@ def plot_combined_damage_stepwise(
     )
     if ax_ham.get_legend() is not None:
         ax_ham.get_legend().remove()
+    if ax_acc.get_legend() is not None:
+        ax_acc.get_legend().get_frame().set_alpha(1.0)
+        ax_acc.get_legend().get_frame().set_facecolor("white")
 
     if vlines:
         for i, vx in enumerate(vlines):
@@ -175,7 +179,9 @@ def plot_combined_damage_stepwise(
             vi = labels.index("Training Size")
             handles = [handles[vi]] + handles[:vi] + handles[vi + 1:]
             labels = [labels[vi]] + labels[:vi] + labels[vi + 1:]
-        ax_acc.legend(handles, labels, loc="best", fontsize=16, ncol=len(labels))
+        leg = ax_acc.legend(handles, labels, loc="best", fontsize=16, ncol=len(labels))
+        leg.get_frame().set_alpha(1.0)
+        leg.get_frame().set_facecolor("white")
 
     ax_ham.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.2f"))
     ax_acc.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.2f"))

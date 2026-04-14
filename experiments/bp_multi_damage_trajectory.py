@@ -109,6 +109,9 @@ def run_bp_multi_damage(
     reversible_bias: float = -10.0,
     seed: int = 9999,
     bp_epochs: int = 300,
+    damage_injection_mode: str = "multi",
+    reinject_threshold: float = 1.0,
+    reinject_cooldown_steps: int = 5,
 ) -> pd.DataFrame:
     """Run BP with multi-damage and return per-step per-circuit accuracy.
 
@@ -129,67 +132,139 @@ def run_bp_multi_damage(
 
     loss_fn = loss_f_l4 if loss_type == "l4" else loss_f_bce
 
-    injection_step_list = build_injection_schedule(
-        damage_start_offset,
-        max_damage_per_circuit,
-        greedy_injection_recover_steps,
-        bp_epochs,
-    )
-    injection_set = set(injection_step_list)
+    use_threshold = damage_injection_mode == "threshold_reinject"
 
-    log.info(
-        "Multi-damage BP: %d events at steps %s (recover=%d, total_epochs=%d)",
-        len(injection_step_list),
-        injection_step_list,
-        greedy_injection_recover_steps,
-        bp_epochs,
-    )
+    if not use_threshold:
+        injection_step_list = build_injection_schedule(
+            damage_start_offset,
+            max_damage_per_circuit,
+            greedy_injection_recover_steps,
+            bp_epochs,
+        )
+        injection_set = set(injection_step_list)
+        log.info(
+            "Multi-damage BP (fixed): %d events at steps %s (recover=%d, total_epochs=%d)",
+            len(injection_step_list),
+            injection_step_list,
+            greedy_injection_recover_steps,
+            bp_epochs,
+        )
+    else:
+        log.info(
+            "Multi-damage BP (threshold_reinject): threshold=%.2f, cooldown=%d, "
+            "max_events=%d, total_epochs=%d",
+            reinject_threshold,
+            reinject_cooldown_steps,
+            max_damage_per_circuit,
+            bp_epochs,
+        )
 
     rows: list[dict] = []
     from tqdm.auto import tqdm
 
     for circuit_idx in tqdm(range(n_circuits), desc="BP multi-damage circuits"):
         state = TrainState(params=baseline_params, opt_state=opt.init(baseline_params))
-
-        # Fresh random pattern for each injection event (ko_out behaviour)
         rng = jax.random.PRNGKey(seed + circuit_idx * 1000)
-        event_patterns: dict[int, jax.Array] = {}
-        for inj_step in injection_step_list:
-            rng, key = jax.random.split(rng)
-            event_patterns[inj_step] = create_reproducible_knockout_pattern(
-                key, layer_sizes, damage_prob,
-            )
 
-        for step_count in range(bp_epochs):
-            if step_count in injection_set:
-                ko_pattern = event_patterns[step_count]
-                apply_damage_now = True
-            else:
-                ko_pattern = None
-                apply_damage_now = False
+        if use_threshold:
+            events = 0
+            is_recovered = False
+            cooldown_counter = 0
 
-            _, step_aux, state = train_step(
-                state=state,
-                opt=opt,
-                wires=baseline_wires,
-                x=x_data,
-                y0=y_data,
-                loss_type=loss_type,
-                do_train=True,
-                knockout_pattern=ko_pattern,
-                layer_sizes=layer_sizes,
-                damage_behavior="reversible",
-                reversible_bias=reversible_bias,
-                step_count=step_count,
-                apply_damage_now=apply_damage_now,
+            for step_count in range(bp_epochs):
+                # Decide whether to inject
+                if step_count == damage_start_offset and events == 0:
+                    inject = True
+                elif is_recovered and cooldown_counter >= reinject_cooldown_steps and events < max_damage_per_circuit:
+                    inject = True
+                else:
+                    inject = False
+
+                if inject:
+                    rng, key = jax.random.split(rng)
+                    ko_pattern = create_reproducible_knockout_pattern(
+                        key, layer_sizes, damage_prob,
+                    )
+                    apply_damage_now = True
+                    events += 1
+                    is_recovered = False
+                    cooldown_counter = 0
+                else:
+                    ko_pattern = None
+                    apply_damage_now = False
+
+                _, step_aux, state = train_step(
+                    state=state,
+                    opt=opt,
+                    wires=baseline_wires,
+                    x=x_data,
+                    y0=y_data,
+                    loss_type=loss_type,
+                    do_train=True,
+                    knockout_pattern=ko_pattern,
+                    layer_sizes=layer_sizes,
+                    damage_behavior="reversible",
+                    reversible_bias=reversible_bias,
+                    step_count=step_count,
+                    apply_damage_now=apply_damage_now,
+                )
+
+                acc = float(step_aux["hard_accuracy"])
+                rows.append(
+                    {"circuit_idx": circuit_idx, "step": step_count, "hard_accuracy": acc}
+                )
+
+                if events > 0 and not is_recovered:
+                    if acc >= reinject_threshold:
+                        is_recovered = True
+                        cooldown_counter = 0
+                elif is_recovered:
+                    cooldown_counter += 1
+        else:
+            injection_step_list = build_injection_schedule(
+                damage_start_offset,
+                max_damage_per_circuit,
+                greedy_injection_recover_steps,
+                bp_epochs,
             )
-            rows.append(
-                {
-                    "circuit_idx": circuit_idx,
-                    "step": step_count,
-                    "hard_accuracy": float(step_aux["hard_accuracy"]),
-                }
-            )
+            injection_set = set(injection_step_list)
+            event_patterns: dict[int, jax.Array] = {}
+            for inj_step in injection_step_list:
+                rng, key = jax.random.split(rng)
+                event_patterns[inj_step] = create_reproducible_knockout_pattern(
+                    key, layer_sizes, damage_prob,
+                )
+
+            for step_count in range(bp_epochs):
+                if step_count in injection_set:
+                    ko_pattern = event_patterns[step_count]
+                    apply_damage_now = True
+                else:
+                    ko_pattern = None
+                    apply_damage_now = False
+
+                _, step_aux, state = train_step(
+                    state=state,
+                    opt=opt,
+                    wires=baseline_wires,
+                    x=x_data,
+                    y0=y_data,
+                    loss_type=loss_type,
+                    do_train=True,
+                    knockout_pattern=ko_pattern,
+                    layer_sizes=layer_sizes,
+                    damage_behavior="reversible",
+                    reversible_bias=reversible_bias,
+                    step_count=step_count,
+                    apply_damage_now=apply_damage_now,
+                )
+                rows.append(
+                    {
+                        "circuit_idx": circuit_idx,
+                        "step": step_count,
+                        "hard_accuracy": float(step_aux["hard_accuracy"]),
+                    }
+                )
 
         # Final accuracy after last gradient update
         final_loss, final_aux = loss_fn(
@@ -229,6 +304,9 @@ def run_gnn_multi_damage(
     greedy_injection_recover_steps: int = 25,
     n_message_steps: int = 250,
     seed: int = 9999,
+    damage_injection_mode: str = "multi",
+    reinject_threshold: float = 1.0,
+    reinject_cooldown_steps: int = 5,
 ) -> pd.DataFrame:
     """Run GNN multi-damage evaluation and return per-step per-circuit accuracy."""
 
@@ -257,12 +335,14 @@ def run_gnn_multi_damage(
         layer_sizes=layer_sizes,
         knockout_patterns=None,  # ko_out: generate fresh patterns
         return_per_pattern=True,
-        damage_injection_mode="multi",
+        damage_injection_mode=damage_injection_mode,
         damage_start_offset=damage_start_offset,
         damage_mode="shotgun",
         greedy_window_size=damage_prob,
         max_damage_per_circuit=max_damage_per_circuit,
         greedy_injection_recover_steps=greedy_injection_recover_steps,
+        reinject_threshold=reinject_threshold,
+        reinject_cooldown_steps=reinject_cooldown_steps,
     )
 
     steps = eval_results.get("step", [])
@@ -464,6 +544,19 @@ def main() -> None:
     parser.add_argument("--n-message-steps", type=int, default=250,
                         help="Message steps for GNN evaluation")
     parser.add_argument("--reversible-bias", type=float, default=-10.0)
+    parser.add_argument(
+        "--damage-injection-mode", type=str, default="multi",
+        choices=["multi", "threshold_reinject"],
+        help="Injection policy: fixed-interval or threshold-triggered",
+    )
+    parser.add_argument(
+        "--reinject-threshold", type=float, default=1.0,
+        help="Hard accuracy that counts as 'recovered' (threshold_reinject mode)",
+    )
+    parser.add_argument(
+        "--reinject-cooldown-steps", type=int, default=5,
+        help="Clean steps after recovery before next damage (threshold_reinject mode)",
+    )
     parser.add_argument("--seed", type=int, default=9999)
     parser.add_argument("--dpi", type=int, default=600)
     args = parser.parse_args()
@@ -514,6 +607,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Auto-compute BP epochs
     # ------------------------------------------------------------------
+    use_threshold = args.damage_injection_mode == "threshold_reinject"
     bp_epochs = args.bp_epochs
     if bp_epochs is None:
         bp_epochs = max(
@@ -524,18 +618,23 @@ def main() -> None:
             + args.greedy_injection_recover_steps,
         )
 
-    injection_steps_bp = build_injection_schedule(
-        args.damage_start_offset,
-        args.max_damage_per_circuit,
-        args.greedy_injection_recover_steps,
-        bp_epochs,
-    )
-    injection_steps_gnn = build_injection_schedule(
-        args.damage_start_offset,
-        args.max_damage_per_circuit,
-        args.greedy_injection_recover_steps,
-        args.n_message_steps,
-    )
+    # Fixed-interval schedules (only used for plotting markers in fixed mode)
+    if use_threshold:
+        injection_steps_bp = []
+        injection_steps_gnn = []
+    else:
+        injection_steps_bp = build_injection_schedule(
+            args.damage_start_offset,
+            args.max_damage_per_circuit,
+            args.greedy_injection_recover_steps,
+            bp_epochs,
+        )
+        injection_steps_gnn = build_injection_schedule(
+            args.damage_start_offset,
+            args.max_damage_per_circuit,
+            args.greedy_injection_recover_steps,
+            args.n_message_steps,
+        )
 
     # ------------------------------------------------------------------
     # Output directory
@@ -577,6 +676,9 @@ def main() -> None:
             reversible_bias=args.reversible_bias,
             seed=args.seed,
             bp_epochs=bp_epochs,
+            damage_injection_mode=args.damage_injection_mode,
+            reinject_threshold=args.reinject_threshold,
+            reinject_cooldown_steps=args.reinject_cooldown_steps,
         )
         bp_csv = os.path.join(args.output, "bp_trajectory.csv")
         bp_df.to_csv(bp_csv, index=False)
@@ -619,6 +721,9 @@ def main() -> None:
             greedy_injection_recover_steps=args.greedy_injection_recover_steps,
             n_message_steps=args.n_message_steps,
             seed=args.seed,
+            damage_injection_mode=args.damage_injection_mode,
+            reinject_threshold=args.reinject_threshold,
+            reinject_cooldown_steps=args.reinject_cooldown_steps,
         )
         gnn_csv = os.path.join(args.output, "gnn_trajectory.csv")
         gnn_df.to_csv(gnn_csv, index=False)
@@ -646,6 +751,9 @@ def main() -> None:
         "damage_start_offset": args.damage_start_offset,
         "max_damage_per_circuit": args.max_damage_per_circuit,
         "greedy_injection_recover_steps": args.greedy_injection_recover_steps,
+        "damage_injection_mode": args.damage_injection_mode,
+        "reinject_threshold": args.reinject_threshold,
+        "reinject_cooldown_steps": args.reinject_cooldown_steps,
         "bp_epochs": bp_epochs,
         "n_message_steps": args.n_message_steps,
         "reversible_bias": args.reversible_bias,
