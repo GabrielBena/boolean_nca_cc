@@ -450,6 +450,9 @@ def evaluate_model_stepwise_batched(
     track_damage_validation: bool = False,  # Enable detailed tracking for permanent damage validation
     # DEBUG: Track pre-update accuracy at damage injection
     track_pre_update_accuracy: bool = False,  # DEBUG: Enable tracking of accuracy before model updates
+    # Threshold-triggered reinjection parameters
+    reinject_threshold: float = 1.0,
+    reinject_cooldown_steps: int = 5,
 ) -> Dict:
     """
     Evaluate GNN performance on a batch of circuits by running message passing steps
@@ -482,8 +485,8 @@ def evaluate_model_stepwise_batched(
         If return_per_pattern=True, also includes "per_pattern" key with individual metrics.
     """
     # Validate new parameters
-    if damage_injection_mode not in ["single", "multi"]:
-        raise ValueError(f"damage_injection_mode must be 'single' or 'multi', got '{damage_injection_mode}'")
+    if damage_injection_mode not in ["single", "multi", "threshold_reinject"]:
+        raise ValueError(f"damage_injection_mode must be 'single', 'multi', or 'threshold_reinject', got '{damage_injection_mode}'")
     # Automatically set max_damage_per_circuit=1 when mode is 'single'
     if damage_injection_mode == "single":
         max_damage_per_circuit = 1
@@ -607,6 +610,8 @@ def evaluate_model_stepwise_batched(
         blind_mode=blind_mode,
         track_damage_validation=track_damage_validation,
         track_pre_update_accuracy=track_pre_update_accuracy,  # DEBUG
+        reinject_threshold=reinject_threshold,
+        reinject_cooldown_steps=reinject_cooldown_steps,
     )
 
 def evaluate_circuits_in_chunks(
@@ -727,13 +732,16 @@ def _evaluate_with_loop(
     track_damage_validation: bool = False,  # Enable detailed tracking for permanent damage validation
     # DEBUG: Track pre-update accuracy at damage injection
     track_pre_update_accuracy: bool = False,  # DEBUG: Enable tracking of accuracy before model updates
+    # Threshold-triggered reinjection parameters
+    reinject_threshold: float = 1.0,
+    reinject_cooldown_steps: int = 5,
 ) -> Dict:
     """
     Evaluate using loop mode (original behavior).
     """
     # Validate new parameters
-    if damage_injection_mode not in ["single", "multi"]:
-        raise ValueError(f"damage_injection_mode must be 'single' or 'multi', got '{damage_injection_mode}'")
+    if damage_injection_mode not in ["single", "multi", "threshold_reinject"]:
+        raise ValueError(f"damage_injection_mode must be 'single', 'multi', or 'threshold_reinject', got '{damage_injection_mode}'")
     # Automatically set max_damage_per_circuit=1 when mode is 'single'
     if damage_injection_mode == "single":
         max_damage_per_circuit = 1
@@ -832,13 +840,41 @@ def _evaluate_with_loop(
         prev_node_logits = current_graphs.nodes["logits"].copy()
         prev_node_hidden = current_graphs.nodes["hidden"].copy()
 
+    # Threshold-reinject per-circuit state (only used when mode == "threshold_reinject")
+    if damage_injection_mode == "threshold_reinject":
+        prev_hard_accuracies = (
+            initial_hard_accuracies if initial_hard_accuracies is not None
+            else jp.ones((batch_size,))
+        )
+        is_recovered = jp.zeros((batch_size,), dtype=jp.bool_)
+        recovered_at_step = jp.zeros((batch_size,), dtype=jp.int32)
+
     for step in range(1, n_message_steps + 1):
         # Determine if damage should be injected at this step
-        recover_steps = int(max(0, greedy_injection_recover_steps))
-        steps_since_first_damage = step - per_circuit_offsets - 1
-        first_damage = (steps_since_first_damage == 0)
-        subsequent_damage = (steps_since_first_damage > 0) & ((steps_since_first_damage % (recover_steps + 1)) == 0)
-        inject_now = first_damage | subsequent_damage
+        if damage_injection_mode == "threshold_reinject":
+            # First damage: at damage_start_offset, before any damage has occurred
+            steps_since_start = step - per_circuit_offsets - 1
+            first_damage = (steps_since_start == 0) & (eval_perturb_counter == 0)
+
+            # Recovery detection: circuit was damaged, hasn't recovered yet, accuracy >= threshold
+            just_recovered = (
+                (eval_perturb_counter > 0)
+                & ~is_recovered
+                & (prev_hard_accuracies >= reinject_threshold)
+            )
+            recovered_at_step = jp.where(just_recovered, step, recovered_at_step)
+            is_recovered = is_recovered | just_recovered
+
+            # Subsequent damage: recovered + cooldown elapsed
+            cooldown_met = is_recovered & ((step - recovered_at_step) >= reinject_cooldown_steps)
+
+            inject_now = first_damage | cooldown_met
+        else:
+            recover_steps = int(max(0, greedy_injection_recover_steps))
+            steps_since_first_damage = step - per_circuit_offsets - 1
+            first_damage = (steps_since_first_damage == 0)
+            subsequent_damage = (steps_since_first_damage > 0) & ((steps_since_first_damage % (recover_steps + 1)) == 0)
+            inject_now = first_damage | subsequent_damage
         
         # Respect maximum number of injections per circuit
         can_inject_mask = eval_perturb_counter < max_damage_per_circuit
@@ -874,6 +910,10 @@ def _evaluate_with_loop(
 
         # Increment eval_perturb_counter (only on injection steps)
         eval_perturb_counter = jp.where(inject_now_mask, eval_perturb_counter + 1, eval_perturb_counter)
+
+        # Reset recovery state for circuits that just received new damage
+        if damage_injection_mode == "threshold_reinject":
+            is_recovered = jp.where(inject_now_mask, False, is_recovered)
         
         # For permanent damage: accumulate patterns using logical OR
         if damage_behavior == "permanent":
@@ -1102,6 +1142,10 @@ def _evaluate_with_loop(
         step_metrics["hidden_std"].append(float(jp.std(updated_graphs.nodes["hidden"])))
 
         current_graphs = updated_graphs
+
+        # Update previous-step accuracy for threshold_reinject recovery detection
+        if damage_injection_mode == "threshold_reinject":
+            prev_hard_accuracies = current_hard_accuracies
 
     # Always add per-pattern data to step_metrics, only expose if requested
     # Convert lists to arrays for easier analysis
