@@ -763,9 +763,7 @@ class CircuitOptimizationDemo:
 
         if method_name == "Backprop":
             # Use direct optax optimizer (not nnx.Optimizer) for logits
-            opt_fn = optax.adamw(self.learning_rate, 0.8, 0.8, weight_decay=1e-1)
-            self.logit_opt_state = opt_fn.init(self.logits)
-            self.logit_optimizer = opt_fn
+            self._reset_backprop_optimizer()
             self.frozen_model = None
             # Reset generator when switching to backprop
             self.model_generator = None
@@ -782,6 +780,8 @@ class CircuitOptimizationDemo:
             # Check if model is already loaded - if so, skip loading and just initialize generator
             if self.frozen_model is not None:
                 print(f"Model already loaded, skipping WandB load")
+                self.logit_optimizer = None
+                self.logit_opt_state = None
                 # Initialize the generator for step-by-step evaluation
                 self.initialize_model_generator()
             elif self.try_load_wandb_model(skip_circuit_regeneration=False):
@@ -848,6 +848,21 @@ class CircuitOptimizationDemo:
             print(f"Traceback: {traceback.format_exc()}")
             self.model_generator = None
             self.last_step_result = None
+
+    def _reset_backprop_optimizer(self):
+        """Initialize optimizer state for the current logit tree."""
+        opt_fn = optax.adamw(self.learning_rate, 0.8, 0.8, weight_decay=1e-1)
+        self.logit_opt_state = opt_fn.init(self.logits)
+        self.logit_optimizer = opt_fn
+
+    def _use_loaded_frozen_model(self):
+        """Switch the GUI to the loaded frozen Self-Attention model."""
+        self.optimization_method_idx = self.optimization_methods.index("Self-Attention")
+        self.logit_optimizer = None
+        self.logit_opt_state = None
+        self.model_generator = None
+        self.last_step_result = None
+        self.initialize_model_generator()
 
     def reset_gate_mask(self):
         """Reset all gate masks to active"""
@@ -1362,6 +1377,13 @@ class CircuitOptimizationDemo:
 
         # Reinitialize optimization method
         # self.initialize_optimization_method()
+        if self.optimization_methods[self.optimization_method_idx] == "Backprop":
+            self._reset_backprop_optimizer()
+        else:
+            self.logit_optimizer = None
+            self.logit_opt_state = None
+            self.model_generator = None
+            self.last_step_result = None
 
         # Reset optimization progress
         if reset_logs:
@@ -1462,9 +1484,7 @@ class CircuitOptimizationDemo:
 
         # Reinitialize optimizer for backprop
         if self.optimization_methods[self.optimization_method_idx] == "Backprop":
-            opt_fn = optax.adamw(self.learning_rate, 0.8, 0.8, weight_decay=1e-1)
-            self.logit_opt_state = opt_fn.init(self.logits)
-            self.logit_optimizer = opt_fn
+            self._reset_backprop_optimizer()
         else:
             # Reinitialize generator for Self-Attention
             self.initialize_model_generator()
@@ -1684,6 +1704,9 @@ class CircuitOptimizationDemo:
 
             disp_w = view_w
             disp_h = disp_w * aspect
+            if disp_w <= 0 or disp_h <= 0:
+                # ImGui widgets assert on non-positive sizes; skip this frame if layout is not ready.
+                return
 
             # Draw visualization
             dl = imgui.get_window_draw_list()
@@ -1894,11 +1917,11 @@ class CircuitOptimizationDemo:
                     imgui.end_popup()
 
                 implot.end_plot()
-                imgui.pop_style_color()  # Restore child_bg
-                imgui.pop_style_color()  # Restore popup_bg
-                imgui.pop_style_color()  # Restore text
-                imgui.pop_style_color()  # Restore window_bg
-                imgui.pop_style_color()  # Restore frame_bg
+            imgui.pop_style_color()  # Restore child_bg
+            imgui.pop_style_color()  # Restore popup_bg
+            imgui.pop_style_color()  # Restore text
+            imgui.pop_style_color()  # Restore window_bg
+            imgui.pop_style_color()  # Restore frame_bg
 
             # Input visualization
             # Set separator text color to dark gray
@@ -2050,18 +2073,15 @@ class CircuitOptimizationDemo:
                     print(f"Preferred metric: {self.prefer_metric or 'Auto'}")
 
             run_id_buffer = self.run_id if self.run_id else ""
-            changed, run_id_buffer = imgui.input_text("Run ID", run_id_buffer, 256)
+            changed, run_id_buffer = imgui.input_text("Run/Sweep ID", run_id_buffer, 256)
             if changed:
                 self.run_id = run_id_buffer if run_id_buffer else None
 
             imgui.same_line()
-            if imgui.button("Load from WandB"):
+            if imgui.button("Load & Use Self-Attention"):
                 if self.try_load_wandb_model():
                     print(f"Successfully loaded frozen Self-Attention model")
-                    if self.optimization_methods[self.optimization_method_idx] == "Self-Attention":
-                        self.logit_optimizer = None
-                        self.logit_opt_state = None
-                        self.initialize_model_generator()
+                    self._use_loaded_frozen_model()
                 else:
                     print(f"Failed to load Self-Attention model")
 
