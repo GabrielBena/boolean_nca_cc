@@ -478,11 +478,25 @@ def _resolve_layer_sizes(cfg):
 
 
 def _create_baseline(cfg, layer_sizes, arity, x, y0, loss_type):
-    """Recreate the preconfigured baseline circuit used during training."""
+    """Recreate the preconfigured baseline circuit used during training.
+
+    Mirrors ``train_loop.py`` preconfiguration: ``preconfig_steps`` and
+    ``preconfig_lr`` come from ``cfg.backprop.epochs`` / ``cfg.backprop.learning_rate``
+    (that is how ``train.py`` calls ``train_model``), and ``optimizer`` / WD /
+    betas are forwarded from ``cfg.backprop``. Without these the baseline
+    circuit does not converge to 1.0 before damage is applied.
+    """
     training_mode = cfg.get("training", {}).get("training_mode", "growth")
     if training_mode == "repair":
-        preconfig_steps = cfg.get("preconfig_steps", 200)
-        preconfig_lr = cfg.get("preconfig_lr", 1e-2)
+        backprop_cfg = cfg.get("backprop", {}) or {}
+        # train.py: preconfig_steps = cfg.backprop.epochs, preconfig_lr = cfg.backprop.learning_rate
+        preconfig_steps = int(backprop_cfg.get("epochs", cfg.get("preconfig_steps", 200)))
+        preconfig_lr = float(backprop_cfg.get("learning_rate", cfg.get("preconfig_lr", 1e-2)))
+        pre_opt = backprop_cfg.get("optimizer", "adam")
+        pre_wd = float(backprop_cfg.get("weight_decay", 0.0))
+        pre_b1 = float(backprop_cfg.get("beta1", 0.9))
+        pre_b2 = float(backprop_cfg.get("beta2", 0.999))
+
         wiring_fixed_key = cfg.get("wiring_fixed_key", cfg.get("test_seed", 42))
         if isinstance(wiring_fixed_key, int):
             wiring_fixed_key = jax.random.PRNGKey(wiring_fixed_key)
@@ -495,11 +509,28 @@ def _create_baseline(cfg, layer_sizes, arity, x, y0, loss_type):
             loss_type=loss_type,
             steps=preconfig_steps,
             lr=preconfig_lr,
+            optimizer=pre_opt,
+            weight_decay=pre_wd,
+            beta1=pre_b1,
+            beta2=pre_b2,
         )
         log.info(
-            "Recreated preconfigured circuit (repair mode, %d steps, lr=%s)",
-            preconfig_steps, preconfig_lr,
+            "Recreated preconfigured circuit (repair mode): steps=%d, lr=%s, "
+            "optimizer=%s, weight_decay=%s, beta1=%s, beta2=%s",
+            preconfig_steps, preconfig_lr, pre_opt, pre_wd, pre_b1, pre_b2,
         )
+
+        # Sanity check: baseline must start at (or very near) 1.0 before damage.
+        loss_fn = loss_f_l4 if loss_type == "l4" else loss_f_bce
+        _, base_aux = loss_fn(logits, wires, x, y0)
+        base_acc = float(base_aux["hard_accuracy"])
+        log.info("Baseline hard accuracy after preconfig: %.6f", base_acc)
+        if base_acc < 0.999:
+            log.warning(
+                "Baseline hard accuracy %.4f < 0.999 — BP trajectory will not "
+                "start at 100%%. Check that cfg.backprop matches the training run.",
+                base_acc,
+            )
     else:
         key = jax.random.PRNGKey(cfg.get("test_seed", 42))
         wires, logits = gen_circuit(key, layer_sizes, arity=arity)

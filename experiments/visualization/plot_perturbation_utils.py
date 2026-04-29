@@ -198,14 +198,14 @@ def _plot_damage_size_vs_accuracy_on_ax(
                           method_data['final_hard_accuracy'],
                           color=color, marker=marker, s=50,
                           label=legend_label, alpha=0.6,
-                          edgecolors='black', linewidths=0.5)
+                          edgecolors='none')
 
         ax.legend(loc='best', fontsize=16)
     else:
         ax.scatter(summary_df['knockout_size'],
                   summary_df['final_hard_accuracy'],
                   marker='o', s=50, alpha=0.6,
-                  edgecolors='black', linewidths=0.5)
+                  edgecolors='none')
 
     if baseline_accuracy is not None:
         ax.axhline(y=baseline_accuracy,

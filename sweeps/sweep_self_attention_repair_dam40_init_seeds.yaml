@@ -1,0 +1,44 @@
+# Five initialization seeds for self-attention repair (dam40, pool multi / eval single KO).
+# Base: sweeps/singles/self_attention_repair_dam40_hydra.yaml (matches WandB run config).
+#
+# Pins eval/input/test/damage seeds so only `seed` is swept. The base sets
+# eval.input_split_seed: ${seed}; we override it here so the train/test split does not move.
+#
+# Note (docs/seed_control.md): `seed` is the master training RNG key, not a dedicated
+# weight-init-only knob—it also affects batch sampling, damage application order, etc.
+# Circuit wiring, knockout vocab, periodic eval patterns, and split indices stay fixed via
+# test_seed, damage_seed, periodic_eval_test_seed, damage_start_offset_seed, input_split_seed.
+#
+# Usage (WandB):
+#   wandb sweep sweeps/sweep_self_attention_repair_dam40_init_seeds.yaml
+#   wandb agent <sweep_id>
+#
+# Usage (Hydra multirun, same 5 runs):
+#   python train.py --config-path sweeps/singles --config-name self_attention_repair_dam40_hydra -m \
+#     seed=14,42,123,456,789 eval.input_split_seed=14
+
+program: train.py
+method: grid
+metric:
+  goal: maximize
+  name: eval_ko_in/final_hard_accuracy
+
+parameters:
+  seed:
+    values:
+      # Same as base single config (seed=14); use this arm to match prior WandB / local runs.
+      - 14
+      - 42
+      - 123
+      - 456
+      - 444
+  eval.input_split_seed:
+    value: 14
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - --config-path=sweeps/singles
+  - --config-name=self_attention_repair_dam40_hydra
+  - ${args_no_hyphens}

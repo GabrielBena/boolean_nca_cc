@@ -1,0 +1,170 @@
+wandb: [wandb.Api()] Loaded credentials for https://api.wandb.ai from /home/marcello/.netrc.
+wandb:   1 of 1 files downloaded.  
+Instantiating model using config: boolean_nca_cc.models.CircuitSelfAttention
+Computed n_nodes for CircuitSelfAttention: 264
+Successfully instantiated model: CircuitSelfAttention
+Loaded checkpoint at step: 0
+Loaded checkpoint at epoch: 0
+Training knockout patterns:   0%|          | 0/20 [00:00<?, ?it/s]Training knockout patterns:   5%|▌         | 1/20 [00:02<00:44,  2.33s/it]Training knockout patterns:  10%|█         | 2/20 [00:04<00:36,  2.04s/it]Training knockout patterns:  15%|█▌        | 3/20 [00:06<00:33,  1.96s/it]Training knockout patterns:  20%|██        | 4/20 [00:07<00:30,  1.91s/it]Training knockout patterns:  25%|██▌       | 5/20 [00:09<00:27,  1.87s/it]Training knockout patterns:  30%|███       | 6/20 [00:11<00:25,  1.81s/it]Training knockout patterns:  35%|███▌      | 7/20 [00:13<00:23,  1.79s/it]Training knockout patterns:  40%|████      | 8/20 [00:14<00:21,  1.77s/it]Training knockout patterns:  45%|████▌     | 9/20 [00:16<00:19,  1.76s/it]Training knockout patterns:  50%|█████     | 10/20 [00:18<00:17,  1.75s/it]Training knockout patterns:  55%|█████▌    | 11/20 [00:19<00:15,  1.73s/it]Training knockout patterns:  60%|██████    | 12/20 [00:21<00:13,  1.73s/it]Training knockout patterns:  65%|██████▌   | 13/20 [00:23<00:11,  1.71s/it]Training knockout patterns:  70%|███████   | 14/20 [00:25<00:10,  1.70s/it]Training knockout patterns:  75%|███████▌  | 15/20 [00:26<00:08,  1.68s/it]Training knockout patterns:  80%|████████  | 16/20 [00:28<00:06,  1.68s/it]Training knockout patterns:  85%|████████▌ | 17/20 [00:29<00:05,  1.67s/it]Training knockout patterns:  90%|█████████ | 18/20 [00:31<00:03,  1.66s/it]Training knockout patterns:  95%|█████████▌| 19/20 [00:33<00:01,  1.64s/it]Training knockout patterns: 100%|██████████| 20/20 [00:34<00:00,  1.64s/it]Training knockout patterns: 100%|██████████| 20/20 [00:34<00:00,  1.74s/it]
+  Step 6: DEBUG pre-update hard_accuracy = 0.9439
+  Step 6: DEBUG post-update hard_accuracy = 0.9296
+DEBUG: Step 6 - Pre-update: 0.9439, Post-update: 0.9296, Delta: -0.0143 (degradation)
+
+============================================================
+Step-by-step performance for ko_size=10:
+============================================================
+Step   Hard Acc   Soft Acc   Hard Loss    Soft Loss   
+------------------------------------------------------------
+0      1.0000     1.0000     0.000000     0.000012    
+1      1.0000     1.0000     0.000000     0.000012    
+2      1.0000     1.0000     0.000000     0.000012    
+3      1.0000     1.0000     0.000000     0.000012    
+4      1.0000     1.0000     0.000000     0.000012    
+5      1.0000     1.0000     0.000000     0.000012    
+6      0.9296     0.9296     3460.800049  2181.681152 
+7      0.9296     0.9296     3460.800049  2181.680908 
+8      0.9296     0.9296     3460.800049  2181.680908 
+9      0.9296     0.9296     3460.800049  2181.680420 
+10     0.9296     0.9296     3460.800049  2181.680420 
+11     0.9296     0.9296     3460.800049  2181.680420 
+12     0.9296     0.9296     3460.800049  2181.679688 
+13     0.9296     0.9296     3460.800049  2181.679688 
+14     0.9296     0.9296     3460.800049  2181.679443 
+15     0.9296     0.9296     3460.800049  2181.679199 
+16     0.9296     0.9296     3460.800049  2181.678955 
+17     0.9296     0.9296     3460.800049  2181.679199 
+18     0.9296     0.9296     3460.800049  2181.678467 
+19     0.9296     0.9296     3460.800049  2181.678467 
+20     0.9296     0.9296     3460.800049  2181.678467 
+21     0.9296     0.9296     3460.800049  2181.678467 
+22     0.9296     0.9296     3460.800049  2181.677979 
+23     0.9296     0.9296     3460.800049  2181.677734 
+24     0.9296     0.9296     3460.800049  2181.677734 
+25     0.9296     0.9296     3460.800049  2181.677490 
+26     0.9296     0.9296     3460.800049  2181.677002 
+============================================================
+
+Per-pattern step-by-step accuracies shape: (27, 20)
+  Accuracies at damage step 6: [0.8841146  0.991862   0.93927    0.9111328  0.93465173 0.9511312
+ 0.9474284  0.85758466 0.9751791  0.98795575 0.882487   0.9068197
+ 0.89542645 0.936849   0.9413249  0.90462244 0.9469401  0.87493896
+ 0.9658203  0.9562582 ]
+Training knockout patterns:   0%|          | 0/20 [00:00<?, ?it/s]Training knockout patterns:   5%|▌         | 1/20 [00:01<00:30,  1.60s/it]Training knockout patterns:  10%|█         | 2/20 [00:03<00:28,  1.59s/it]Training knockout patterns:  15%|█▌        | 3/20 [00:04<00:27,  1.62s/it]Training knockout patterns:  20%|██        | 4/20 [00:06<00:26,  1.63s/it]Training knockout patterns:  25%|██▌       | 5/20 [00:08<00:24,  1.65s/it]Training knockout patterns:  30%|███       | 6/20 [00:09<00:23,  1.66s/it]Training knockout patterns:  35%|███▌      | 7/20 [00:11<00:21,  1.65s/it]Training knockout patterns:  40%|████      | 8/20 [00:13<00:19,  1.65s/it]Training knockout patterns:  45%|████▌     | 9/20 [00:14<00:18,  1.65s/it]Training knockout patterns:  50%|█████     | 10/20 [00:16<00:16,  1.65s/it]Training knockout patterns:  55%|█████▌    | 11/20 [00:18<00:14,  1.64s/it]Training knockout patterns:  60%|██████    | 12/20 [00:19<00:13,  1.63s/it]Training knockout patterns:  65%|██████▌   | 13/20 [00:21<00:11,  1.62s/it]Training knockout patterns:  70%|███████   | 14/20 [00:22<00:09,  1.63s/it]Training knockout patterns:  75%|███████▌  | 15/20 [00:24<00:08,  1.64s/it]Training knockout patterns:  80%|████████  | 16/20 [00:26<00:06,  1.62s/it]Training knockout patterns:  85%|████████▌ | 17/20 [00:27<00:04,  1.59s/it]Training knockout patterns:  90%|█████████ | 18/20 [00:29<00:03,  1.58s/it]Training knockout patterns:  95%|█████████▌| 19/20 [00:30<00:01,  1.57s/it]Training knockout patterns: 100%|██████████| 20/20 [00:32<00:00,  1.56s/it]Training knockout patterns: 100%|██████████| 20/20 [00:32<00:00,  1.61s/it]
+  Step 6: DEBUG pre-update hard_accuracy = 0.8060
+  Step 6: DEBUG post-update hard_accuracy = 0.8125
+DEBUG: Step 6 - Pre-update: 0.8060, Post-update: 0.8125, Delta: +0.0065 (recovery)
+
+============================================================
+Step-by-step performance for ko_size=40:
+============================================================
+Step   Hard Acc   Soft Acc   Hard Loss    Soft Loss   
+------------------------------------------------------------
+0      1.0000     1.0000     0.000000     0.000012    
+1      1.0000     1.0000     0.000000     0.000012    
+2      1.0000     1.0000     0.000000     0.000012    
+3      1.0000     1.0000     0.000000     0.000012    
+4      1.0000     1.0000     0.000000     0.000012    
+5      1.0000     1.0000     0.000000     0.000012    
+6      0.8125     0.8127     9216.150391  6305.130371 
+7      0.8125     0.8127     9216.150391  6305.131348 
+8      0.8125     0.8127     9216.150391  6305.130859 
+9      0.8125     0.8127     9216.150391  6305.130859 
+10     0.8125     0.8127     9216.150391  6305.130859 
+11     0.8125     0.8127     9216.150391  6305.132324 
+12     0.8125     0.8127     9216.150391  6305.132324 
+13     0.8125     0.8127     9216.150391  6305.132812 
+14     0.8125     0.8127     9216.150391  6305.132812 
+15     0.8125     0.8127     9216.150391  6305.132812 
+16     0.8125     0.8127     9216.150391  6305.134277 
+17     0.8125     0.8127     9216.150391  6305.133789 
+18     0.8125     0.8127     9216.150391  6305.134766 
+19     0.8125     0.8127     9216.150391  6305.135254 
+20     0.8125     0.8127     9216.150391  6305.135254 
+21     0.8125     0.8127     9216.150391  6305.135254 
+22     0.8125     0.8127     9216.150391  6305.135742 
+23     0.8125     0.8127     9216.150391  6305.135742 
+24     0.8125     0.8127     9216.150391  6305.136230 
+25     0.8125     0.8127     9216.150391  6305.137695 
+26     0.8125     0.8127     9216.150391  6305.138184 
+============================================================
+
+Per-pattern step-by-step accuracies shape: (27, 20)
+  Accuracies at damage step 6: [0.72436523 0.7879232  0.87980145 0.80135095 0.7731527  0.81225586
+ 0.85839844 0.8151042  0.8684896  0.8206787  0.78572595 0.7674357
+ 0.82804364 0.8041992  0.8706462  0.79231775 0.8092448  0.8046875
+ 0.8221029  0.8240153 ]
+Training knockout patterns:   0%|          | 0/20 [00:00<?, ?it/s]Training knockout patterns:   5%|▌         | 1/20 [00:01<00:30,  1.61s/it]Training knockout patterns:  10%|█         | 2/20 [00:03<00:29,  1.62s/it]Training knockout patterns:  15%|█▌        | 3/20 [00:04<00:27,  1.60s/it]Training knockout patterns:  20%|██        | 4/20 [00:06<00:25,  1.59s/it]Training knockout patterns:  25%|██▌       | 5/20 [00:07<00:23,  1.58s/it]Training knockout patterns:  30%|███       | 6/20 [00:09<00:22,  1.58s/it]Training knockout patterns:  35%|███▌      | 7/20 [00:11<00:20,  1.57s/it]Training knockout patterns:  40%|████      | 8/20 [00:12<00:18,  1.57s/it]Training knockout patterns:  40%|████      | 8/20 [00:12<00:19,  1.61s/it]
+Traceback (most recent call last):
+  File "/home/marcello/workspace/boolean_nca_cc/experiments/accuracy_vs_damage_plot.py", line 912, in <module>
+    main()
+    ~~~~^^
+  File "/home/marcello/workspace/boolean_nca_cc/experiments/accuracy_vs_damage_plot.py", line 593, in main
+    bp_knockouts = _run_bp_with_knockouts(
+        mock_cfg,
+    ...<8 lines>...
+        damage_start_offset=damage_start_offset,
+    )
+  File "/home/marcello/workspace/boolean_nca_cc/experiments/accuracy_vs_damage_plot.py", line 191, in _run_bp_with_knockouts
+    _, step_aux, state = _step(state, step_count)
+                         ~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/home/marcello/workspace/boolean_nca_cc/experiments/accuracy_vs_damage_plot.py", line 168, in _step
+    return train_step(
+        state=st,
+    ...<11 lines>...
+        apply_damage_now=apply_damage_now,
+    )
+  File "/home/marcello/workspace/boolean_nca_cc/boolean_nca_cc/circuits/train.py", line 369, in train_step
+    new_logits, new_opt_state = update_params(grad, opt_state, opt, logits)
+                                ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/marcello/workspace/boolean_nca_cc/boolean_nca_cc/circuits/train.py", line 300, in update_params
+    upd, new_opt_state = opt.update(grad, opt_state, logits)
+                         ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/optax/transforms/_combining.py", line 90, in update_fn
+    updates, new_s = fn(updates, s, params, **extra_args)
+                     ~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/optax/_src/base.py", line 336, in update
+    return tx.update(updates, state, params)
+           ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/optax/_src/transform.py", line 283, in update_fn
+    mu = optax.tree.update_moment(updates, state.mu, b1, 1)
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/optax/tree_utils/_tree_math.py", line 355, in tree_update_moment
+    return jax.tree.map(
+           ~~~~~~~~~~~~^
+        lambda g, t: (
+        ^^^^^^^^^^^^^^
+    ...<4 lines>...
+        is_leaf=lambda x: x is None,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/jax/_src/tree.py", line 155, in map
+    return tree_util.tree_map(f, tree, *rest, is_leaf=is_leaf)
+           ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/jax/_src/tree_util.py", line 369, in tree_map
+    return treedef.unflatten(f(*xs) for xs in zip(*all_leaves))
+           ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/jax/_src/tree_util.py", line 369, in <genexpr>
+    return treedef.unflatten(f(*xs) for xs in zip(*all_leaves))
+                             ~^^^^^
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/optax/tree_utils/_tree_math.py", line 357, in <lambda>
+    (1 - decay) * (g**order) + decay * t if g is not None else None
+                   ~^^~~~~~
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/jax/_src/numpy/array_methods.py", line 609, in deferring_binary_op
+    return binary_op(*args)
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/jax/_src/numpy/ufuncs.py", line 2683, in power
+    return lax.integer_pow(x1, x2)
+           ~~~~~~~~~~~~~~~^^^^^^^^
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/jax/_src/lax/lax.py", line 907, in integer_pow
+    return integer_pow_p.bind(x, y=y)
+           ~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/jax/_src/core.py", line 631, in bind
+    args = args if self.skip_canonicalization else map(canonicalize_value, args)
+                                                   ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/jax/_src/core.py", line 2017, in canonicalize_value
+    aval = get_aval(val)
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/jax/_src/core.py", line 1785, in get_aval
+    return aval_fn(x)
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/jax/_src/array.py", line 1123, in _get_aval_array
+    def _get_aval_array(self):
+    
+KeyboardInterrupt

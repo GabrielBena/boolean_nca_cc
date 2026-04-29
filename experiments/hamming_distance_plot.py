@@ -240,9 +240,11 @@ def main():
     # Config loading - optional, defaults to configs/config.yaml
     parser.add_argument("--config", type=str, default="configs/config.yaml", 
                         help="Path to config YAML file (default: configs/config.yaml)")
-    parser.add_argument("--run-id", type=str, default="nypyrbwh", 
-                        help="WandB run id for GNN model load (default: nypyrbwh)")
-    parser.add_argument("--checkpoint", type=str, default=None, 
+    parser.add_argument("--run-id", type=str, default="nypyrbwh",
+                        help="WandB run id for GNN model load (default: nypyrbwh). Can also be a sweep ID.")
+    parser.add_argument("--sweep-id", type=str, default=None,
+                        help="WandB sweep ID to load from (will select best run from sweep)")
+    parser.add_argument("--checkpoint", type=str, default=None,
                         help="Local checkpoint path .pkl for GNN model (optional, only needed if --methods includes 'gnn')")
     # Analysis method selection
     parser.add_argument("--methods", type=str, default="bp", help="gnn,bp,both (default: bp)")
@@ -250,7 +252,7 @@ def main():
     parser.add_argument("--n-message-steps", type=int, default=None,
                         help="Number of message passing steps for GNN evaluation (default: 26, or from config if available, CLI override takes precedence)")
     # Knockout size variation
-    parser.add_argument("--knockout-sizes", type=str, default=None, 
+    parser.add_argument("--knockout-sizes", type=str, default=None,
                         help="Comma-separated list of knockout sizes (e.g., '1,10,20,40'). If not provided, uses damage_prob from config.")
     parser.add_argument("--patterns-per-size", type=int, default=None,
                         help="Number of patterns to generate per knockout size. If not provided, uses vocabulary_size from config.")
@@ -260,6 +262,24 @@ def main():
                         help="Number of steps before damage injection (default: 5, damage at step 6)")
     parser.add_argument("--exclude-knocked-out-gates", action="store_true", default=False,
                         help="Exclude knocked-out gates from hamming distance calculation (default: False, i.e., include all gates).")
+    parser.add_argument("--bp-epochs", type=int, default=None,
+                        help="Override backprop epochs for baseline and knockout BP runs.")
+    parser.add_argument("--pattern-seed", type=int, default=9999,
+                        help="Seed for sampling knockout patterns (default: 9999). "
+                             "Vary across runs to get pattern diversity for multi-seed analysis.")
+    parser.add_argument("--wandb-project", type=str, default=None,
+                        help="WandB project to load run/sweep from. Defaults to the loader default "
+                             "('boolean-nca-cc'). Use 'boolean_nca_cc' for runs in the underscored project.")
+    parser.add_argument("--filename", type=str, default="best_model_eval_ko_hard_accuracy",
+                        help="Artifact filename to load (without .pkl). Newer runs use "
+                             "'best_model_eval_ko_in_hard_accuracy' (with _in_).")
+    parser.add_argument("--force-download", action="store_true", default=False,
+                        help="Force re-download of model artifact from WandB, ignoring local cache. "
+                             "Use when the cached file is stale or from the wrong checkpoint version.")
+    parser.add_argument("--prefer-metric", type=str, default=None,
+                        help="Artifact selection metric passed to loader (e.g. 'eval_ko_in_hard_accuracy'). "
+                             "When set, picks the highest-version artifact matching that metric name — "
+                             "critical for runs that log multiple artifact versions per metric.")
     args = parser.parse_args()
 
     # Parse methods selection early to determine what needs to be loaded
@@ -277,20 +297,26 @@ def main():
         gnn_training_config = cfg
     else:
         # Load config from WandB (without loading the model yet)
-        # Use standard artifact filename to get config
-        filename_to_load = "best_model_eval_ko_hard_accuracy"
-        cfg, _, _ = load_config_from_wandb(
+        # Artifact filename — overridable via --filename for newer runs
+        # (e.g. 'best_model_eval_ko_in_hard_accuracy' with the _in_ infix).
+        filename_to_load = args.filename
+        load_kwargs = dict(
             run_id=args.run_id,
+            sweep_id=args.sweep_id,
             filename=filename_to_load,
-            select_by_best_metric=False,  # Just get config, not necessarily best model
+            select_by_best_metric=True if args.sweep_id else False,  # Select best if from sweep
+            force_download=args.force_download,
         )
+        if args.wandb_project is not None:
+            load_kwargs["project"] = args.wandb_project
+        cfg, _, _ = load_config_from_wandb(**load_kwargs)
         gnn_training_config = cfg
 
     # Parse and set all configuration variables from args or config
     # Seed for random operations - use dedicated analysis seed to avoid overlap with training/eval patterns
     # Training uses damage_seed=481 for vocabulary, eval uses periodic_eval_test_seed=42
     # This ensures analysis patterns are distinct from both
-    seed = 9999  # Hard-coded analysis seed, different from training seeds
+    seed = args.pattern_seed  # Pattern sampling seed (default 9999, varies across multi-seed runs)
     
     # Knockout sizes: parse from args or use config default
     if args.knockout_sizes is not None:
@@ -331,7 +357,10 @@ def main():
     
     # Include all gates mode: Default is True (include all gates), unless --exclude-knocked-out-gates is set
     include_all_gates = not args.exclude_knocked_out_gates
-    
+
+    # BP epochs: CLI override > config value, with a minimum of 300 by default
+    backprop_cfg = cfg.get("backprop", {})
+    bp_epochs = args.bp_epochs if args.bp_epochs is not None else max(backprop_cfg.get("epochs", 200), 300)
 
     # Only load GNN model if GNN is in the methods
     gnn_model = None
@@ -360,11 +389,18 @@ def main():
                 print("Warning: Could not determine checkpoint epoch/step from loaded data")
         else:
             # Load the actual model now
-            gnn_model, loaded_dict, _ = load_best_model_from_wandb(
+            best_kwargs = dict(
                 run_id=args.run_id,
+                sweep_id=args.sweep_id,
                 seed=0,  # Use default seed, will be overridden by GNN config
                 filename=filename_to_load,
+                select_by_best_metric=True if args.sweep_id else False,  # Select best if from sweep
+                force_download=args.force_download,
+                prefer_metric=args.prefer_metric,
             )
+            if args.wandb_project is not None:
+                best_kwargs["project"] = args.wandb_project
+            gnn_model, loaded_dict, _ = load_best_model_from_wandb(**best_kwargs)
             gnn_hidden_dim = int(cfg.model.get("circuit_hidden_dim", 16))
             
             # Extract and display epoch/step information
@@ -384,9 +420,11 @@ def main():
 
     # Set output directory with f-string if not provided
     if args.output is None:
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         ko_sizes_str = "_".join(map(str, knockout_sizes))
         gates_mode = "allgates" if include_all_gates else "activeonly"
-        args.output = f"reports/figures/hamming/hamming_scaled{ko_sizes_str}_p{patterns_per_size}_{damage_behavior}_{gates_mode}"
+        args.output = f"reports/figures/hamming/hamming_scaled{ko_sizes_str}_p{patterns_per_size}_{damage_behavior}_{gates_mode}_run{args.run_id}_{ts}"
     log.info(f"Output directory: {args.output}")
     log.info(f"Hamming distance mode: {'include all gates' if include_all_gates else 'exclude knocked-out gates'}")
 
@@ -466,7 +504,7 @@ def main():
                     beta1=backprop_cfg.get("beta1", 0.9),
                     beta2=backprop_cfg.get("beta2", 0.999),
                     weight_decay=backprop_cfg.get("weight_decay", 0.0),
-                    epochs=max(backprop_cfg.get("epochs", 200), 300),
+                    epochs=bp_epochs,
                 ),
                 circuit=SimpleNamespace(
                     layer_sizes=layer_sizes,
@@ -486,7 +524,7 @@ def main():
                 beta1=backprop_cfg.get("beta1", 0.9),
                 beta2=backprop_cfg.get("beta2", 0.999),
                 weight_decay=backprop_cfg.get("weight_decay", 0.0),
-                epochs=max(backprop_cfg.get("epochs", 200), 300),
+                epochs=bp_epochs,
             ),
             circuit=SimpleNamespace(
                 layer_sizes=layer_sizes,
@@ -542,7 +580,7 @@ def main():
                     beta1=backprop_cfg.get("beta1", 0.9),
                     beta2=backprop_cfg.get("beta2", 0.999),
                     weight_decay=backprop_cfg.get("weight_decay", 0.0),
-                    epochs=max(backprop_cfg.get("epochs", 200), 300),
+                    epochs=bp_epochs,
                 ),
                 circuit=SimpleNamespace(
                     layer_sizes=layer_sizes,

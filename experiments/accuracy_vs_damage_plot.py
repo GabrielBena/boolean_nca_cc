@@ -277,6 +277,22 @@ def main():
                         help="Exclude knocked-out gates from hamming distance calculation (default: False, i.e., include all gates).")
     parser.add_argument("--bp-epochs", type=int, default=None,
                         help="Override backprop epochs for baseline and knockout BP runs.")
+    parser.add_argument("--pattern-seed", type=int, default=9999,
+                        help="Seed for sampling knockout patterns (default: 9999). "
+                             "Vary across runs to get pattern diversity for multi-seed analysis.")
+    parser.add_argument("--wandb-project", type=str, default=None,
+                        help="WandB project to load run/sweep from. Defaults to the loader default "
+                             "('boolean-nca-cc'). Use 'boolean_nca_cc' for runs in the underscored project.")
+    parser.add_argument("--filename", type=str, default="best_model_eval_ko_hard_accuracy",
+                        help="Artifact filename to load (without .pkl). Newer runs use "
+                             "'best_model_eval_ko_in_hard_accuracy' (with _in_).")
+    parser.add_argument("--force-download", action="store_true", default=False,
+                        help="Force re-download of model artifact from WandB, ignoring local cache. "
+                             "Use when the cached file is stale or from the wrong checkpoint version.")
+    parser.add_argument("--prefer-metric", type=str, default=None,
+                        help="Artifact selection metric passed to loader (e.g. 'eval_ko_in_hard_accuracy'). "
+                             "When set, picks the highest-version artifact matching that metric name — "
+                             "critical for runs that log multiple artifact versions per metric.")
     args = parser.parse_args()
 
     # Parse methods selection early to determine what needs to be loaded
@@ -294,21 +310,26 @@ def main():
         gnn_training_config = cfg
     else:
         # Load config from WandB (without loading the model yet)
-        # Use standard artifact filename to get config
-        filename_to_load = "best_model_eval_ko_hard_accuracy"
-        cfg, _, _ = load_config_from_wandb(
+        # Artifact filename — overridable via --filename for newer runs
+        # (e.g. 'best_model_eval_ko_in_hard_accuracy' with the _in_ infix).
+        filename_to_load = args.filename
+        load_kwargs = dict(
             run_id=args.run_id,
             sweep_id=args.sweep_id,
             filename=filename_to_load,
             select_by_best_metric=True if args.sweep_id else False,  # Select best if from sweep
+            force_download=args.force_download,
         )
+        if args.wandb_project is not None:
+            load_kwargs["project"] = args.wandb_project
+        cfg, _, _ = load_config_from_wandb(**load_kwargs)
         gnn_training_config = cfg
 
     # Parse and set all configuration variables from args or config
     # Seed for random operations - use dedicated analysis seed to avoid overlap with training/eval patterns
     # Training uses damage_seed=481 for vocabulary, eval uses periodic_eval_test_seed=42
     # This ensures analysis patterns are distinct from both
-    seed = 9999  # Hard-coded analysis seed, different from training seeds
+    seed = args.pattern_seed  # Pattern sampling seed (default 9999, varies across multi-seed runs)
     
     # Knockout sizes: parse from args or use config default
     if args.knockout_sizes is not None:
@@ -382,13 +403,18 @@ def main():
                 print("Warning: Could not determine checkpoint epoch/step from loaded data")
         else:
             # Load the actual model now
-            gnn_model, loaded_dict, _ = load_best_model_from_wandb(
+            best_kwargs = dict(
                 run_id=args.run_id,
                 sweep_id=args.sweep_id,
                 seed=0,  # Use default seed, will be overridden by GNN config
                 filename=filename_to_load,
                 select_by_best_metric=True if args.sweep_id else False,  # Select best if from sweep
+                force_download=args.force_download,
+                prefer_metric=args.prefer_metric,
             )
+            if args.wandb_project is not None:
+                best_kwargs["project"] = args.wandb_project
+            gnn_model, loaded_dict, _ = load_best_model_from_wandb(**best_kwargs)
             gnn_hidden_dim = int(cfg.model.get("circuit_hidden_dim", 16))
             
             # Extract and display epoch/step information

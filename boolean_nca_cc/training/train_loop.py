@@ -298,6 +298,8 @@ def run_knockout_periodic_evaluation(
             # Vocabulary-based evaluation parameters
             knockout_vocabulary=knockout_vocabulary,  # If provided => seen; else => unseen
             blind_mode=blind_mode,  # Ablation study: disable loss feedback
+            reinject_threshold=float(knockout_config.get("reinject_threshold", 1.0)),
+            reinject_cooldown_steps=int(knockout_config.get("reinject_cooldown_steps", 5)),
         )
 
         final_metrics_in = {
@@ -366,6 +368,8 @@ def run_knockout_periodic_evaluation(
             # For OUT, force unseen by not providing a vocabulary
             knockout_vocabulary=None,  # Force unseen patterns for OUT evaluation
             blind_mode=blind_mode,  # Ablation study: disable loss feedback
+            reinject_threshold=float(knockout_config.get("reinject_threshold", 1.0)),
+            reinject_cooldown_steps=int(knockout_config.get("reinject_cooldown_steps", 5)),
         )
 
         final_metrics_out = {
@@ -1006,9 +1010,11 @@ def train_model(
                                       Validates that damaged nodes remain at expected values
                                       (logits=-10.0, hidden=0.0) across pool updates and resets.
     """
-       # Validate unified damage control parameters
-    if damage_injection_mode not in ["single", "multi"]:
-        raise ValueError(f"damage_injection_mode must be 'single' or 'multi', got '{damage_injection_mode}'")
+    # Validate unified damage control parameters
+    if damage_injection_mode not in ["single", "multi", "threshold_reinject"]:
+        raise ValueError(
+            f"damage_injection_mode must be 'single', 'multi', or 'threshold_reinject', got '{damage_injection_mode}'"
+        )
     # Automatically set max_damage_per_circuit=1 when mode is 'single'
     if damage_injection_mode == "single":
         max_damage_per_circuit = 1
@@ -2502,6 +2508,8 @@ def train_model(
                 damage_start_offset_seed=int(knockout_eval.get("damage_start_offset_seed", 42)),
                 knockout_vocabulary=knockout_vocabulary,
                 training_mode=training_mode,  # Add this line
+                reinject_threshold=float(knockout_eval.get("reinject_threshold", 1.0)),
+                reinject_cooldown_steps=int(knockout_eval.get("reinject_cooldown_steps", 5)),
             )
             
             # Save Figure 3 locally

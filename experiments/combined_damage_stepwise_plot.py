@@ -206,6 +206,10 @@ def plot_combined_damage_stepwise(
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight", pad_inches=0.15)
+
+    pdf_path = os.path.splitext(output_path)[0] + ".pdf"
+    fig.savefig(pdf_path, bbox_inches="tight", pad_inches=0.15)
+
     plt.close(fig)
     return output_path
 
