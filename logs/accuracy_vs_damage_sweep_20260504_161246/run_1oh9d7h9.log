@@ -1,0 +1,86 @@
+wandb: [wandb.Api()] Loaded credentials for https://api.wandb.ai from /home/marcello/.netrc.
+wandb:   1 of 1 files downloaded.  
+wandb:   1 of 1 files downloaded.  
+Instantiating model using config: boolean_nca_cc.models.CircuitSelfAttention
+Computed n_nodes for CircuitSelfAttention: 264
+Successfully instantiated model: CircuitSelfAttention
+Loaded checkpoint at step: 7217
+Loaded checkpoint at epoch: 7217
+Training knockout patterns:   0%|          | 0/20 [00:00<?, ?it/s]Training knockout patterns:   5%|▌         | 1/20 [00:01<00:36,  1.90s/it]Training knockout patterns:  10%|█         | 2/20 [00:03<00:29,  1.64s/it]Training knockout patterns:  15%|█▌        | 3/20 [00:04<00:26,  1.55s/it]Training knockout patterns:  20%|██        | 4/20 [00:06<00:24,  1.52s/it]Training knockout patterns:  25%|██▌       | 5/20 [00:07<00:21,  1.43s/it]Training knockout patterns:  30%|███       | 6/20 [00:08<00:19,  1.42s/it]Training knockout patterns:  35%|███▌      | 7/20 [00:10<00:18,  1.41s/it]Training knockout patterns:  40%|████      | 8/20 [00:11<00:17,  1.42s/it]Training knockout patterns:  45%|████▌     | 9/20 [00:13<00:15,  1.43s/it]Training knockout patterns:  50%|█████     | 10/20 [00:14<00:14,  1.44s/it]Training knockout patterns:  55%|█████▌    | 11/20 [00:16<00:12,  1.44s/it]Training knockout patterns:  60%|██████    | 12/20 [00:17<00:11,  1.44s/it]Training knockout patterns:  65%|██████▌   | 13/20 [00:19<00:10,  1.45s/it]Training knockout patterns:  70%|███████   | 14/20 [00:20<00:08,  1.45s/it]Training knockout patterns:  75%|███████▌  | 15/20 [00:21<00:07,  1.45s/it]Training knockout patterns:  80%|████████  | 16/20 [00:23<00:05,  1.45s/it]Training knockout patterns:  85%|████████▌ | 17/20 [00:24<00:04,  1.45s/it]Training knockout patterns:  90%|█████████ | 18/20 [00:26<00:02,  1.45s/it]Training knockout patterns:  95%|█████████▌| 19/20 [00:27<00:01,  1.45s/it]Training knockout patterns: 100%|██████████| 20/20 [00:29<00:00,  1.45s/it]Training knockout patterns: 100%|██████████| 20/20 [00:29<00:00,  1.46s/it]
+  Step 6: DEBUG pre-update hard_accuracy = 0.9385
+  Step 6: DEBUG post-update hard_accuracy = 0.9382
+DEBUG: Step 6 - Pre-update: 0.9385, Post-update: 0.9382, Delta: -0.0002 (degradation)
+
+============================================================
+Step-by-step performance for ko_size=10:
+============================================================
+Step   Hard Acc   Soft Acc   Hard Loss    Soft Loss   
+------------------------------------------------------------
+0      1.0000     1.0000     0.000000     0.000012    
+1      1.0000     1.0000     0.000000     0.000040    
+2      1.0000     1.0000     0.000000     0.000048    
+3      1.0000     1.0000     0.000000     0.000055    
+4      1.0000     1.0000     0.000000     0.000063    
+5      1.0000     1.0000     0.000000     0.000074    
+6      0.9382     0.9384     3036.800049  1749.430664 
+7      0.9692     0.9705     1512.450073  327.826630  
+8      0.9996     0.9997     19.350000    8.171945    
+9      1.0000     1.0000     0.000000     0.041526    
+10     1.0000     1.0000     0.000000     0.000596    
+11     1.0000     1.0000     0.000000     0.000251    
+12     1.0000     1.0000     0.000000     0.000256    
+13     1.0000     1.0000     0.000000     0.000267    
+14     1.0000     1.0000     0.000000     0.000270    
+15     1.0000     1.0000     0.000000     0.000272    
+16     1.0000     1.0000     0.000000     0.000271    
+17     1.0000     1.0000     0.000000     0.000269    
+18     1.0000     1.0000     0.000000     0.000266    
+19     1.0000     1.0000     0.000000     0.000262    
+20     1.0000     1.0000     0.000000     0.000258    
+21     1.0000     1.0000     0.000000     0.000253    
+22     1.0000     1.0000     0.000000     0.000248    
+23     1.0000     1.0000     0.000000     0.000243    
+24     1.0000     1.0000     0.000000     0.000238    
+25     1.0000     1.0000     0.000000     0.000233    
+26     1.0000     1.0000     0.000000     0.000229    
+============================================================
+
+Per-pattern step-by-step accuracies shape: (27, 20)
+  Accuracies at damage step 6: [0.8965861  0.96158856 0.93587244 0.96126306 0.96240234 0.9391073
+ 0.94873047 0.9713542  0.9364421  0.9383952  0.96329755 0.9733073
+ 0.90568036 0.88850915 0.9034831  0.84993494 0.9324951  0.96280926
+ 0.9679362  0.9651286 ]
+Traceback (most recent call last):
+  File "/home/marcello/workspace/boolean_nca_cc/experiments/accuracy_vs_damage_plot.py", line 922, in <module>
+    main()
+    ~~~~^^
+  File "/home/marcello/workspace/boolean_nca_cc/experiments/accuracy_vs_damage_plot.py", line 771, in main
+    pattern_loss, pattern_aux = get_loss_from_wires_logits(
+                                ~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        pattern_final_logits,
+        ^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+        loss_type
+        ^^^^^^^^^
+    )
+    ^
+  File "/home/marcello/workspace/boolean_nca_cc/boolean_nca_cc/training/evaluation.py", line 51, in get_loss_from_wires_logits
+    acts = run_circuit(logits, wires, x)
+  File "/home/marcello/workspace/boolean_nca_cc/boolean_nca_cc/circuits/model.py", line 192, in run_circuit
+    x = run_layer(luts, [x[..., w] for w in ws]) * mask
+                         ~^^^^^^^^
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/jax/_src/array.py", line 367, in __getitem__
+    return indexing.rewriting_take(self, idx)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/jax/_src/numpy/indexing.py", line 1223, in rewriting_take
+    return internal_gather(arr, dynamic_idx)
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/jax/_src/numpy/indexing.py", line 1255, in _gather
+    y = slicing.gather(
+        y, indexer.gather_indices, indexer.dnums, indexer.gather_slice_shape,
+        unique_indices=unique_indices or indexer.unique_indices,
+        indices_are_sorted=indices_are_sorted or indexer.indices_are_sorted,
+        mode=mode, fill_value=fill_value)
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/jax/_src/lax/slicing.py", line 324, in gather
+    def gather(operand: ArrayLike, start_indices: ArrayLike,
+    
+KeyboardInterrupt

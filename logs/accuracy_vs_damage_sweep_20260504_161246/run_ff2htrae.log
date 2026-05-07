@@ -1,0 +1,372 @@
+wandb: [wandb.Api()] Loaded credentials for https://api.wandb.ai from /home/marcello/.netrc.
+wandb:   1 of 1 files downloaded.  
+wandb:   1 of 1 files downloaded.  
+Instantiating model using config: boolean_nca_cc.models.CircuitSelfAttention
+Computed n_nodes for CircuitSelfAttention: 264
+Successfully instantiated model: CircuitSelfAttention
+Loaded checkpoint at step: 7217
+Loaded checkpoint at epoch: 7217
+Training knockout patterns:   0%|          | 0/20 [00:00<?, ?it/s]Training knockout patterns:   5%|▌         | 1/20 [00:01<00:36,  1.93s/it]Training knockout patterns:  10%|█         | 2/20 [00:03<00:29,  1.63s/it]Training knockout patterns:  15%|█▌        | 3/20 [00:04<00:26,  1.54s/it]Training knockout patterns:  20%|██        | 4/20 [00:06<00:24,  1.50s/it]Training knockout patterns:  25%|██▌       | 5/20 [00:07<00:22,  1.48s/it]Training knockout patterns:  30%|███       | 6/20 [00:09<00:20,  1.47s/it]Training knockout patterns:  35%|███▌      | 7/20 [00:10<00:18,  1.45s/it]Training knockout patterns:  40%|████      | 8/20 [00:11<00:17,  1.45s/it]Training knockout patterns:  45%|████▌     | 9/20 [00:13<00:16,  1.49s/it]Training knockout patterns:  50%|█████     | 10/20 [00:14<00:14,  1.47s/it]Training knockout patterns:  55%|█████▌    | 11/20 [00:16<00:13,  1.46s/it]Training knockout patterns:  60%|██████    | 12/20 [00:17<00:11,  1.46s/it]Training knockout patterns:  65%|██████▌   | 13/20 [00:19<00:10,  1.46s/it]Training knockout patterns:  70%|███████   | 14/20 [00:20<00:08,  1.47s/it]Training knockout patterns:  75%|███████▌  | 15/20 [00:22<00:07,  1.48s/it]Training knockout patterns:  80%|████████  | 16/20 [00:23<00:05,  1.48s/it]Training knockout patterns:  85%|████████▌ | 17/20 [00:25<00:04,  1.49s/it]Training knockout patterns:  90%|█████████ | 18/20 [00:26<00:02,  1.49s/it]Training knockout patterns:  95%|█████████▌| 19/20 [00:28<00:01,  1.49s/it]Training knockout patterns: 100%|██████████| 20/20 [00:29<00:00,  1.48s/it]Training knockout patterns: 100%|██████████| 20/20 [00:29<00:00,  1.49s/it]
+  Step 6: DEBUG pre-update hard_accuracy = 0.9218
+  Step 6: DEBUG post-update hard_accuracy = 0.9214
+DEBUG: Step 6 - Pre-update: 0.9218, Post-update: 0.9214, Delta: -0.0004 (degradation)
+
+============================================================
+Step-by-step performance for ko_size=10:
+============================================================
+Step   Hard Acc   Soft Acc   Hard Loss    Soft Loss   
+------------------------------------------------------------
+0      1.0000     1.0000     0.000000     0.000012    
+1      1.0000     1.0000     0.000000     0.000029    
+2      1.0000     1.0000     0.000000     0.000072    
+3      1.0000     1.0000     0.000000     0.000104    
+4      1.0000     1.0000     0.000000     0.000137    
+5      1.0000     1.0000     0.000000     0.000178    
+6      0.9214     0.9220     3862.250000  2102.925537 
+7      0.9481     0.9506     2552.300049  568.253845  
+8      0.9967     0.9968     163.800003   74.072166   
+9      0.9988     0.9998     57.000000    4.597585    
+10     1.0000     1.0000     0.000000     0.031745    
+11     1.0000     1.0000     0.000000     0.002766    
+12     1.0000     1.0000     0.000000     0.001500    
+13     1.0000     1.0000     0.000000     0.001310    
+14     1.0000     1.0000     0.000000     0.001291    
+15     1.0000     1.0000     0.000000     0.001326    
+16     1.0000     1.0000     0.000000     0.001388    
+17     1.0000     1.0000     0.000000     0.001470    
+18     1.0000     1.0000     0.000000     0.001572    
+19     1.0000     1.0000     0.000000     0.001695    
+20     1.0000     1.0000     0.000000     0.001846    
+21     1.0000     1.0000     0.000000     0.002031    
+22     1.0000     1.0000     0.000000     0.002256    
+23     1.0000     1.0000     0.000000     0.002530    
+24     1.0000     1.0000     0.000000     0.002860    
+25     1.0000     1.0000     0.000000     0.003256    
+26     1.0000     1.0000     0.000000     0.003733    
+============================================================
+
+Per-pattern step-by-step accuracies shape: (27, 20)
+  Accuracies at damage step 6: [0.9394735  0.91469324 0.87976074 0.8725586  0.9312744  0.9696249
+ 0.938619   0.8819987  0.9309896  0.8968913  0.93064374 0.9687907
+ 0.8779704  0.8901367  0.93330896 0.97062176 0.9510702  0.90708417
+ 0.9448649  0.8980713 ]
+Training knockout patterns:   0%|          | 0/20 [00:00<?, ?it/s]Training knockout patterns:   5%|▌         | 1/20 [00:01<00:26,  1.42s/it]Training knockout patterns:  10%|█         | 2/20 [00:02<00:25,  1.41s/it]Training knockout patterns:  15%|█▌        | 3/20 [00:04<00:23,  1.40s/it]Training knockout patterns:  20%|██        | 4/20 [00:05<00:22,  1.39s/it]Training knockout patterns:  25%|██▌       | 5/20 [00:07<00:20,  1.40s/it]Training knockout patterns:  30%|███       | 6/20 [00:08<00:19,  1.41s/it]Training knockout patterns:  35%|███▌      | 7/20 [00:09<00:18,  1.40s/it]Training knockout patterns:  40%|████      | 8/20 [00:11<00:17,  1.44s/it]Training knockout patterns:  45%|████▌     | 9/20 [00:12<00:16,  1.48s/it]Training knockout patterns:  50%|█████     | 10/20 [00:14<00:14,  1.50s/it]Training knockout patterns:  55%|█████▌    | 11/20 [00:15<00:13,  1.51s/it]Training knockout patterns:  60%|██████    | 12/20 [00:17<00:12,  1.51s/it]Training knockout patterns:  65%|██████▌   | 13/20 [00:18<00:10,  1.50s/it]Training knockout patterns:  70%|███████   | 14/20 [00:20<00:08,  1.49s/it]Training knockout patterns:  75%|███████▌  | 15/20 [00:21<00:07,  1.48s/it]Training knockout patterns:  80%|████████  | 16/20 [00:23<00:05,  1.47s/it]Training knockout patterns:  85%|████████▌ | 17/20 [00:24<00:04,  1.47s/it]Training knockout patterns:  90%|█████████ | 18/20 [00:26<00:02,  1.46s/it]Training knockout patterns:  95%|█████████▌| 19/20 [00:27<00:01,  1.47s/it]Training knockout patterns: 100%|██████████| 20/20 [00:29<00:00,  1.47s/it]Training knockout patterns: 100%|██████████| 20/20 [00:29<00:00,  1.46s/it]
+  Step 6: DEBUG pre-update hard_accuracy = 0.8089
+  Step 6: DEBUG post-update hard_accuracy = 0.8247
+DEBUG: Step 6 - Pre-update: 0.8089, Post-update: 0.8247, Delta: +0.0157 (recovery)
+
+============================================================
+Step-by-step performance for ko_size=40:
+============================================================
+Step   Hard Acc   Soft Acc   Hard Loss    Soft Loss   
+------------------------------------------------------------
+0      1.0000     1.0000     0.000000     0.000012    
+1      1.0000     1.0000     0.000000     0.000029    
+2      1.0000     1.0000     0.000000     0.000072    
+3      1.0000     1.0000     0.000000     0.000104    
+4      1.0000     1.0000     0.000000     0.000137    
+5      1.0000     1.0000     0.000000     0.000178    
+6      0.8247     0.8247     8617.250000  5234.604980 
+7      0.8676     0.8674     6505.899902  2181.180176 
+8      0.9772     0.9686     1119.000000  448.663666  
+9      0.9952     0.9976     238.300003   38.099895   
+10     0.9999     1.0000     3.900000     0.903629    
+11     1.0000     1.0000     0.000000     0.031562    
+12     1.0000     1.0000     0.000000     0.004665    
+13     1.0000     1.0000     0.000000     0.002385    
+14     1.0000     1.0000     0.000000     0.002028    
+15     1.0000     1.0000     0.000000     0.002133    
+16     1.0000     1.0000     0.000000     0.002485    
+17     1.0000     1.0000     0.000000     0.002997    
+18     1.0000     1.0000     0.000000     0.003602    
+19     1.0000     1.0000     0.000000     0.004242    
+20     1.0000     1.0000     0.000000     0.004864    
+21     1.0000     1.0000     0.000000     0.005429    
+22     1.0000     1.0000     0.000000     0.005910    
+23     1.0000     1.0000     0.000000     0.006297    
+24     1.0000     1.0000     0.000000     0.006594    
+25     1.0000     1.0000     0.000000     0.006826    
+26     1.0000     1.0000     0.000000     0.007016    
+============================================================
+
+Per-pattern step-by-step accuracies shape: (27, 20)
+  Accuracies at damage step 6: [0.8787028  0.843099   0.81819665 0.843099   0.8196615  0.8163656
+ 0.78885907 0.76275635 0.78068036 0.9029948  0.824056   0.7753906
+ 0.84285486 0.82548016 0.8141276  0.7732748  0.8541667  0.8491618
+ 0.80126953 0.87943524]
+Training knockout patterns:   0%|          | 0/20 [00:00<?, ?it/s]Training knockout patterns:   5%|▌         | 1/20 [00:01<00:28,  1.51s/it]Training knockout patterns:  10%|█         | 2/20 [00:03<00:28,  1.56s/it]Training knockout patterns:  15%|█▌        | 3/20 [00:04<00:26,  1.58s/it]Training knockout patterns:  20%|██        | 4/20 [00:06<00:24,  1.56s/it]Training knockout patterns:  25%|██▌       | 5/20 [00:07<00:24,  1.60s/it]Training knockout patterns:  30%|███       | 6/20 [00:09<00:22,  1.63s/it]Training knockout patterns:  35%|███▌      | 7/20 [00:11<00:21,  1.66s/it]Training knockout patterns:  40%|████      | 8/20 [00:12<00:19,  1.66s/it]Training knockout patterns:  45%|████▌     | 9/20 [00:14<00:18,  1.67s/it]Training knockout patterns:  50%|█████     | 10/20 [00:16<00:16,  1.66s/it]Training knockout patterns:  55%|█████▌    | 11/20 [00:17<00:15,  1.67s/it]Training knockout patterns:  60%|██████    | 12/20 [00:19<00:13,  1.67s/it]Training knockout patterns:  65%|██████▌   | 13/20 [00:21<00:11,  1.67s/it]Training knockout patterns:  70%|███████   | 14/20 [00:22<00:10,  1.67s/it]Training knockout patterns:  75%|███████▌  | 15/20 [00:24<00:08,  1.68s/it]Training knockout patterns:  80%|████████  | 16/20 [00:26<00:06,  1.68s/it]Training knockout patterns:  85%|████████▌ | 17/20 [00:28<00:05,  1.69s/it]Training knockout patterns:  90%|█████████ | 18/20 [00:29<00:03,  1.70s/it]Training knockout patterns:  95%|█████████▌| 19/20 [00:31<00:01,  1.71s/it]Training knockout patterns: 100%|██████████| 20/20 [00:33<00:00,  1.70s/it]Training knockout patterns: 100%|██████████| 20/20 [00:33<00:00,  1.66s/it]
+  Step 6: DEBUG pre-update hard_accuracy = 0.7567
+  Step 6: DEBUG post-update hard_accuracy = 0.7531
+DEBUG: Step 6 - Pre-update: 0.7567, Post-update: 0.7531, Delta: -0.0036 (degradation)
+
+============================================================
+Step-by-step performance for ko_size=70:
+============================================================
+Step   Hard Acc   Soft Acc   Hard Loss    Soft Loss   
+------------------------------------------------------------
+0      1.0000     1.0000     0.000000     0.000012    
+1      1.0000     1.0000     0.000000     0.000029    
+2      1.0000     1.0000     0.000000     0.000072    
+3      1.0000     1.0000     0.000000     0.000104    
+4      1.0000     1.0000     0.000000     0.000137    
+5      1.0000     1.0000     0.000000     0.000178    
+6      0.7531     0.7537     12133.350586 7997.166504 
+7      0.7859     0.7935     10522.049805 3810.042725 
+8      0.9540     0.9415     2260.550049  840.271423  
+9      0.9937     0.9944     311.800018   56.686779   
+10     1.0000     1.0000     0.000000     0.991396    
+11     1.0000     1.0000     0.000000     0.042737    
+12     1.0000     1.0000     0.000000     0.016022    
+13     1.0000     1.0000     0.000000     0.006465    
+14     1.0000     1.0000     0.000000     0.005221    
+15     1.0000     1.0000     0.000000     0.005792    
+16     1.0000     1.0000     0.000000     0.007213    
+17     1.0000     1.0000     0.000000     0.009361    
+18     1.0000     1.0000     0.000000     0.012311    
+19     1.0000     1.0000     0.000000     0.016221    
+20     1.0000     1.0000     0.000000     0.021296    
+21     1.0000     1.0000     0.000000     0.027735    
+22     1.0000     1.0000     0.000000     0.035734    
+23     1.0000     1.0000     0.000000     0.045481    
+24     1.0000     1.0000     1.200000     0.057127    
+25     1.0000     1.0000     1.200000     0.070811    
+26     1.0000     1.0000     1.200000     0.086603    
+============================================================
+
+Per-pattern step-by-step accuracies shape: (27, 20)
+  Accuracies at damage step 6: [0.69921875 0.8144531  0.7809245  0.7402344  0.82356775 0.75
+ 0.7089844  0.73258466 0.7402344  0.7552084  0.75065106 0.74576825
+ 0.7259115  0.75325525 0.71158856 0.7235718  0.8222656  0.7389323
+ 0.75325525 0.79231775]
+Training knockout patterns:   0%|          | 0/20 [00:00<?, ?it/s]Training knockout patterns:   5%|▌         | 1/20 [00:01<00:33,  1.77s/it]Training knockout patterns:  10%|█         | 2/20 [00:03<00:31,  1.75s/it]Training knockout patterns:  15%|█▌        | 3/20 [00:05<00:29,  1.73s/it]Training knockout patterns:  20%|██        | 4/20 [00:06<00:27,  1.69s/it]Training knockout patterns:  25%|██▌       | 5/20 [00:08<00:25,  1.67s/it]Training knockout patterns:  30%|███       | 6/20 [00:10<00:23,  1.66s/it]Training knockout patterns:  35%|███▌      | 7/20 [00:11<00:21,  1.66s/it]Training knockout patterns:  40%|████      | 8/20 [00:13<00:19,  1.66s/it]Training knockout patterns:  45%|████▌     | 9/20 [00:15<00:18,  1.65s/it]Training knockout patterns:  50%|█████     | 10/20 [00:16<00:16,  1.65s/it]Training knockout patterns:  55%|█████▌    | 11/20 [00:18<00:14,  1.65s/it]Training knockout patterns:  60%|██████    | 12/20 [00:20<00:13,  1.66s/it]Training knockout patterns:  65%|██████▌   | 13/20 [00:21<00:11,  1.66s/it]Training knockout patterns:  70%|███████   | 14/20 [00:23<00:09,  1.66s/it]Training knockout patterns:  75%|███████▌  | 15/20 [00:25<00:08,  1.66s/it]Training knockout patterns:  80%|████████  | 16/20 [00:26<00:06,  1.66s/it]Training knockout patterns:  85%|████████▌ | 17/20 [00:28<00:05,  1.68s/it]Training knockout patterns:  90%|█████████ | 18/20 [00:30<00:03,  1.69s/it]Training knockout patterns:  95%|█████████▌| 19/20 [00:31<00:01,  1.69s/it]Training knockout patterns: 100%|██████████| 20/20 [00:33<00:00,  1.70s/it]Training knockout patterns: 100%|██████████| 20/20 [00:33<00:00,  1.68s/it]
+  Step 6: DEBUG pre-update hard_accuracy = 0.7218
+  Step 6: DEBUG post-update hard_accuracy = 0.7313
+DEBUG: Step 6 - Pre-update: 0.7218, Post-update: 0.7313, Delta: +0.0095 (recovery)
+
+============================================================
+Step-by-step performance for ko_size=90:
+============================================================
+Step   Hard Acc   Soft Acc   Hard Loss    Soft Loss   
+------------------------------------------------------------
+0      1.0000     1.0000     0.000000     0.000012    
+1      1.0000     1.0000     0.000000     0.000029    
+2      1.0000     1.0000     0.000000     0.000072    
+3      1.0000     1.0000     0.000000     0.000104    
+4      1.0000     1.0000     0.000000     0.000137    
+5      1.0000     1.0000     0.000000     0.000178    
+6      0.7313     0.7308     13206.500000 9060.120117 
+7      0.7651     0.7691     11545.799805 4523.367188 
+8      0.9251     0.9149     3679.199951  1377.894165 
+9      0.9838     0.9788     797.250000   188.469284  
+10     0.9997     1.0000     13.850000    2.852381    
+11     1.0000     1.0000     0.000000     0.039253    
+12     1.0000     1.0000     0.000000     0.008713    
+13     1.0000     1.0000     0.000000     0.004622    
+14     1.0000     1.0000     0.000000     0.003861    
+15     1.0000     1.0000     0.000000     0.004494    
+16     1.0000     1.0000     0.000000     0.006686    
+17     1.0000     1.0000     0.000000     0.010958    
+18     1.0000     1.0000     0.000000     0.017697    
+19     1.0000     1.0000     0.000000     0.026975    
+20     1.0000     1.0000     0.000000     0.038649    
+21     1.0000     1.0000     0.000000     0.052431    
+22     1.0000     1.0000     0.000000     0.067928    
+23     1.0000     1.0000     0.000000     0.084801    
+24     1.0000     1.0000     0.000000     0.102731    
+25     1.0000     1.0000     0.000000     0.121557    
+26     1.0000     1.0000     0.000000     0.141014    
+============================================================
+
+Per-pattern step-by-step accuracies shape: (27, 20)
+  Accuracies at damage step 6: [0.7447917  0.7373047  0.7089844  0.72981775 0.7363281  0.7089844
+ 0.71126306 0.77705896 0.7203776  0.75065106 0.71875    0.71988934
+ 0.773112   0.72998047 0.73795575 0.75065106 0.69856775 0.7426758
+ 0.7201335  0.7089844 ]
+Training knockout patterns:   0%|          | 0/20 [00:00<?, ?it/s]Training knockout patterns:   5%|▌         | 1/20 [00:01<00:32,  1.70s/it]Training knockout patterns:  10%|█         | 2/20 [00:03<00:30,  1.69s/it]Training knockout patterns:  15%|█▌        | 3/20 [00:05<00:28,  1.69s/it]Training knockout patterns:  20%|██        | 4/20 [00:06<00:26,  1.68s/it]Training knockout patterns:  25%|██▌       | 5/20 [00:08<00:25,  1.67s/it]Training knockout patterns:  30%|███       | 6/20 [00:10<00:23,  1.67s/it]Training knockout patterns:  35%|███▌      | 7/20 [00:11<00:21,  1.67s/it]Training knockout patterns:  40%|████      | 8/20 [00:13<00:20,  1.68s/it]Training knockout patterns:  45%|████▌     | 9/20 [00:15<00:18,  1.67s/it]Training knockout patterns:  50%|█████     | 10/20 [00:16<00:16,  1.64s/it]Training knockout patterns:  55%|█████▌    | 11/20 [00:18<00:14,  1.61s/it]Training knockout patterns:  60%|██████    | 12/20 [00:19<00:12,  1.57s/it]Training knockout patterns:  65%|██████▌   | 13/20 [00:21<00:10,  1.55s/it]Training knockout patterns:  70%|███████   | 14/20 [00:22<00:09,  1.51s/it]Training knockout patterns:  75%|███████▌  | 15/20 [00:24<00:07,  1.49s/it]Training knockout patterns:  80%|████████  | 16/20 [00:25<00:05,  1.46s/it]Training knockout patterns:  85%|████████▌ | 17/20 [00:26<00:04,  1.48s/it]Training knockout patterns:  90%|█████████ | 18/20 [00:28<00:02,  1.48s/it]Training knockout patterns:  95%|█████████▌| 19/20 [00:29<00:01,  1.48s/it]Training knockout patterns: 100%|██████████| 20/20 [00:31<00:00,  1.48s/it]Training knockout patterns: 100%|██████████| 20/20 [00:31<00:00,  1.57s/it]
+  Step 6: DEBUG pre-update hard_accuracy = 0.7204
+  Step 6: DEBUG post-update hard_accuracy = 0.7139
+DEBUG: Step 6 - Pre-update: 0.7204, Post-update: 0.7139, Delta: -0.0065 (degradation)
+
+============================================================
+Step-by-step performance for ko_size=120:
+============================================================
+Step   Hard Acc   Soft Acc   Hard Loss    Soft Loss   
+------------------------------------------------------------
+0      1.0000     1.0000     0.000000     0.000012    
+1      1.0000     1.0000     0.000000     0.000029    
+2      1.0000     1.0000     0.000000     0.000072    
+3      1.0000     1.0000     0.000000     0.000104    
+4      1.0000     1.0000     0.000000     0.000137    
+5      1.0000     1.0000     0.000000     0.000178    
+6      0.7139     0.7138     14062.299805 9771.890625 
+7      0.7243     0.7314     13551.950195 5623.141602 
+8      0.8831     0.8590     5745.350098  2308.596191 
+9      0.9626     0.9608     1838.700073  504.082764  
+10     0.9948     0.9992     253.199997   18.400253   
+11     1.0000     1.0000     0.200000     0.373928    
+12     1.0000     1.0000     0.000000     0.045084    
+13     1.0000     1.0000     0.000000     0.017539    
+14     1.0000     1.0000     0.000000     0.013130    
+15     1.0000     1.0000     0.000000     0.017674    
+16     1.0000     1.0000     0.000000     0.033437    
+17     1.0000     1.0000     0.000000     0.067736    
+18     1.0000     1.0000     0.000000     0.129666    
+19     1.0000     1.0000     0.000000     0.228465    
+20     1.0000     1.0000     0.900000     0.372576    
+21     1.0000     1.0000     2.400000     0.569770    
+22     1.0000     1.0000     2.400000     0.826454    
+23     1.0000     1.0000     2.400000     1.147223    
+24     0.9996     1.0000     18.400000    1.533859    
+25     0.9996     1.0000     18.400000    1.987061    
+26     0.9992     1.0000     38.049999    2.504504    
+============================================================
+
+Per-pattern step-by-step accuracies shape: (27, 20)
+  Accuracies at damage step 6: [0.7122396  0.72721356 0.73502606 0.75065106 0.6972656  0.7089844
+ 0.69856775 0.7089844  0.6998698  0.7089844  0.6920573  0.7044271
+ 0.7089844  0.73763025 0.69856775 0.7089844  0.7399089  0.7209066
+ 0.7089844  0.7097982 ]
+Training knockout patterns:   0%|          | 0/20 [00:00<?, ?it/s]Training knockout patterns:   5%|▌         | 1/20 [00:01<00:28,  1.49s/it]Training knockout patterns:  10%|█         | 2/20 [00:02<00:25,  1.42s/it]Training knockout patterns:  15%|█▌        | 3/20 [00:04<00:23,  1.38s/it]Training knockout patterns:  20%|██        | 4/20 [00:05<00:22,  1.40s/it]Training knockout patterns:  25%|██▌       | 5/20 [00:07<00:21,  1.42s/it]Training knockout patterns:  30%|███       | 6/20 [00:08<00:20,  1.43s/it]Training knockout patterns:  35%|███▌      | 7/20 [00:09<00:18,  1.44s/it]Training knockout patterns:  40%|████      | 8/20 [00:11<00:17,  1.44s/it]Training knockout patterns:  45%|████▌     | 9/20 [00:12<00:15,  1.45s/it]Training knockout patterns:  50%|█████     | 10/20 [00:14<00:14,  1.44s/it]Training knockout patterns:  55%|█████▌    | 11/20 [00:15<00:13,  1.46s/it]Training knockout patterns:  60%|██████    | 12/20 [00:17<00:11,  1.44s/it]Training knockout patterns:  65%|██████▌   | 13/20 [00:18<00:09,  1.42s/it]Training knockout patterns:  70%|███████   | 14/20 [00:19<00:08,  1.41s/it]Training knockout patterns:  75%|███████▌  | 15/20 [00:21<00:07,  1.41s/it]Training knockout patterns:  80%|████████  | 16/20 [00:22<00:05,  1.41s/it]Training knockout patterns:  85%|████████▌ | 17/20 [00:24<00:04,  1.41s/it]Training knockout patterns:  90%|█████████ | 18/20 [00:25<00:02,  1.42s/it]Training knockout patterns:  95%|█████████▌| 19/20 [00:27<00:01,  1.42s/it]Training knockout patterns: 100%|██████████| 20/20 [00:28<00:00,  1.42s/it]Training knockout patterns: 100%|██████████| 20/20 [00:28<00:00,  1.43s/it]
+  Step 6: DEBUG pre-update hard_accuracy = 0.7109
+  Step 6: DEBUG post-update hard_accuracy = 0.7098
+DEBUG: Step 6 - Pre-update: 0.7109, Post-update: 0.7098, Delta: -0.0010 (degradation)
+
+============================================================
+Step-by-step performance for ko_size=150:
+============================================================
+Step   Hard Acc   Soft Acc   Hard Loss    Soft Loss   
+------------------------------------------------------------
+0      1.0000     1.0000     0.000000     0.000012    
+1      1.0000     1.0000     0.000000     0.000029    
+2      1.0000     1.0000     0.000000     0.000072    
+3      1.0000     1.0000     0.000000     0.000104    
+4      1.0000     1.0000     0.000000     0.000137    
+5      1.0000     1.0000     0.000000     0.000178    
+6      0.7098     0.7101     14262.400391 10704.361328
+7      0.7164     0.7200     13937.600586 7078.688965 
+8      0.8318     0.8062     8268.000000  3509.512939 
+9      0.9496     0.9405     2476.350098  707.053040  
+10     0.9986     0.9998     69.750000    14.960629   
+11     1.0000     1.0000     0.000000     0.137986    
+12     1.0000     1.0000     0.000000     0.021274    
+13     1.0000     1.0000     0.000000     0.007609    
+14     1.0000     1.0000     0.000000     0.008463    
+15     1.0000     1.0000     0.000000     0.027076    
+16     0.9999     1.0000     6.400000     0.109114    
+17     0.9991     1.0000     42.600002    0.337089    
+18     0.9979     1.0000     101.400002   0.793570    
+19     0.9973     1.0000     135.100006   1.544721    
+20     0.9972     0.9999     136.000000   2.636567    
+21     0.9961     0.9998     192.400009   4.098556    
+22     0.9961     0.9998     192.699997   5.939960    
+23     0.9950     0.9997     245.199997   8.159720    
+24     0.9944     0.9994     276.149994   10.737830   
+25     0.9946     0.9990     265.600006   13.637088   
+26     0.9935     0.9985     320.899994   16.818684   
+============================================================
+
+Per-pattern step-by-step accuracies shape: (27, 20)
+  Accuracies at damage step 6: [0.7089844  0.68815106 0.7089844  0.7089844  0.7089844  0.7089844
+ 0.7089844  0.71940106 0.7089844  0.75065106 0.69856775 0.7089844
+ 0.69856775 0.7089844  0.7089844  0.70377606 0.7089844  0.7089844
+ 0.72200525 0.7076823 ]
+Training knockout patterns:   0%|          | 0/20 [00:00<?, ?it/s]Training knockout patterns:   5%|▌         | 1/20 [00:01<00:26,  1.40s/it]Training knockout patterns:  10%|█         | 2/20 [00:02<00:25,  1.41s/it]Training knockout patterns:  15%|█▌        | 3/20 [00:04<00:23,  1.41s/it]Training knockout patterns:  20%|██        | 4/20 [00:05<00:22,  1.42s/it]Training knockout patterns:  25%|██▌       | 5/20 [00:07<00:21,  1.43s/it]Training knockout patterns:  30%|███       | 6/20 [00:08<00:19,  1.42s/it]Training knockout patterns:  35%|███▌      | 7/20 [00:09<00:18,  1.42s/it]Training knockout patterns:  40%|████      | 8/20 [00:11<00:17,  1.43s/it]Training knockout patterns:  45%|████▌     | 9/20 [00:12<00:15,  1.43s/it]Training knockout patterns:  50%|█████     | 10/20 [00:14<00:14,  1.42s/it]Training knockout patterns:  55%|█████▌    | 11/20 [00:15<00:12,  1.40s/it]Training knockout patterns:  60%|██████    | 12/20 [00:16<00:11,  1.40s/it]Training knockout patterns:  65%|██████▌   | 13/20 [00:18<00:09,  1.39s/it]Training knockout patterns:  70%|███████   | 14/20 [00:19<00:08,  1.38s/it]Training knockout patterns:  75%|███████▌  | 15/20 [00:21<00:06,  1.37s/it]Training knockout patterns:  80%|████████  | 16/20 [00:22<00:05,  1.37s/it]Training knockout patterns:  85%|████████▌ | 17/20 [00:23<00:04,  1.36s/it]Training knockout patterns:  90%|█████████ | 18/20 [00:25<00:02,  1.38s/it]Training knockout patterns:  95%|█████████▌| 19/20 [00:26<00:01,  1.42s/it]Training knockout patterns: 100%|██████████| 20/20 [00:28<00:00,  1.44s/it]Training knockout patterns: 100%|██████████| 20/20 [00:28<00:00,  1.41s/it]
+  Step 6: DEBUG pre-update hard_accuracy = 0.7090
+  Step 6: DEBUG post-update hard_accuracy = 0.7085
+DEBUG: Step 6 - Pre-update: 0.7090, Post-update: 0.7085, Delta: -0.0005 (degradation)
+
+============================================================
+Step-by-step performance for ko_size=180:
+============================================================
+Step   Hard Acc   Soft Acc   Hard Loss    Soft Loss   
+------------------------------------------------------------
+0      1.0000     1.0000     0.000000     0.000012    
+1      1.0000     1.0000     0.000000     0.000029    
+2      1.0000     1.0000     0.000000     0.000072    
+3      1.0000     1.0000     0.000000     0.000104    
+4      1.0000     1.0000     0.000000     0.000137    
+5      1.0000     1.0000     0.000000     0.000178    
+6      0.7085     0.7089     14329.600586 11335.553711
+7      0.7113     0.7144     14189.600586 7908.490723 
+8      0.7846     0.7761     10586.799805 4544.907715 
+9      0.9267     0.9171     3601.000000  1215.119019 
+10     0.9975     0.9991     120.700005   32.297535   
+11     1.0000     1.0000     0.100000     0.308804    
+12     1.0000     1.0000     0.500000     0.061611    
+13     1.0000     1.0000     0.000000     0.012868    
+14     1.0000     1.0000     0.000000     0.019262    
+15     1.0000     1.0000     0.000000     0.095083    
+16     1.0000     1.0000     0.000000     0.389091    
+17     0.9983     1.0000     84.500000    1.155485    
+18     0.9974     0.9999     127.800003   2.681445    
+19     0.9974     0.9999     128.400009   5.227654    
+20     0.9963     0.9998     180.300003   8.987239    
+21     0.9947     0.9992     261.500000   14.063074   
+22     0.9908     0.9986     452.100006   20.470076   
+23     0.9900     0.9983     492.800018   28.128729   
+24     0.9884     0.9971     568.200012   36.921658   
+25     0.9869     0.9958     644.600037   46.675209   
+26     0.9859     0.9948     692.600037   57.206207   
+============================================================
+
+Per-pattern step-by-step accuracies shape: (27, 20)
+  Accuracies at damage step 6: [0.7089844  0.7089844  0.7089844  0.7089844  0.7089844  0.7089844
+ 0.7089844  0.7089844  0.7089844  0.7089844  0.7089844  0.7089844
+ 0.69856775 0.7089844  0.7089844  0.7089844  0.7089844  0.7089844
+ 0.7089844  0.7089844 ]
+Training knockout patterns:   0%|          | 0/20 [00:00<?, ?it/s]Training knockout patterns:   5%|▌         | 1/20 [00:01<00:28,  1.50s/it]Training knockout patterns:  10%|█         | 2/20 [00:03<00:27,  1.50s/it]Training knockout patterns:  15%|█▌        | 3/20 [00:04<00:25,  1.50s/it]Training knockout patterns:  20%|██        | 4/20 [00:06<00:24,  1.50s/it]Training knockout patterns:  25%|██▌       | 5/20 [00:07<00:22,  1.50s/it]Training knockout patterns:  30%|███       | 6/20 [00:08<00:20,  1.50s/it]Training knockout patterns:  35%|███▌      | 7/20 [00:10<00:19,  1.49s/it]Training knockout patterns:  40%|████      | 8/20 [00:12<00:18,  1.51s/it]Training knockout patterns:  45%|████▌     | 9/20 [00:13<00:16,  1.51s/it]Training knockout patterns:  50%|█████     | 10/20 [00:15<00:15,  1.51s/it]Training knockout patterns:  55%|█████▌    | 11/20 [00:16<00:13,  1.52s/it]Training knockout patterns:  60%|██████    | 12/20 [00:18<00:12,  1.52s/it]Training knockout patterns:  65%|██████▌   | 13/20 [00:19<00:10,  1.51s/it]Training knockout patterns:  70%|███████   | 14/20 [00:21<00:08,  1.48s/it]Training knockout patterns:  75%|███████▌  | 15/20 [00:22<00:07,  1.48s/it]Training knockout patterns:  80%|████████  | 16/20 [00:24<00:06,  1.50s/it]Training knockout patterns:  85%|████████▌ | 17/20 [00:25<00:04,  1.50s/it]Training knockout patterns:  90%|█████████ | 18/20 [00:27<00:03,  1.50s/it]Training knockout patterns:  95%|█████████▌| 19/20 [00:28<00:01,  1.48s/it]Training knockout patterns: 100%|██████████| 20/20 [00:29<00:00,  1.46s/it]Training knockout patterns: 100%|██████████| 20/20 [00:29<00:00,  1.49s/it]
+  Step 6: DEBUG pre-update hard_accuracy = 0.7090
+  Step 6: DEBUG post-update hard_accuracy = 0.7090
+DEBUG: Step 6 - Pre-update: 0.7090, Post-update: 0.7090, Delta: +0.0000 (degradation)
+
+============================================================
+Step-by-step performance for ko_size=210:
+============================================================
+Step   Hard Acc   Soft Acc   Hard Loss    Soft Loss   
+------------------------------------------------------------
+0      1.0000     1.0000     0.000000     0.000012    
+1      1.0000     1.0000     0.000000     0.000029    
+2      1.0000     1.0000     0.000000     0.000072    
+3      1.0000     1.0000     0.000000     0.000104    
+4      1.0000     1.0000     0.000000     0.000137    
+5      1.0000     1.0000     0.000000     0.000178    
+6      0.7090     0.7090     14304.000000 12241.739258
+7      0.7101     0.7105     14247.799805 9176.717773 
+8      0.7551     0.7385     12039.650391 5739.381348 
+9      0.8991     0.8824     4960.850098  2010.495728 
+10     0.9859     0.9944     691.650024   88.209068   
+11     1.0000     1.0000     0.000000     0.735929    
+12     1.0000     1.0000     0.500000     0.078568    
+13     1.0000     1.0000     0.000000     0.014629    
+14     1.0000     1.0000     0.000000     0.017809    
+15     1.0000     1.0000     0.000000     0.116383    
+16     0.9993     1.0000     34.400002    0.642112    
+17     0.9968     1.0000     159.400009   2.435214    
+18     0.9940     0.9996     293.500000   6.699716    
+19     0.9919     0.9991     397.300018   14.679082   
+20     0.9905     0.9989     465.300018   27.337107   
+21     0.9850     0.9971     738.200012   45.047451   
+22     0.9748     0.9917     1236.800049  67.493652   
+23     0.9746     0.9894     1249.500000  93.835503   
+24     0.9743     0.9880     1262.300049  122.973145  
+25     0.9743     0.9870     1262.599976  153.750397  
+26     0.9734     0.9861     1306.800049  185.118759  
+============================================================
+
+Per-pattern step-by-step accuracies shape: (27, 20)
+  Accuracies at damage step 6: [0.7089844 0.7089844 0.7089844 0.7089844 0.7089844 0.7089844 0.7089844
+ 0.7089844 0.7089844 0.7089844 0.7089844 0.7089844 0.7089844 0.7089844
+ 0.7089844 0.7089844 0.7089844 0.7089844 0.7089844 0.7089844]
+Accuracy plot saved to: reports/figures/rev_damage_scale/accuracy_scaled10_40_70_90_120_150_180_210_p20_reversible_runff2htrae_20260504_161246/accuracy_vs_distance.png
+Damage size vs accuracy plot saved to: reports/figures/rev_damage_scale/accuracy_scaled10_40_70_90_120_150_180_210_p20_reversible_runff2htrae_20260504_161246/damage_size_vs_accuracy.png
+{
+  "num_patterns": 320,
+  "mean_overall_bitwise_fraction_diff": 0.1901863219246032,
+  "mean_per_gate_mean_hamming": 0.19018633289961145,
+  "mean_final_hard_accuracy": 0.9969388356432318,
+  "mean_final_hard_loss": 150.4625,
+  "output_path": "/home/marcello/workspace/boolean_nca_cc/reports/figures/rev_damage_scale/accuracy_scaled10_40_70_90_120_150_180_210_p20_reversible_runff2htrae_20260504_161246",
+  "pairwise_matrix_csv": "/home/marcello/workspace/boolean_nca_cc/reports/figures/rev_damage_scale/accuracy_scaled10_40_70_90_120_150_180_210_p20_reversible_runff2htrae_20260504_161246/pairwise_matrix.csv",
+  "accuracy_plot_path": "/home/marcello/workspace/boolean_nca_cc/reports/figures/rev_damage_scale/accuracy_scaled10_40_70_90_120_150_180_210_p20_reversible_runff2htrae_20260504_161246/accuracy_vs_distance.png",
+  "damage_size_plot_path": "/home/marcello/workspace/boolean_nca_cc/reports/figures/rev_damage_scale/accuracy_scaled10_40_70_90_120_150_180_210_p20_reversible_runff2htrae_20260504_161246/damage_size_vs_accuracy.png"
+}

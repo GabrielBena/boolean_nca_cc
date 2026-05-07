@@ -1,0 +1,107 @@
+wandb: [wandb.Api()] Loaded credentials for https://api.wandb.ai from /home/marcello/.netrc.
+wandb: WARNING A graphql request initiated by the public wandb API timed out (timeout=19 sec). Create a new API with an integer timeout larger than 19, e.g., `api = wandb.Api(timeout=29)` to increase the graphql timeout.
+Traceback (most recent call last):
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/urllib3/connectionpool.py", line 534, in _make_request
+    response = conn.getresponse()
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/urllib3/connection.py", line 571, in getresponse
+    httplib_response = super().getresponse()
+  File "/home/marcello/.local/share/uv/python/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/http/client.py", line 1450, in getresponse
+    response.begin()
+    ~~~~~~~~~~~~~~^^
+  File "/home/marcello/.local/share/uv/python/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/http/client.py", line 336, in begin
+    version, status, reason = self._read_status()
+                              ~~~~~~~~~~~~~~~~~^^
+  File "/home/marcello/.local/share/uv/python/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/http/client.py", line 297, in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/home/marcello/.local/share/uv/python/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/socket.py", line 725, in readinto
+    return self._sock.recv_into(b)
+           ~~~~~~~~~~~~~~~~~~~~^^^
+  File "/home/marcello/.local/share/uv/python/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/ssl.py", line 1304, in recv_into
+    return self.read(nbytes, buffer)
+           ~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "/home/marcello/.local/share/uv/python/cpython-3.14.3-linux-x86_64-gnu/lib/python3.14/ssl.py", line 1138, in read
+    return self._sslobj.read(len, buffer)
+           ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+TimeoutError: The read operation timed out
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/requests/adapters.py", line 644, in send
+    resp = conn.urlopen(
+        method=request.method,
+    ...<9 lines>...
+        chunked=chunked,
+    )
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/urllib3/connectionpool.py", line 841, in urlopen
+    retries = retries.increment(
+        method, url, error=new_e, _pool=self, _stacktrace=sys.exc_info()[2]
+    )
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/urllib3/util/retry.py", line 490, in increment
+    raise reraise(type(error), error, _stacktrace)
+          ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/urllib3/util/util.py", line 39, in reraise
+    raise value
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/urllib3/connectionpool.py", line 787, in urlopen
+    response = self._make_request(
+        conn,
+    ...<10 lines>...
+        **response_kw,
+    )
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/urllib3/connectionpool.py", line 536, in _make_request
+    self._raise_timeout(err=e, url=url, timeout_value=read_timeout)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/urllib3/connectionpool.py", line 367, in _raise_timeout
+    raise ReadTimeoutError(
+        self, url, f"Read timed out. (read timeout={timeout_value})"
+    ) from err
+urllib3.exceptions.ReadTimeoutError: HTTPSConnectionPool(host='api.wandb.ai', port=443): Read timed out. (read timeout=19)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/marcello/workspace/boolean_nca_cc/experiments/hamming_distance_plot.py", line 877, in <module>
+    main()
+    ~~~~^^
+  File "/home/marcello/workspace/boolean_nca_cc/experiments/hamming_distance_plot.py", line 312, in main
+    cfg, _, _ = load_config_from_wandb(**load_kwargs)
+                ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "/home/marcello/workspace/boolean_nca_cc/boolean_nca_cc/training/checkpointing.py", line 547, in load_config_from_wandb
+    if not artifacts:
+           ^^^^^^^^^
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/wandb/apis/paginator.py", line 178, in __len__
+    self._load_page()
+    ~~~~~~~~~~~~~~~^^
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/wandb/apis/paginator.py", line 80, in _load_page
+    self._update_response()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/wandb/apis/public/artifacts.py", line 814, in _update_response
+    data = self.client.execute(self.QUERY, variable_values=self.variables)
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/wandb/apis/public/api.py", line 113, in execute
+    return self._execute_decorated(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/wandb/sdk/lib/retry.py", line 322, in wrapped_fn
+    return retrier(*args, **kargs)
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/wandb/sdk/lib/retry.py", line 160, in __call__
+    result = self._call_fn(*args, **kwargs)
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/wandb/apis/public/api.py", line 125, in _wrapped
+    return self._client.execute(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/wandb/vendor/gql-0.2.0/wandb_gql/client.py", line 52, in execute
+    result = self._get_result(document, *args, **kwargs)
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/wandb/vendor/gql-0.2.0/wandb_gql/client.py", line 60, in _get_result
+    return self.transport.execute(document, *args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/wandb/sdk/lib/gql_request.py", line 70, in execute
+    request = self.session.post(self.url, **post_args)
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/requests/sessions.py", line 637, in post
+    return self.request("POST", url, data=data, json=json, **kwargs)
+           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/requests/sessions.py", line 589, in request
+    resp = self.send(prep, **send_kwargs)
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/requests/sessions.py", line 703, in send
+    r = adapter.send(request, **kwargs)
+  File "/home/marcello/workspace/boolean_nca_cc/.venv/lib/python3.14/site-packages/requests/adapters.py", line 690, in send
+    raise ReadTimeout(e, request=request)
+requests.exceptions.ReadTimeout: HTTPSConnectionPool(host='api.wandb.ai', port=443): Read timed out. (read timeout=19)

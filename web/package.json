@@ -1,0 +1,23 @@
+{
+  "name": "boolean-nca-cc-web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "spike": "node --experimental-vm-modules --import tsx spike/run_spike.ts"
+  },
+  "dependencies": {
+    "@jax-js/jax": "0.1.11",
+    "@jax-js/optax": "0.1.2"
+  },
+  "devDependencies": {
+    "tsx": "4.21.0",
+    "typescript": "6.0.3",
+    "vite": "8.0.11",
+    "vitest": "4.1.5"
+  }
+}

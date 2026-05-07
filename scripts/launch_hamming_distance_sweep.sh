@@ -24,8 +24,8 @@ WANDB_PROJECT=boolean_nca_cc  # sweep f1pktfh5 lives in the underscored project
 FILENAME=latest_checkpoint  # use final training state, not first-time-at-1.0 best checkpoint
 
 # (run_id, training_seed) — pattern_seed = 1000 + training_seed
-RUN_IDS=(ap1b5iyb 0kbp45do 43mjb3pf brt24qbj ig4cnjty)
-PAT_SEEDS=(1014    1123     1042     1456     1789)
+RUN_IDS=(5a66oyt1 z434epjj uiyiujey brt24qbj 1oh9d7h9)
+PAT_SEEDS=(1014    1123     1042     1456     1444)
 
 # Where each run dumps its summary.csv. Single shared timestamp lets us pre-compute
 # all 5 output paths and emit a manifest before launching any python process.
