@@ -1,0 +1,17 @@
+{
+  "name": "sodc-web-demo",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "description": "In-browser interactive demo of the SODC TMT policy.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "vite": "^5.0.0"
+  }
+}
