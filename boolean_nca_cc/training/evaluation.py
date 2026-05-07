@@ -840,6 +840,9 @@ def evaluate_model_stepwise_generator(
     permanent_damage: float = 1.0,
     # Delayed probabilistic damage onset
     p_fault_onset_step: int = 0,
+    # Pre-existing damage carried in from outside the generator (e.g. shotgun damage
+    # applied by the live demo before continuous repair starts).
+    initial_gate_knockout_mask: jp.ndarray | None = None,
     verbose: bool = False,
 ) -> Generator[StepResult, None, None]:
     """
@@ -874,6 +877,9 @@ def evaluate_model_stepwise_generator(
             1.0 = always permanent, 0.0 = always temporary, 0.5 = independent coin flip
             per gate per timestep.
         p_fault_onset_step: Step at which probabilistic damage starts (0 = from the start)
+        initial_gate_knockout_mask: Pre-existing damage mask to seed the graph with.
+            Flat ``[total_gates]`` (or layered list) of 0.0/1.0 values, matching
+            ``build_graph``'s convention. ``None`` = no prior damage (default).
 
     Yields:
         StepResult: Results from each step including loss, accuracy, predictions, and updated logits
@@ -884,7 +890,7 @@ def evaluate_model_stepwise_generator(
     # Store original shapes for reconstruction
     logits_original_shapes = [logit.shape for logit in logits]
 
-    # Build initial graph
+    # Build initial graph (carrying any prior damage in via the mask).
     graph = build_graph(
         logits,
         wires,
@@ -893,7 +899,7 @@ def evaluate_model_stepwise_generator(
         circuit_hidden_dim,
         loss_value=0.0,
         bidirectional_edges=bidirectional_edges,
-        gate_knockout_mask=None,
+        gate_knockout_mask=initial_gate_knockout_mask,
     )
 
     # Initialize graph with loss computation (uses unified function)

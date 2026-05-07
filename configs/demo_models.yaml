@@ -1,0 +1,97 @@
+# =============================================================================
+# Live demo: pre-trained model gallery
+# =============================================================================
+#
+# This file curates the pre-trained models that the live demo exposes as a
+# clickable gallery, decoupling the *user-facing* notion of "the X paper
+# figure" from the *back-end* W&B run IDs.
+#
+# Each entry maps a (task × recipe) pair to a W&B run. The GUI builds a
+# two-axis dropdown:
+#
+#   Task   ∈ {reverse, add, binary_multiply, ...}
+#   Recipe ∈ {fixed_no_damage, fixed_damage, random_no_damage, random_damage}
+#
+# Combinations with `run_id: null` are greyed out in the gallery — useful
+# placeholders to mark "models we plan to train" without breaking the UI.
+#
+# Add new entries freely; the demo will pick them up at startup.
+# =============================================================================
+
+# Defaults applied to every entry unless overridden inline.
+defaults:
+  entity: gbena
+  project: boolean-nca-cc
+
+# Display names for the four training recipes (paper terminology).
+# These appear in the GUI; tweak the labels here if the wording shifts.
+recipes:
+  fixed_no_damage:
+    label: "Fixed wires · clean"
+    description: "Regime I, no damage during training. Zero-shot resilience tests OOD damage."
+  fixed_damage:
+    label: "Fixed wires · damage-trained"
+    description: "Regime I, stochastic gate failure during training. §4.1 fig. 2 bottom row."
+  random_damage:
+    label: "Random wires · damage-trained"
+    description: "Regime III, random wiring + damage. §4.3 fig. 4."
+
+# -----------------------------------------------------------------------------
+# Gallery entries. Order matters only insofar as the GUI iterates this list
+# when building dropdown options.
+# -----------------------------------------------------------------------------
+models:
+
+  # ---- Task: Bit reversal (reverse) -----------------------------------------
+  - task: reverse
+    recipe: fixed_no_damage
+    run_id: vt9awu7h  # TODO(gbena): paper run ID for clean fixed-wire reverse
+    prefer_metric: eval_in_test_hard_accuracy
+
+  - task: reverse
+    recipe: fixed_damage
+    run_id: y2swhhrl
+    prefer_metric: eval_damaged_in_test_hard_accuracy
+    notes: |
+      Paper figure 2 bottom row "Learned Resilience".
+      Picked from boolean_nca_exploration.ipynb cell 1.
+
+  - task: reverse
+    recipe: random_damage
+    run_id: 1u5ssulx
+    prefer_metric: eval_damaged_out_test_hard_accuracy
+    notes: |
+      Paper figure 4 random-topology reverse.
+      Picked from boolean_nca_exploration.ipynb cell 1 ("Random wires, damages, reverse task").
+
+  # ---- Task: Split addition (add) -------------------------------------------
+  - task: add
+    recipe: fixed_no_damage
+    run_id: 84cbqbag  # TODO(gbena)
+    prefer_metric: eval_in_test_hard_accuracy
+
+  - task: add
+    recipe: fixed_damage
+    run_id: wjk2hfyu  # TODO(gbena)
+    prefer_metric: eval_damaged_in_test_hard_accuracy
+
+  - task: add
+    recipe: random_damage
+    run_id: 91fv6lpm  # TODO(gbena)
+    prefer_metric: eval_damaged_out_test_hard_accuracy
+
+  # ---- Task: Split multiplication (binary_multiply) -------------------------
+  - task: binary_multiply
+    recipe: fixed_no_damage
+    run_id: pvi2s1hw  # TODO(gbena)
+    prefer_metric: eval_in_test_hard_accuracy
+
+  - task: binary_multiply
+    recipe: fixed_damage
+    run_id: ouafszyh  # TODO(gbena)
+    prefer_metric: eval_damaged_in_test_hard_accuracy
+
+  - task: binary_multiply
+    recipe: random_damage
+    run_id: zcfqv5bq  # TODO(gbena)
+    prefer_metric: eval_damaged_out_test_hard_accuracy

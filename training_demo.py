@@ -1,69 +1,71 @@
 #!/usr/bin/env python3
 """
-Training-compatible boolean circuits demo using shared infrastructure.
+Live demo for Self-Organising Digital Circuits.
 
-This demo shows live circuit optimization where:
-- Backprop: Direct gradient-based optimization of circuit logits
-- GNN/Self-Attention: Pre-trained models suggest logit improvements (frozen models)
+This is the GUI layer on top of ``boolean_nca_cc.demo.DemoSession``,
+which carries all the actual logic (config loading, pool init,
+optimisation steps, damage, etc.). Everything visible here is purely
+about interacting with that session: drawing the circuit, running plots,
+exposing the four paper regimes (I-IV) as one-click presets, and a
+small set of toggles that map directly onto the training config schema.
 
-No model training occurs - only circuit logit optimization.
+Default boot-up: Backprop on the default Hydra config (configs/config.yaml),
+no model loaded. Hit *Load Model from W&B* to pull in a trained TMT
+policy and explore the four regimes from the manuscript.
 """
+
+from __future__ import annotations
 
 import logging
 
 import IPython
-import jax
 import jax.numpy as jp
 import numpy as np
-import optax
-from flax import nnx
+from imgui_bundle import imgui, immapp, immvision, implot
 
-# Import model components
-from imgui_bundle import (
-    hello_imgui,
-    imgui,
-    immapp,
-    implot,
+from boolean_nca_cc.demo import (
+    REGIME_DESCRIPTIONS,
+    REGIME_LABELS,
+    SCALE_FREE_WIDTH_FACTORS,
+    DemoSession,
+    Method,
+    Regime,
+    WandbCoordinates,
+    WiringMode,
+    damage_status_string,
+    list_available_tasks,
 )
+from boolean_nca_cc.perf import FrameProfiler
 
-from boolean_nca_cc import generate_layer_sizes
-
-# Import shared training infrastructure
-from boolean_nca_cc.circuits.model import gen_circuit, run_circuit
-from boolean_nca_cc.circuits.tasks import TASKS, get_task_data
-
-# Import training loop functions
-from boolean_nca_cc.training.checkpointing import (
-    load_config_from_wandb,
-    load_model_from_config_and_checkpoint,
-)
-from boolean_nca_cc.training.eval_datasets import (
-    _create_circuit_batch_with_pattern,
-)
-from boolean_nca_cc.training.evaluation import (
-    evaluate_model_stepwise_generator,
-    get_loss_from_wires_logits,
-)
-
-# Import genetic mutation functions
-from boolean_nca_cc.training.pool.perturbation import mutate_wires_swap
-
-# Configure logging to show INFO messages
 logging.basicConfig(level=logging.INFO, format="%(name)s - %(levelname)s - %(message)s")
 
-################## circuit gate and wire use analysis ##################
+
+# ---------------------------------------------------------------------------
+# Lightweight visualisation helpers
+# ---------------------------------------------------------------------------
 
 
-def calc_lut_input_use(logits):
-    """
-    Computes which inputs are used by each LUT (lookup table) gate based on its logits.
+def zoom(a: np.ndarray, k: int = 2) -> np.ndarray:
+    """Repeat-pixel zoom for image visualisation."""
+    return np.repeat(np.repeat(a, k, 1), k, 0)
 
-    Args:
-        logits: ndarray of shape (..., lut), where the last dimension represents the LUT truth table.
 
-    Returns:
-        input_use_mask: ndarray of shape (..., arity), boolean mask indicating for each LUT which inputs affect its output.
-    """
+# Visualisation budget: cap the texture-side column count so that
+# (a) the GPU isn't filtering 32 k pixels down to 700, which produced
+# the "mostly black" mid-gray result for binary inputs, and
+# (b) we feed immvision a contiguously-sized array we can actually
+# read back if we ever need to. 512 keeps the texture cheap while
+# preserving enough column resolution to read the case axis.
+_MAX_PANEL_COLS = 512
+
+
+def is_point_in_box(p0, p1, p) -> bool:
+    (x0, y0), (x1, y1), (x, y) = p0, p1, p
+    return (x0 <= x <= x1) and (y0 <= y <= y1)
+
+
+def calc_lut_input_use(logits: jp.ndarray) -> jp.ndarray:
+    """Boolean mask: which inputs of each LUT actually influence its output."""
     luts = jp.sign(logits) * 0.5 + 0.5
     arity = luts.shape[-1].bit_length() - 1
     luts = luts.reshape(luts.shape[:-1] + (2,) * arity)
@@ -77,19 +79,6 @@ def calc_lut_input_use(logits):
 
 
 def propagate_gate_use(input_n, wires, logits, output_use):
-    """
-    Propagates gate usage backwards through a layer, determining which previous gates and wires are used.
-
-    Args:
-        input_n: int, number of inputs to the current layer.
-        wires: ndarray, wire indices for the current layer.
-        logits: ndarray, LUT logits for the current layer.
-        output_use: ndarray, boolean mask indicating which gates in the current layer are used.
-
-    Returns:
-        prev_gate_use: ndarray of shape (input_n,), boolean mask indicating which previous gates are used.
-        wire_use_mask: ndarray, boolean mask indicating which wires in the current layer are used.
-    """
     output_use = output_use.reshape(logits.shape[:2])
     gate_input_use = calc_lut_input_use(logits) * output_use
     wire_use_mask = gate_input_use.any(-1)
@@ -100,19 +89,8 @@ def propagate_gate_use(input_n, wires, logits, output_use):
 
 
 def calc_gate_use_masks(input_n, wires, logits):
-    """
-    Computes masks indicating which gates and wires are used throughout a multi-layer circuit, propagating usage from outputs to inputs.
-
-    Args:
-        input_n: int, number of input gates to the first layer.
-        wires: list of ndarrays, each specifying the wire indices for a layer.
-        logits: list of ndarrays, each specifying the LUT logits for a layer.
-
-    Returns:
-        gate_masks: list of ndarrays, each a boolean mask for gates in each layer (from input to output).
-        wire_masks: list of ndarrays, each a boolean mask for wires in each layer (from input to output).
-    """
-    layer_sizes = [input_n] + [np.prod(log.shape[:2]) for log in logits]
+    """Backwards-traverse the circuit to figure out which gates affect output."""
+    layer_sizes = [input_n] + [int(np.prod(log.shape[:2])) for log in logits]
     gate_use_mask = np.ones(layer_sizes[-1], np.bool_)
     gate_masks = [gate_use_mask]
     wire_masks = []
@@ -125,1111 +103,781 @@ def calc_gate_use_masks(input_n, wires, logits):
     return gate_masks[::-1], wire_masks[::-1]
 
 
-######################## helper functions ##############################
+def to_rgb_image(arr: np.ndarray) -> np.ndarray:
+    """Convert a 2D scalar (H, W) or 3D RGB (H, W, 3) float array into an RGB uint8 image.
 
+    The previous implementation pre-zoomed the array 8x as a hack to
+    make the per-pixel rect renderer give visible cells. Now that
+    panels go through ``immvision.image_display`` (which lets the GPU
+    scale the texture to any panel size with proper filtering), the 8x
+    zoom is wasted memory: e.g. a ``(12, 4096)`` input was inflated to
+    ``(96, 32768)`` and then squashed back down to a ~700 px panel,
+    where the linear minification merged binary data into a featureless
+    mid-grey strip.
 
-def is_point_in_box(p0, p1, p):
-    """Check if point p is inside box defined by p0 and p1"""
-    (x0, y0), (x1, y1), (x, y) = p0, p1, p
-    return (x0 <= x <= x1) and (y0 <= y <= y1)
-
-
-class LogitContainer(nnx.Module):
-    """Simple container to hold circuit logits for nnx.Optimizer"""
-
-    def __init__(self, logits):
-        self.logits = logits
-
-
-def zoom(a, k=2):
-    """Zoom function for image visualization"""
-    return np.repeat(np.repeat(a, k, 1), k, 0)
-
-
-def unpack(x, bit_n=8):
-    """Unpack integers to binary representation"""
-    return (x[..., None] >> np.r_[:bit_n]) & 1
-
-
-max_trainstep_n = 1000
-
-
-class CircuitOptimizationDemo:
+    We now:
+        * keep the array at its native resolution,
+        * stride-sample very-wide arrays down to ``_MAX_PANEL_COLS``
+          columns so the GPU isn't filtering across dozens of source
+          pixels per output pixel (which is what was producing the
+          "mostly black" look on binary inputs),
+        * uniformly broadcast 2D data to RGB and pass through 3D RGB.
     """
-    Demo showing live circuit optimization.
+    arr = np.asarray(arr)
+    if arr.ndim == 2:
+        arr = np.repeat(arr[..., None], 3, axis=2)
+    elif arr.ndim == 3:
+        if arr.shape[2] == 1:
+            arr = np.repeat(arr, 3, axis=2)
+        elif arr.shape[2] != 3:
+            raise ValueError(f"Expected 2D or RGB-shaped array, got shape {arr.shape}")
+    else:
+        raise ValueError(f"Expected 2D or 3D array, got ndim={arr.ndim}")
 
-    - Backprop: Direct gradient-based logit optimization
-    - GNN/Self-Attention: Pre-trained models suggest logit improvements
-    """
+    # Stride-sample columns when the array is dramatically wider than
+    # what we can show. Plain striding is fine here: input bits are
+    # ordered, so showing every Nth case still preserves the local
+    # structure of the bit columns.
+    w = arr.shape[1]
+    if w > _MAX_PANEL_COLS:
+        stride = max(1, w // _MAX_PANEL_COLS)
+        arr = arr[:, ::stride]
 
-    def __init__(self):
-        # Circuit configuration
-        self.input_n = 8
-        self.output_n = 8
-        self.arity = 4
-        self.layer_n = 3
-        self.width_factor = 2
-        self.hidden_dim = 64
+    return np.ascontiguousarray(np.uint8(np.clip(arr, 0.0, 1.0) * 255))
 
-        # Update case_n based on input_n
-        self.case_n = 1 << self.input_n
 
-        # Wiring configuration
-        self.wiring_modes = ["fixed", "random"]
-        self.wiring_mode_idx = 1
-        self.wiring_mode = self.wiring_modes[self.wiring_mode_idx]
-        self.wiring_seed = 42  # Direct control over wiring seed
-        self.wiring_key = jax.random.PRNGKey(self.wiring_seed)
+# ---------------------------------------------------------------------------
+# DemoApp: GUI wrapper around DemoSession
+# ---------------------------------------------------------------------------
 
-        # Training-consistent wire generation
-        self.initial_diversity = 1  # Number of different wirings to use (like in training)
-        self.evaluation_base_seed = 42  # Base seed for evaluation datasets
-        self.use_training_wires = False  # Whether to use training-consistent wire generation
-        self.distribution_modes = ["IN-distribution", "OUT-of-distribution"]
-        self.distribution_mode_idx = 0  # Default to IN-distribution
-        self.current_wire_idx = 0  # Index of current wire within the distribution
-        self.available_wires = []  # List of available wire sets for current distribution
-        self.available_logits = []  # List of available logit sets for current distribution
 
-        # Optimization configuration
-        self.loss_type = "l4"
-        self.learning_rate = 1.0  # Learning rate for backprop
-        self.n_message_steps = 1
+class DemoApp:
+    """The GUI controller. Owns a ``DemoSession`` and a small bag of GUI state."""
 
-        # Initialize circuit using shared functions
-        self.initialize_circuit()
+    PLOT_TYPES = ("Loss", "Accuracy")
+    LOSS_DISPLAY_MODES = ("Both", "Soft only", "Hard only")
+    METHODS = (Method.BACKPROP.value, Method.TMT.value)
+    WIRING_MODES = (WiringMode.FIXED.value, WiringMode.RANDOM.value)
+    REGIMES = tuple(r.value for r in Regime)
 
-        # Task configuration
-        self.available_tasks = list(TASKS.keys())
-        self.task_idx = 6
-        self.task_text = "Hello Neural CA"  # Shorter text works better with performance mode
-        self.noise_p = 0.5
-        self.update_task()
-
-        # Optimization state
-        self.step_i = 0
+    def __init__(self) -> None:
+        # Build the session with the default Hydra config — Backprop, no
+        # model loaded, fixed wiring, reverse task. The rest is driven
+        # by the user.
+        self.session = DemoSession.from_default_config(pool_size=8)
         self.is_optimizing = True
-        self.loss_log = np.zeros(max_trainstep_n, np.float32)
-        self.hard_log = np.zeros(max_trainstep_n, np.float32)
-        self.accuracy_log = np.zeros(max_trainstep_n, np.float32)
-        self.hard_accuracy_log = np.zeros(max_trainstep_n, np.float32)
+        self.tmt_message_steps = 1
 
-        # Mutation settings
-        self.mutation_rate = 0.05
+        # Evaluation regime selector (defaults to Regime I).
+        self.regime_idx = 0
 
-        # Optimization method configuration
-        self.optimization_methods = ["Backprop", "GNN", "Self-Attention"]
-        self.optimization_method_idx = 0
-
-        # Model instances (only pre-trained, frozen models)
-        self.frozen_model = None
-        self.logit_optimizer = None  # Only for backprop
-
-        # Model configuration for consistency with training
-        self.model_hidden_dim = self.hidden_dim  # Will be updated when loading models
-        self.model_use_globals = True  # Will be updated when loading self-attention models
-
-        # Step-by-step generator for GNN/Self-Attention (unified with training code)
-        self.model_generator = None
-        self.last_step_result = None
-
-        # Visualization settings
-        self.use_simple_viz = False
-        self.use_message_viz = False  # For circuit visualization
-        self.use_full_resolution = False  # Toggle for full resolution vs performance mode
-        self.max_loss_value = 10.0
-        self.min_loss_value = 1e-6
-        self.auto_scale_plot = True
-
-        # Plot display options
-        self.plot_types = ["Loss", "Accuracy"]
-        self.plot_type_idx = 1  # Default to Loss
-        self.loss_display_modes = ["Both", "Soft Only", "Hard Only"]
-        self.loss_display_mode_idx = 0  # Default to showing both
-
-        # Gate mask management for circuit visualization
-        self.gate_mask = []
-        self.wire_masks = []
-        self.reset_gate_mask()
-
-        # Store activations for circuit visualization
-        self.act = []
-        self.err_mask = None
-
-        # Active case for visualization
-        self.active_case_i = 123 % self.case_n
-
-        # WandB integration
-        self.wandb_entity = "m2snn"
-        self.wandb_project = "boolean-nca-cc"
-        self.wandb_download_dir = "saves"
-        self.run_id = None
-        self.loaded_run_id = None
-
-        # Model loading preferences
-        self.load_modes = ["Latest Checkpoint", "Best Model"]
-        self.load_mode_idx = 1  # Default to best model
-        self.prefer_metric = "eval_out_hard_accuracy"  # For best model selection
-
-        # Initialize visualization
-        self.setup_visualization()
-
-        # Debug flag for printing dimensions
-        self._debug_printed = False
-
-        # Initialize optimization method
-        self.initialize_optimization_method()
-
-        # Initialize activations now that everything is set up
-        self.initialize_activations()
-
-    def initialize_circuit(self):
-        """Initialize circuit using shared infrastructure"""
-        # Generate layer sizes using shared function
-        self.layer_sizes = generate_layer_sizes(
-            self.input_n, self.output_n, self.arity, self.layer_n, self.width_factor
-        )
-
-        if self.use_training_wires and self.wiring_mode == "fixed":
-            # Use training-consistent wire generation
-            self._initialize_training_consistent_wires()
+        # Gallery selection state. Initialise to whichever (task, recipe)
+        # has a usable run-id in the YAML so the dropdowns boot to a
+        # working entry rather than a "n/a" one.
+        first_entry = self.session.gallery.first_available()
+        if first_entry is not None:
+            self.gallery_task = first_entry.task
+            self.gallery_recipe = first_entry.recipe
         else:
-            # Use original circuit generation
-            self.wires, self.logits = gen_circuit(
-                self.wiring_key, self.logits_key, self.layer_sizes, arity=self.arity, noise_scale=self.noise_scale
-            )
-            # Clear available wires when not using training wires
-            self.available_wires = []
-            self.available_logits = []
-            self.current_wire_idx = 0
+            tasks = self.session.gallery.tasks() or ["reverse"]
+            self.gallery_task = tasks[0]
+            recipes = self.session.gallery.recipes_for_task(self.gallery_task)
+            self.gallery_recipe = recipes[0] if recipes else "fixed_damage"
 
-        # Store initial logits
-        self.logits0 = self.logits
+        # Manual W&B coordinates (used by the "Custom W&B run ID" expander).
+        self.wandb = WandbCoordinates()
+        self._wandb_run_id_buffer = ""
 
-        print(f"Circuit initialized with {sum(logit.size for logit in self.logits0)} parameters")
-        print(f"Layer structure: {self.layer_sizes}")
+        # Plotting / display state.
+        self.plot_type_idx = 1  # Default to Accuracy (more visually informative)
+        self.loss_display_mode_idx = 0
 
-        # Reset gate masks for new circuit structure
-        self.reset_gate_mask()
+        # Active visualisation case (for circuit preview).
+        self.active_case_i = 123 % self.session.case_n
 
-        # Initialize empty activations (will be properly set after task setup)
-        self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
-        self.err_mask = np.zeros((self.case_n, self.output_n), bool)
+        # Circuit gate-use mask (for visual highlighting only — does NOT
+        # touch the underlying logits).
+        self._gate_use_mask: list[np.ndarray] = []
+        self._wire_use_mask: list[np.ndarray] = []
+        self._reset_gate_visual_mask()
 
-        # Reset the model generator when circuit changes
-        self.model_generator = None
-        self.last_step_result = None
+        # Cached images for input/ground-truth/output panels.
+        self._input_img: np.ndarray | None = None
+        self._gt_img: np.ndarray | None = None
+        self._output_img: np.ndarray | None = None
+        # Texture-upload dirty flags. ``image_display`` only re-uploads
+        # to the GPU when ``refresh_image=True``; we set this when the
+        # underlying numpy buffer actually changed.
+        self._image_dirty: dict[str, bool] = {
+            "inputs": True,
+            "outputs": True,
+            "ground_truth": True,
+        }
+        self._refresh_image_cache(force=True)
 
-    def _initialize_training_consistent_wires(self):
-        """Initialize wires using training-consistent generation (like in eval_datasets)"""
+        # Per-frame profiler. Toggle visible in the Performance section.
+        self.prof = FrameProfiler(window=120)
+        self.show_perf = True
+        # Hand it to the session so step() can subdivide BP forward / grad / viz.
+        self.session.prof = self.prof
+
+    # ------------------------------------------------------------------
+    # Convenience accessors
+    # ------------------------------------------------------------------
+
+    @property
+    def s(self) -> DemoSession:
+        """Short alias used inside render loops."""
+        return self.session
+
+    # ------------------------------------------------------------------
+    # Visual mask plumbing
+    # ------------------------------------------------------------------
+
+    def _reset_gate_visual_mask(self) -> None:
+        s = self.session
+        self._gate_use_mask = [np.ones(int(gate_n)) for gate_n, _ in s.layer_sizes]
+        self._wire_use_mask = [np.ones_like(np.asarray(w), np.bool_) for w in s.wires]
+
+    def _mask_unused_gates(self) -> None:
+        s = self.session
+        gate_masks, self._wire_use_mask = calc_gate_use_masks(s.input_n, s.wires, s.logits)
+        for i, gm in enumerate(gate_masks):
+            self._gate_use_mask[i] = np.array(self._gate_use_mask[i] * gm)
+
+    # ------------------------------------------------------------------
+    # Image cache (input / ground-truth / output)
+    # ------------------------------------------------------------------
+
+    def _refresh_image_cache(self, force: bool = False) -> None:
+        s = self.session
+        if s.x_total is None or s.y_total is None:
+            return
+        if force or self._input_img is None:
+            self._input_img = to_rgb_image(np.asarray(s.x_total).T)
+            self._gt_img = to_rgb_image(np.asarray(s.y_total).T)
+            self._image_dirty["inputs"] = True
+            self._image_dirty["ground_truth"] = True
+
+        # Output image with red overlay on errors.
+        if s.current_pred is not None:
+            pred = np.asarray(s.current_pred).T
+            oimg = np.dstack([pred] * 3).astype(np.float32)
+            if s.current_pred_hard is not None and s.y_total is not None:
+                err = (np.asarray(s.current_pred_hard) != np.asarray(s.y_total)).T
+                m = err[..., None] * 0.5
+                oimg = oimg * (1.0 - m) + m * np.float32([1, 0, 0])
+            self._output_img = to_rgb_image(oimg)
+            self._image_dirty["outputs"] = True
+
+    # ------------------------------------------------------------------
+    # Main step (called every frame while playing)
+    # ------------------------------------------------------------------
+
+    def _step(self) -> None:
+        if not self.is_optimizing:
+            return
         try:
-            distribution_mode = self.distribution_modes[self.distribution_mode_idx]
-
-            if distribution_mode == "IN-distribution":
-                # Use IN-distribution (matches training pattern)
-                wiring_mode = "fixed"
-                initial_diversity = self.initial_diversity
-                base_seed = self.evaluation_base_seed
-            else:
-                # Use OUT-of-distribution (always random)
-                wiring_mode = "random"
-                initial_diversity = 16  # Use higher diversity for OOD
-                base_seed = self.evaluation_base_seed + 10000
-
-            # Create wire batch using the same logic as training evaluation
-            batch_wires, batch_logits, actual_batch_size = _create_circuit_batch_with_pattern(
-                rng=jax.random.PRNGKey(base_seed),
-                layer_sizes=self.layer_sizes,
-                arity=self.arity,
-                batch_size=initial_diversity,  # Generate multiple wires to choose from
-                wiring_mode=wiring_mode,
-                initial_diversity=initial_diversity,
-                get_all_wirings=True,  # Get all available wirings
-            )
-
-            # Store available wires and logits
-            self.available_wires = [
-                jax.tree.map(lambda x, idx=i: x[idx], batch_wires) for i in range(actual_batch_size)
-            ]
-            self.available_logits = [
-                jax.tree.map(lambda x, idx=i: x[idx], batch_logits)
-                for i in range(actual_batch_size)
-            ]
-
-            # Use the current wire index (clamped to available range)
-            self.current_wire_idx = min(self.current_wire_idx, len(self.available_wires) - 1)
-            self.wires = self.available_wires[self.current_wire_idx]
-            self.logits = self.available_logits[self.current_wire_idx]
-
-            print(
-                f"Initialized {distribution_mode} wires: {actual_batch_size} available, using index {self.current_wire_idx}"
-            )
-            print(f"  - Wiring mode: {wiring_mode}, Initial diversity: {initial_diversity}")
-
+            with self.prof.region("compute.step"):
+                self.s.step(n_message_steps=self.tmt_message_steps)
         except Exception as e:
-            print(f"Error initializing training-consistent wires: {e}")
-            import traceback
+            # Keep the GUI alive even if a step blows up.
+            logging.error(f"Optimisation step failed: {e}", exc_info=True)
+            self.is_optimizing = False
+        with self.prof.region("compute.image_cache"):
+            self._refresh_image_cache()
 
-            print(f"Traceback: {traceback.format_exc()}")
-            # Fallback to original generation
-            self.wires, self.logits = gen_circuit(
-                self.wiring_key, self.logits_key, self.layer_sizes, arity=self.arity, noise_scale=self.noise_scale
-            )
-            self.available_wires = []
-            self.available_logits = []
-            self.current_wire_idx = 0
+    # ------------------------------------------------------------------
+    # GUI: top-level dispatcher
+    # ------------------------------------------------------------------
 
-    def switch_to_wire_index(self, wire_idx: int):
-        """Switch to a specific wire within the current distribution"""
-        if not self.available_wires or not self.use_training_wires:
-            print("No training wires available to switch to")
-            return
-
-        if wire_idx < 0 or wire_idx >= len(self.available_wires):
-            print(f"Wire index {wire_idx} out of range [0, {len(self.available_wires) - 1}]")
-            return
-
-        self.current_wire_idx = wire_idx
-        self.wires = self.available_wires[self.current_wire_idx]
-        self.logits = self.available_logits[self.current_wire_idx]
-        self.logits0 = self.logits  # Update initial logits
-
-        # Reset optimization state but keep the same task
-        self.step_i = 0
-        self.loss_log = np.zeros(max_trainstep_n, np.float32)
-        self.hard_log = np.zeros(max_trainstep_n, np.float32)
-        self.accuracy_log = np.zeros(max_trainstep_n, np.float32)
-        self.hard_accuracy_log = np.zeros(max_trainstep_n, np.float32)
-
-        # Reset the model generator when wires change
-        self.model_generator = None
-        self.last_step_result = None
-
-        # Reinitialize optimization method for new circuit
-        self.initialize_optimization_method()
-
-        # Update gate masks for new wiring
-        self.reset_gate_mask()
-
-        # Refresh activations
-        self.initialize_activations()
-
-        distribution_mode = self.distribution_modes[self.distribution_mode_idx]
-        print(f"Switched to {distribution_mode} wire {wire_idx} of {len(self.available_wires)}")
-
-    def switch_distribution_mode(self, mode_idx: int):
-        """Switch between IN-distribution and OUT-of-distribution modes"""
-        if mode_idx < 0 or mode_idx >= len(self.distribution_modes):
-            print(f"Distribution mode index {mode_idx} out of range")
-            return
-
-        old_mode = self.distribution_modes[self.distribution_mode_idx]
-        self.distribution_mode_idx = mode_idx
-        new_mode = self.distribution_modes[self.distribution_mode_idx]
-
-        if old_mode != new_mode:
-            print(f"Switching from {old_mode} to {new_mode}")
-            # Reset wire index when switching distributions
-            self.current_wire_idx = 0
-            # Reinitialize with new distribution
-            if self.use_training_wires and self.wiring_mode == "fixed":
-                self._initialize_training_consistent_wires()
-                self.logits0 = self.logits  # Update initial logits
-
-                # Reset optimization state
-                self.step_i = 0
-                self.loss_log = np.zeros(max_trainstep_n, np.float32)
-                self.hard_log = np.zeros(max_trainstep_n, np.float32)
-                self.accuracy_log = np.zeros(max_trainstep_n, np.float32)
-                self.hard_accuracy_log = np.zeros(max_trainstep_n, np.float32)
-
-                # Reset the model generator when distribution changes
-                self.model_generator = None
-                self.last_step_result = None
-
-                # Reinitialize optimization method
-                self.initialize_optimization_method()
-
-                # Update gate masks
-                self.reset_gate_mask()
-
-                # Refresh activations
-                self.initialize_activations()
-
-    def update_task(self, reset_logs=True):
-        """Update current task using shared task infrastructure"""
-        task_name = self.available_tasks[self.task_idx]
-
-        # Use shared task infrastructure for all tasks
+    def gui(self) -> None:
         try:
-            # Prepare task-specific parameters
-            task_kwargs = {
-                "input_bits": self.input_n,
-                "output_bits": self.output_n,
-            }
+            with self.prof.frame():
+                self._step()
 
-            # Add task-specific parameters
-            if task_name == "text":
-                task_kwargs["text"] = self.task_text
-            elif task_name == "noise":
-                task_kwargs["noise_p"] = self.noise_p
-                # Use a consistent seed for reproducibility during demo
-                task_kwargs["seed"] = 42
-
-            self.input_x, self.y0 = get_task_data(task_name, self.case_n, **task_kwargs)
+                imgui.begin_child("main", (-340, 0))
+                with self.prof.region("render.main_panel"):
+                    self._render_main_panel()
+                imgui.end_child()
+                imgui.same_line()
+                imgui.begin_child("controls")
+                with self.prof.region("render.control_panel"):
+                    self._render_control_panel()
+                imgui.end_child()
         except Exception as e:
-            print(f"Error loading task '{task_name}': {e}")
-            # Fallback to copy task
-            x = jp.arange(self.case_n)
-            self.input_x = unpack(x, bit_n=self.input_n)
-            max_output_value = (1 << self.output_n) - 1
-            clipped_output = np.minimum(x, max_output_value)
-            self.y0 = jp.float32(unpack(clipped_output, bit_n=self.output_n))
+            logging.exception("Top-level GUI error")
+            imgui.text(f"GUI error: {e}")
 
-        # Reset optimization progress
-        if reset_logs:
-            self.step_i = 0
-            self.loss_log = np.zeros(max_trainstep_n, np.float32)
-            self.hard_log = np.zeros(max_trainstep_n, np.float32)
-            self.accuracy_log = np.zeros(max_trainstep_n, np.float32)
-            self.hard_accuracy_log = np.zeros(max_trainstep_n, np.float32)
+    # ------------------------------------------------------------------
+    # GUI: main panel (plots, circuit, I/O images)
+    # ------------------------------------------------------------------
 
-        # Reset the model generator when task changes
-        self.model_generator = None
-        self.last_step_result = None
+    def _render_main_panel(self) -> None:
+        with self.prof.region("render.plot"):
+            self._render_progress_plot()
 
-        # Update visualization
-        self.setup_visualization()
+        imgui.separator_text("Inputs")
+        with self.prof.region("render.image_panel.inputs"):
+            if self._input_img is not None:
+                self._render_image_panel("inputs", self._input_img)
 
-        # Refresh activations for new task
-        self.initialize_activations()
+        imgui.separator_text("Circuit")
+        circuit_height = imgui.get_content_region_avail().y - 360
+        with self.prof.region("render.circuit_diagram"):
+            self._render_circuit_diagram(height=max(int(circuit_height), 280))
 
-    def setup_visualization(self):
-        """Setup visualization using shared functions"""
-        # Use consistent zoom factor like in notebook
-        zoom_factor = 8
+        imgui.separator_text("Current output")
+        with self.prof.region("render.image_panel.outputs"):
+            if self._output_img is not None:
+                self._render_image_panel("outputs", self._output_img)
 
-        # Create input visualization - transpose to match notebook format
-        inp_img = self.input_x.T
-        inp_img = np.dstack([inp_img] * 3)
-        inp_img = zoom(inp_img, zoom_factor)
-        self.inputs_img = np.uint8(inp_img.clip(0, 1) * 255)
+        imgui.separator_text("Expected output")
+        with self.prof.region("render.image_panel.gt"):
+            if self._gt_img is not None:
+                self._render_image_panel("ground_truth", self._gt_img)
 
-        # Create ground truth visualization - transpose to match notebook format
-        gt_img = self.y0.T
-        gt_img = np.dstack([gt_img] * 3)
-        gt_img = zoom(gt_img, zoom_factor)
-        self.ground_truth_img = np.uint8(gt_img.clip(0, 1) * 255)
-
-        # Initialize output image placeholder
-        self.outputs_img = np.zeros_like(self.ground_truth_img)
-
-        # Initialize textures with None - will be set when ImGui context is available
-        self.input_texture = None
-        self.output_texture = None
-        self.ground_truth_texture = None
-        self.imgui_initialized = False
-
-        # Initialize active case
-        self.active_case_i = 123 % self.case_n
-
-    def initialize_imgui_textures(self):
-        """Initialize ImGui textures once context is available"""
-        if not self.imgui_initialized:
-            try:
-                dummy_texture = imgui.get_io().fonts.tex_id
-                self.input_texture = (
-                    dummy_texture,
-                    self.inputs_img.shape[1],
-                    self.inputs_img.shape[0],
+    def _render_progress_plot(self) -> None:
+        s = self.session
+        plot_type = self.PLOT_TYPES[self.plot_type_idx]
+        plot_title = f"Circuit Optimisation — {plot_type}"
+        if implot.begin_plot(plot_title, (-1, 220)):
+            implot.setup_legend(implot.Location_.north_east.value)
+            display_mode = self.LOSS_DISPLAY_MODES[self.loss_display_mode_idx]
+            if plot_type == "Loss":
+                implot.setup_axis_scale(implot.ImAxis_.y1.value, implot.Scale_.log10.value)
+                implot.setup_axes(
+                    "Step",
+                    "Loss",
+                    implot.AxisFlags_.auto_fit.value,
+                    implot.AxisFlags_.auto_fit.value,
                 )
-                self.output_texture = (
-                    dummy_texture,
-                    self.outputs_img.shape[1],
-                    self.outputs_img.shape[0],
+                implot.setup_axis_limits(implot.ImAxis_.y1.value, 1e-6, 10.0)
+                if display_mode in ("Both", "Soft only"):
+                    implot.plot_line("soft loss", s.loss_log)
+                if display_mode in ("Both", "Hard only"):
+                    implot.plot_line("hard loss", s.hard_loss_log)
+            else:  # Accuracy
+                implot.setup_axes(
+                    "Step",
+                    "Accuracy",
+                    implot.AxisFlags_.auto_fit.value,
+                    implot.AxisFlags_.none.value,
                 )
-                self.ground_truth_texture = (
-                    dummy_texture,
-                    self.ground_truth_img.shape[1],
-                    self.ground_truth_img.shape[0],
-                )
-                self.imgui_initialized = True
-            except Exception as e:
-                print(f"Error initializing ImGui textures: {e}")
-                # ImGui context not ready yet
-                pass
+                implot.setup_axis_limits(implot.ImAxis_.y1.value, 0.0, 1.05)
+                if display_mode in ("Both", "Soft only"):
+                    implot.plot_line("soft acc", s.accuracy_log)
+                if display_mode in ("Both", "Hard only"):
+                    implot.plot_line("hard acc", s.hard_accuracy_log)
+            implot.drag_line_x(1, s.step_count % len(s.loss_log), (0.8, 0, 0, 0.5))
+            implot.end_plot()
 
-    def initialize_optimization_method(self):
-        """Initialize the selected optimization method"""
-        method_name = self.optimization_methods[self.optimization_method_idx]
+    # ------------------------------------------------------------------
+    # GUI: control panel (the right sidebar)
+    # ------------------------------------------------------------------
 
-        if method_name == "Backprop":
-            # Use direct optax optimizer (not nnx.Optimizer) for logits
-            opt_fn = optax.adamw(self.learning_rate, 0.8, 0.8, weight_decay=1e-1)
-            self.logit_opt_state = opt_fn.init(self.logits)
-            self.logit_optimizer = opt_fn
-            self.frozen_model = None
-            # Reset generator when switching to backprop
-            self.model_generator = None
-            self.last_step_result = None
+    def _render_control_panel(self) -> None:
+        if imgui.button("Python REPL"):
+            IPython.embed()
 
-        elif method_name in ["GNN", "Self-Attention"]:
-            # Try to load pre-trained frozen model
-            if self.try_load_wandb_model():
-                print(f"Loaded frozen {method_name} model from WandB")
-                self.logit_optimizer = None  # No optimizer needed for frozen models
-                self.logit_opt_state = None  # No optimizer state needed for frozen models
-                # Initialize the generator for step-by-step evaluation
-                self.initialize_model_generator()
-            else:
-                print(f"Could not load {method_name} model. Falling back to Backprop.")
-                self.optimization_method_idx = 0
-                self.initialize_optimization_method()
-                return
+        self._render_play_section()
+        self._render_model_section()
+        self._render_regime_section()
+        self._render_ood_section()
+        self._render_circuit_section()
+        self._render_damage_section()
+        self._render_visualization_section()
+        self._render_status_section()
+        self._render_performance_section()
 
-    def initialize_model_generator(self):
-        """Initialize the step-by-step model generator using the unified training code"""
-        if self.frozen_model is None:
-            return
+    # ---------- Play / pause / reset --------------------------------------
 
-        try:
-            # Use the exact same generator as training and evaluation
-            # For self-attention models, we need to use the correct hidden_dim from the model
-            hidden_dim_for_graph = getattr(self, "model_hidden_dim", self.hidden_dim)
+    def _render_play_section(self) -> None:
+        imgui.separator_text("Optimisation")
+        if self.is_optimizing:
+            if imgui.button("⏸ Pause", (120, 0)):
+                self.is_optimizing = False
+        else:
+            if imgui.button("▶ Play", (120, 0)):
+                self.is_optimizing = True
+        imgui.same_line()
+        imgui.text("running" if self.is_optimizing else "paused")
+        if imgui.button("Reset circuit"):
+            self.session.reset_circuit()
+            self._refresh_image_cache(force=True)
 
-            print("Initializing model generator with:")
-            print(f"  - hidden_dim: {hidden_dim_for_graph}")
-            print(f"  - use_globals: {getattr(self, 'model_use_globals', True)}")
-            print(f"  - model type: {type(self.frozen_model).__name__}")
+    # ---------- Model: gallery + manual run-ID ----------------------------
 
-            self.model_generator = evaluate_model_stepwise_generator(
-                model=self.frozen_model,
-                wires=self.wires,
-                logits=self.logits,
-                x_data=self.input_x,
-                y_data=self.y0,
-                input_n=self.input_n,
-                arity=self.arity,
-                circuit_hidden_dim=hidden_dim_for_graph,  # Use model's hidden_dim
-                max_steps=None,  # Infinite steps for live demo
-                loss_type=self.loss_type,
-                bidirectional_edges=True,
-                layer_sizes=self.layer_sizes,
+    def _render_model_section(self) -> None:
+        imgui.separator_text("Pre-trained model")
+        s = self.session
+
+        # Loaded-model card (status panel).
+        if s.loaded_entry is not None:
+            imgui.text_colored(
+                imgui.ImVec4(0.0, 1.0, 0.0, 1.0),
+                f"✓ {s.loaded_entry.task} · {s.loaded_entry.label}",
+            )
+            imgui.text_colored(
+                imgui.ImVec4(0.7, 0.7, 0.7, 1.0),
+                f"   run {s.loaded_entry.entity}/{s.loaded_entry.project}/"
+                f"{s.loaded_entry.run_id}",
+            )
+            if s.loaded_entry.description:
+                imgui.text_wrapped(s.loaded_entry.description)
+        elif s.model_run_id is not None:
+            imgui.text_colored(
+                imgui.ImVec4(0.0, 1.0, 0.0, 1.0), f"✓ custom run {s.model_run_id}"
+            )
+        else:
+            imgui.text_colored(
+                imgui.ImVec4(0.7, 0.7, 0.7, 1.0),
+                "No model loaded — running Backprop on default config",
             )
 
-            # Get the initial state (step 0)
-            self.last_step_result = next(self.model_generator)
-            print(
-                f"Initialized model generator with initial loss: {self.last_step_result.loss:.4f}"
+        # Gallery dropdowns: task x recipe.
+        gallery = s.gallery
+        tasks = gallery.tasks()
+        if not tasks:
+            imgui.text_colored(
+                imgui.ImVec4(1.0, 0.7, 0.0, 1.0),
+                "Gallery empty — fill in configs/demo_models.yaml.",
             )
+        else:
+            self._render_gallery_dropdowns(gallery, tasks)
 
-        except Exception as e:
-            print(f"Error initializing model generator: {e}")
-            import traceback
-
-            print(f"Traceback: {traceback.format_exc()}")
-            self.model_generator = None
-            self.last_step_result = None
-
-    def reset_gate_mask(self):
-        """Reset all gate masks to active"""
-        # Ensure we have the right number of masks
-        self.gate_mask = [np.ones(gate_n) for gate_n, _ in self.layer_sizes]
-        self.wire_masks = [np.ones_like(w, np.bool_) for w in self.wires]
-        print(
-            f"Reset gate mask: {len(self.gate_mask)} gate masks, {len(self.wire_masks)} wire masks"
-        )
-
-    def mask_unused_gates(self):
-        """Mask unused gates based on circuit analysis"""
-        gate_masks, self.wire_masks = calc_gate_use_masks(self.input_n, self.wires, self.logits)
-        for i in range(len(gate_masks)):
-            self.gate_mask[i] = np.array(self.gate_mask[i] * gate_masks[i])
-
-    def try_load_wandb_model(self):
-        """Try to load frozen model from WandB"""
-        try:
-            method_name = self.optimization_methods[self.optimization_method_idx]
-            model_type = "gnn" if method_name == "GNN" else "self_attention"
-
-            filters = {
-                "config.circuit.input_bits": self.input_n,
-                "config.circuit.output_bits": self.output_n,
-                "config.circuit.arity": self.arity,
-                # "config.circuit.num_layers": self.layer_n,
-                "config.model.type": model_type,
-                "config.training.wiring_mode": self.wiring_mode,
-                "config.circuit.task": self.available_tasks[self.task_idx],
-            }
-
-            # Load frozen model based on selected mode
-            load_mode = self.load_modes[self.load_mode_idx]
-
-            if load_mode == "Best Model":
-                # Use the new best model loading with intelligent selection
-                loaded_config, checkpoint_path, run_id = load_config_from_wandb(
-                    run_id=self.run_id,
-                    filters=filters if not self.run_id else None,
-                    project=self.wandb_project,
-                    entity=self.wandb_entity,
-                    download_dir=self.wandb_download_dir,
-                    select_by_best_metric=True,
-                    run_from_last=1,
-                    use_cache=True,
-                    prefer_metric=self.prefer_metric,  # Will use intelligent selection if None
-                    metric_name="best/eval_out_hard_accuracy",
-                )
-
-                if loaded_config.circuit.num_layers != self.layer_n:
-                    print(
-                        f"Layer number mismatch: {loaded_config.circuit.num_layers} != {self.layer_n}"
-                    )
-                    print(f"Using layer number: {self.layer_n}")
-                    loaded_config.circuit.num_layers = self.layer_n
-
-                if loaded_config.circuit.get("width_factor", 2) != self.width_factor:
-                    print(
-                        f"Width factor mismatch: {loaded_config.circuit.get('width_factor', 2)} != {self.width_factor}"
-                    )
-                    print(f"Using width factor: {self.width_factor}")
-                    loaded_config.circuit.width_factor = self.width_factor
-
-                model, loaded_dict, _ = load_model_from_config_and_checkpoint(
-                    config=loaded_config,
-                    checkpoint_path=checkpoint_path,
-                    run_id=run_id,
-                )
-
-                # For best model loading, we already have the instantiated model
-                self.frozen_model = model
-                self.loaded_run_id = run_id
-                self.loaded_run_id = loaded_dict.get("run_id", "unknown")
-
-            else:  # Latest Checkpoint
-                # Use the original checkpoint loading
-                loaded_config, checkpoint_path, run_id = load_config_from_wandb(
-                    run_id=self.run_id,
-                    filters=filters if not self.run_id else None,
-                    project=self.wandb_project,
-                    entity=self.wandb_entity,
-                    download_dir=self.wandb_download_dir,
-                    filename="latest_checkpoint",
-                    select_by_best_metric=False,
-                    run_from_last=1,
-                    use_cache=True,
-                )
-
-                if loaded_config.circuit.num_layers != self.layer_n:
-                    print(
-                        f"Layer number mismatch: {loaded_config.circuit.num_layers} != {self.layer_n}"
-                    )
-                    print(f"Using layer number: {self.layer_n}")
-                    loaded_config.circuit.num_layers = self.layer_n
-
-                if loaded_config.circuit.width_factor != self.width_factor:
-                    print(
-                        f"Width factor mismatch: {loaded_config.circuit.width_factor} != {self.width_factor}"
-                    )
-                    print(f"Using width factor: {self.width_factor}")
-                    loaded_config.circuit.width_factor = self.width_factor
-
-                model, loaded_dict, _ = load_model_from_config_and_checkpoint(
-                    config=loaded_config,
-                    checkpoint_path=checkpoint_path,
-                    run_id=run_id,
-                )
-
-                self.frozen_model = model
-                self.loaded_run_id = loaded_dict.get("run_id", "unknown")
-
-            # Extract hidden_dim from loaded config for graph compatibility
-            if hasattr(loaded_config, "model") and hasattr(loaded_config.model, "hidden_dim"):
-                self.model_hidden_dim = loaded_config.model.hidden_dim
-                print(f"Using model hidden_dim={self.model_hidden_dim} from loaded config")
-            elif hasattr(loaded_config, "circuit") and hasattr(
-                loaded_config.circuit, "circuit_hidden_dim"
-            ):
-                self.model_hidden_dim = loaded_config.circuit.circuit_hidden_dim
-                print(f"Using circuit hidden_dim={self.model_hidden_dim} from loaded config")
-            else:
-                self.model_hidden_dim = self.hidden_dim  # Fallback to demo default
-                print(
-                    f"Could not find hidden_dim in config, using default: {self.model_hidden_dim}"
-                )
-
-            # Extract use_globals from loaded config for self-attention models
-            if method_name == "Self-Attention":
-                if hasattr(loaded_config, "model") and hasattr(loaded_config.model, "use_globals"):
-                    self.model_use_globals = loaded_config.model.use_globals
-                    print(f"Using model use_globals={self.model_use_globals} from loaded config")
+        # Manual run-ID expander (folded by default).
+        if imgui.tree_node("Custom W&B run ID"):
+            _, self.wandb.entity = imgui.input_text("Entity", self.wandb.entity)
+            _, self.wandb.project = imgui.input_text("Project", self.wandb.project)
+            _, self._wandb_run_id_buffer = imgui.input_text(
+                "Run ID", self._wandb_run_id_buffer
+            )
+            if imgui.button("Load custom run"):
+                self.wandb.run_id = self._wandb_run_id_buffer or None
+                ok = self.session.load_model_from_wandb(self.wandb)
+                if ok:
+                    self._on_model_loaded()
                 else:
-                    self.model_use_globals = True  # Default fallback for compatibility
-                    print(
-                        f"Could not find use_globals in config, using default: {self.model_use_globals}"
-                    )
+                    logging.warning("Could not load model — leaving Backprop active")
+            imgui.tree_pop()
+
+        # Method (BP vs TMT) toggle. Only meaningful when a model is loaded.
+        method_idx = list(self.METHODS).index(s.method.value)
+        changed, method_idx = imgui.combo("Method", method_idx, list(self.METHODS))
+        if changed:
+            new_method = Method(list(self.METHODS)[method_idx])
+            if new_method == Method.TMT and s.model is None:
+                imgui.text_colored(
+                    imgui.ImVec4(1, 0.4, 0.4, 1),
+                    "No TMT model loaded — keeping Backprop",
+                )
             else:
-                self.model_use_globals = (
-                    True  # Default for GNN models (not applicable but for consistency)
-                )
+                s.method = new_method
+                s._reset_optimizers()
 
-            return True
-
-        except Exception as e:
-            print(f"Could not load model from WandB: {e}")
-            return False
-
-    def optimize_circuit(self):
-        """Perform one optimization step on the circuit logits"""
-        try:
-            method_name = self.optimization_methods[self.optimization_method_idx]
-
-            if method_name == "Backprop":
-                loss, hard_loss, accuracy, hard_accuracy = self.optimize_backprop()
-            else:
-                loss, hard_loss, accuracy, hard_accuracy = self.optimize_with_unified_model()
-
-            # Update loss logs
-            i = self.step_i % len(self.loss_log)
-            self.loss_log[i] = max(min(float(loss), self.max_loss_value), self.min_loss_value)
-            self.hard_log[i] = max(min(float(hard_loss), self.max_loss_value), self.min_loss_value)
-            self.accuracy_log[i] = max(min(float(accuracy), 1.0), 0.0)
-            self.hard_accuracy_log[i] = max(min(float(hard_accuracy), 1.0), 0.0)
-
-            # Debug output every 100 steps
-            if self.is_optimizing and self.step_i % 100 == 0:
-                print(
-                    f"Step {self.step_i}: Loss = {float(loss):.4f}, Hard Loss = {float(hard_loss):.4f}"
-                )
-
-            if self.is_optimizing:
-                self.step_i += 1
-
-            # Update visualization
-            self.update_output_visualization()
-
-        except Exception as e:
-            print(f"Error in optimize_circuit: {e}")
-            import traceback
-
-            print(f"Traceback: {traceback.format_exc()}")
-
-    def optimize_backprop(self):
-        """Optimize circuit logits using backpropagation"""
-        # Get current logits
-        current_logits = self.logits
-
-        # Calculate loss using the unified function for consistency
-        (
-            loss,
-            aux_data,
-        ) = get_loss_from_wires_logits(
-            current_logits, self.wires, self.input_x, self.y0, self.loss_type
-        )
-        hard_loss = aux_data["hard_loss"]
-        accuracy = aux_data["accuracy"]
-        hard_accuracy = aux_data["hard_accuracy"]
-        pred = aux_data["predictions"]
-        pred_hard = aux_data["hard_predictions"]
-
-        if self.is_optimizing and hasattr(self, "logit_optimizer") and self.logit_optimizer:
-            # Compute gradients with respect to logits
-            def loss_fn(logits):
-                loss, _ = get_loss_from_wires_logits(
-                    logits, self.wires, self.input_x, self.y0, self.loss_type
-                )
-                return loss
-
-            grad_fn = jax.grad(loss_fn)
-            grads = grad_fn(current_logits)
-
-            # Update logits using optax
-            updates, self.logit_opt_state = self.logit_optimizer.update(
-                grads, self.logit_opt_state, current_logits
+        if s.method == Method.BACKPROP:
+            _, s.bp_learning_rate = imgui.slider_float(
+                "Learning rate",
+                s.bp_learning_rate,
+                1e-4,
+                2.0,
+                "%.4f",
+                imgui.SliderFlags_.logarithmic.value,
             )
-            self.logits = optax.apply_updates(current_logits, updates)
-
-        # Store predictions for visualization
-        self.current_pred = pred
-        self.current_pred_hard = pred_hard
-
-        # Generate circuit activations for visualization using shared circuit runner
-        try:
-            # Import the circuit runner from the shared infrastructure
-            from boolean_nca_cc.circuits.model import run_circuit
-
-            # Run circuit to get layer-by-layer activations
-            # This returns [input_acts, layer1_acts, layer2_acts, ..., output_acts]
-            self.act = run_circuit(
-                current_logits, self.wires, self.input_x, hard=False, gate_mask=self.gate_mask
+        else:
+            _, self.tmt_message_steps = imgui.slider_int(
+                "Message steps / frame", self.tmt_message_steps, 1, 16
             )
 
-            # Generate error mask for visualization
-            self.err_mask = pred_hard != self.y0
-
-        except Exception as e:
-            print(f"Warning: Could not generate circuit activations: {e}")
-            # Fallback: create empty activations
-            self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
-            self.err_mask = np.zeros((self.case_n, self.output_n), bool)
-
-        return loss, hard_loss, accuracy, hard_accuracy
-
-    def optimize_with_unified_model(self):
-        """Use the unified generator from training code to optimize with frozen GNN/Self-Attention model"""
-        if self.frozen_model is None:
-            print("No frozen model loaded, falling back to backprop")
-            self.optimization_method_idx = 0
-            self.initialize_optimization_method()
-            return self.optimize_backprop()
-
+    def _render_gallery_dropdowns(self, gallery, tasks: list[str]) -> None:
+        # Sticky task index.
         try:
-            # Initialize generator if needed
-            if self.model_generator is None:
-                self.initialize_model_generator()
-                if self.model_generator is None:
-                    # Fallback to backprop if generator initialization failed
-                    print("Generator initialization failed, falling back to backprop")
-                    self.optimization_method_idx = 0
-                    self.initialize_optimization_method()
-                    return self.optimize_backprop()
+            task_idx = tasks.index(self.gallery_task)
+        except ValueError:
+            task_idx = 0
+            self.gallery_task = tasks[0]
+        changed, task_idx = imgui.combo("Task", task_idx, tasks)
+        if changed:
+            self.gallery_task = tasks[task_idx]
 
-            if self.is_optimizing:
-                # Get the next step from the generator (exactly like training)
-                try:
-                    # Run the specified number of message steps
-                    for _ in range(self.n_message_steps):
-                        self.last_step_result = next(self.model_generator)
-
-                    # Update circuit logits with the results from the generator
-                    self.logits = self.last_step_result.logits
-
-                except StopIteration:
-                    # Generator exhausted, reinitialize
-                    print("Model generator exhausted, reinitializing...")
-                    self.initialize_model_generator()
-                    if self.model_generator is None:
-                        return self.optimize_backprop()
-                    self.last_step_result = next(self.model_generator)
-
-            # Use the last step result for visualization
-            if self.last_step_result is not None:
-                # Store predictions for visualization (exactly like training)
-                self.current_pred = self.last_step_result.predictions
-                self.current_pred_hard = self.last_step_result.hard_predictions
-
-                # Generate circuit activations for visualization using the same method as backprop
-                try:
-                    # Run circuit to get layer-by-layer activations
-                    # This returns [input_acts, layer1_acts, layer2_acts, ..., output_acts]
-                    self.act = run_circuit(
-                        self.logits, self.wires, self.input_x, hard=False, gate_mask=self.gate_mask
-                    )
-
-                    # Generate error mask for visualization
-                    self.err_mask = self.current_pred_hard != self.y0
-
-                except Exception as act_e:
-                    print(
-                        f"Warning: Could not generate circuit activations in unified model: {act_e}"
-                    )
-                    # Fallback: create empty activations
-                    self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
-                    self.err_mask = np.zeros((self.case_n, self.output_n), bool)
-
-                return (
-                    self.last_step_result.loss,
-                    self.last_step_result.hard_loss,
-                    self.last_step_result.accuracy,
-                    self.last_step_result.hard_accuracy,
-                )
-            else:
-                # No result yet, return current state
-                loss, aux_data = get_loss_from_wires_logits(
-                    self.logits, self.wires, self.input_x, self.y0, self.loss_type
-                )
-                self.current_pred = aux_data["predictions"]
-                self.current_pred_hard = aux_data["hard_predictions"]
-                return loss, aux_data["hard_loss"], aux_data["accuracy"], aux_data["hard_accuracy"]
-
-        except Exception as e:
-            import traceback
-
-            print(f"Error with unified model: {e}")
-            print(f"Traceback: {traceback.format_exc()}")
-            print("Falling back to backprop")
-            # Fallback to backprop
-            self.optimization_method_idx = 0
-            self.initialize_optimization_method()
-            return self.optimize_backprop()
-
-    def update_output_visualization(self):
-        """Update output visualization based on current predictions"""
-        if not hasattr(self, "current_pred_hard"):
+        # Build recipe options for the chosen task. Show greyed-out
+        # entries for declared-but-unavailable recipes.
+        declared_recipes = gallery.recipes_for_task(self.gallery_task)
+        if not declared_recipes:
+            imgui.text_colored(
+                imgui.ImVec4(0.7, 0.7, 0.7, 1.0), "No recipes declared for this task."
+            )
             return
 
-        # Create output visualization - transpose to match notebook format
-        oimg = self.current_pred.T
-        oimg = np.dstack([oimg] * 3)
-
-        # Apply error mask for visualization
-        err_mask = (self.current_pred_hard != self.y0).T
-        m = err_mask[..., None] * 0.5
-        oimg = oimg * (1.0 - m) + m * np.float32([1, 0, 0])
-
-        # Use consistent zoom factor like in notebook
-        zoom_factor = 8
-        oimg = zoom(oimg, zoom_factor)
-        self.outputs_img = np.uint8(oimg.clip(0, 1) * 255)
-
-    def regenerate_circuit(self, reset_logs=True):
-        """Regenerate circuit completely"""
-        print(f"Regenerating circuit: input_n={self.input_n}, output_n={self.output_n}")
-
-        # Update derived values
-        self.case_n = 1 << self.input_n
-        self.active_case_i = min(self.active_case_i, self.case_n - 1)
-
-        # Reinitialize circuit
-        self.initialize_circuit()
-
-        # Clear cached predictions to avoid shape mismatches
-        if hasattr(self, "current_pred"):
-            delattr(self, "current_pred")
-        if hasattr(self, "current_pred_hard"):
-            delattr(self, "current_pred_hard")
-
-        # Update task and visualization
-        self.update_task(reset_logs=reset_logs)
-
-        # Reinitialize optimization method
-        # self.initialize_optimization_method()
-
-        # Reset optimization progress
-        if reset_logs:
-            self.step_i = 0
-            self.loss_log = np.zeros(max_trainstep_n, np.float32)
-            self.hard_log = np.zeros(max_trainstep_n, np.float32)
-            self.accuracy_log = np.zeros(max_trainstep_n, np.float32)
-            self.hard_accuracy_log = np.zeros(max_trainstep_n, np.float32)
-
-        print("Circuit regenerated successfully")
-
-    def mutate_wires_random(self, mutation_rate=None, reset_logs=True):
-        """Mutate current circuit wires using genetic mutation with specified rate"""
-        if mutation_rate is None:
-            mutation_rate = self.mutation_rate
-
+        recipe_labels = [
+            f"{gallery.recipe_labels.get(r, r)}"
+            + ("" if gallery.lookup(self.gallery_task, r) else "  (n/a)")
+            for r in declared_recipes
+        ]
         try:
-            # Generate a random key for mutation
-            import random
+            rec_idx = declared_recipes.index(self.gallery_recipe)
+        except ValueError:
+            rec_idx = 0
+            self.gallery_recipe = declared_recipes[0]
+        changed, rec_idx = imgui.combo("Recipe", rec_idx, recipe_labels)
+        if changed:
+            self.gallery_recipe = declared_recipes[rec_idx]
 
-            mutation_seed = random.randint(0, 99999)
-            mutation_key = jax.random.PRNGKey(mutation_seed)
-
-            # Apply mutation to current wires
-            mutated_wires = mutate_wires_swap(self.wires, mutation_key, mutation_rate)
-
-            # Update the circuit with mutated wires
-            self.wires = mutated_wires
-
-            # Reset optimization state but keep the same task
-            if reset_logs:
-                self.step_i = 0
-                self.loss_log = np.zeros(max_trainstep_n, np.float32)
-                self.hard_log = np.zeros(max_trainstep_n, np.float32)
-                self.accuracy_log = np.zeros(max_trainstep_n, np.float32)
-                self.hard_accuracy_log = np.zeros(max_trainstep_n, np.float32)
-
-            # Reset logits to initial state for fair comparison
-            self.logits = self.logits0
-
-            # Reset the model generator when wires change
-            self.model_generator = None
-            self.last_step_result = None
-
-            # Reinitialize optimization method for new circuit
-            self.initialize_optimization_method()
-
-            # Update gate masks for new wiring
-            self.reset_gate_mask()
-
-            # Refresh activations
-            self.initialize_activations()
-
-            print(f"Wires mutated with rate {mutation_rate} (seed: {mutation_seed})")
-
-        except Exception as e:
-            print(f"Error mutating wires: {e}")
-            import traceback
-
-            print(f"Traceback: {traceback.format_exc()}")
-
-    def mutate_one_wire(self, reset_logs=True):
-        """Mutate exactly one wire in one randomly selected layer"""
-        try:
-            # Generate a random key for mutation
-            import random
-
-            mutation_seed = random.randint(0, 99999)
-
-            # Pick a random layer to mutate (skip if no layers have enough connections)
-            available_layers = []
-            for i, wire_layer in enumerate(self.wires):
-                if wire_layer.size >= 2:  # Need at least 2 connections to swap
-                    available_layers.append(i)
-
-            if not available_layers:
-                print("No layers available for mutation (need at least 2 connections per layer)")
-                return
-
-            # Choose random layer
-            layer_to_mutate = random.choice(available_layers)
-
-            # Create a copy of wires
-            mutated_wires = [w.copy() for w in self.wires]
-
-            # Mutate only the selected layer with exactly 1 swap
-            layer_key = jax.random.PRNGKey(mutation_seed + layer_to_mutate)
-            mutated_layer = mutate_wires_swap(
-                [self.wires[layer_to_mutate]],
-                layer_key,
-                mutation_rate=0.0,
-                n_swaps_per_layer=1,
+        # Status hint for the currently picked card.
+        entry = gallery.lookup(self.gallery_task, self.gallery_recipe)
+        if entry is None:
+            imgui.text_colored(
+                imgui.ImVec4(1.0, 0.7, 0.0, 1.0),
+                "✗ Not yet trained — pick another card.",
             )
-            mutated_wires[layer_to_mutate] = mutated_layer[0]
-
-            # Update the circuit with mutated wires
-            self.wires = mutated_wires
-
-            # Reset optimization state but keep the same task
-            if reset_logs:
-                self.step_i = 0
-                self.loss_log = np.zeros(max_trainstep_n, np.float32)
-                self.hard_log = np.zeros(max_trainstep_n, np.float32)
-                self.accuracy_log = np.zeros(max_trainstep_n, np.float32)
-                self.hard_accuracy_log = np.zeros(max_trainstep_n, np.float32)
-
-            # Reset logits to initial state for fair comparison
-            self.logits = self.logits0
-
-            # Reset the model generator when wires change
-            self.model_generator = None
-            self.last_step_result = None
-
-            # Reinitialize optimization method for new circuit
-            self.initialize_optimization_method()
-
-            # Update gate masks for new wiring
-            self.reset_gate_mask()
-
-            # Refresh activations
-            self.initialize_activations()
-
-            print(f"Mutated exactly one wire in layer {layer_to_mutate} (seed: {mutation_seed})")
-
-        except Exception as e:
-            print(f"Error mutating one wire: {e}")
-            import traceback
-
-            print(f"Traceback: {traceback.format_exc()}")
-
-    def reset_circuit(self):
-        """Reset circuit to initial state"""
-        self.logits = self.logits0
-        self.step_i = 0
-        self.loss_log = np.zeros(max_trainstep_n, np.float32)
-        self.hard_log = np.zeros(max_trainstep_n, np.float32)
-        self.accuracy_log = np.zeros(max_trainstep_n, np.float32)
-        self.hard_accuracy_log = np.zeros(max_trainstep_n, np.float32)
-
-        # Reset the model generator when circuit is reset
-        self.model_generator = None
-        self.last_step_result = None
-
-        # Reinitialize optimizer for backprop
-        if self.optimization_methods[self.optimization_method_idx] == "Backprop":
-            opt_fn = optax.adamw(self.learning_rate, 0.8, 0.8, weight_decay=1e-1)
-            self.logit_opt_state = opt_fn.init(self.logits)
-            self.logit_optimizer = opt_fn
+            imgui.begin_disabled()
+            imgui.button("Load")
+            imgui.end_disabled()
         else:
-            # Reinitialize generator for GNN/Self-Attention
-            self.initialize_model_generator()
+            imgui.text_colored(
+                imgui.ImVec4(0.0, 1.0, 0.0, 1.0),
+                f"✓ {entry.run_id}",
+            )
+            if imgui.button("Load this model"):
+                ok = self.session.load_model_from_gallery(
+                    self.gallery_task, self.gallery_recipe
+                )
+                if ok:
+                    self._on_model_loaded()
 
-        print("Circuit reset to initial state")
+    def _on_model_loaded(self) -> None:
+        """Refresh GUI caches after a successful model load."""
+        self._reset_gate_visual_mask()
+        self._refresh_image_cache(force=True)
+        self.active_case_i = 123 % self.session.case_n
 
-    def draw_gate_lut(self, x, y, logit):
-        """Draw the lookup table for a gate when hovering"""
-        x0, y0 = x - 20, y - 20 - 36
-        dl = imgui.get_window_draw_list()
-        lut = jax.nn.sigmoid(logit).reshape(-1, 4)
-        col = np.uint32(lut * 255)
-        col = (col << 16) | (col << 8) | col | 0xFF000000
-        for (i, j), c in np.ndenumerate(col):
-            x_pos, y_pos = x0 + j * 10, y0 + i * 10
-            dl.add_rect_filled((x_pos, y_pos), (x_pos + 10, y_pos + 10), c)
+    # ---------- Evaluation regime ----------------------------------------
 
-    def draw_circuit(self, pad=4, d=24, H=600):  # noqa: N803
-        """Draw the detailed circuit visualization"""
+    def _render_regime_section(self) -> None:
+        imgui.separator_text("Evaluation regime")
+        regimes = list(Regime)
+        for i, r in enumerate(regimes):
+            label = REGIME_LABELS[r]
+            selected = self.regime_idx == i
+            if imgui.radio_button(label, selected):
+                self.regime_idx = i
+                self.session.apply_regime(r)
+                self._on_model_loaded()
+        # Active description.
+        active = regimes[self.regime_idx]
+        imgui.text_colored(
+            imgui.ImVec4(0.6, 0.6, 0.6, 1.0), REGIME_DESCRIPTIONS[active]
+        )
+        # Width slider is *always* shown when Regime IV is active.
+        if active == Regime.WIDTH_SWEEP:
+            wf_current = float(
+                self.session.width_factor
+                if self.session.width_factor is not None
+                else self.session.cfg.circuit.width_factor
+            )
+            wf_min, wf_max = SCALE_FREE_WIDTH_FACTORS[0], SCALE_FREE_WIDTH_FACTORS[-1]
+            changed, wf_new = imgui.slider_float(
+                "Width factor", wf_current, wf_min, wf_max, "%.2f"
+            )
+            if changed and abs(wf_new - wf_current) > 1e-3:
+                self.session.width_factor = float(wf_new)
+                self.session.bootstrap()
+                self._on_model_loaded()
+
+    # ---------- OOD overrides (advanced) ---------------------------------
+
+    def _render_ood_section(self) -> None:
+        s = self.session
+        diffs = s.ood_diffs()
+        # Prefix the header with a status badge so the user can tell at
+        # a glance whether they're inside or outside training distribution.
+        if s.training_cfg is None:
+            header = "OOD overrides (advanced) — load a model to enable"
+        elif diffs:
+            header = f"OOD overrides ({len(diffs)} active) ▼"
+        else:
+            header = "OOD overrides (advanced) — matches training"
+
+        if not imgui.collapsing_header(header):
+            return
+
+        if s.training_cfg is None:
+            imgui.text_colored(
+                imgui.ImVec4(0.7, 0.7, 0.7, 1.0),
+                "No model loaded yet — these knobs become active once "
+                "you pull a run from the gallery.",
+            )
+            return
+
+        if imgui.button("Reset all to training config"):
+            s.reset_to_training_config()
+            self._on_model_loaded()
+
+        amber = imgui.ImVec4(1.0, 0.65, 0.0, 1.0)
+        green = imgui.ImVec4(0.6, 0.6, 0.6, 1.0)
+
+        def label_with_status(name: str, knob: str) -> None:
+            """Coloured label + (training: X) annotation."""
+            if knob in diffs:
+                trained, current = diffs[knob]
+                imgui.text_colored(amber, f"{name}: trained {trained!r} → now {current!r}")
+            else:
+                imgui.text_colored(green, f"{name}: matches training")
+
+        # Task override.
+        tasks = list_available_tasks()
+        try:
+            task_idx = tasks.index(s.task_name)
+        except ValueError:
+            task_idx = 0
+        changed, task_idx = imgui.combo("Task##ood", task_idx, tasks)
+        if changed:
+            s.apply_cfg_changes(**{"circuit.task": tasks[task_idx]})
+            self._on_model_loaded()
+        label_with_status("Task", "task")
+
+        # Wiring mode override.
+        wiring_idx = list(self.WIRING_MODES).index(s.wiring_mode)
+        changed, wiring_idx = imgui.combo(
+            "Wiring##ood", wiring_idx, list(self.WIRING_MODES)
+        )
+        if changed:
+            s.apply_cfg_changes(
+                **{"training.wiring_mode": list(self.WIRING_MODES)[wiring_idx]}
+            )
+            self._on_model_loaded()
+        label_with_status("Wiring", "wiring_mode")
+
+        # Width factor override.
+        wf_current = float(
+            s.width_factor if s.width_factor is not None else s.cfg.circuit.width_factor
+        )
+        wf_min, wf_max = SCALE_FREE_WIDTH_FACTORS[0], SCALE_FREE_WIDTH_FACTORS[-1]
+        changed, wf_new = imgui.slider_float(
+            "Width factor##ood", wf_current, wf_min, wf_max, "%.2f"
+        )
+        if changed and abs(wf_new - wf_current) > 1e-3:
+            s.width_factor = float(wf_new)
+            s.bootstrap()
+            self._on_model_loaded()
+        label_with_status("Width factor", "width_factor")
+
+        # Num layers override.
+        nl_current = int(s.cfg.circuit.num_layers)
+        changed, nl_new = imgui.slider_int("Num hidden layers##ood", nl_current, 1, 6)
+        if changed and nl_new != nl_current:
+            s.apply_cfg_changes(**{"circuit.num_layers": int(nl_new)})
+            self._on_model_loaded()
+        label_with_status("Num layers", "num_layers")
+
+        # Damage override.
+        _, dmg_now = imgui.checkbox("Damage at eval##ood", bool(s.damage_enabled))
+        if dmg_now != bool(s.damage_enabled):
+            s.damage_enabled = dmg_now
+        label_with_status("Damage", "damage_enabled")
+
+    # ---------- Circuit / pool knobs -------------------------------------
+
+    def _render_circuit_section(self) -> None:
+        imgui.separator_text("Pool")
+        s = self.session
+        # Pool / circuit index slider.
+        if s.pool_size > 1:
+            changed, new_idx = imgui.slider_int(
+                f"Circuit (1..{s.pool_size})",
+                s.current_circuit_idx,
+                0,
+                s.pool_size - 1,
+            )
+            if changed:
+                s.select_circuit_idx(int(new_idx))
+                self._on_model_loaded()
+
+        # Regime III demonstration: replace the wires of the *current*
+        # circuit with a fresh random topology, keeping the optimised
+        # logits and the metric history. With a wiring-agnostic TMT
+        # this should produce a visible accuracy drop followed by a
+        # recovery — without ever touching the trained policy.
+        if imgui.button("Shuffle wires (current circuit)"):
+            s.shuffle_wires()
+            # Don't call _on_model_loaded — that would force-reset the
+            # gate visual mask and image cache, which is fine, but we
+            # also leave the metric log untouched (so the drop+recovery
+            # is visible across the shuffle event).
+            self._reset_gate_visual_mask()
+            self._refresh_image_cache(force=True)
+        imgui.text_colored(
+            imgui.ImVec4(0.6, 0.6, 0.6, 1.0),
+            "Regime III: OOD wire shuffle, keeps logits + log",
+        )
+
+        # Full pool reshuffle: rebuild the entire pool from a fresh seed,
+        # which *does* reset the logs (intentional — every circuit is
+        # different now). Useful for scrubbing through topologies.
+        if imgui.button("Reshuffle pool"):
+            s.regenerate_pool()
+            self._on_model_loaded()
+
+    # ---------- Damage controls ------------------------------------------
+
+    def _render_damage_section(self) -> None:
+        imgui.separator_text("Damage")
+        s = self.session
+        _, s.damage_enabled = imgui.checkbox(
+            "Stochastic faults each step", s.damage_enabled
+        )
+        _, s.permanent_damage = imgui.slider_float(
+            "Permanence", s.permanent_damage, 0.0, 1.0, "%.2f"
+        )
+        if imgui.button("🔫 Shotgun"):
+            s.apply_shotgun_damage()
+            self._refresh_image_cache(force=True)
+        imgui.same_line()
+        if imgui.button("Pre-grow with BP"):
+            s.pre_grow_with_bp(n_steps=300)
+            self._refresh_image_cache(force=True)
+        imgui.text_colored(
+            imgui.ImVec4(0.7, 0.7, 0.7, 1.0), damage_status_string(s.damage_params)
+        )
+
+    # ---------- Visualisation options ------------------------------------
+
+    def _render_visualization_section(self) -> None:
+        imgui.separator_text("Visualisation")
+        _, self.plot_type_idx = imgui.combo(
+            "Plot", self.plot_type_idx, list(self.PLOT_TYPES)
+        )
+        _, self.loss_display_mode_idx = imgui.combo(
+            "Display", self.loss_display_mode_idx, list(self.LOSS_DISPLAY_MODES)
+        )
+        if imgui.button("Reset gate highlight"):
+            self._reset_gate_visual_mask()
+        imgui.same_line()
+        if imgui.button("Highlight used gates"):
+            self._mask_unused_gates()
+
+    # ---------- Performance / profiler ----------------------------------
+
+    def _render_performance_section(self) -> None:
+        imgui.separator_text("Performance")
+        _, self.show_perf = imgui.checkbox("Show breakdown", self.show_perf)
+        imgui.same_line()
+        if imgui.small_button("Reset"):
+            self.prof.reset()
+        if not self.show_perf:
+            return
+
+        frame_mean, frame_p95, _frame_last = self.prof.frame_stats_ms()
+        fps = self.prof.fps()
+        if frame_mean > 0:
+            imgui.text(f"Frame: {frame_mean:5.1f} ms (p95 {frame_p95:5.1f}) → {fps:5.1f} FPS")
+        else:
+            imgui.text("Frame: (warming up)")
+
+        rows = self.prof.summary()
+        if not rows:
+            return
+
+        # Headers.
+        imgui.separator()
+        imgui.text(f"{'Region':<26}{'mean':>8}{'p95':>8}{'last':>8}{'%':>6}")
+        denom = max(frame_mean, 1e-6)
+        red = imgui.ImVec4(1.0, 0.45, 0.45, 1.0)
+        amber = imgui.ImVec4(1.0, 0.75, 0.3, 1.0)
+        green = imgui.ImVec4(0.55, 0.85, 0.55, 1.0)
+        stale = imgui.ImVec4(0.45, 0.45, 0.45, 1.0)
+        for name, mean_ms, p95_ms, last_ms, is_stale in rows:
+            pct = 100.0 * mean_ms / denom
+            if is_stale:
+                # Greyed out: e.g. ``bp.*`` rows after the user
+                # switches to TMT, or ``compute.step`` while paused.
+                color = stale
+                tag = " (stale)"
+            else:
+                if pct >= 35.0:
+                    color = red
+                elif pct >= 15.0:
+                    color = amber
+                else:
+                    color = green
+                tag = ""
+            imgui.text_colored(
+                color,
+                f"{name:<26}{mean_ms:7.2f} {p95_ms:7.2f} {last_ms:7.2f} {pct:5.1f}{tag}",
+            )
+
+    # ---------- Status panel ---------------------------------------------
+
+    def _render_status_section(self) -> None:
+        imgui.separator_text("Status")
+        s = self.session
+        imgui.text(f"Method: {s.method.value}")
+        imgui.text(f"Task: {s.task_name}  ({s.input_n} → {s.output_n} bits)")
+        imgui.text(f"Wiring: {s.wiring_mode}")
+        imgui.text(f"Layers: {s.layer_sizes}")
+        imgui.text(f"Step: {s.step_count}")
+        imgui.text(f"Pool: {s.current_circuit_idx + 1}/{s.pool_size}")
+        if s.last_step_result is not None:
+            imgui.text(f"Soft acc: {float(s.last_step_result.accuracy):.3f}")
+            imgui.text(f"Hard acc: {float(s.last_step_result.hard_accuracy):.3f}")
+        if s.gate_mask_flat is not None:
+            n_active = int(jp.asarray(s.gate_mask_flat).sum())
+            n_total = int(s.gate_mask_flat.shape[0])
+            imgui.text(f"Damaged gates: {n_total - n_active} / {n_total}")
+
+    # ------------------------------------------------------------------
+    # Circuit diagram (gates + wires)
+    # ------------------------------------------------------------------
+
+    def _render_circuit_diagram(self, pad: int = 4, d: int = 24, height: int = 600) -> None:
+        s = self.session
         io = imgui.get_io()
-        W = imgui.get_content_region_avail().x - pad * 2
-        imgui.invisible_button("circuit", (W, H))
+        width = imgui.get_content_region_avail().x - pad * 2
+        imgui.invisible_button("circuit", (width, height))
         base_x, base_y = imgui.get_item_rect_min()
         base_x += pad
 
         dl = imgui.get_window_draw_list()
-        h = (H - d) / (len(self.layer_sizes) - 1) if len(self.layer_sizes) > 1 else H
+        layer_sizes = s.layer_sizes
+        layer_h = (height - d) / max(1, (len(layer_sizes) - 1))
+
+        # Make sure cached masks match the current layer count.
+        if len(self._gate_use_mask) != len(layer_sizes):
+            self._reset_gate_visual_mask()
+
+        # Pre-fetch per-case activations once (each ``np.asarray`` on a
+        # JAX array forces a device→host sync, so doing it per-layer
+        # inside the gate loop was paying ``len(layer_sizes)`` syncs
+        # *every frame*).
+        case = self.active_case_i
+        case_activations: list[np.ndarray] = []
+        for li in range(len(layer_sizes)):
+            if li < len(s.activations) and case < s.activations[li].shape[0]:
+                case_activations.append(np.asarray(s.activations[li][case]))
+            else:
+                case_activations.append(np.zeros(layer_sizes[li][0]))
+        # Pre-fetch wires too — they only change on bootstrap/mutate, so
+        # a per-frame ``np.asarray`` is wasteful but harmless to cache
+        # at this granularity.
+        wires_np = [np.asarray(w) for w in s.wires]
+
         prev_gate_x = None
         prev_y = 0
         prev_act = None
-        case = self.active_case_i
         hover_gate = None
 
-        # Ensure activations exist and have correct dimensions
-        if not hasattr(self, "act") or len(self.act) != len(self.layer_sizes):
-            if not hasattr(self, "_activation_warning_shown"):
-                print("Warning: Activations not initialized properly, creating empty activations")
-                self._activation_warning_shown = True
-            self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
-
-        # Ensure each activation layer has the right shape
-        for li, (gate_n, _group_size) in enumerate(self.layer_sizes):
-            if li >= len(self.act) or self.act[li].shape != (self.case_n, gate_n):
-                if li >= len(self.act):
-                    # Extend act list if needed
-                    while len(self.act) <= li:
-                        default_size = (
-                            self.layer_sizes[len(self.act)][0]
-                            if len(self.act) < len(self.layer_sizes)
-                            else gate_n
-                        )
-                        self.act.append(np.zeros((self.case_n, default_size)))
-                else:
-                    # Reshape if needed
-                    self.act[li] = np.zeros((self.case_n, gate_n))
-
-        # Ensure wire_masks has the right length
-        if len(self.wire_masks) != len(self.wires):
-            print(
-                f"Warning: wire_masks length mismatch. Expected {len(self.wires)}, got {len(self.wire_masks)}"
-            )
-            self.wire_masks = [np.ones_like(w, np.bool_) for w in self.wires]
-
-        for li, (gate_n, group_size) in enumerate(self.layer_sizes):
-            group_n = gate_n // group_size
-            span_x = W / group_n if group_n > 0 else W
+        for li, (gate_n, group_size) in enumerate(layer_sizes):
+            group_n = gate_n // max(group_size, 1)
+            span_x = width / max(group_n, 1)
             group_w = min(d * group_size, span_x - 6)
-            gate_w = group_w / group_size if group_size > 0 else group_w
+            gate_w = group_w / max(group_size, 1)
             group_x = base_x + (np.arange(group_n)[:, None] + 0.5) * span_x
             gate_ofs = (np.arange(group_size) - group_size / 2 + 0.5) * gate_w
             gate_x = (group_x + gate_ofs).ravel()
-            y = base_y + li * h + d / 2
+            y = base_y + li * layer_h + d / 2
 
-            # Ensure we don't go out of bounds on activations
-            if li < len(self.act):
-                act = np.array(self.act[li][case]) if case < len(self.act[li]) else np.zeros(gate_n)
-            else:
-                print(f"Warning: Missing activation for layer {li}")
-                act = np.zeros(gate_n)
+            act = case_activations[li]
 
             for i, x in enumerate(gate_x):
                 a = int(act[i] * 0xA0) if i < len(act) else 0
@@ -1237,36 +885,42 @@ class CircuitOptimizationDemo:
                 p0, p1 = (x - gate_w / 2, y - d / 2), (x + gate_w / 2, y + d / 2)
                 dl.add_rect_filled(p0, p1, col, 4)
 
-                # Handle hover and click interactions
                 if is_point_in_box(p0, p1, io.mouse_pos):
                     dl.add_rect(p0, p1, 0xA00000FF, 4, thickness=2.0)
                     if li > 0:
-                        group_idx = i // group_size
-                        gate_idx = i % group_size
-                        if group_idx < len(self.logits[li - 1]) and gate_idx < len(
-                            self.logits[li - 1][group_idx]
+                        group_idx = i // max(group_size, 1)
+                        gate_idx = i % max(group_size, 1)
+                        layer_logits = s.logits[li - 1]
+                        if (
+                            group_idx < layer_logits.shape[0]
+                            and gate_idx < layer_logits.shape[1]
                         ):
-                            hover_gate = (
-                                x,
-                                y,
-                                self.logits[li - 1][group_idx, gate_idx],
-                            )
+                            hover_gate = (x, y, layer_logits[group_idx, gate_idx])
                     if io.mouse_clicked[0]:
-                        if li > 0:
-                            if li < len(self.gate_mask) and i < len(self.gate_mask[li]):
-                                self.gate_mask[li][i] = 1.0 - self.gate_mask[li][i]
-                        else:
+                        if li == 0:
+                            # Input layer: flip the active case bit.
                             self.active_case_i = self.active_case_i ^ (1 << i)
+                        elif 0 < li < len(layer_sizes) - 1:
+                            # Hidden gate: knock it out and add to the
+                            # damage set. Mirrors what shotgun does for a
+                            # random gate (logits → faulty value, mask → 0).
+                            flat_idx = sum(g for g, _ in layer_sizes[:li]) + i
+                            s.damage_gate(flat_idx)
+                            self._refresh_image_cache(force=True)
 
-                # Show masked gates
+                # Damaged-gate overlay (red).
                 if (
-                    li < len(self.gate_mask)
-                    and i < len(self.gate_mask[li])
-                    and self.gate_mask[li][i] == 0.0
+                    s.gate_mask_flat is not None
+                    and 0 < li < len(layer_sizes) - 1
                 ):
-                    dl.add_rect_filled(p0, p1, 0xA00000FF, 4)
+                    flat_idx = sum(g for g, _ in layer_sizes[:li]) + i
+                    if (
+                        flat_idx < s.gate_mask_flat.shape[0]
+                        and float(s.gate_mask_flat[flat_idx]) == 0.0
+                    ):
+                        dl.add_rect_filled(p0, p1, 0xC00000FF, 4)
 
-            # Draw group boundaries
+            # Group boundaries.
             for x in group_x[:, 0]:
                 dl.add_rect(
                     (x - group_w / 2, y - d / 2),
@@ -1275,41 +929,36 @@ class CircuitOptimizationDemo:
                     4,
                 )
 
-            # Draw wires between layers
+            # Wires from previous layer.
             if (
                 li > 0
                 and prev_gate_x is not None
-                and li - 1 < len(self.wires)
-                and li - 1 < len(self.wire_masks)
+                and (li - 1) < len(wires_np)
+                and (li - 1) < len(self._wire_use_mask)
             ):
-                wires = self.wires[li - 1].T
-                masks = self.wire_masks[li - 1].T
+                wires = wires_np[li - 1].T
+                masks = self._wire_use_mask[li - 1].T
                 src_x = prev_gate_x[wires]
-                dst_x = group_x + (np.arange(self.arity) + 0.5) / self.arity * group_w - group_w / 2
+                dst_x = (
+                    group_x
+                    + (np.arange(s.arity) + 0.5) / s.arity * group_w
+                    - group_w / 2
+                )
                 my = (prev_y + y) / 2
-
                 for x0, x1, si, m in zip(
-                    src_x.ravel(), dst_x.ravel(), wires.ravel(), masks.ravel(), strict=False
+                    src_x.ravel(),
+                    dst_x.ravel(),
+                    wires.ravel(),
+                    masks.ravel(),
+                    strict=False,
                 ):
                     if not m:
                         continue
-                    activation_intensity = int(prev_act[si] * 0x60) if si < len(prev_act) else 0
-
-                    if (
-                        self.use_message_viz
-                        and self.optimization_methods[self.optimization_method_idx] != "Backprop"
-                    ):
-                        # Colorful visualization for GNN/Self-Attention
-                        import random
-
-                        r = random.randint(0, 255)
-                        g = random.randint(0, 255)
-                        b = random.randint(0, 255)
-                        alpha = random.randint(128, 255)  # Semi-transparent
-                        col = (alpha << 24) | (r << 16) | (g << 8) | b
+                    if prev_act is not None and si < len(prev_act):
+                        a_i = int(prev_act[si] * 0x60)
                     else:
-                        col = 0xFF404040 + (activation_intensity << 8)
-
+                        a_i = 0
+                    col = 0xFF404040 + (a_i << 8)
                     dl.add_bezier_cubic(
                         (x0, prev_y + d / 2),
                         (x0, my),
@@ -1319,697 +968,113 @@ class CircuitOptimizationDemo:
                         1.0,
                     )
 
-            # Show LUT on hover
             if hover_gate is not None:
-                self.draw_gate_lut(*hover_gate)
+                self._draw_gate_lut(*hover_gate)
 
             prev_gate_x = gate_x
             prev_act = act
             prev_y = y
 
-    def draw_lut(self, name, img, tex_id):
-        """Draw visualization using ImGui"""
+    def _draw_gate_lut(self, x: float, y: float, logit: jp.ndarray) -> None:
+        x0, y0 = x - 20, y - 20 - 36
+        dl = imgui.get_window_draw_list()
+        from jax.nn import sigmoid
+
+        lut = np.asarray(sigmoid(logit)).reshape(-1, 4)
+        col = np.uint32(lut * 255)
+        col = (col << 16) | (col << 8) | col | 0xFF000000
+        for (i, j), c in np.ndenumerate(col):
+            xp, yp = x0 + j * 10, y0 + i * 10
+            dl.add_rect_filled((xp, yp), (xp + 10, yp + 10), c)
+
+    # ------------------------------------------------------------------
+    # Image panel (input / output / ground-truth)
+    # ------------------------------------------------------------------
+
+    def _render_image_panel(self, name: str, img: np.ndarray) -> None:
+        """Draw an RGB uint8 image as a single GL texture (immvision).
+
+        This replaces the previous per-pixel ``add_rect_filled`` grid
+        which, at default settings, issued ~4096 draw calls per panel,
+        across 3 panels (~12k draw calls per frame). That was the
+        dominant rendering cost.
+        ``image_display`` uploads to the GPU once per change of the
+        underlying numpy buffer (``refresh_image=True``) and otherwise just
+        re-binds the existing texture (~one draw call).
+        """
         try:
             view_w = imgui.get_content_region_avail().x
             img_h, img_w = img.shape[:2]
+            disp_w = max(1, int(view_w))
+            # Honour the image's natural aspect ratio in the limit, but
+            # floor the displayed height generously so very-wide arrays
+            # (e.g. 12 x 4096 input grids) still render as a *readable*
+            # strip rather than a 30-pixel sliver. Capping above the
+            # natural height is intentional: it deliberately stretches
+            # the bit axis so each input bit is several rows tall.
+            natural_h = round(disp_w * img_h / max(img_w, 1))
+            disp_h = int(np.clip(natural_h, 80, 220))
 
-            # Debug: print image dimensions for text task
-            if (
-                name in ["outputs", "ground_truth"]
-                and hasattr(self, "_debug_printed")
-                and not self._debug_printed
-            ):
-                print(f"Debug {name}: img shape = {img.shape}, aspect = {img_h / img_w:.4f}")
-                self._debug_printed = True
+            refresh = self._image_dirty.get(name, True)
+            immvision.image_display(
+                f"##img_{name}",
+                img,
+                image_display_size=(disp_w, disp_h),
+                refresh_image=refresh,
+                show_options_button=False,
+            )
+            if refresh:
+                self._image_dirty[name] = False
 
-            # Simple aspect ratio based on actual image dimensions
-            # This matches how the notebook displays the data
-            natural_aspect = img_h / img_w
-
-            # For text tasks with very wide, short images, we need to respect
-            # the true aspect ratio to show the full 256×8 data properly
-            if natural_aspect < 0.05:  # Very wide image (like 64×2048)
-                # Use the natural aspect ratio but ensure it's visible
-                aspect = max(0.03, natural_aspect)  # Allow very wide aspect ratios
-            elif natural_aspect < 0.2:  # Moderately wide
-                aspect = max(0.1, natural_aspect)
-            else:
-                aspect = max(0.1, min(natural_aspect, 1.0))
-
-            disp_w = view_w
-            disp_h = disp_w * aspect
-
-            # Draw visualization
+            # Overlay the active-case marker on top of the image we just
+            # drew. ``imgui.get_item_rect_*`` refers to the immvision item.
+            p0 = imgui.get_item_rect_min()
+            p1 = imgui.get_item_rect_max()
             dl = imgui.get_window_draw_list()
-            p0 = imgui.get_cursor_screen_pos()
-            p1 = (p0[0] + disp_w, p0[1] + disp_h)
-
-            # Background
-            dl.add_rect_filled(p0, p1, 0xFF333333, 4.0)
-
-            if self.use_simple_viz:
-                # Simple line visualization
-                case_width = disp_w / self.case_n
-                for i in range(self.case_n):
-                    x_pos = p0[0] + i * case_width
-                    is_active = i == self.active_case_i
-
-                    # Sample color from middle row
-                    middle_y = img_h // 2
-                    if len(img.shape) == 3 and img.shape[2] >= 3:
-                        r, g, b = [int(v) for v in img[middle_y, i % img_w, 0:3]]
-                        r, g, b = r & 0xFF, g & 0xFF, b & 0xFF
-                        color = 0xFF000000 | (b << 16) | (g << 8) | r
-                    else:
-                        v = int(img[middle_y, i % img_w]) & 0xFF
-                        color = 0xFF000000 | (v << 16) | (v << 8) | v
-
-                    # Draw line
-                    dl.add_line((x_pos, p0[1]), (x_pos, p1[1]), color, 2.0 if is_active else 1.0)
-
-                    # Highlight active case
-                    if is_active:
-                        dl.add_rect(
-                            (x_pos - case_width / 2, p0[1]),
-                            (x_pos + case_width / 2, p1[1]),
-                            0x8000FF00,
-                            0.0,
-                            thickness=2.0,
-                        )
-            else:
-                if self.use_full_resolution:
-                    # Full resolution mode - show every pixel (slower but more detailed)
-                    x_step = 1
-                    y_step = 1
-                else:
-                    # Performance mode - intelligent downsampling that preserves text readability
-                    # For very wide images (like text), preserve more horizontal detail
-                    aspect_ratio = img_h / img_w
-
-                    if aspect_ratio < 0.1:  # Very wide image (likely text)
-                        # Preserve horizontal resolution for text readability
-                        max_horizontal_samples = min(256, img_w // 4)  # Sample every 4th pixel
-                        max_vertical_samples = min(64, img_h)  # Full vertical resolution
-                        x_step = max(1, img_w // max_horizontal_samples)
-                        y_step = max(1, img_h // max_vertical_samples)
-                    else:
-                        # Regular images - use original 64x64 approach
-                        max_blocks = 64
-                        x_step = max(1, img_w // max_blocks)
-                        y_step = max(1, img_h // max_blocks)
-
-                for y in range(0, img_h, y_step):
-                    for x in range(0, img_w, x_step):
-                        px = p0[0] + (x / img_w) * disp_w
-                        py = p0[1] + (y / img_h) * disp_h
-                        px_end = p0[0] + ((x + x_step) / img_w) * disp_w
-                        py_end = p0[1] + ((y + y_step) / img_h) * disp_h
-
-                        # Get color
-                        if len(img.shape) == 3 and img.shape[2] >= 3:
-                            r, g, b = [int(v) for v in img[y, x, 0:3]]
-                            r, g, b = r & 0xFF, g & 0xFF, b & 0xFF
-                            color = 0xFF000000 | (b << 16) | (g << 8) | r
-                        else:
-                            v = int(img[y, x]) & 0xFF
-                            color = 0xFF000000 | (v << 16) | (v << 8) | v
-
-                        dl.add_rect_filled((px, py), (px_end, py_end), color)
-
-            # Active case cursor
-            x = p0[0] + (disp_w * (self.active_case_i + 0.5) / self.case_n)
-            dl.add_line((x, p0[1]), (x, p1[1]), 0x8000FF00, 2.0)
-
-            # Border
+            case_n = max(self.session.case_n, 1)
+            x = p0.x + (p1.x - p0.x) * (self.active_case_i + 0.5) / case_n
+            dl.add_line((x, p0.y), (x, p1.y), 0xFF00FF00, 2.0)
             dl.add_rect(p0, p1, 0xFFFFFFFF, 4.0)
 
-            # Make clickable
-            imgui.invisible_button(f"{name}_area", (disp_w, disp_h))
+            # Click-to-select active case.
             if imgui.is_item_hovered() and imgui.is_mouse_clicked(0):
-                mx = imgui.get_io().mouse_pos.x - p0[0]
-                mx_ratio = mx / disp_w
-                self.active_case_i = max(0, min(int(mx_ratio * self.case_n), self.case_n - 1))
-
-            # Reserve space
-            imgui.dummy((0, disp_h))
-
+                mx = imgui.get_io().mouse_pos.x - p0.x
+                mx_ratio = mx / max(p1.x - p0.x, 1)
+                self.active_case_i = max(
+                    0, min(int(mx_ratio * case_n), case_n - 1)
+                )
         except Exception as e:
-            imgui.text(f"Error drawing {name}: {e}")
-
-    def gui(self):
-        """Main GUI function"""
-        try:
-            # Initialize ImGui textures if not already done
-            self.initialize_imgui_textures()
-
-            # Perform one optimization step
-            self.optimize_circuit()
-
-            # Configure FPS
-            runner_params = hello_imgui.get_runner_params()
-            runner_params.fps_idling.enable_idling = True
-
-            # Main content area
-            imgui.begin_child("main", (-300, 0))
-
-            # Optimization progress plot
-            plot_type = self.plot_types[self.plot_type_idx]
-            plot_title = f"Circuit Optimization Progress - {plot_type}"
-
-            if implot.begin_plot(plot_title, (-1, 200)):
-                implot.setup_legend(implot.Location_.north_east.value)
-
-                # Setup axes based on plot type
-                if plot_type == "Loss":
-                    implot.setup_axis_scale(implot.ImAxis_.y1.value, implot.Scale_.log10.value)
-                    implot.setup_axes(
-                        "Step",
-                        "Loss",
-                        implot.AxisFlags_.auto_fit.value,
-                        implot.AxisFlags_.auto_fit.value,
-                    )
-                    implot.setup_axis_limits(
-                        implot.ImAxis_.y1.value, self.min_loss_value, self.max_loss_value
-                    )
-
-                    # Plot loss lines based on display mode
-                    display_mode = self.loss_display_modes[self.loss_display_mode_idx]
-                    if display_mode in ["Both", "Soft Only"]:
-                        implot.plot_line("soft_loss", self.loss_log)
-                    if display_mode in ["Both", "Hard Only"]:
-                        implot.plot_line("hard_loss", self.hard_log)
-
-                else:  # Accuracy
-                    implot.setup_axis_scale(implot.ImAxis_.y1.value, implot.Scale_.linear.value)
-                    implot.setup_axes(
-                        "Step",
-                        "Accuracy",
-                        implot.AxisFlags_.auto_fit.value,
-                        implot.AxisFlags_.none.value,  # Remove auto_fit for y-axis to respect manual limits
-                    )
-                    implot.setup_axis_limits(implot.ImAxis_.y1.value, 0.0, 1.15)
-
-                    # Plot accuracy lines based on display mode
-                    display_mode = self.loss_display_modes[self.loss_display_mode_idx]
-                    if display_mode in ["Both", "Soft Only"]:
-                        implot.plot_line("soft_accuracy", self.accuracy_log)
-                    if display_mode in ["Both", "Hard Only"]:
-                        implot.plot_line("hard_accuracy", self.hard_accuracy_log)
-
-                implot.drag_line_x(1, self.step_i % len(self.loss_log), (0.8, 0, 0, 0.5))
-
-                # Right-click context menu for plot options
-                if implot.is_plot_hovered() and imgui.is_mouse_clicked(1):  # Right click
-                    imgui.open_popup("plot_options_menu")
-
-                if imgui.begin_popup("plot_options_menu"):
-                    imgui.text("Plot Options")
-                    imgui.separator()
-
-                    # Plot type selection
-                    imgui.text("Plot Type:")
-                    for i, ptype in enumerate(self.plot_types):
-                        selected = i == self.plot_type_idx
-                        if imgui.selectable(ptype, selected)[0]:
-                            self.plot_type_idx = i
-                            print(f"Plot type changed to: {ptype}")
-
-                    imgui.separator()
-
-                    # Display mode selection
-                    mode_label = "Loss Display" if plot_type == "Loss" else "Accuracy Display"
-                    imgui.text(f"{mode_label} Options:")
-                    for i, mode in enumerate(self.loss_display_modes):
-                        selected = i == self.loss_display_mode_idx
-                        if imgui.selectable(mode, selected)[0]:
-                            self.loss_display_mode_idx = i
-                            print(f"Display mode changed to: {mode}")
-
-                    imgui.end_popup()
-
-                implot.end_plot()
-
-            # Input visualization
-            imgui.separator_text("Inputs")
-            self.draw_lut("inputs", self.inputs_img, self.input_texture)
-
-            # Circuit visualization
-            imgui.separator_text("Circuit")
-            H = imgui.get_content_region_avail().y - 400  # Leave room for outputs below
-            self.draw_circuit(H=max(H, 300))  # Minimum height of 300
-
-            # Output vs Ground Truth
-            imgui.separator_text("Current Output")
-            self.draw_lut("outputs", self.outputs_img, self.output_texture)
-
-            imgui.separator_text("Expected Output")
-            self.draw_lut("ground_truth", self.ground_truth_img, self.ground_truth_texture)
-            imgui.end_child()
-            imgui.same_line()
-
-            # Control panel
-            imgui.begin_child("controls")
-
-            if imgui.button("Python REPL"):
-                IPython.embed()
-
-            # Optimization controls
-            imgui.separator_text("Circuit Optimization")
-
-            # Play/Pause button for optimization
-            if self.is_optimizing:
-                if imgui.button("⏸️ Pause", (120, 0)):
-                    self.is_optimizing = False
-            else:
-                if imgui.button("▶️ Play", (120, 0)):
-                    self.is_optimizing = True
-
-            imgui.same_line()
-            imgui.text("Optimization" if self.is_optimizing else "Paused")
-
-            if imgui.button("Reset Circuit"):
-                self.reset_circuit()
-
-            # Optimization method
-            opt_changed, self.optimization_method_idx = imgui.combo(
-                "Method", self.optimization_method_idx, self.optimization_methods
-            )
-            if opt_changed:
-                print(f"Switching to {self.optimization_methods[self.optimization_method_idx]}")
-                self.initialize_optimization_method()
-
-            # Method-specific controls
-            method_name = self.optimization_methods[self.optimization_method_idx]
-
-            if method_name == "Backprop":
-                imgui.text("Direct gradient-based logit optimization")
-                _, self.learning_rate = imgui.slider_float(
-                    "Learning Rate",
-                    self.learning_rate,
-                    1e-5,
-                    1e-1,
-                    "%.5f",
-                    imgui.SliderFlags_.logarithmic.value,
-                )
-
-            elif method_name in ["GNN", "Self-Attention"]:
-                _, self.n_message_steps = imgui.slider_int(
-                    "Message Steps", self.n_message_steps, 1, 10
-                )
-
-                # Show model status
-                if self.frozen_model is not None:
-                    imgui.text_colored(
-                        imgui.ImVec4(0.0, 1.0, 0.0, 1.0),
-                        f"✓ Frozen {method_name} model loaded",
-                    )
-                    imgui.text("Model suggests logit improvements")
-                else:
-                    imgui.text_colored(
-                        imgui.ImVec4(1.0, 0.0, 0.0, 1.0), f"✗ No {method_name} model"
-                    )
-
-                # WandB integration
-                imgui.separator_text("Load Frozen Model")
-
-                # Loading mode selection
-                load_changed, self.load_mode_idx = imgui.combo(
-                    "Load Mode", self.load_mode_idx, self.load_modes
-                )
-                if load_changed:
-                    print(f"Changed load mode to: {self.load_modes[self.load_mode_idx]}")
-
-                # Show description of selected mode
-                if self.load_mode_idx == 0:  # Latest Checkpoint
-                    imgui.text_colored(
-                        imgui.ImVec4(0.7, 0.7, 0.7, 1.0),
-                        "Loads most recent checkpoint (may not be best performing)",
-                    )
-                else:  # Best Model
-                    imgui.text_colored(
-                        imgui.ImVec4(0.0, 1.0, 0.0, 1.0),
-                        "Loads best performing model (recommended)",
-                    )
-
-                # Optional preferred metric for best model selection
-                if self.load_mode_idx == 1:  # Best Model mode
-                    prefer_metrics = [
-                        "Auto (Intelligent Selection)",
-                        "eval_in_hard_accuracy",
-                        "eval_out_hard_accuracy",
-                        "eval_in_hard_loss",
-                        "eval_out_hard_loss",
-                        "training_hard_accuracy",
-                    ]
-                    prefer_metric_idx = (
-                        0
-                        if self.prefer_metric is None
-                        else (
-                            prefer_metrics.index(self.prefer_metric)
-                            if self.prefer_metric in prefer_metrics
-                            else 0
-                        )
-                    )
-
-                    changed, prefer_metric_idx = imgui.combo(
-                        "Prefer Metric", prefer_metric_idx, prefer_metrics
-                    )
-                    if changed:
-                        self.prefer_metric = (
-                            None if prefer_metric_idx == 0 else prefer_metrics[prefer_metric_idx]
-                        )
-                        print(f"Preferred metric: {self.prefer_metric or 'Auto'}")
-
-                run_id_buffer = self.run_id if self.run_id else ""
-                changed, run_id_buffer = imgui.input_text("Run ID", run_id_buffer, 256)
-                if changed:
-                    self.run_id = run_id_buffer if run_id_buffer else None
-
-                if imgui.button("Load from WandB"):
-                    if self.try_load_wandb_model():
-                        print(f"Successfully loaded frozen {method_name} model")
-                    else:
-                        print(f"Failed to load {method_name} model")
-
-                if self.loaded_run_id:
-                    imgui.text_colored(
-                        imgui.ImVec4(0.0, 1.0, 0.0, 1.0),
-                        f"Loaded: {self.loaded_run_id}",
-                    )
-
-            # Circuit architecture
-            imgui.separator_text("Circuit Architecture")
-
-            orig_input_n = self.input_n
-            orig_output_n = self.output_n
-            orig_arity = self.arity
-            orig_layer_n = self.layer_n
-            orig_width_factor = self.width_factor
-
-            _, self.input_n = imgui.slider_int("Input Bits", self.input_n, 2, 8)
-            _, self.output_n = imgui.slider_int("Output Bits", self.output_n, 2, 8)
-            _, self.arity = imgui.slider_int("Gate Arity", self.arity, 2, 4)
-            _, self.layer_n = imgui.slider_int("Hidden Layers", self.layer_n, 1, 5)
-            _, self.width_factor = imgui.slider_int("Width Factor", self.width_factor, 1, 4)
-
-            if (
-                self.input_n != orig_input_n
-                or self.output_n != orig_output_n
-                or self.arity != orig_arity
-                or self.layer_n != orig_layer_n
-                or self.width_factor != orig_width_factor
-            ):
-                try:
-                    self.regenerate_circuit()
-                    self.initialize_optimization_method()
-                except Exception as e:
-                    print(f"Error regenerating circuit: {e}")
-                    # Revert
-                    self.input_n = orig_input_n
-                    self.output_n = orig_output_n
-                    self.arity = orig_arity
-                    self.layer_n = orig_layer_n
-                    self.width_factor = orig_width_factor
-
-            if imgui.button("Regenerate Circuit"):
-                self.regenerate_circuit()
-
-            # Wiring configuration
-            imgui.separator_text("Wiring")
-            wiring_changed, self.wiring_mode_idx = imgui.combo(
-                "Wiring Mode", self.wiring_mode_idx, self.wiring_modes
-            )
-            if wiring_changed:
-                self.wiring_mode = self.wiring_modes[self.wiring_mode_idx]
-                self.regenerate_circuit()  # This will invalidate cache
-
-            # Wiring seed control
-            seed_changed, new_seed = imgui.input_int("Wiring Seed", self.wiring_seed)
-            if seed_changed:
-                self.wiring_seed = max(0, new_seed)  # Ensure non-negative
-                self.wiring_key = jax.random.PRNGKey(self.wiring_seed)
-                self.regenerate_circuit()
-
-            if imgui.button("Reset Seed (42)"):
-                self.wiring_seed = 42
-                self.wiring_key = jax.random.PRNGKey(self.wiring_seed)
-                self.regenerate_circuit()
-
-            imgui.same_line()
-            if imgui.button("Shuffle Wires"):
-                # Generate a random seed
-                import random
-
-                self.wiring_seed = random.randint(0, 99999)
-                self.wiring_key = jax.random.PRNGKey(self.wiring_seed)
-                self.regenerate_circuit(reset_logs=False)  # This will invalidate cache
-
-            # Training-consistent wiring controls
-            imgui.separator_text("Training-Consistent Wiring")
-
-            # Enable/disable training wires (only available in fixed mode)
-            if self.wiring_mode == "fixed":
-                training_wires_changed, self.use_training_wires = imgui.checkbox(
-                    "Use Training Wires", self.use_training_wires
-                )
-                if training_wires_changed:
-                    self.regenerate_circuit()
-
-                if self.use_training_wires:
-                    # Initial diversity control
-                    diversity_changed, self.initial_diversity = imgui.slider_int(
-                        "Initial Diversity", self.initial_diversity, 1, 16
-                    )
-                    if diversity_changed:
-                        self.regenerate_circuit()
-
-                    # Evaluation base seed control
-                    eval_seed_changed, self.evaluation_base_seed = imgui.input_int(
-                        "Evaluation Seed", self.evaluation_base_seed
-                    )
-                    if eval_seed_changed:
-                        self.evaluation_base_seed = max(0, self.evaluation_base_seed)
-                        if self.use_training_wires:
-                            self.regenerate_circuit()
-
-                    # Distribution mode selection
-                    dist_changed, self.distribution_mode_idx = imgui.combo(
-                        "Distribution", self.distribution_mode_idx, self.distribution_modes
-                    )
-                    if dist_changed:
-                        self.switch_distribution_mode(self.distribution_mode_idx)
-
-                    # Wire switching controls
-                    if self.available_wires:
-                        num_wires = len(self.available_wires)
-                        imgui.text(f"Available wires: {num_wires}")
-
-                        # Wire index slider
-                        wire_changed, new_wire_idx = imgui.slider_int(
-                            "Wire Index", self.current_wire_idx, 0, num_wires - 1
-                        )
-                        if wire_changed:
-                            self.switch_to_wire_index(new_wire_idx)
-
-                        # Previous/Next wire buttons
-                        if imgui.button("← Previous Wire") and self.current_wire_idx > 0:
-                            self.switch_to_wire_index(self.current_wire_idx - 1)
-
-                        imgui.same_line()
-                        if imgui.button("Next Wire →") and self.current_wire_idx < num_wires - 1:
-                            self.switch_to_wire_index(self.current_wire_idx + 1)
-
-                        # Show current distribution and wire info
-                        current_dist = self.distribution_modes[self.distribution_mode_idx]
-                        imgui.text_colored(
-                            imgui.ImVec4(0.0, 1.0, 0.0, 1.0),
-                            f"Current: {current_dist} wire {self.current_wire_idx + 1}/{num_wires}",
-                        )
-                    else:
-                        imgui.text_colored(
-                            imgui.ImVec4(1.0, 1.0, 0.0, 1.0), "No training wires loaded"
-                        )
-            else:
-                imgui.text_colored(
-                    imgui.ImVec4(0.7, 0.7, 0.7, 1.0),
-                    "Training wires only available in 'fixed' mode",
-                )
-
-            # Mutation controls
-            imgui.separator()
-
-            # Mutation rate slider
-            _, self.mutation_rate = imgui.slider_float(
-                "Mutation Rate", self.mutation_rate, 0.01, 0.5, "%.3f"
-            )
-
-            # Mutation buttons
-            if imgui.button("Mutate Random"):
-                # Apply genetic mutation to current wires using the slider value
-                self.mutate_wires_random()
-
-            imgui.same_line()
-            if imgui.button("Mutate One"):
-                # Mutate exactly one wire in one random layer
-                self.mutate_one_wire()
-
-            # Task selection
-            imgui.separator_text("Task")
-            task_changed, self.task_idx = imgui.combo("Task", self.task_idx, self.available_tasks)
-            if task_changed:
-                self.update_task()
-                self.initialize_optimization_method()
-
-            # Task-specific controls
-            task_name = self.available_tasks[self.task_idx]
-            if task_name == "text":
-                text_changed, self.task_text = imgui.input_text("Text", self.task_text)
-                if text_changed:
-                    self.update_task()
-            elif task_name == "noise":
-                noise_changed, self.noise_p = imgui.slider_float("Noise p", self.noise_p, 0.0, 1.0)
-                if noise_changed:
-                    self.update_task()
-
-            # Loss type
-            imgui.separator_text("Loss Function")
-            loss_types = ["l4", "l2", "bce"]
-            loss_idx = loss_types.index(self.loss_type) if self.loss_type in loss_types else 0
-            loss_changed, loss_idx = imgui.combo("Loss Type", loss_idx, loss_types)
-            if loss_changed:
-                self.loss_type = loss_types[loss_idx]
-
-            # Visualization controls
-            imgui.separator_text("Visualization")
-
-            # Plot type selection
-            plot_changed, self.plot_type_idx = imgui.combo(
-                "Plot Type", self.plot_type_idx, self.plot_types
-            )
-            if plot_changed:
-                print(f"Plot type changed to: {self.plot_types[self.plot_type_idx]}")
-
-            _, self.use_simple_viz = imgui.checkbox("Simple visualization", self.use_simple_viz)
-            _, self.use_message_viz = imgui.checkbox("Message visualization", self.use_message_viz)
-            _, self.use_full_resolution = imgui.checkbox(
-                "Full resolution (slower)", self.use_full_resolution
-            )
-            _, self.auto_scale_plot = imgui.checkbox("Auto-scale plot", self.auto_scale_plot)
-
-            # Circuit gate mask controls
-            imgui.separator_text("Circuit Masks")
-            if imgui.button("Reset Gate Mask"):
-                self.reset_gate_mask()
-            imgui.same_line()
-            if imgui.button("Mask Unused Gates"):
-                self.mask_unused_gates()
-
-            # Show active gate count
-            if hasattr(self, "gate_mask") and len(self.gate_mask) > 0:
-                active_gate_n = int(sum(m.sum() for m in self.gate_mask))
-                imgui.text(f"Active gates: {active_gate_n}")
-
-            # Status information
-            imgui.separator_text("Status")
-            imgui.text(f"Method: {method_name}")
-            imgui.text(f"Load Mode: {self.load_modes[self.load_mode_idx]}")
-            if self.load_mode_idx == 1 and self.prefer_metric:  # Best Model with specific metric
-                imgui.text(f"Prefer Metric: {self.prefer_metric}")
-            imgui.text(f"Circuit Parameters: {sum(logit.size for logit in self.logits0)}")
-            imgui.text(f"Optimization Step: {self.step_i}")
-            imgui.text(f"Active Input Case: {self.active_case_i}")
-            imgui.text(f"Wiring Seed: {self.wiring_seed}")
-            imgui.text(f"Wiring Mode: {self.wiring_mode}")
-            imgui.text(f"Plot Type: {self.plot_types[self.plot_type_idx]}")
-            imgui.text(f"Display Mode: {self.loss_display_modes[self.loss_display_mode_idx]}")
-
-            # Training wire status
-            if self.use_training_wires:
-                current_dist = self.distribution_modes[self.distribution_mode_idx]
-                imgui.text(f"Training Wires: {current_dist}")
-                if self.available_wires:
-                    imgui.text(f"Wire: {self.current_wire_idx + 1}/{len(self.available_wires)}")
-                imgui.text(f"Initial Diversity: {self.initial_diversity}")
-                imgui.text(f"Eval Seed: {self.evaluation_base_seed}")
-            else:
-                imgui.text("Training Wires: Disabled")
-
-            # Model-specific status
-            if method_name == "Self-Attention" and self.frozen_model is not None:
-                imgui.text(f"Model hidden_dim: {self.model_hidden_dim}")
-                imgui.text(f"Model use_globals: {self.model_use_globals}")
-            elif method_name == "GNN" and self.frozen_model is not None:
-                imgui.text(f"Model hidden_dim: {self.model_hidden_dim}")
-
-            if hasattr(self, "current_pred_hard"):
-                try:
-                    # Check shape compatibility before calculating accuracy
-                    if (
-                        hasattr(self, "current_pred")
-                        and self.current_pred.shape == self.y0.shape
-                        and self.current_pred_hard.shape == self.y0.shape
-                    ):
-                        accuracy = float(jp.mean(jp.round(self.current_pred) == self.y0))
-                        hard_accuracy = float(jp.mean(self.current_pred_hard == self.y0))
-                        imgui.text(f"Soft Accuracy: {accuracy:.3f}")
-                        imgui.text(f"Hard Accuracy: {hard_accuracy:.3f}")
-                    else:
-                        imgui.text("Accuracy: Computing...")
-                except Exception as e:
-                    imgui.text(f"Accuracy: Error - {str(e)[:30]}...")
-
-            imgui.end_child()
-
-        except Exception as e:
-            print(f"Exception in GUI: {e}")
-            import traceback
-
-            print(f"Traceback: {traceback.format_exc()}")
-
-    def initialize_activations(self):
-        """Run circuit once to generate initial activations"""
-        try:
-            # Make sure we have input data
-            if not hasattr(self, "input_x") or not hasattr(self, "y0"):
-                # Create default input data
-                x = jp.arange(self.case_n)
-                self.input_x = unpack(x, bit_n=self.input_n)
-                self.y0 = jp.zeros((self.case_n, self.output_n))
-
-            # Run circuit to get layer-by-layer activations
-            # This returns [input_acts, layer1_acts, layer2_acts, ..., output_acts]
-            self.act = run_circuit(
-                self.logits, self.wires, self.input_x, hard=False, gate_mask=self.gate_mask
-            )
-
-            # Generate error mask for visualization - use final output from activations
-            final_output = self.act[-1] if self.act else jp.zeros_like(self.y0)
-            self.err_mask = (final_output > 0.5) != self.y0
-
-        except Exception as e:
-            print(f"Warning: Could not generate initial circuit activations: {e}")
-            # Fallback: create empty activations
-            self.act = [np.zeros((self.case_n, size)) for size, _ in self.layer_sizes]
-            self.err_mask = np.zeros((self.case_n, self.output_n), bool)
+            imgui.text(f"Error rendering {name}: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    print("Self-Organising Digital Circuits — live demo")
+    print(
+        "Default: Backprop on the default Hydra config. "
+        "Use the 'Load TMT from W&B' panel to bring in a trained model."
+    )
+    # Required by immvision since Oct-2024: declare the color order of
+    # the numpy buffers we'll feed to ``image_display``. We build all
+    # panel images as RGB uint8 (see ``to_rgb_image``).
+    immvision.use_rgb_color_order()
+    app = DemoApp()
+    immapp.run(
+        app.gui,
+        window_title="Self-Organising Digital Circuits — live demo",
+        window_size=(1400, 900),
+        # Idle FPS bumped from 10 → 30: at 10 FPS, dropdown / hover reactions
+        # incur up to 100 ms of latency which feels sluggish even though
+        # the renderer is fine. 30 FPS is plenty for static UI and barely
+        # costs anything since rendering is now texture-based.
+        fps_idle=30,
+        with_implot=True,
+    )
 
 
 if __name__ == "__main__":
-    try:
-        print("Starting Circuit Optimization Demo...")
-        print("- Backprop: Direct gradient-based logit optimization")
-        print("- GNN/Self-Attention: Frozen models suggest logit improvements")
-
-        demo = CircuitOptimizationDemo()
-
-        immapp.run(
-            demo.gui,
-            window_title="Circuit Optimization Demo",
-            window_size=(1200, 800),
-            fps_idle=10,
-            with_implot=True,
-        )
-    except Exception as e:
-        print(f"Error running demo: {e}")
-        import traceback
-
-        print(f"Traceback: {traceback.format_exc()}")
+    main()
