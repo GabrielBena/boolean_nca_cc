@@ -352,6 +352,7 @@ class CircuitOptimizationDemo:
         self.wandb_download_dir = "saves"
         self.run_id = None
         self.loaded_run_id = None
+        self.last_model_load_error = None
 
         # Model loading preferences
         self.load_modes = ["Latest Checkpoint", "Best Model"]
@@ -764,7 +765,7 @@ class CircuitOptimizationDemo:
         if method_name == "Backprop":
             # Use direct optax optimizer (not nnx.Optimizer) for logits
             self._reset_backprop_optimizer()
-            self.frozen_model = None
+            self._clear_loaded_frozen_model()
             # Reset generator when switching to backprop
             self.model_generator = None
             self.last_step_result = None
@@ -849,6 +850,18 @@ class CircuitOptimizationDemo:
             self.model_generator = None
             self.last_step_result = None
 
+    def _clear_loaded_frozen_model(self, reason=None):
+        """Clear the active frozen model so stale checkpoints cannot keep running."""
+        self.frozen_model = None
+        self.loaded_run_id = None
+        self.model_generator = None
+        self.last_step_result = None
+        self.model_logit_scale = None
+        self.model_hidden_scale = None
+        self.checkpoint_epoch = None
+        self.checkpoint_step = None
+        self.last_model_load_error = reason
+
     def _reset_backprop_optimizer(self):
         """Initialize optimizer state for the current logit tree."""
         opt_fn = optax.adamw(self.learning_rate, 0.8, 0.8, weight_decay=1e-1)
@@ -887,6 +900,7 @@ class CircuitOptimizationDemo:
                                        Useful when circuit state is already set (e.g., from preconfigured state).
         """
         try:
+            self.last_model_load_error = None
             method_name = self.optimization_methods[self.optimization_method_idx]
             model_type = "self_attention"
 
@@ -1122,6 +1136,7 @@ class CircuitOptimizationDemo:
 
         except Exception as e:
             print(f"Could not load model from WandB: {e}")
+            self._clear_loaded_frozen_model(reason=str(e))
             return False
 
     def optimize_circuit(self):
@@ -2085,10 +2100,15 @@ class CircuitOptimizationDemo:
                 else:
                     print(f"Failed to load Self-Attention model")
 
-            if self.loaded_run_id:
+            if self.frozen_model is not None and self.loaded_run_id:
                 imgui.text_colored(
                     imgui.ImVec4(0.0, 1.0, 0.0, 1.0),
-                    f"Loaded: {self.loaded_run_id}",
+                    f"Active loaded run: {self.loaded_run_id}",
+                )
+            elif self.last_model_load_error:
+                imgui.text_colored(
+                    imgui.ImVec4(1.0, 0.25, 0.25, 1.0),
+                    f"Last model load failed: {self.last_model_load_error[:120]}",
                 )
 
             # Circuit architecture

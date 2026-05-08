@@ -2,6 +2,7 @@ import logging
 import os
 import pickle
 import warnings
+from collections.abc import Hashable, Mapping
 from typing import Any
 
 import hydra
@@ -15,6 +16,17 @@ from boolean_nca_cc.utils.graph_builder import build_graph
 
 # Setup logging
 log = logging.getLogger(__name__)
+
+
+def _install_flax_typing_pickle_compat() -> None:
+    """Restore Flax typing aliases that older pickled checkpoints may reference."""
+    try:
+        import flax.typing as flax_typing
+    except Exception:
+        return
+
+    if not hasattr(flax_typing, "HashableMapping"):
+        flax_typing.HashableMapping = Mapping[Hashable, Any]
 
 
 def load_checkpoint(checkpoint_path):
@@ -33,6 +45,7 @@ def load_checkpoint(checkpoint_path):
         - step: Training step number
     """
     log.info(f"Loading checkpoint: {checkpoint_path}")
+    _install_flax_typing_pickle_compat()
     
     with open(checkpoint_path, "rb") as f:
         checkpoint = pickle.load(f)
