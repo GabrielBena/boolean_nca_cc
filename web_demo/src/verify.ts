@@ -21,8 +21,9 @@ import { runReplayFromJson, type PerTickReport, type ReplayResult } from "./repl
 import { countParameters, loadWeights } from "./weights";
 
 const MOUNT_ID = "sodc-demo";
-const WEIGHTS_URL = "/weights/reverse_random_damage.json";
-const TRAJECTORY_URL = "/weights/reverse_trajectory.json";
+const BASE = import.meta.env.BASE_URL;
+const WEIGHTS_URL = `${BASE}weights/reverse_random_damage.json`;
+const TRAJECTORY_URL = `${BASE}weights/reverse_trajectory.json`;
 
 // ---------------------------------------------------------------------------
 // DOM helpers

@@ -57,7 +57,8 @@ export function setupCanvas(
   if (!ctx) throw new Error("2D context unavailable");
   canvas.width = Math.max(1, Math.floor(logicalWidth * dpr));
   canvas.height = Math.max(1, Math.floor(logicalHeight * dpr));
-  canvas.style.width = `${logicalWidth}px`;
+  // Do not set style.width — let CSS (width: 100%) control display width so
+  // we don't fight the layout engine. style.height pins the canvas height.
   canvas.style.height = `${logicalHeight}px`;
   // We do all geometry in CSS-px and let the backing store scale.
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);

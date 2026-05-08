@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "deploy": "npm run build && node -e \"const {execSync}=require('child_process');const dest='../../../PhD/gabrielbena.github.io/assets/sodc-demo';execSync('rm -rf '+dest);execSync('mkdir -p '+dest);require('fs').readdirSync('dist').filter(f=>f.endsWith('.js')).forEach(f=>execSync('cp dist/'+f+' '+dest+'/'));execSync('cp -r public/weights '+dest+'/weights');console.log('Deployed to '+dest);\""
   },
   "devDependencies": {
     "typescript": "^5.0.0",

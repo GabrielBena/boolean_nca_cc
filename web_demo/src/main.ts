@@ -28,16 +28,45 @@ import {
 import { countParameters, loadWeights, type TMTWeights } from "./weights";
 
 const MOUNT_ID = "sodc-demo";
-const WEIGHTS_URL = "/weights/reverse_random_damage.json";
-// Live demo loads the *bootstrap* file (header + layer_sizes + task_data
-// only). The full ``reverse_trajectory.json`` is reserved for the parity
-// test at /verify.html. Both files are produced by ``record_trajectory.py``
-// in one invocation (see ``web_demo/export/record_trajectory.py``).
-const BOOTSTRAP_URL = "/weights/reverse_demo.json";
+const BASE = import.meta.env.BASE_URL; // "/" in dev, "/assets/sodc-demo/" in prod
+const GALLERY_URL = `${BASE}weights/gallery.json`;
 
 // Default knobs. Tweakable from the URL hash later if needed.
 const DEFAULT_SHOTGUN_GATES = 8;
 const TICK_THROTTLE_MS = 16; // ≤ 60 FPS — actual ticks gated by compute time
+
+// ---------------------------------------------------------------------------
+// Gallery types (mirrors gallery.json written by export_gallery.py)
+// ---------------------------------------------------------------------------
+
+export interface GalleryEntry {
+  id: string;
+  task: string;
+  recipe: string;
+  label: string;
+  description: string;
+  runId: string;
+  weightsPath: string;  // relative to /weights/
+  bootstrapPath: string;
+}
+
+export interface Gallery {
+  models: GalleryEntry[];
+}
+
+async function fetchGallery(): Promise<Gallery> {
+  const resp = await fetch(GALLERY_URL);
+  if (!resp.ok) throw new Error(`fetch gallery (${GALLERY_URL}): ${resp.status}`);
+  return (await resp.json()) as Gallery;
+}
+
+function weightsUrl(entry: GalleryEntry): string {
+  return `${BASE}weights/${entry.weightsPath}`;
+}
+
+function bootstrapUrl(entry: GalleryEntry): string {
+  return `${BASE}weights/${entry.bootstrapPath}`;
+}
 
 // ---------------------------------------------------------------------------
 // DOM helpers
@@ -56,6 +85,7 @@ function clearChildren(node: HTMLElement) {
 
 interface UI {
   status: HTMLElement;
+  modelPicker: HTMLDivElement;
   imagePanel: HTMLDivElement;
   inputCanvas: HTMLCanvasElement;
   inputWrap: HTMLDivElement;
@@ -64,7 +94,7 @@ interface UI {
   currentWrap: HTMLDivElement;
   expectedCanvas: HTMLCanvasElement;
   expectedWrap: HTMLDivElement;
-  tickLabel: HTMLElement;
+  chartCanvas: HTMLCanvasElement;
   controls: HTMLDivElement;
   playBtn: HTMLButtonElement;
   resetBtn: HTMLButtonElement;
@@ -76,21 +106,25 @@ interface UI {
 function buildUI(root: HTMLElement): UI {
   clearChildren(root);
   const wrap = el<HTMLDivElement>("div", "sodc-wrap");
-  const status = el<HTMLDivElement>("div", "sodc-status", "Loading weights ...");
-  const tickLabel = el<HTMLDivElement>("div", "sodc-tick-label", "tick 0 — hard_acc=…");
+  // Status is hidden by default — only shown on load errors.
+  const status = el<HTMLDivElement>("div", "sodc-status");
+  status.style.display = "none";
 
   const imagePanel = el<HTMLDivElement>("div", "sodc-image-panel");
   const inputRow = makeBitCanvas("input  (x)");
   const circuitRow = makeCircuitCanvas("circuit (active case)");
   const currentRow = makeBitCanvas("current TMT output");
   const expectedRow = makeBitCanvas("expected (y)");
+  const chartCanvas = el<HTMLCanvasElement>("canvas", "sodc-chart-canvas");
   imagePanel.append(
-    tickLabel,
     inputRow.row,
     circuitRow.row,
     currentRow.row,
     expectedRow.row,
+    chartCanvas,
   );
+
+  const modelPicker = el<HTMLDivElement>("div", "sodc-model-picker");
 
   const controls = el<HTMLDivElement>("div", "sodc-controls");
   const playBtn = el<HTMLButtonElement>("button", "sodc-btn sodc-btn-primary", "▶ Play");
@@ -145,12 +179,27 @@ function buildUI(root: HTMLElement): UI {
     .sodc-readout { font-size: 0.9em; padding: 0.5em 0.8em;
                     background: #f6f8fa; border-radius: 6px; color: #57606a;
                     font-variant-numeric: tabular-nums; }
+    .sodc-model-picker { display: flex; flex-wrap: wrap; gap: 0.4em;
+                         align-items: center; margin-bottom: 0.5em; }
+    .sodc-model-label { font-size: 0.8em; color: #6e7681; margin-right: 0.25em; }
+    .sodc-model-btn { font: inherit; font-size: 0.82em; cursor: pointer;
+                      padding: 0.3em 0.75em; border-radius: 20px;
+                      border: 1px solid #d0d7de; background: #f6f8fa;
+                      color: #57606a; transition: all 0.1s; white-space: nowrap; }
+    .sodc-model-btn:hover { background: #eaeef2; color: #1f2328; }
+    .sodc-model-btn.active { background: #1f883d; color: #fff;
+                             border-color: #1a7f37; font-weight: 600; }
+    .sodc-model-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .sodc-chart-canvas { width: 100%; height: 130px; display: block;
+                         border: 1px solid #30363d; border-radius: 4px;
+                         margin-top: 0.6em; background: #0d1117; }
   `;
-  wrap.append(style, status, imagePanel, controls, hint, readout);
+  wrap.append(style, status, modelPicker, imagePanel, controls, hint, readout);
   root.append(wrap);
 
   return {
     status,
+    modelPicker,
     imagePanel,
     inputCanvas: inputRow.canvas,
     inputWrap: inputRow.wrap,
@@ -159,7 +208,7 @@ function buildUI(root: HTMLElement): UI {
     currentWrap: currentRow.wrap,
     expectedCanvas: expectedRow.canvas,
     expectedWrap: expectedRow.wrap,
-    tickLabel,
+    chartCanvas,
     controls,
     playBtn,
     resetBtn,
@@ -246,6 +295,9 @@ interface BootstrapData {
   yData: Float32Array;
   taskStyle: string;
   text: string | null;
+  /** Pre-computed wires from the training run. Present for fixed-wires models;
+   *  absent for random-wires models (Controller generates its own). */
+  wires?: Int32Array[];
 }
 
 interface RawB64 {
@@ -267,9 +319,16 @@ function decodeFloat32(entry: RawB64): Float32Array {
   return new Float32Array(buf);
 }
 
-async function fetchBootstrap(): Promise<BootstrapData> {
-  const resp = await fetch(BOOTSTRAP_URL);
-  if (!resp.ok) throw new Error(`fetch bootstrap (${BOOTSTRAP_URL}): ${resp.status}`);
+function decodeInt32(entry: RawB64): Int32Array {
+  const bytes = base64ToBytes(entry.data_b64);
+  const buf = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buf).set(bytes);
+  return new Int32Array(buf);
+}
+
+async function fetchBootstrap(url: string): Promise<BootstrapData> {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`fetch bootstrap (${url}): ${resp.status}`);
   const raw = (await resp.json()) as {
     header: {
       case_n: number;
@@ -279,6 +338,7 @@ async function fetchBootstrap(): Promise<BootstrapData> {
       text?: string | null;
     };
     layer_sizes: [number, number][];
+    wires?: RawB64[];
     task_data: { x: RawB64; y: RawB64 };
   };
   return {
@@ -290,7 +350,197 @@ async function fetchBootstrap(): Promise<BootstrapData> {
     yData: decodeFloat32(raw.task_data.y),
     taskStyle: raw.header.task_style ?? "sequential",
     text: raw.header.text ?? null,
+    ...(raw.wires ? { wires: raw.wires.map(decodeInt32) } : {}),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Accuracy history + chart
+// ---------------------------------------------------------------------------
+
+type EventKind = "damage" | "shotgun" | "shuffle" | "reset";
+
+interface AccuracyHistory {
+  hard: number[];
+  soft: number[];
+  events: Array<{ tick: number; kind: EventKind }>;
+}
+
+function makeHistory(): AccuracyHistory {
+  return { hard: [], soft: [], events: [] };
+}
+
+const EVENT_COLORS: Record<EventKind, string> = {
+  damage: "#f85149",
+  shotgun: "#e3b341",
+  shuffle: "#388bfd",
+  reset: "#848d97",
+};
+
+function drawAccuracyChart(canvas: HTMLCanvasElement, history: AccuracyHistory): void {
+  const dpr = window.devicePixelRatio || 1;
+  const cssW = canvas.clientWidth || 600;
+  const cssH = canvas.clientHeight || 130;
+  if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+  }
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.save();
+  ctx.scale(dpr, dpr);
+
+  // Layout: top 24px = legend header, then chart area, then 16px x-axis footer
+  const LEGEND_H = 24;
+  const PAD_L = 38;
+  const PAD_R = 8;
+  const PAD_B = 16;
+  const cW = cssW - PAD_L - PAD_R;
+  const chartTop = LEGEND_H;
+  const cH = cssH - LEGEND_H - PAD_B;
+
+  ctx.fillStyle = "#0d1117";
+  ctx.fillRect(0, 0, cssW, cssH);
+
+  ctx.font = `10px ui-monospace, monospace`;
+
+  // ---- Legend row (above the plot) ---------------------------------------
+  const legY = LEGEND_H / 2 + 3.5; // vertically centred in the header strip
+
+  // Thin separator between legend and plot
+  ctx.strokeStyle = "#21262d";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, LEGEND_H);
+  ctx.lineTo(cssW, LEGEND_H);
+  ctx.stroke();
+
+  // "hard acc" swatch
+  let legX = PAD_L + 4;
+  ctx.strokeStyle = "#3fb950";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(legX, legY);
+  ctx.lineTo(legX + 14, legY);
+  ctx.stroke();
+  ctx.fillStyle = "#d0d7de";
+  ctx.textAlign = "left";
+  ctx.fillText("hard acc", legX + 18, legY);
+  legX += 82;
+
+  // "soft acc" swatch
+  ctx.strokeStyle = "#1f6feb";
+  ctx.lineWidth = 1;
+  ctx.globalAlpha = 0.6;
+  ctx.beginPath();
+  ctx.moveTo(legX, legY);
+  ctx.lineTo(legX + 14, legY);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = "#8b949e";
+  ctx.fillText("soft acc", legX + 18, legY);
+  legX += 82;
+
+  // Event type swatches (dashed vertical lines)
+  const evTypes: [EventKind, string][] = [
+    ["shotgun", "shotgun"],
+    ["damage", "click"],
+    ["shuffle", "shuffle"],
+  ];
+  for (const [kind, label] of evTypes) {
+    ctx.strokeStyle = EVENT_COLORS[kind];
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(legX + 5, LEGEND_H * 0.15);
+    ctx.lineTo(legX + 5, LEGEND_H * 0.85);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#8b949e";
+    ctx.fillText(label, legX + 11, legY);
+    legX += 54;
+  }
+
+  // ---- Chart area --------------------------------------------------------
+  ctx.strokeStyle = "#21262d";
+  ctx.lineWidth = 1;
+  ctx.fillStyle = "#6e7681";
+  ctx.textAlign = "right";
+  for (let v = 0; v <= 1.001; v += 0.25) {
+    const y = chartTop + cH * (1 - v);
+    ctx.beginPath();
+    ctx.moveTo(PAD_L, y);
+    ctx.lineTo(PAD_L + cW, y);
+    ctx.stroke();
+    ctx.fillText(v.toFixed(2), PAD_L - 4, y + 3.5);
+  }
+
+  const n = history.hard.length;
+  if (n === 0) {
+    ctx.restore();
+    return;
+  }
+
+  const MAX_TICKS = 120;
+  const startTick = Math.max(0, n - MAX_TICKS);
+  const xOf = (i: number) =>
+    PAD_L + ((i - startTick) / Math.max(1, MAX_TICKS - 1)) * cW;
+  const yOf = (v: number) => chartTop + cH * (1 - Math.max(0, Math.min(1, v)));
+
+  // Event markers
+  for (const ev of history.events) {
+    if (ev.tick < startTick) continue;
+    const x = xOf(ev.tick);
+    ctx.strokeStyle = EVENT_COLORS[ev.kind];
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(x, chartTop);
+    ctx.lineTo(x, chartTop + cH);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  // Soft accuracy (dim blue)
+  if (history.soft.length === history.hard.length) {
+    ctx.strokeStyle = "#1f6feb";
+    ctx.lineWidth = 1;
+    ctx.globalAlpha = 0.55;
+    ctx.beginPath();
+    for (let i = startTick; i < n; i++) {
+      const x = xOf(i);
+      const y = yOf(history.soft[i]!);
+      i === startTick ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  // Hard accuracy (bright green)
+  ctx.strokeStyle = "#3fb950";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let i = startTick; i < n; i++) {
+    const x = xOf(i);
+    const y = yOf(history.hard[i]!);
+    i === startTick ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Dot at last point
+  ctx.fillStyle = "#3fb950";
+  ctx.beginPath();
+  ctx.arc(xOf(n - 1), yOf(history.hard[n - 1]!), 3, 0, Math.PI * 2);
+  ctx.fill();
+
+  // X-axis tick labels
+  ctx.fillStyle = "#6e7681";
+  ctx.textAlign = "left";
+  ctx.fillText(`tick ${startTick}`, PAD_L, cssH - 3);
+  ctx.textAlign = "right";
+  ctx.fillText(`tick ${n - 1}`, PAD_L + cW, cssH - 3);
+
+  ctx.restore();
 }
 
 // ---------------------------------------------------------------------------
@@ -311,6 +561,12 @@ interface AppState {
   recentShotgun: Int32Array | null;
   /** Flat index of the gate the mouse is currently over, or -1. */
   hoveredGateIdx: number;
+  /** Running accuracy history for the live chart. */
+  history: AccuracyHistory;
+  /** Available models from gallery.json. */
+  gallery: Gallery;
+  /** ID of the currently loaded gallery entry. */
+  activeModelId: string;
 }
 
 function updateReadout(app: AppState, snap: ControllerSnapshot): void {
@@ -321,15 +577,15 @@ function updateReadout(app: AppState, snap: ControllerSnapshot): void {
     `  ·  soft_acc ${snap.softAccuracy.toFixed(4)}` +
     `  ·  damaged ${snap.damaged}/${total}` +
     `  ·  case ${app.activeCase}/${app.bootstrap.caseN}`;
-  app.ui.tickLabel.textContent =
-    `tick ${snap.step} — hard_acc=${snap.hardAccuracy.toFixed(4)}` +
-    `  ·  active case ${app.activeCase}`;
 }
 
 function refreshFrame(app: AppState, snap: ControllerSnapshot): void {
   drawBitImage(app.ui.currentCanvas, snap.predHard, snap.caseN, snap.outputBits);
   redrawCircuit(app);
   updateReadout(app, snap);
+  app.history.hard.push(snap.hardAccuracy);
+  app.history.soft.push(snap.softAccuracy);
+  drawAccuracyChart(app.ui.chartCanvas, app.history);
 }
 
 /** Move the active-case marker on a wrap to ``activeCase``'s column. */
@@ -360,6 +616,7 @@ function pickCase(canvas: HTMLCanvasElement, ev: MouseEvent, caseN: number): num
 }
 
 function redrawCircuit(app: AppState): void {
+  if (app.circuitTarget.width <= 1) return; // not yet sized by rAF
   const { ctrl, bootstrap } = app;
   const x1 = activeCaseInput(bootstrap.xData, app.activeCase, bootstrap.inputBits);
   const acts = singleCaseActivations(ctrl.topology, ctrl.state, x1, ctrl.arity);
@@ -396,6 +653,92 @@ function canvasMousePos(canvas: HTMLCanvasElement, ev: MouseEvent): { x: number;
   return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
 }
 
+// ---------------------------------------------------------------------------
+// Gallery / model switching
+// ---------------------------------------------------------------------------
+
+/** Populate the model picker with buttons from the gallery. */
+function populateModelPicker(app: AppState): void {
+  const picker = app.ui.modelPicker;
+  picker.innerHTML = "";
+
+  for (const entry of app.gallery.models) {
+    const btn = el<HTMLButtonElement>("button", "sodc-model-btn", entry.label);
+    btn.title = entry.description;
+    if (entry.id === app.activeModelId) btn.classList.add("active");
+    btn.addEventListener("click", () => {
+      if (entry.id === app.activeModelId) return;
+      void switchModel(app, entry);
+    });
+    picker.appendChild(btn);
+  }
+}
+
+/** Load a new model from the gallery and reinitialise the Controller in place. */
+async function switchModel(app: AppState, entry: GalleryEntry): Promise<void> {
+  setPlaying(app, false);
+
+  // Disable all controls while loading.
+  const allBtns = app.ui.modelPicker.querySelectorAll<HTMLButtonElement>("button");
+  allBtns.forEach((b) => (b.disabled = true));
+  for (const b of [app.ui.playBtn, app.ui.resetBtn, app.ui.shuffleBtn, app.ui.shotgunBtn])
+    b.disabled = true;
+  app.ui.status.textContent = `Loading ${entry.label} …`;
+  app.ui.status.className = "sodc-status";
+
+  try {
+    const [weights, bs] = await Promise.all([
+      loadWeights(weightsUrl(entry)),
+      fetchBootstrap(bootstrapUrl(entry)),
+    ]);
+
+    // Replace the controller with a fresh one.
+    app.ctrl = new Controller(weights, {
+      caseN: bs.caseN,
+      xData: bs.xData,
+      yData: bs.yData,
+      inputBits: bs.inputBits,
+      outputBits: bs.outputBits,
+      layerSizes: bs.layerSizes,
+      rngSeed: 44,
+      ...(bs.wires ? { precomputedWires: bs.wires } : {}),
+    });
+    app.bootstrap = bs;
+    app.activeModelId = entry.id;
+    app.history = makeHistory();
+    app.recentShotgun = null;
+    app.hoveredGateIdx = -1;
+    app.activeCase = 1234 % bs.caseN;
+
+    // Redraw static strips.
+    drawBitImage(app.ui.inputCanvas, bs.xData, bs.caseN, bs.inputBits);
+    drawBitImage(app.ui.expectedCanvas, bs.yData, bs.caseN, bs.outputBits);
+
+    // Reset circuit canvas size (new model may have different architecture).
+    const w = Math.floor(app.ui.circuitCanvas.getBoundingClientRect().width) || 1000;
+    app.circuitTarget = setupCanvas(app.ui.circuitCanvas, w, 280);
+
+    app.ui.status.textContent = summariseWeights(weights);
+    app.ui.status.classList.add("pass");
+
+    refreshFrame(app, app.ctrl.reset());
+    setActiveCase(app, app.activeCase);
+
+    // Update picker active state.
+    populateModelPicker(app);
+  } catch (err) {
+    console.error(err);
+    app.ui.status.textContent = `Error loading ${entry.label}: ${(err as Error).message}`;
+    app.ui.status.classList.add("fail");
+    app.ui.status.style.display = "block";
+  } finally {
+    for (const b of [app.ui.playBtn, app.ui.resetBtn, app.ui.shuffleBtn, app.ui.shotgunBtn])
+      b.disabled = false;
+    app.ui.modelPicker.querySelectorAll<HTMLButtonElement>("button")
+      .forEach((b) => (b.disabled = false));
+  }
+}
+
 function setPlaying(app: AppState, on: boolean): void {
   app.playing = on;
   app.ui.playBtn.textContent = on ? "⏸ Pause" : "▶ Play";
@@ -420,15 +763,18 @@ function wireControls(app: AppState): void {
   app.ui.resetBtn.addEventListener("click", () => {
     setPlaying(app, false);
     app.recentShotgun = null;
+    app.history = makeHistory();
     refreshFrame(app, app.ctrl.reset());
   });
   app.ui.shuffleBtn.addEventListener("click", () => {
     app.recentShotgun = null;
+    app.history.events.push({ tick: app.history.hard.length, kind: "shuffle" });
     refreshFrame(app, app.ctrl.shuffle());
   });
   app.ui.shotgunBtn.addEventListener("click", () => {
     const { snapshot, chosen } = app.ctrl.shotgun(DEFAULT_SHOTGUN_GATES);
     app.recentShotgun = chosen;
+    app.history.events.push({ tick: app.history.hard.length, kind: "shotgun" });
     refreshFrame(app, snapshot);
   });
 
@@ -472,6 +818,7 @@ function wireControls(app: AppState): void {
     // After a manual click we want the yellow outline to be the freshly
     // damaged gate, not whatever the previous shotgun set was.
     app.recentShotgun = null;
+    app.history.events.push({ tick: app.history.hard.length, kind: "damage" });
     refreshFrame(app, snap);
   });
 }
@@ -485,6 +832,24 @@ function summariseWeights(weights: TMTWeights): string {
   );
 }
 
+/** Build a single-entry fallback gallery from the legacy per-model files. */
+function fallbackGallery(): Gallery {
+  return {
+    models: [
+      {
+        id: "reverse_random_damage",
+        task: "reverse",
+        recipe: "random_damage",
+        label: "Random · damage-trained",
+        description: "Regime III, random wiring + damage.",
+        runId: "1u5ssulx",
+        weightsPath: "reverse_random_damage.json",
+        bootstrapPath: "reverse_demo.json",
+      },
+    ],
+  };
+}
+
 async function bootstrap(): Promise<void> {
   const root = document.getElementById(MOUNT_ID);
   if (!root) {
@@ -495,8 +860,21 @@ async function bootstrap(): Promise<void> {
   // Disable buttons until the controller is up.
   for (const b of [ui.playBtn, ui.resetBtn, ui.shuffleBtn, ui.shotgunBtn]) b.disabled = true;
   try {
-    ui.status.textContent = "Loading weights ...";
-    const [weights, bs] = await Promise.all([loadWeights(WEIGHTS_URL), fetchBootstrap()]);
+    ui.status.textContent = "Loading …";
+
+    // Fetch gallery + first model in parallel. gallery.json may not exist yet
+    // (pre-export), in which case fall back to the legacy single-model files.
+    const galleryPromise = fetchGallery().catch(() => fallbackGallery());
+    const gallery = await galleryPromise;
+
+    // Default to the last entry (random_damage — most capable) or the only one.
+    const defaultEntry = gallery.models[gallery.models.length - 1] ?? gallery.models[0];
+    if (!defaultEntry) throw new Error("gallery.json contains no models");
+
+    const [weights, bs] = await Promise.all([
+      loadWeights(weightsUrl(defaultEntry)),
+      fetchBootstrap(bootstrapUrl(defaultEntry)),
+    ]);
     ui.status.textContent = summariseWeights(weights);
     ui.status.classList.add("pass");
 
@@ -508,10 +886,10 @@ async function bootstrap(): Promise<void> {
       outputBits: bs.outputBits,
       layerSizes: bs.layerSizes,
       rngSeed: 44,
+      ...(bs.wires ? { precomputedWires: bs.wires } : {}),
     });
-    // Set up the circuit canvas at the natural size of its container.
-    const cssWidth = ui.circuitCanvas.clientWidth || 1000;
-    const circuitTarget = setupCanvas(ui.circuitCanvas, cssWidth, 280);
+    // Bootstrap with a 1-px placeholder; the rAF below sets the real size once
+    // the DOM has laid out and clientWidth is reliable.
     const app: AppState = {
       ctrl,
       ui,
@@ -519,11 +897,17 @@ async function bootstrap(): Promise<void> {
       rafHandle: null,
       lastTickTs: 0,
       bootstrap: bs,
-      circuitTarget,
+      circuitTarget: setupCanvas(ui.circuitCanvas, 1, 280),
       activeCase: 1234 % bs.caseN,
       recentShotgun: null,
       hoveredGateIdx: -1,
+      history: makeHistory(),
+      gallery,
+      activeModelId: defaultEntry.id,
     };
+
+    // Populate model picker (before rendering so it's visible immediately).
+    populateModelPicker(app);
 
     drawBitImage(ui.inputCanvas, bs.xData, bs.caseN, bs.inputBits);
     drawBitImage(ui.expectedCanvas, bs.yData, bs.caseN, bs.outputBits);
@@ -536,16 +920,25 @@ async function bootstrap(): Promise<void> {
     wireControls(app);
     for (const b of [ui.playBtn, ui.resetBtn, ui.shuffleBtn, ui.shotgunBtn]) b.disabled = false;
 
-    // Re-setup canvas on resize — keeps it crisp + responsive.
-    window.addEventListener("resize", () => {
-      const w = ui.circuitCanvas.clientWidth || 1000;
+    // Defer circuit setup to after first paint so getBoundingClientRect() is accurate.
+    requestAnimationFrame(() => {
+      const w = Math.floor(ui.circuitCanvas.getBoundingClientRect().width) || 1000;
       app.circuitTarget = setupCanvas(ui.circuitCanvas, w, 280);
       redrawCircuit(app);
+    });
+
+    // Re-setup canvases on resize — keeps them crisp + responsive.
+    window.addEventListener("resize", () => {
+      const w = Math.floor(ui.circuitCanvas.getBoundingClientRect().width) || 1000;
+      app.circuitTarget = setupCanvas(ui.circuitCanvas, w, 280);
+      redrawCircuit(app);
+      drawAccuracyChart(ui.chartCanvas, app.history);
     });
   } catch (err) {
     console.error(err);
     ui.status.textContent = `Error: ${(err as Error).message}`;
     ui.status.classList.add("fail");
+    ui.status.style.display = "block";
   }
 }
 

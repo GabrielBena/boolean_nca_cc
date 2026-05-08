@@ -57,6 +57,9 @@ export interface ControllerOptions {
   layerSizes: LayerSize[];
   rngSeed?: number;
   noiseScale?: number;
+  /** Pre-computed wires from the training run (fixed-wires models).
+   *  When present, topology is built from these instead of generating via RNG. */
+  precomputedWires?: Int32Array[];
 }
 
 export class Controller {
@@ -79,6 +82,8 @@ export class Controller {
   /** When the user has manually damaged a specific gate (clicks), we keep
    *  a rolling list so the rendering can highlight the most recent click. */
   lastDamagedFlatIdx: number | null = null;
+  private _precomputedWires: Int32Array[] | undefined;
+  private _originalTopology: Topology;
 
   constructor(weights: TMTWeights, opts: ControllerOptions) {
     this.weights = weights;
@@ -92,8 +97,10 @@ export class Controller {
     this.outputBits = opts.outputBits;
     this.layerSizes = opts.layerSizes;
     this.rng = makeRng(opts.rngSeed ?? 44);
+    this._precomputedWires = opts.precomputedWires;
 
-    this.topology = this._freshTopology();
+    this._originalTopology = this._freshTopology();
+    this.topology = this._originalTopology;
     this.state = initState(
       this.topology,
       { arity: this.arity, hiddenDim: this.hiddenDim, noiseScale: opts.noiseScale ?? 0.1 },
@@ -124,6 +131,7 @@ export class Controller {
   }
 
   reset(): ControllerSnapshot {
+    this.topology = this._originalTopology;
     this.state = resetCircuit(this.topology, this.rng, this.arity, this.hiddenDim);
     this.step = 0;
     this.lastDamagedFlatIdx = null;
@@ -204,9 +212,15 @@ export class Controller {
     for (let li = 1; li < this.layerSizes.length; li++) {
       const [outN, gs] = this.layerSizes[li];
       const inN = this.layerSizes[li - 1][0];
-      const w = genWires(this.rng, inN, outN, this.arity, gs);
-      wires.push(w.data);
-      wiresShape.push(w.shape);
+      if (this._precomputedWires) {
+        // Use the exact wires from the training run (fixed-wires models).
+        wires.push(this._precomputedWires[li - 1]);
+        wiresShape.push([this.arity, outN / gs]);
+      } else {
+        const w = genWires(this.rng, inN, outN, this.arity, gs);
+        wires.push(w.data);
+        wiresShape.push(w.shape);
+      }
     }
     return buildTopology(this.layerSizes, wires, wiresShape, {
       arity: this.arity,

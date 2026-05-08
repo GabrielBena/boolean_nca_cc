@@ -1,0 +1,34 @@
+{
+  "models": [
+    {
+      "id": "reverse_fixed_no_damage",
+      "task": "reverse",
+      "recipe": "fixed_no_damage",
+      "label": "Fixed wires \u00b7 clean",
+      "description": "Regime I, no damage during training. Zero-shot resilience tests OOD damage.",
+      "runId": "vt9awu7h",
+      "weightsPath": "reverse_fixed_no_damage.json",
+      "bootstrapPath": "reverse_fixed_no_damage_demo.json"
+    },
+    {
+      "id": "reverse_fixed_damage",
+      "task": "reverse",
+      "recipe": "fixed_damage",
+      "label": "Fixed wires \u00b7 damage-trained",
+      "description": "Regime I, stochastic gate failure during training. \u00a74.1 fig. 2 bottom row.",
+      "runId": "y2swhhrl",
+      "weightsPath": "reverse_fixed_damage.json",
+      "bootstrapPath": "reverse_fixed_damage_demo.json"
+    },
+    {
+      "id": "reverse_random_damage",
+      "task": "reverse",
+      "recipe": "random_damage",
+      "label": "Random wires \u00b7 damage-trained",
+      "description": "Regime III, random wiring + damage. \u00a74.3 fig. 4.",
+      "runId": "1u5ssulx",
+      "weightsPath": "reverse_random_damage.json",
+      "bootstrapPath": "reverse_random_damage_demo.json"
+    }
+  ]
+}
