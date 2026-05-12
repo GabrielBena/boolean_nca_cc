@@ -33,6 +33,7 @@ def load_checkpoint_with_compatibility_working(checkpoint_path):
 
         class WorkingCompatibilityUnpickler(pickle.Unpickler):
             def find_class(self, module, name):
+                log.debug(f"[compat] find_class: module={module!r} name={name!r}")
                 # Handle flax.nnx.nnx -> flax.nnx remapping
                 if module.startswith("flax.nnx.nnx"):
                     log.debug(f"Remapping {module}.{name}")
@@ -114,6 +115,38 @@ def load_checkpoint_with_compatibility_working(checkpoint_path):
                                             setattr(self, key, value)
 
                         return CompatibleGeneric
+
+                # Wrap any flax.nnx.* Variable subclass to handle raw_value -> _raw_value rename
+                if module.startswith("flax.nnx") and not module.startswith("flax.nnx.nnx"):
+                    try:
+                        real_class = super().find_class(module, name)
+                        from flax.nnx.variablelib import Variable as _FlaxVariable
+
+                        if isinstance(real_class, type) and issubclass(real_class, _FlaxVariable):
+
+                            class CompatibleVariableWrapper(real_class):
+                                def __setstate__(self, state):
+                                    state = dict(state)
+                                    if "_raw_value" not in state:
+                                        for old_key in ("raw_value", "value", "_value"):
+                                            if old_key in state:
+                                                state["_raw_value"] = state.pop(old_key)
+                                                break
+                                        else:
+                                            state["_raw_value"] = None
+                                    if "_var_metadata" not in state:
+                                        state["_var_metadata"] = {}
+                                    if "_trace_state" not in state:
+                                        state["_trace_state"] = None
+                                    object.__setattr__(self, "_trace_state", state["_trace_state"])
+                                    object.__setattr__(self, "_var_metadata", state["_var_metadata"])
+                                    object.__setattr__(self, "_raw_value", state["_raw_value"])
+
+                            CompatibleVariableWrapper.__name__ = name
+                            CompatibleVariableWrapper.__qualname__ = name
+                            return CompatibleVariableWrapper
+                    except Exception:
+                        pass
 
                 # Handle JAX compatibility issues
                 if "jax" in module and name == "MainTrace":

@@ -42,6 +42,11 @@ dependencies = [
     # Image processing and visualization
     "Pillow>=9.0.0",
     "imgui-bundle>=1.0.0",
+
+    # Visualization and interactive tools
+    "matplotlib>=3.5.0",
+    "jupyter>=1.0.0",
+    "ipywidgets>=8.0.0",
     
     # Interactive development
     "IPython>=8.0.0",
@@ -174,4 +179,4 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = "test_*.py"
-addopts = "--cov=boolean_nca_cc" 
+addopts = "--cov=boolean_nca_cc"

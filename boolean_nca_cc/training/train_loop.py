@@ -648,6 +648,13 @@ def train_model(
     p_fault_onset_step_train: int = 0,  # Onset step for training scan
     p_fault_onset_step_eval: int = 0,  # Onset step for eval scan
     compute_no_repair_baseline: bool = False,
+    # ── Probabilistic wire shuffle (training-only) ──────────────────────
+    p_shuffle: float | None = None,  # Per-step circuit-wide shuffle prob (None = disabled)
+    shuffle_fraction: float = 1.0,  # 1.0 = full reshuffle via gen_wires; <1.0 = partial
+    p_shuffle_onset_step_train: int = 0,  # Step at which probabilistic shuffles start
+    # ── Graph topology (used to refresh edges when wires shuffle) ───────
+    bidirectional_edges: bool = True,
+    neighboring_connections: bool = False,
     # ── Periodic evaluation ─────────────────────────────────────────────
     periodic_eval_enabled: bool = False,
     periodic_eval_interval: int = 1024,
@@ -919,6 +926,9 @@ def train_model(
         p_fault: float | None = None,
         faulty_value: float = -10.0,
         permanent_damage: float | str = 1.0,
+        # Probabilistic wire shuffle parameters
+        p_shuffle: float | None = None,
+        shuffle_fraction: float = 1.0,
     ):
         """
         Core loss and gradient computation logic.
@@ -993,6 +1003,14 @@ def train_model(
                 permanent_damage=permanent_damage,
                 # Delayed onset (let circuit converge before damage starts)
                 p_fault_onset_step=p_fault_onset_step_train,
+                # Probabilistic wire shuffle during training
+                p_shuffle=p_shuffle,
+                shuffle_fraction=shuffle_fraction,
+                p_shuffle_onset_step=p_shuffle_onset_step_train,
+                # Topology refresh inputs (used when any wire-shuffle path is active)
+                arity=arity,
+                bidirectional_edges=bidirectional_edges,
+                neighboring_connections=neighboring_connections,
             )
 
             loss_step = get_loss_step(loss_key)
@@ -1114,6 +1132,9 @@ def train_model(
         p_fault: float | None = None,
         faulty_value: float = -10.0,
         permanent_damage: float | str = 1.0,
+        # Probabilistic wire shuffle parameters
+        p_shuffle: float | None = None,
+        shuffle_fraction: float = 1.0,
     ):
         """
         Single training step using graphs from the pool.
@@ -1162,6 +1183,8 @@ def train_model(
             p_fault=p_fault,
             faulty_value=faulty_value,
             permanent_damage=permanent_damage,
+            p_shuffle=p_shuffle,
+            shuffle_fraction=shuffle_fraction,
         )
 
         if do_check_gradients:
@@ -1192,6 +1215,8 @@ def train_model(
             "p_fault",
             "faulty_value",
             "permanent_damage",
+            "p_shuffle",
+            "shuffle_fraction",
         ),
     )(_pool_train_step)
 
@@ -1259,6 +1284,9 @@ def train_model(
                 p_fault=p_fault,
                 faulty_value=faulty_logit_value,
                 permanent_damage=permanent_damage,
+                # Probabilistic wire shuffle during training
+                p_shuffle=p_shuffle,
+                shuffle_fraction=shuffle_fraction,
             )
 
             hard_loss = aux["hard_loss"]

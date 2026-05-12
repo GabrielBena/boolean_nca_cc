@@ -24,6 +24,8 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 # os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
 # os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
 
+# GPU VISIBILITY
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 import logging
 
@@ -47,6 +49,7 @@ from boolean_nca_cc.training.eval_datasets import (
 from boolean_nca_cc.training.evaluation import run_bp_scan
 from boolean_nca_cc.training.pool.structural_perturbation import (
     compute_damage_params,
+    compute_shuffle_params,
 )
 from boolean_nca_cc.training.train_loop import (
     run_unified_periodic_evaluation,
@@ -657,6 +660,9 @@ def main(cfg: DictConfig) -> None:
     # Compute all damage parameters from target_damage_fraction
     damage_params = compute_damage_params(cfg, layer_sizes, log)
 
+    # Compute probabilistic wire-shuffle parameters from target_shuffles_per_lifecycle
+    shuffle_params = compute_shuffle_params(cfg, log)
+
     # Create evaluation datasets
     eval_datasets = create_unified_evaluation_datasets(
         eval_key=eval_key,
@@ -809,6 +815,13 @@ def main(cfg: DictConfig) -> None:
         p_fault_onset_step_train=damage_params["p_fault_onset_step_train"],
         p_fault_onset_step_eval=damage_params["p_fault_onset_step_eval"],
         compute_no_repair_baseline=damage_params["compute_no_repair_baseline"],
+        # ── Probabilistic wire shuffle (training-only) ──────────────────
+        p_shuffle=shuffle_params["p_shuffle_train"],
+        shuffle_fraction=shuffle_params["shuffle_fraction"],
+        p_shuffle_onset_step_train=shuffle_params["p_shuffle_onset_step_train"],
+        # ── Graph topology (used by topology refresh on shuffle events) ──
+        bidirectional_edges=bool(cfg.graph.bidirectional_edges),
+        neighboring_connections=bool(cfg.graph.neighboring_connections),
         # ── Periodic evaluation ─────────────────────────────────────────
         periodic_eval_enabled=cfg.eval.enabled,
         periodic_eval_interval=cfg.eval.interval,

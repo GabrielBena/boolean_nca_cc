@@ -314,6 +314,90 @@ def build_graph(
     )
 
 
+def compute_circuit_edges(
+    wires: list[jp.ndarray],
+    layer_sizes: list[tuple[int, int]] | tuple[tuple[int, int], ...],
+    arity: int,
+    bidirectional_edges: bool = True,
+    neighboring_connections: bool = False,
+) -> tuple[jp.ndarray, jp.ndarray]:
+    """Recompute ``(senders, receivers)`` for a circuit graph from its wires.
+
+    Mirrors the edge-construction in :func:`build_graph` exactly so that
+    node features can be reused while topology is refreshed mid-scan
+    (e.g. after a wire shuffle).
+
+    Edge layout (must match build_graph):
+        [forward_senders, backward_senders?, neighboring_senders?]
+
+    Only the wire-dependent values change between calls — output shapes
+    are static given fixed ``layer_sizes`` / topology flags, so the result
+    is JIT-friendly.
+
+    Args:
+        wires: List of wire arrays, one per gate layer. Shape
+            ``(arity, group_n)``, values in ``[0, prev_layer_n)``.
+        layer_sizes: Full topology including the input layer first
+            (``[(input_n, 1), (gate_n_1, group_size_1), ...]``).
+        arity: Number of inputs per gate.
+        bidirectional_edges: Mirror forward edges as backward edges.
+        neighboring_connections: Add intra-layer adjacent edges.
+
+    Returns:
+        Tuple ``(senders, receivers)`` as int32 arrays.
+    """
+    all_forward_senders = []
+    all_forward_receivers = []
+    layer_start_indices = [0]
+    current_global_node_idx = layer_sizes[0][0]
+
+    for layer_idx, ((gate_n, group_size), layer_wires) in enumerate(
+        zip(layer_sizes[1:], wires, strict=True)
+    ):
+        layer_start_indices.append(current_global_node_idx)
+        layer_global_indices = jp.arange(
+            current_global_node_idx, current_global_node_idx + gate_n
+        )
+        current_layer_receivers = jp.repeat(layer_global_indices, arity)
+        previous_layer_start_idx = layer_start_indices[layer_idx]
+        global_senders_for_layer = previous_layer_start_idx + layer_wires
+        tiled_senders = jp.tile(global_senders_for_layer.T, (1, group_size))
+        current_layer_senders = tiled_senders.reshape(-1)
+
+        all_forward_senders.append(current_layer_senders)
+        all_forward_receivers.append(current_layer_receivers)
+        current_global_node_idx += gate_n
+
+    if not all_forward_senders:
+        return jp.array([], dtype=jp.int32), jp.array([], dtype=jp.int32)
+
+    forward_senders = jp.concatenate(all_forward_senders)
+    forward_receivers = jp.concatenate(all_forward_receivers)
+
+    if bidirectional_edges:
+        senders = jp.concatenate([forward_senders, forward_receivers])
+        receivers = jp.concatenate([forward_receivers, forward_senders])
+    else:
+        senders = forward_senders
+        receivers = forward_receivers
+
+    if neighboring_connections:
+        neighboring_senders = []
+        neighboring_receivers = []
+        for layer_idx in range(1, len(layer_start_indices)):
+            layer_start_idx = layer_start_indices[layer_idx]
+            gate_n = layer_sizes[layer_idx][0]
+            if gate_n > 1:
+                for i in range(gate_n - 1):
+                    neighboring_senders.extend([layer_start_idx + i, layer_start_idx + i + 1])
+                    neighboring_receivers.extend([layer_start_idx + i + 1, layer_start_idx + i])
+        if neighboring_senders:
+            senders = jp.concatenate([senders, jp.array(neighboring_senders, dtype=jp.int32)])
+            receivers = jp.concatenate([receivers, jp.array(neighboring_receivers, dtype=jp.int32)])
+
+    return senders.astype(jp.int32), receivers.astype(jp.int32)
+
+
 def _ensure_layered_mask(
     gate_mask: jp.ndarray | list[jp.ndarray],
     layer_sizes: list[tuple[int, int]],

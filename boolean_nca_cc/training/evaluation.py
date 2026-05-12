@@ -32,6 +32,7 @@ from boolean_nca_cc.training.pool.perturbation import shuffle_wires as _shuffle_
 from boolean_nca_cc.training.pool.structural_perturbation import (
     apply_knockout_to_circuit,
     apply_probabilistic_gate_failure,
+    apply_probabilistic_wire_shuffle,
     create_eligible_gate_mask,
     create_flat_knockout_pattern,
     flat_to_layered_mask,
@@ -41,6 +42,7 @@ from boolean_nca_cc.utils import (
     update_output_node_from_residuals,
 )
 from boolean_nca_cc.utils.configured_graph_builder import configured_build_graph as build_graph
+from boolean_nca_cc.utils.graph_builder import compute_circuit_edges
 
 
 class StepResult(NamedTuple):
@@ -322,6 +324,74 @@ def _prepare_model_fn(
     return model_fn, attention_mask
 
 
+def _compute_topology_cache(
+    model,
+    senders: jp.ndarray,
+    receivers: jp.ndarray,
+    n_node: int,
+) -> dict | None:
+    """Compute the wire-dependent precomputed topology for ``model``.
+
+    Returns the bits of state that ``_prepare_model_fn`` would otherwise
+    capture as closure variables, so the scan can refresh them when wires
+    change (via :func:`compute_circuit_edges`). Wire-independent bits like
+    Perceiver's ``input_output_gate`` are NOT in the cache — they stay
+    frozen for the whole scan.
+
+    Returns:
+        - ``CircuitGatheredAttention`` →
+          ``{"neighbor_indices": ..., "neighbor_mask": ...}``
+        - ``CircuitSelfAttention`` / ``PerceiverCircuitAttention`` →
+          ``{"attention_mask": ...}``
+        - ``CircuitGNN`` → ``None`` (model reads ``graph.senders/receivers`` directly)
+    """
+    if isinstance(model, CircuitGatheredAttention):
+        from boolean_nca_cc.models.attention.base import build_neighbor_indices
+
+        neighbor_indices, neighbor_mask = build_neighbor_indices(
+            senders,
+            receivers,
+            n_node,
+            model.max_neighbors,
+            model.use_attention_mask,
+        )
+        return {"neighbor_indices": neighbor_indices, "neighbor_mask": neighbor_mask}
+    if isinstance(model, (CircuitSelfAttention, PerceiverCircuitAttention)):
+        return {"attention_mask": model._create_attention_mask(senders, receivers, n_node)}
+    return None
+
+
+def _apply_model_with_cache(
+    model,
+    graph,
+    cache: dict | None,
+    perceiver_input_gate=None,
+    perceiver_output_gate=None,
+):
+    """Run ``model`` using an externally-supplied topology cache.
+
+    Counterpart of the closure ``base_fn`` produced by ``_prepare_model_fn``,
+    but takes the cache as an explicit argument so the scan can refresh it
+    when wires change.
+    """
+    if isinstance(model, CircuitGatheredAttention):
+        return model(
+            graph,
+            neighbor_indices=cache["neighbor_indices"],
+            neighbor_mask=cache["neighbor_mask"],
+        )
+    if isinstance(model, CircuitSelfAttention):
+        return model(graph, attention_mask=cache["attention_mask"])
+    if isinstance(model, PerceiverCircuitAttention):
+        return model(
+            graph,
+            attention_mask=cache["attention_mask"],
+            input_output_gate=perceiver_input_gate,
+            output_output_gate=perceiver_output_gate,
+        )
+    return model(graph)
+
+
 def run_model_scan_with_loss(
     model: CircuitGatheredAttention | CircuitGNN | CircuitSelfAttention | PerceiverCircuitAttention,
     graph,
@@ -346,10 +416,19 @@ def run_model_scan_with_loss(
     p_fault_onset_step: int = 0,
     # No-repair baseline: compute loss right after damage, before NCA runs
     compute_no_repair_baseline: bool = False,
-    # Wire shuffling parameters
+    # Wire shuffling parameters (discrete: explicit step indices)
     wire_shuffle_steps: list[int] | None = None,
     wire_shuffle_key: jax.random.PRNGKey = jax.random.PRNGKey(42),
     wire_shuffle_fraction: float = 1.0,
+    # Wire shuffling parameters (probabilistic: per-step circuit-wide coin flip)
+    p_shuffle: float | None = None,
+    shuffle_fraction: float = 1.0,
+    p_shuffle_onset_step: int = 0,
+    # Circuit topology (only consulted when a wire-shuffle path is active,
+    # to recompute senders/receivers/topology-cache matching the initial graph)
+    arity: int | None = None,
+    bidirectional_edges: bool = True,
+    neighboring_connections: bool = False,
 ):
     """
     Unified scan function for all model types with loss computation at each step.
@@ -399,6 +478,13 @@ def run_model_scan_with_loss(
         wire_shuffle_fraction: Fraction of wires to shuffle (0.0-1.0).
             1.0 (default) = regenerate all wires from scratch.
             < 1.0 = randomly reassign that fraction of connections per layer.
+        p_shuffle: Per-step circuit-wide shuffle probability (None = disabled).
+            Probabilistic counterpart to ``wire_shuffle_steps``: each step a single
+            coin flip decides whether to perturb the wires (training-only path).
+        shuffle_fraction: Static flavor knob for the probabilistic path
+            (same semantics as ``wire_shuffle_fraction`` but applied per-step
+            when the coin flip triggers).
+        p_shuffle_onset_step: Step at which probabilistic shuffles start (0 = from the start).
 
     Returns:
         Tuple of (final_graph, step_outputs) where step_outputs contains
@@ -563,6 +649,105 @@ def run_model_scan_with_loss(
 
         return jax.lax.cond(is_shuffle_step, do_shuffle, no_shuffle, None)
 
+    # === Probabilistic wire shuffle setup ===
+    # Circuit-wide per-step coin flip on p_shuffle. Mirrors the dual mode of damage
+    # (discrete wire_shuffle_steps + probabilistic p_shuffle).
+    prob_shuffle_enabled = p_shuffle is not None and p_shuffle > 0.0
+    if prob_shuffle_enabled:
+        prob_shuffle_arity = wires[0].shape[0]
+        prob_shuffle_key, _ = jax.random.split(damage_key)  # separate stream
+        prob_shuffle_keys = jax.random.split(prob_shuffle_key, num_steps)
+    else:
+        prob_shuffle_keys = None
+        prob_shuffle_arity = None
+
+    def apply_probabilistic_shuffle(current_wires, step_idx):
+        """Apply probabilistic per-step wire shuffle (circuit-wide coin flip).
+
+        Respects ``p_shuffle_onset_step``: shuffles only start once
+        ``step_idx >= p_shuffle_onset_step``. Gating is done by zeroing the
+        effective probability before the coin flip, so both branches stay
+        JIT-safe.
+        """
+        if not prob_shuffle_enabled:
+            return current_wires
+
+        past_onset = step_idx >= p_shuffle_onset_step
+        effective_p = jp.where(past_onset, p_shuffle, 0.0)
+        return apply_probabilistic_wire_shuffle(
+            prob_shuffle_keys[step_idx],
+            current_wires,
+            layer_sizes,
+            prob_shuffle_arity,
+            effective_p,
+            shuffle_fraction=shuffle_fraction,
+        )
+
+    # === Topology refresh setup (only when a wire-shuffle path is active) ===
+    # The model precomputes attention masks / neighbor indices from the *initial*
+    # graph.senders/receivers (see `_prepare_model_fn`). When wires change mid-scan
+    # the precomputed cache and the graph's edges go stale, so the model attends
+    # over the OLD topology while the loss evaluates the NEW one — the bug that
+    # makes scan-time shuffles collapse to chance accuracy. Below we refresh both
+    # on shuffle events via jax.lax.cond, so the only cost when no shuffle fires
+    # is the cond check itself.
+    any_shuffle_enabled = wire_shuffle_enabled or prob_shuffle_enabled
+    if any_shuffle_enabled:
+        _refresh_arity = arity if arity is not None else int(wires[0].shape[0])
+        _n_node_static = int(graph.nodes["layer"].shape[0])
+
+        # Static (wire-independent) Perceiver gates — computed once, frozen for scan.
+        _perceiver_input_gate = None
+        _perceiver_output_gate = None
+        if isinstance(model, PerceiverCircuitAttention):
+            _layer_indices = graph.nodes["layer"]
+            _max_layer = jp.max(_layer_indices)
+            if model.restrict_input_cross_attn_to_first_layer:
+                _perceiver_input_gate = model._create_output_gate(_layer_indices, allowed_layer=0)
+            if model.restrict_output_cross_attn_to_last_layer:
+                _perceiver_output_gate = model._create_output_gate(
+                    _layer_indices, allowed_layer=_max_layer
+                )
+
+        initial_topology_cache = _compute_topology_cache(
+            model, graph.senders, graph.receivers, _n_node_static
+        )
+
+        def refresh_topology(current_graph, current_wires):
+            """Recompute senders/receivers and topology cache from new wires."""
+            new_senders, new_receivers = compute_circuit_edges(
+                current_wires,
+                layer_sizes,
+                _refresh_arity,
+                bidirectional_edges=bidirectional_edges,
+                neighboring_connections=neighboring_connections,
+            )
+            new_graph = current_graph._replace(senders=new_senders, receivers=new_receivers)
+            new_cache = _compute_topology_cache(model, new_senders, new_receivers, _n_node_static)
+            return new_graph, new_cache
+
+        def _apply_model_dynamic(g, cache):
+            return _apply_model_with_cache(
+                model, g, cache, _perceiver_input_gate, _perceiver_output_gate
+            )
+
+        apply_model_remat = (
+            nnx.remat(_apply_model_dynamic) if gradient_checkpointing else _apply_model_dynamic
+        )
+
+        def detect_wire_change(old_wires, new_wires):
+            """Cheap per-element comparison summed across layers. ``True`` if any wire changed."""
+            return jp.any(
+                jp.stack(
+                    [jp.any(o != n) for o, n in zip(old_wires, new_wires, strict=True)]
+                )
+            )
+    else:
+        initial_topology_cache = None
+        refresh_topology = None
+        apply_model_remat = None
+        detect_wire_change = None
+
     def apply_probabilistic_damage(graph, step_idx, gate_mask):
         """Apply probabilistic damage: each gate has p_fault chance of failure.
 
@@ -619,14 +804,25 @@ def run_model_scan_with_loss(
         # ------------------------------------------------------------------
 
         def scan_step(carry, step_idx):
-            (
-                current_graph,
-                current_gate_mask,
-                nr_graph,
-                nr_gate_mask,
-                damage_started,
-                current_wires,
-            ) = carry
+            if any_shuffle_enabled:
+                (
+                    current_graph,
+                    current_gate_mask,
+                    nr_graph,
+                    nr_gate_mask,
+                    damage_started,
+                    current_wires,
+                    current_cache,
+                ) = carry
+            else:
+                (
+                    current_graph,
+                    current_gate_mask,
+                    nr_graph,
+                    nr_gate_mask,
+                    damage_started,
+                    current_wires,
+                ) = carry
 
             # --- Sync nr graph with main BEFORE this step's damage --------
             # While no damage has occurred yet, the nr graph is an exact
@@ -664,7 +860,25 @@ def run_model_scan_with_loss(
             )
 
             # --- 1b. Shuffle wires if needed (1-indexed, same as damage_steps)
+            old_wires = current_wires
             current_wires = shuffle_wires_if_needed(current_wires, step_idx + 1)
+            # --- 1c. Probabilistic per-step wire shuffle (training path) ---
+            #         Uses raw step_idx (0-indexed, same as apply_probabilistic_damage)
+            current_wires = apply_probabilistic_shuffle(current_wires, step_idx)
+
+            # --- 1d. Refresh graph topology + cache if wires changed -------
+            if any_shuffle_enabled:
+                did_shuffle = detect_wire_change(old_wires, current_wires)
+                current_graph, current_cache = jax.lax.cond(
+                    did_shuffle,
+                    lambda _: refresh_topology(current_graph, current_wires),
+                    lambda _: (current_graph, current_cache),
+                    None,
+                )
+                # nr graph shares wires with main → keep its edges in sync too
+                nr_graph = nr_graph._replace(
+                    senders=current_graph.senders, receivers=current_graph.receivers
+                )
 
             # --- 2. Detect whether damage has now started ------------------
             # Any gate that was active in the initial mask and is now
@@ -682,16 +896,28 @@ def run_model_scan_with_loss(
             )
 
             # --- 4. Apply NCA model ONLY to the main graph -----------------
-            updated_graph, loss, current_logits, aux = apply_model_and_compute_loss(
-                model_fn,
-                current_graph,
-                logits_original_shapes,
-                current_wires,
-                x_batch,
-                y_batch,
-                loss_cfg,
-                layer_sizes,
-            )
+            if any_shuffle_enabled:
+                model_updated_graph = apply_model_remat(current_graph, current_cache)
+                updated_graph, loss, current_logits, aux = get_loss_and_update_graph(
+                    model_updated_graph,
+                    logits_original_shapes,
+                    current_wires,
+                    x_batch,
+                    y_batch,
+                    loss_cfg,
+                    layer_sizes,
+                )
+            else:
+                updated_graph, loss, current_logits, aux = apply_model_and_compute_loss(
+                    model_fn,
+                    current_graph,
+                    logits_original_shapes,
+                    current_wires,
+                    x_batch,
+                    y_batch,
+                    loss_cfg,
+                    layer_sizes,
+                )
 
             # Merge no-repair metrics into aux dict
             aux = {
@@ -702,38 +928,64 @@ def run_model_scan_with_loss(
                 "no_repair_hard_accuracy": no_repair_aux["hard_accuracy"],
             }
 
-            new_carry = (
-                updated_graph,
-                current_gate_mask,
-                nr_graph,
-                nr_gate_mask,
-                damage_started,
-                current_wires,
-            )
+            if any_shuffle_enabled:
+                new_carry = (
+                    updated_graph,
+                    current_gate_mask,
+                    nr_graph,
+                    nr_gate_mask,
+                    damage_started,
+                    current_wires,
+                    current_cache,
+                )
+            else:
+                new_carry = (
+                    updated_graph,
+                    current_gate_mask,
+                    nr_graph,
+                    nr_gate_mask,
+                    damage_started,
+                    current_wires,
+                )
             return new_carry, (updated_graph, loss, current_logits, aux)
 
         # Initial carry: nr graph starts as a copy of the main graph
-        init_carry = (
-            graph,
-            initial_gate_mask,
-            graph,
-            initial_gate_mask,
-            jp.bool_(False),
-            wires,
-        )
-        (final_graph, _, _, _, _, _), step_outputs = jax.lax.scan(
+        if any_shuffle_enabled:
+            init_carry = (
+                graph,
+                initial_gate_mask,
+                graph,
+                initial_gate_mask,
+                jp.bool_(False),
+                wires,
+                initial_topology_cache,
+            )
+        else:
+            init_carry = (
+                graph,
+                initial_gate_mask,
+                graph,
+                initial_gate_mask,
+                jp.bool_(False),
+                wires,
+            )
+        final_carry, step_outputs = jax.lax.scan(
             scan_step,
             init_carry,
             xs=jp.arange(num_steps),
             length=num_steps,
         )
+        final_graph = final_carry[0]
 
     else:
         # ------------------------------------------------------------------
         # Standard scan (no baseline tracking)
         # ------------------------------------------------------------------
         def scan_step(carry, step_idx):
-            current_graph, current_gate_mask, current_wires = carry
+            if any_shuffle_enabled:
+                current_graph, current_gate_mask, current_wires, current_cache = carry
+            else:
+                current_graph, current_gate_mask, current_wires = carry
 
             current_graph, current_gate_mask = apply_probabilistic_damage(
                 current_graph,
@@ -747,32 +999,58 @@ def run_model_scan_with_loss(
             )
 
             # Shuffle wires if needed (1-indexed, same convention as damage_steps)
+            old_wires = current_wires
             current_wires = shuffle_wires_if_needed(current_wires, step_idx + 1)
+            # Probabilistic per-step wire shuffle (training path)
+            # Uses raw step_idx (0-indexed, same as apply_probabilistic_damage)
+            current_wires = apply_probabilistic_shuffle(current_wires, step_idx)
 
-            updated_graph, loss, current_logits, aux = apply_model_and_compute_loss(
-                model_fn,
-                current_graph,
-                logits_original_shapes,
-                current_wires,
-                x_batch,
-                y_batch,
-                loss_cfg,
-                layer_sizes,
-            )
+            # Refresh graph topology + cache if any shuffle fired
+            if any_shuffle_enabled:
+                did_shuffle = detect_wire_change(old_wires, current_wires)
+                current_graph, current_cache = jax.lax.cond(
+                    did_shuffle,
+                    lambda _: refresh_topology(current_graph, current_wires),
+                    lambda _: (current_graph, current_cache),
+                    None,
+                )
+                model_updated_graph = apply_model_remat(current_graph, current_cache)
+                updated_graph, loss, current_logits, aux = get_loss_and_update_graph(
+                    model_updated_graph,
+                    logits_original_shapes,
+                    current_wires,
+                    x_batch,
+                    y_batch,
+                    loss_cfg,
+                    layer_sizes,
+                )
+                new_carry = (updated_graph, current_gate_mask, current_wires, current_cache)
+            else:
+                updated_graph, loss, current_logits, aux = apply_model_and_compute_loss(
+                    model_fn,
+                    current_graph,
+                    logits_original_shapes,
+                    current_wires,
+                    x_batch,
+                    y_batch,
+                    loss_cfg,
+                    layer_sizes,
+                )
+                new_carry = (updated_graph, current_gate_mask, current_wires)
 
-            return (updated_graph, current_gate_mask, current_wires), (
-                updated_graph,
-                loss,
-                current_logits,
-                aux,
-            )
+            return new_carry, (updated_graph, loss, current_logits, aux)
 
-        (final_graph, _, _), step_outputs = jax.lax.scan(
+        if any_shuffle_enabled:
+            init_carry = (graph, initial_gate_mask, wires, initial_topology_cache)
+        else:
+            init_carry = (graph, initial_gate_mask, wires)
+        final_carry, step_outputs = jax.lax.scan(
             scan_step,
-            (graph, initial_gate_mask, wires),
+            init_carry,
             xs=jp.arange(num_steps),
             length=num_steps,
         )
+        final_graph = final_carry[0]
 
     return final_graph, step_outputs
 

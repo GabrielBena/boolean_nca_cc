@@ -35,6 +35,9 @@ Key Functions:
 import jax
 import jax.numpy as jp
 
+from boolean_nca_cc.circuits.model import gen_wires
+from boolean_nca_cc.training.pool.perturbation import shuffle_wires as _shuffle_wires_partial
+
 
 def create_knockout_pattern(
     key: jax.random.PRNGKey,
@@ -806,6 +809,161 @@ def compute_damage_params(cfg, layer_sizes, log=None) -> dict:
         # Training will use p_fault_train
         result["p_fault_train"] = None
         # We still leave p_fault_eval as is, to plot damaged/undamaged performance
+
+    return result
+
+
+# =============================================================================
+# Probabilistic Wire Shuffle Functions
+# =============================================================================
+
+
+def apply_probabilistic_wire_shuffle(
+    key: jax.random.PRNGKey,
+    wires: list[jp.ndarray],
+    layer_sizes: list[tuple[int, int]] | tuple[tuple[int, int], ...],
+    arity: int,
+    p_shuffle,
+    shuffle_fraction: float = 1.0,
+) -> list[jp.ndarray]:
+    """
+    Probabilistic wire shuffle: with probability ``p_shuffle``, perturb the
+    entire circuit's wiring this step.
+
+    Circuit-wide: a single coin flip per call decides whether ANY shuffling
+    happens. When triggered:
+
+    - ``shuffle_fraction == 1.0`` (default): regenerate all wires from scratch
+      via ``gen_wires`` (matches the live demo's Regime III OOD test).
+    - ``shuffle_fraction < 1.0``: reassign that fraction of connections per
+      layer via :func:`shuffle_wires` (Bernoulli per entry).
+
+    This is the per-step training analog of the discrete ``wire_shuffle_steps``
+    used in evaluation/visualization, and the wire-level analog of
+    :func:`apply_probabilistic_gate_failure` (which is per-gate).
+
+    Args:
+        key: Random key for both the coin flip and the candidate wires.
+        wires: List of wire arrays, one per layer (excluding input).
+        layer_sizes: Circuit topology including the input layer.
+        arity: Number of inputs per gate.
+        p_shuffle: Per-step shuffle probability (static float OR traced
+            scalar — both work).
+        shuffle_fraction: Static float controlling shuffle flavor (see above).
+
+    Returns:
+        New list of wire arrays (same shapes). Under JIT, both branches are
+        always computed and selected via ``jp.where(do_shuffle, ...)``.
+    """
+    coin_key, shuffle_key = jax.random.split(key)
+    do_shuffle = jax.random.uniform(coin_key) < p_shuffle
+
+    if shuffle_fraction < 1.0:
+        candidate = _shuffle_wires_partial(
+            shuffle_key, wires, layer_sizes, fraction=shuffle_fraction
+        )
+    else:
+        layer_keys = jax.random.split(shuffle_key, len(wires))
+        candidate = []
+        in_n = layer_sizes[0][0]
+        for i, (out_n, group_size) in enumerate(layer_sizes[1:]):
+            candidate.append(gen_wires(layer_keys[i], in_n, out_n, arity, group_size))
+            in_n = out_n
+
+    return [jp.where(do_shuffle, c, w) for c, w in zip(candidate, wires, strict=True)]
+
+
+def _p_shuffle_from_target(target_shuffles: float, n_steps: int) -> float:
+    """Compute per-step shuffle probability for a target expected count.
+
+    For a circuit-wide Bernoulli with probability ``p`` over ``L`` steps,
+    the expected number of shuffle events is ``E[N] = L * p``. So::
+
+        p = target_shuffles / n_steps
+
+    Clamped to ``[0, 1]``.
+
+    Args:
+        target_shuffles: Expected number of shuffle events per circuit lifetime.
+        n_steps: Lifetime in optimization steps.
+
+    Returns:
+        Per-step shuffle probability.
+    """
+    if target_shuffles <= 0.0 or n_steps <= 0:
+        return 0.0
+    return float(min(target_shuffles / n_steps, 1.0))
+
+
+def compute_shuffle_params(cfg, log=None) -> dict:
+    """Derive probabilistic wire-shuffle parameters from
+    ``cfg.shuffle.target_shuffles_per_lifecycle``.
+
+    Mirrors :func:`compute_damage_params`. Returns a dict with::
+
+        enabled                    - master switch
+        target_shuffles            - configured target (echo)
+        p_shuffle_train            - per-step shuffle prob tuned for pool.expected_updates
+        p_shuffle_eval             - per-step shuffle prob tuned for eval.inner_steps
+        shuffle_fraction           - 1.0 = full reshuffle, <1.0 = partial
+        p_shuffle_onset_fraction   - fraction of steps before shuffles start
+        p_shuffle_onset_step_train - absolute onset step for training
+        p_shuffle_onset_step_eval  - absolute onset step for evaluation
+    """
+    onset_frac = float(cfg.shuffle.get("p_shuffle_onset_fraction", 0.0))
+    train_steps = int(cfg.pool.expected_updates)
+    eval_steps = int(cfg.eval.inner_steps)
+
+    result = {
+        "enabled": bool(cfg.shuffle.get("enabled", False)),
+        "target_shuffles": 0.0,
+        "p_shuffle_train": None,
+        "p_shuffle_eval": None,
+        "shuffle_fraction": float(cfg.shuffle.get("shuffle_fraction", 1.0)),
+        "p_shuffle_onset_fraction": onset_frac,
+        "p_shuffle_onset_step_train": int(onset_frac * train_steps),
+        "p_shuffle_onset_step_eval": int(onset_frac * eval_steps),
+    }
+
+    target = float(cfg.shuffle.get("target_shuffles_per_lifecycle", 0.0))
+    result["target_shuffles"] = target
+    if target <= 0.0:
+        if log:
+            log.info("target_shuffles_per_lifecycle <= 0, shuffle effectively disabled")
+        return result
+
+    explicit_p = cfg.shuffle.get("p_shuffle")
+    if explicit_p is not None:
+        result["p_shuffle_train"] = float(explicit_p)
+        # Re-derive eval p_shuffle from target (not from the override)
+        result["p_shuffle_eval"] = _p_shuffle_from_target(target, eval_steps)
+        if log:
+            log.info(f"Using explicit p_shuffle_train = {result['p_shuffle_train']:.2e}")
+    else:
+        result["p_shuffle_train"] = _p_shuffle_from_target(target, train_steps)
+        result["p_shuffle_eval"] = _p_shuffle_from_target(target, eval_steps)
+
+    if log:
+        onset_msg = ""
+        if onset_frac > 0:
+            onset_msg = (
+                f"\n  onset: {onset_frac:.0%} of steps "
+                f"(train={result['p_shuffle_onset_step_train']}, "
+                f"eval={result['p_shuffle_onset_step_eval']})"
+            )
+        log.info(
+            f"Shuffle params (target {target} shuffles/lifecycle, "
+            f"fraction={result['shuffle_fraction']}):\n"
+            f"  p_shuffle_train = {result['p_shuffle_train']:.2e}  ({train_steps} steps)\n"
+            f"  p_shuffle_eval  = {result['p_shuffle_eval']:.2e}  ({eval_steps} steps)"
+            f"{onset_msg}"
+        )
+
+    if not result["enabled"]:
+        if log:
+            log.info("Shuffle system disabled: setting p_shuffle_train to None")
+        result["p_shuffle_train"] = None
+        # Leave p_shuffle_eval as is, for symmetry/future eval usage
 
     return result
 
