@@ -1254,7 +1254,7 @@ def _migrate_legacy_gathered_attention_state(state):
     return remaining
 
 
-def _migrate_checkpoint_state(model, state):
+def migrate_checkpoint_state(model, state):
     """Apply model-specific state migrations before ``nnx.update``.
 
     Centralizes backward-compat shims for module-layout changes. New migrations
@@ -1311,7 +1311,7 @@ def load_model_from_config_and_checkpoint(
 
     # Apply backward-compat migrations for module-layout changes (e.g. the
     # CircuitGatheredAttention `attn_block` refactor). No-op for unchanged models.
-    loaded_dict["model"] = _migrate_checkpoint_state(model, loaded_dict["model"])
+    loaded_dict["model"] = migrate_checkpoint_state(model, loaded_dict["model"])
 
     # Update model with loaded state (compatibility handled during loading)
     nnx.update(model, loaded_dict["model"])

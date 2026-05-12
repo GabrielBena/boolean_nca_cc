@@ -37,6 +37,7 @@ from boolean_nca_cc.training.checkpointing import (
     instantiate_model_from_config,
     load_checkpoint_with_compatibility,
     load_config_from_wandb,
+    migrate_checkpoint_state,
 )
 from boolean_nca_cc.utils.graph_builder import build_graph
 
@@ -137,6 +138,10 @@ def load_run(
     init_model = instantiate_model_from_config(loaded_cfg, seed=seed, n_node=n_node)
     model = copy.deepcopy(init_model)
     loaded = load_checkpoint_with_compatibility(checkpoint_path)
+    # Backward-compat for the CircuitGatheredAttention attn_block refactor:
+    # pre-refactor checkpoints stored attention submodules at the top level,
+    # the new module layout nests them inside `attn_block`. No-op otherwise.
+    loaded["model"] = migrate_checkpoint_state(model, loaded["model"])
     nnx.update(model, loaded["model"])
     return model, loaded_cfg, checkpoint_path
 
@@ -183,41 +188,45 @@ def cfg_to_tmt_config(cfg: DictConfig) -> TMTConfig:
 def extract_gathered_block(model: nnx.Module) -> GatheredAttentionWeights:
     """Pack ``CircuitGatheredAttention``'s attention block into ``GatheredAttentionWeights``.
 
-    Attribute mapping (LHS = nnx model, RHS = oracle field):
+    Attribute mapping (LHS = nnx model, RHS = oracle field). All attention
+    submodules live on ``model.attn_block`` after the GatheredAttentionBlock
+    refactor — legacy checkpoints are re-nested by ``migrate_checkpoint_state``
+    in :func:`load_run` so this path is uniform.
 
-      attn_norm        -> attn_norm
-      query_proj       -> Wq, bq
-      key_proj         -> Wk, bk
-      value_proj       -> Wv, bv
-      output_proj      -> Wo, bo
-      query_ln (γ only)-> q_ln_gamma
-      key_ln   (γ only)-> k_ln_gamma
-      ffn[0] (LN)      -> ffn_ln
-      ffn[1] (Linear)  -> ffn_W1, ffn_b1
-      ffn[3] (Linear)  -> ffn_W2, ffn_b2
-      attn_rezero      -> attn_rezero (scalar)
-      ffn_rezero       -> ffn_rezero  (scalar)
+      attn_block.attn_norm        -> attn_norm
+      attn_block.query_proj       -> Wq, bq
+      attn_block.key_proj         -> Wk, bk
+      attn_block.value_proj       -> Wv, bv
+      attn_block.output_proj      -> Wo, bo
+      attn_block.query_ln (γ only)-> q_ln_gamma
+      attn_block.key_ln   (γ only)-> k_ln_gamma
+      attn_block.ffn[0] (LN)      -> ffn_ln
+      attn_block.ffn[1] (Linear)  -> ffn_W1, ffn_b1
+      attn_block.ffn[3] (Linear)  -> ffn_W2, ffn_b2
+      attn_block.attn_rezero      -> attn_rezero (scalar)
+      attn_block.ffn_rezero       -> ffn_rezero  (scalar)
     """
-    ffn_layers = list(model.ffn.layers)  # nnx.Sequential exposes .layers
+    block = model.attn_block
+    ffn_layers = list(block.ffn.layers)  # nnx.Sequential exposes .layers
     return GatheredAttentionWeights(
-        attn_norm=(to_np(model.attn_norm.scale.value), to_np(model.attn_norm.bias.value)),
-        Wq=to_np(model.query_proj.kernel.value),
-        bq=to_np(model.query_proj.bias.value),
-        Wk=to_np(model.key_proj.kernel.value),
-        bk=to_np(model.key_proj.bias.value),
-        Wv=to_np(model.value_proj.kernel.value),
-        bv=to_np(model.value_proj.bias.value),
-        Wo=to_np(model.output_proj.kernel.value),
-        bo=to_np(model.output_proj.bias.value),
-        q_ln_gamma=to_np(model.query_ln.scale.value),
-        k_ln_gamma=to_np(model.key_ln.scale.value),
+        attn_norm=(to_np(block.attn_norm.scale.value), to_np(block.attn_norm.bias.value)),
+        Wq=to_np(block.query_proj.kernel.value),
+        bq=to_np(block.query_proj.bias.value),
+        Wk=to_np(block.key_proj.kernel.value),
+        bk=to_np(block.key_proj.bias.value),
+        Wv=to_np(block.value_proj.kernel.value),
+        bv=to_np(block.value_proj.bias.value),
+        Wo=to_np(block.output_proj.kernel.value),
+        bo=to_np(block.output_proj.bias.value),
+        q_ln_gamma=to_np(block.query_ln.scale.value),
+        k_ln_gamma=to_np(block.key_ln.scale.value),
         ffn_ln=(to_np(ffn_layers[0].scale.value), to_np(ffn_layers[0].bias.value)),
         ffn_W1=to_np(ffn_layers[1].kernel.value),
         ffn_b1=to_np(ffn_layers[1].bias.value),
         ffn_W2=to_np(ffn_layers[3].kernel.value),
         ffn_b2=to_np(ffn_layers[3].bias.value),
-        attn_rezero=_scalar(model.attn_rezero.scale),
-        ffn_rezero=_scalar(model.ffn_rezero.scale),
+        attn_rezero=_scalar(block.attn_rezero.scale),
+        ffn_rezero=_scalar(block.ffn_rezero.scale),
         num_heads=int(model.num_heads),
         use_gelu_approx=True,  # match nnx.gelu / jax.nn.gelu default
     )
