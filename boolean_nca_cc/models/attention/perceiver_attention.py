@@ -23,9 +23,11 @@ from flax import nnx
 
 from boolean_nca_cc.models.attention.base import (
     AttentionBlock,
+    GatheredAttentionBlock,
     PassThrough,
     ReZero,
     apply_knockout_mask,
+    build_neighbor_indices,
     create_attention_mask,
     extract_node_features,
 )
@@ -77,6 +79,9 @@ class PerceiverCircuitAttention(nnx.Module):
         # Structural constraints
         restrict_input_cross_attn_to_first_layer: bool = False,
         restrict_output_cross_attn_to_last_layer: bool = False,
+        # Self-attention backend among gates
+        self_attn_kind: str = "dense",
+        max_neighbors: int = 16,
     ):
         """
         Initialize the Perceiver-style circuit attention model.
@@ -113,6 +118,13 @@ class PerceiverCircuitAttention(nnx.Module):
                 O(N_gates * samples_per_step * N_bits) per step.
             restrict_input_cross_attn_to_first_layer: Only first gate layer attends to inputs
             restrict_output_cross_attn_to_last_layer: Only output layer attends to residuals
+            self_attn_kind: Backend for self-attention among gates.
+                "dense"    — O(N^2) masked MultiHeadAttention via AttentionBlock (default).
+                "gathered" — O(N * max_neighbors) gathered neighborhood attention via
+                             GatheredAttentionBlock. Cross-attention to data is unaffected
+                             (gathering doesn't apply — no graph topology there).
+            max_neighbors: Fixed width of the gathered neighbor tensor (used only when
+                self_attn_kind="gathered"). Must be >= the maximum gate degree.
         """
         self.n_node = int(n_node)
         self.arity = arity
@@ -134,6 +146,13 @@ class PerceiverCircuitAttention(nnx.Module):
         self.re_zero_attn = re_zero_attn
         self.re_zero_updates = re_zero_updates
         self.warm_start = warm_start
+
+        if self_attn_kind not in ("dense", "gathered"):
+            raise ValueError(
+                f"self_attn_kind must be 'dense' or 'gathered', got {self_attn_kind!r}"
+            )
+        self.self_attn_kind = self_attn_kind
+        self.max_neighbors = int(max_neighbors)
 
         if mlp_dim is None:
             mlp_dim = attention_dim * mlp_dim_multiplier
@@ -207,21 +226,39 @@ class PerceiverCircuitAttention(nnx.Module):
         if use_output_cross_attention:
             self.output_encoder, self.output_cross_attn_layers = create_cross_attention_layers()
 
-        # === Self-attention layers ===
-        self.self_attn_layers = nnx.List(
-            [
-                AttentionBlock(
-                    dim=self.attention_dim,
-                    mlp_dim=mlp_dim,
-                    num_heads=num_heads,
-                    dropout_rate=dropout_rate,
-                    rngs=rngs,
-                    re_zero=re_zero_attn,
-                    warm_start=warm_start,
-                )
-                for _ in range(num_self_attn_layers)
-            ]
-        )
+        # === Self-attention layers among gates ===
+        # Dense (O(N^2)) or gathered-neighborhood (O(N * max_neighbors)) variants
+        # share the same I/O contract aside from masking inputs; selection is
+        # config-time so the rest of the model is agnostic.
+        if self.self_attn_kind == "gathered":
+            self.self_attn_layers = nnx.List(
+                [
+                    GatheredAttentionBlock(
+                        dim=self.attention_dim,
+                        mlp_dim=mlp_dim,
+                        num_heads=num_heads,
+                        rngs=rngs,
+                        re_zero=re_zero_attn,
+                        warm_start=warm_start,
+                    )
+                    for _ in range(num_self_attn_layers)
+                ]
+            )
+        else:
+            self.self_attn_layers = nnx.List(
+                [
+                    AttentionBlock(
+                        dim=self.attention_dim,
+                        mlp_dim=mlp_dim,
+                        num_heads=num_heads,
+                        dropout_rate=dropout_rate,
+                        rngs=rngs,
+                        re_zero=re_zero_attn,
+                        warm_start=warm_start,
+                    )
+                    for _ in range(num_self_attn_layers)
+                ]
+            )
 
         # Final LayerNorm before output heads (standard Pre-LN practice)
         self.final_norm = nnx.LayerNorm(self.attention_dim, rngs=rngs)
@@ -337,6 +374,8 @@ class PerceiverCircuitAttention(nnx.Module):
         output_cross_attn_mask: jp.ndarray | None = None,
         input_output_gate: jp.ndarray | None = None,
         output_output_gate: jp.ndarray | None = None,
+        neighbor_indices: jp.ndarray | None = None,
+        neighbor_mask: jp.ndarray | None = None,
         return_intermediate_latents: bool = False,
     ) -> jraph.GraphsTuple:
         """
@@ -344,13 +383,17 @@ class PerceiverCircuitAttention(nnx.Module):
 
         Args:
             graph: Input graph with data in globals (GraphGlobals NamedTuple)
-            attention_mask: Optional pre-computed self-attention mask
+            attention_mask: Optional pre-computed self-attention mask (dense self-attn only)
             input_cross_attn_mask: Optional pre-computed mask for input cross-attention
             output_cross_attn_mask: Optional pre-computed mask for output cross-attention
             input_output_gate: Optional pre-computed output gate for input cross-attention
                 [1, N_nodes, 1] - hard zeros non-allowed layers' contributions
             output_output_gate: Optional pre-computed output gate for output cross-attention
                 [1, N_nodes, 1] - hard zeros non-allowed layers' contributions
+            neighbor_indices: Optional pre-computed [N, max_neighbors] index tensor
+                (gathered self-attn only). Built from graph topology if omitted.
+            neighbor_mask: Optional pre-computed [N, max_neighbors] bool mask
+                (gathered self-attn only). Built from graph topology if omitted.
 
         Returns:
             Updated graph with new logits and hidden states
@@ -445,17 +488,32 @@ class PerceiverCircuitAttention(nnx.Module):
                     intermediate_latents.append(gate_latents.copy())
 
         # === Self-attention among gates ===
-        # Derive n_node from graph (scale-free: works with any circuit size)
-        # Note: this fallback path is only used outside JIT. In training/eval,
-        # masks are always precomputed with a concrete n_node.
-        if attention_mask is None:
-            n_node = nodes["layer"].shape[0]
-            attention_mask = self._create_attention_mask(senders, receivers, n_node)
+        # Derive n_node from graph (scale-free: works with any circuit size).
+        # Note: these fallback paths are only used outside JIT. In training/eval,
+        # masks / neighbor indices are precomputed with a concrete n_node.
+        if self.self_attn_kind == "gathered":
+            if neighbor_indices is None or neighbor_mask is None:
+                n_node = nodes["layer"].shape[0]
+                neighbor_indices, neighbor_mask = build_neighbor_indices(
+                    senders, receivers, n_node,
+                    self.max_neighbors, self.use_attention_mask,
+                )
+            # GatheredAttentionBlock operates on [N, D], not [1, N, D]
+            x = gate_latents[0]
+            for layer in self.self_attn_layers:
+                x = layer(x, neighbor_indices, neighbor_mask)
+                if return_intermediate_latents:
+                    intermediate_latents.append(x[None, ...].copy())
+            gate_latents = x[None, ...]
+        else:
+            if attention_mask is None:
+                n_node = nodes["layer"].shape[0]
+                attention_mask = self._create_attention_mask(senders, receivers, n_node)
 
-        for layer in self.self_attn_layers:
-            gate_latents = layer(gate_latents, key_value=None, mask=attention_mask)
-            if return_intermediate_latents:
-                intermediate_latents.append(gate_latents.copy())
+            for layer in self.self_attn_layers:
+                gate_latents = layer(gate_latents, key_value=None, mask=attention_mask)
+                if return_intermediate_latents:
+                    intermediate_latents.append(gate_latents.copy())
 
         # === Final norm + project to updates ===
         gate_latents = self.final_norm(gate_latents)

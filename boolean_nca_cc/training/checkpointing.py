@@ -1203,6 +1203,73 @@ def load_config_from_wandb(
     return config, checkpoint_path, run.id
 
 
+# Submodules that used to live directly on `CircuitGatheredAttention` and now
+# live inside the nested `attn_block` (GatheredAttentionBlock). When loading
+# a checkpoint trained before that refactor we have to splice them back in.
+_LEGACY_GATHERED_ATTENTION_BLOCK_KEYS = (
+    "attn_norm",
+    "query_proj",
+    "key_proj",
+    "value_proj",
+    "output_proj",
+    "query_ln",
+    "key_ln",
+    "attn_rezero",
+    "ffn",
+    "ffn_rezero",
+)
+
+
+def _migrate_legacy_gathered_attention_state(state):
+    """Re-nest a pre-refactor CircuitGatheredAttention state under ``attn_block``.
+
+    Old checkpoints stored ``attn_norm`` / ``query_proj`` / ... as top-level
+    attributes of the model. The refactor moved them inside a single
+    ``GatheredAttentionBlock`` submodule. This helper detects the old layout
+    (``attn_norm`` present, ``attn_block`` absent) and rewrites the mapping so
+    ``nnx.update`` can apply it to the new model. Anything that doesn't look
+    like the legacy layout is returned untouched.
+    """
+    if state is None or not hasattr(state, "__contains__"):
+        return state
+    if "attn_block" in state or "attn_norm" not in state:
+        return state
+
+    moved = {}
+    remaining = {}
+    for key in list(state.keys()):
+        if key in _LEGACY_GATHERED_ATTENTION_BLOCK_KEYS:
+            moved[key] = state[key]
+        else:
+            remaining[key] = state[key]
+
+    if not moved:
+        return state
+
+    remaining["attn_block"] = moved
+    log.info(
+        "Migrated legacy CircuitGatheredAttention checkpoint: "
+        f"re-nested {sorted(moved)} under 'attn_block'."
+    )
+    return remaining
+
+
+def _migrate_checkpoint_state(model, state):
+    """Apply model-specific state migrations before ``nnx.update``.
+
+    Centralizes backward-compat shims for module-layout changes. New migrations
+    should be added here so the call site in
+    :func:`load_model_from_config_and_checkpoint` stays small.
+    """
+    from boolean_nca_cc.models.attention.gathered_attention import (
+        CircuitGatheredAttention,
+    )
+
+    if isinstance(model, CircuitGatheredAttention):
+        return _migrate_legacy_gathered_attention_state(state)
+    return state
+
+
 def load_model_from_config_and_checkpoint(
     config: Any,
     checkpoint_path: str,
@@ -1241,6 +1308,11 @@ def load_model_from_config_and_checkpoint(
     model = copy.deepcopy(
         init_model
     )  # Make a deep copy of the model to avoid modifying the original
+
+    # Apply backward-compat migrations for module-layout changes (e.g. the
+    # CircuitGatheredAttention `attn_block` refactor). No-op for unchanged models.
+    loaded_dict["model"] = _migrate_checkpoint_state(model, loaded_dict["model"])
+
     # Update model with loaded state (compatibility handled during loading)
     nnx.update(model, loaded_dict["model"])
 

@@ -2,8 +2,8 @@
 
 # Default parameters for experiment
 defaults:
-  - model: gathered_attention  # Default model (gnn or self_attention or perceiver_attention)
-  - circuit: reverse_large
+  - model: perceiver_attention  # Default model (gnn or self_attention or perceiver_attention)
+  - circuit: reverse
   - loss: bce  # Options: l2, l4, bce, bce_w3, focal, asym, focal_asym
   - _self_  # For self-overrides
 
@@ -45,19 +45,19 @@ training:
   random_loss_step_min: 2
   use_beta_loss_step: false  # Use beta distribution for random loss step (varies from early to late steps through training)
   # TRAIN/TEST SPLIT
-  test_num: 256  # Fraction/absolute number of data to use for testing (from all input combinations)
+  test_num: 64  # Fraction/absolute number of data to use for testing (from all input combinations)
   # BATCH SIZE
-  meta_batch_size: 128 
+  meta_batch_size: 256 
   
   # MULTI-GPU DATA PARALLELISM
   # Distributes batch across GPUs, each device processes batch_size/num_devices circuits
   # Gradients are automatically synchronized via all-reduce
   multi_gpu:
-    enabled: null  # null = auto (enable if >1 GPU available), true/false = explicit
+    enabled: false  # null = auto (enable if >1 GPU available), true/false = explicit
     num_devices: null  # Number of devices to use (null = all available)
   
   # OPTIMIZATION
-  learning_rate: 4e-4
+  learning_rate: 3e-4
   weight_decay: 1e-5
   # LEARNING RATE SCHEDULER
   # Options: "constant", "exponential", "cosine", "linear_warmup", "adaptive", "reduce_on_plateau"
@@ -99,7 +99,7 @@ training:
 
   # NUMBER OF EPOCHS
   epochs: null
-  epochs_power_of_2: 16 # 2^n
+  epochs_power_of_2: 18 # 2^n
   # USE SCAN
   use_scan: true
   # GRADIENT CHECKPOINTING (remat)
@@ -143,7 +143,7 @@ damage:
   # === TARGET DAMAGE (the single knob) ===
   # Fraction of eligible (hidden) gates expected to be damaged by circuit reset.
   # Drives BOTH p_fault and knockouts_per_event so they are directly comparable.
-  target_damage_fraction: 0.10  # e.g., 15% of hidden gates
+  target_damage_fraction: 0.10  # e.g., 10% of hidden gates
   
   # === PROBABILISTIC (training) ===
   # Auto-computed: p_fault = 1 - (1 - target_damage_fraction)^(1/pool.expected_updates)
@@ -174,9 +174,38 @@ damage:
   # === SHARED ===
   faulty_logit_value: -10.0  # Large negative value -> sigmoid outputs ~0
 
+# Wire shuffle perturbation (training-only counterpart to wire_shuffle_steps in eval)
+# Circuit-wide per-step Bernoulli: each step, with probability p_shuffle, the entire
+# circuit's wiring is perturbed. Auto-computed from target_shuffles_per_lifecycle so
+# expected events match across train/eval scan lengths.
+shuffle:
+  enabled: false  # Master switch for probabilistic shuffle during training
+
+  # === TARGET (the single knob) ===
+  # Expected number of shuffle events per circuit lifetime.
+  # Drives p_shuffle: E[shuffles] = L * p, so p = target / L.
+  target_shuffles_per_lifecycle: 2.0
+
+  # === PROBABILISTIC (training) ===
+  # Auto-computed: p_shuffle_train = target_shuffles_per_lifecycle / pool.expected_updates
+  # For eval, p_shuffle_eval is derived for eval.inner_steps so expected count matches.
+  # Set explicitly to override auto-computation.
+  p_shuffle: null
+
+  # === SHUFFLE FLAVOR ===
+  # 1.0 (default) = full reshuffle via gen_wires (matches demo's Regime III OOD test).
+  # <1.0 = each connection has shuffle_fraction probability of being reassigned
+  #        (Bernoulli per entry, via training/pool/perturbation.py:shuffle_wires).
+  shuffle_fraction: 1.0
+
+  # === DELAYED ONSET ===
+  # Fraction of total steps before probabilistic shuffles start (parallel to damage).
+  # 0.0 = shuffles from the start. 0.5 = shuffles start at 50% of steps.
+  p_shuffle_onset_fraction: 0.0
+
 # Backpropagation baseline
 backprop:
-  enabled: true
+  enabled: false
   epochs: ${eval.inner_steps}
   learning_rate: 1
   weight_decay: 1e-1
@@ -193,9 +222,9 @@ eval:
   inner_steps: 256
   log_stepwise: true  # Whether to log detailed step-by-step metrics to wandb
   # batch_size_in: ${training.meta_batch_size}  # Batch size for IN-distribution evaluation (None means use initial_diversity)
-  batch_size_in: 24  # Batch size for IN-distribution evaluation (None means use initial_diversity)
+  batch_size_in: 64  # Batch size for IN-distribution evaluation (None means use initial_diversity)
   # batch_size_out: ${training.meta_batch_size}  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
-  batch_size_out: 24  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
+  batch_size_out: 64  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
   log_pool_scatter: true
   do_ood_evaluation: null # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
   get_all_wirings: true # Whether to get all wirings (True) or a subset (False)

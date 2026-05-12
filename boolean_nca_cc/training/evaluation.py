@@ -271,9 +271,8 @@ def _prepare_model_fn(
     output_output_gate = None
 
     if isinstance(model, PerceiverCircuitAttention):
-        # Perceiver: precompute attention mask and output gates
-        attention_mask = model._create_attention_mask(graph.senders, graph.receivers, model.n_node)
-
+        # Perceiver: precompute output gates plus self-attn topology
+        # (mask for dense, neighbor indices for gathered).
         layer_indices = graph.nodes["layer"]
         max_layer = jp.max(layer_indices)
 
@@ -283,13 +282,38 @@ def _prepare_model_fn(
         if model.restrict_output_cross_attn_to_last_layer:
             output_output_gate = model._create_output_gate(layer_indices, allowed_layer=max_layer)
 
-        def base_fn(g):
-            return model(
-                g,
-                attention_mask=attention_mask,
-                input_output_gate=input_output_gate,
-                output_output_gate=output_output_gate,
+        if model.self_attn_kind == "gathered":
+            from boolean_nca_cc.models.attention.base import build_neighbor_indices
+
+            neighbor_indices, neighbor_mask = build_neighbor_indices(
+                graph.senders,
+                graph.receivers,
+                model.n_node,
+                model.max_neighbors,
+                model.use_attention_mask,
             )
+
+            def base_fn(g):
+                return model(
+                    g,
+                    neighbor_indices=neighbor_indices,
+                    neighbor_mask=neighbor_mask,
+                    input_output_gate=input_output_gate,
+                    output_output_gate=output_output_gate,
+                )
+
+        else:
+            attention_mask = model._create_attention_mask(
+                graph.senders, graph.receivers, model.n_node
+            )
+
+            def base_fn(g):
+                return model(
+                    g,
+                    attention_mask=attention_mask,
+                    input_output_gate=input_output_gate,
+                    output_output_gate=output_output_gate,
+                )
 
     elif isinstance(model, CircuitSelfAttention):
         # Self-attention: precompute attention mask
@@ -341,11 +365,15 @@ def _compute_topology_cache(
     Returns:
         - ``CircuitGatheredAttention`` →
           ``{"neighbor_indices": ..., "neighbor_mask": ...}``
-        - ``CircuitSelfAttention`` / ``PerceiverCircuitAttention`` →
+        - ``PerceiverCircuitAttention`` with ``self_attn_kind="gathered"`` →
+          ``{"neighbor_indices": ..., "neighbor_mask": ...}``
+        - ``CircuitSelfAttention`` / dense ``PerceiverCircuitAttention`` →
           ``{"attention_mask": ...}``
         - ``CircuitGNN`` → ``None`` (model reads ``graph.senders/receivers`` directly)
     """
-    if isinstance(model, CircuitGatheredAttention):
+    if isinstance(model, CircuitGatheredAttention) or (
+        isinstance(model, PerceiverCircuitAttention) and model.self_attn_kind == "gathered"
+    ):
         from boolean_nca_cc.models.attention.base import build_neighbor_indices
 
         neighbor_indices, neighbor_mask = build_neighbor_indices(
@@ -383,6 +411,14 @@ def _apply_model_with_cache(
     if isinstance(model, CircuitSelfAttention):
         return model(graph, attention_mask=cache["attention_mask"])
     if isinstance(model, PerceiverCircuitAttention):
+        if model.self_attn_kind == "gathered":
+            return model(
+                graph,
+                neighbor_indices=cache["neighbor_indices"],
+                neighbor_mask=cache["neighbor_mask"],
+                input_output_gate=perceiver_input_gate,
+                output_output_gate=perceiver_output_gate,
+            )
         return model(
             graph,
             attention_mask=cache["attention_mask"],

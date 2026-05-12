@@ -3,5 +3,5 @@ defaults:
   - _base_
 
 
-input_bits: 14
-output_bits: 14
+input_bits: 10
+output_bits: 10

@@ -27,4 +27,13 @@ restrict_input_cross_attn_to_first_layer: true
 # If true, only output layer can attend to residuals (mirrors circuit output flow)
 restrict_output_cross_attn_to_last_layer: true
 
+# Self-attention backend among gates.
+# "dense"    — O(N^2) masked MultiHeadAttention (default; matches prior behavior).
+# "gathered" — O(N * max_neighbors) gathered neighborhood attention. Cross-attention
+#              to data is unchanged either way (no graph topology to exploit there).
+self_attn_kind: dense
+# Only used when self_attn_kind == "gathered". Must be >= max gate degree
+# (typically arity + fan-out + 1 self-loop).
+max_neighbors: 16
+
 use_node_loss: false

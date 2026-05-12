@@ -15,12 +15,12 @@ The model structure mirrors CircuitSelfAttention exactly (same input projection,
 FFN, output heads, ReZero, Pre-LN) so parameter counts are directly comparable.
 """
 
-import jax
 import jax.numpy as jp
 import jraph
 from flax import nnx
 
 from boolean_nca_cc.models.attention.base import (
+    GatheredAttentionBlock,
     PassThrough,
     ReZero,
     apply_knockout_mask,
@@ -121,44 +121,14 @@ class CircuitGatheredAttention(nnx.Module):
         self.input_norm = nnx.LayerNorm(input_feature_dim, rngs=rngs)
         self.feature_proj = nnx.Linear(input_feature_dim, attention_dim, rngs=rngs)
 
-        # --- Gathered multi-head attention ---
-        # Pre-LN before attention (single LN since Q/K/V all come from same source)
-        self.attn_norm = nnx.LayerNorm(attention_dim, rngs=rngs)
-
-        # Q/K/V/O projections (same structure as nnx.MultiHeadAttention)
-        self.query_proj = nnx.Linear(attention_dim, attention_dim, rngs=rngs)
-        self.key_proj = nnx.Linear(attention_dim, attention_dim, rngs=rngs)
-        self.value_proj = nnx.Linear(attention_dim, attention_dim, rngs=rngs)
-        self.output_proj = nnx.Linear(attention_dim, attention_dim, rngs=rngs)
-
-        # QK-normalization: per-head LayerNorm (no bias), matching ViT-22B / Flax convention
-        self.query_ln = nnx.LayerNorm(self.head_dim, use_bias=False, rngs=rngs)
-        self.key_ln = nnx.LayerNorm(self.head_dim, use_bias=False, rngs=rngs)
-
-        # ReZero for attention residual
-        self.attn_rezero = (
-            ReZero(rngs=rngs, warm_start=warm_start) if re_zero_attn else PassThrough()
-        )
-
-        # --- FFN (same as AttentionBlock) ---
-        self.ffn = nnx.Sequential(
-            nnx.LayerNorm(attention_dim, rngs=rngs),
-            nnx.Linear(
-                attention_dim,
-                mlp_dim,
-                rngs=rngs,
-                kernel_init=nnx.initializers.kaiming_normal(),
-            ),
-            nnx.gelu,
-            nnx.Linear(
-                mlp_dim,
-                attention_dim,
-                rngs=rngs,
-                kernel_init=nnx.initializers.kaiming_normal(),
-            ),
-        )
-        self.ffn_rezero = (
-            ReZero(rngs=rngs, warm_start=warm_start) if re_zero_attn else PassThrough()
+        # --- Gathered multi-head self-attention + FFN (shared block) ---
+        self.attn_block = GatheredAttentionBlock(
+            dim=attention_dim,
+            mlp_dim=mlp_dim,
+            num_heads=num_heads,
+            rngs=rngs,
+            re_zero=re_zero_attn,
+            warm_start=warm_start,
         )
 
         # --- Output heads (same as CircuitSelfAttention) ---
@@ -207,8 +177,11 @@ class CircuitGatheredAttention(nnx.Module):
         if neighbor_indices is None or neighbor_mask is None:
             n_node = nodes["layer"].shape[0]
             neighbor_indices, neighbor_mask = build_neighbor_indices(
-                graph.senders, graph.receivers, n_node,
-                self.max_neighbors, self.use_attention_mask,
+                graph.senders,
+                graph.receivers,
+                n_node,
+                self.max_neighbors,
+                self.use_attention_mask,
             )
 
         # --- Extract & project features ---
@@ -217,11 +190,8 @@ class CircuitGatheredAttention(nnx.Module):
         )
         x = self.feature_proj(self.input_norm(features))  # [N, D]
 
-        # --- Gathered multi-head attention ---
-        x = x + self.attn_rezero(self._gathered_attention(x, neighbor_indices, neighbor_mask))
-
-        # --- FFN ---
-        x = x + self.ffn_rezero(self.ffn(x))
+        # --- Gathered self-attention + FFN ---
+        x = self.attn_block(x, neighbor_indices, neighbor_mask)
 
         # --- Output projections ---
         x = self.final_norm(x)
@@ -237,62 +207,3 @@ class CircuitGatheredAttention(nnx.Module):
 
         updated_nodes = {**nodes, "logits": updated_logits, "hidden": updated_hidden}
         return graph._replace(nodes=updated_nodes)
-
-    def _gathered_attention(
-        self,
-        x: jp.ndarray,
-        neighbor_indices: jp.ndarray,
-        neighbor_mask: jp.ndarray,
-    ) -> jp.ndarray:
-        """
-        Compute multi-head attention over gathered neighborhoods.
-
-        All operations are dense batched matmuls — no scatter/gather atomics.
-
-        Args:
-            x: Node features [N, D]
-            neighbor_indices: [N, max_neighbors] padded neighbor indices
-            neighbor_mask: [N, max_neighbors] boolean mask
-
-        Returns:
-            Attention output [N, D]
-        """
-        N = x.shape[0]
-        H = self.num_heads
-        D = self.head_dim
-
-        # Pre-LN
-        x_normed = self.attn_norm(x)
-
-        # Q/K/V projections → reshape to multi-head
-        Q = self.query_proj(x_normed).reshape(N, H, D)  # [N, H, D]
-        K = self.key_proj(x_normed).reshape(N, H, D)  # [N, H, D]
-        V = self.value_proj(x_normed).reshape(N, H, D)  # [N, H, D]
-
-        # QK-normalization (per-head LayerNorm, ViT-22B convention)
-        Q = self.query_ln(Q)  # [N, H, D]
-        K = self.key_ln(K)  # [N, H, D]
-
-        # Gather neighbor keys and values: [N, max_neighbors, H, D]
-        K_gathered = K[neighbor_indices]
-        V_gathered = V[neighbor_indices]
-
-        # Attention logits: Q_i · K_j for each neighbor j of node i
-        # [N, H, D] x [N, max_neighbors, H, D] -> [N, H, max_neighbors]
-        logits = jp.einsum("nhd,nmhd->nhm", Q, K_gathered) / jp.sqrt(jp.float32(D))
-
-        # Mask padding positions → -inf before softmax
-        # neighbor_mask: [N, max_neighbors] → [N, 1, max_neighbors]
-        mask = neighbor_mask[:, None, :]
-        logits = jp.where(mask, logits, jp.finfo(jp.float32).min)
-
-        # Softmax over neighbors (axis=-1 = max_neighbors dim)
-        weights = jax.nn.softmax(logits, axis=-1)  # [N, H, max_neighbors]
-
-        # Weighted aggregation of neighbor values
-        # [N, H, max_neighbors] x [N, max_neighbors, H, D] -> [N, H, D]
-        attn_output = jp.einsum("nhm,nmhd->nhd", weights, V_gathered)
-
-        # Reshape back and output projection
-        attn_output = attn_output.reshape(N, self.attention_dim)
-        return self.output_proj(attn_output)

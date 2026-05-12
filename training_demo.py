@@ -420,15 +420,12 @@ class DemoApp:
             )
             imgui.text_colored(
                 imgui.ImVec4(0.7, 0.7, 0.7, 1.0),
-                f"   run {s.loaded_entry.entity}/{s.loaded_entry.project}/"
-                f"{s.loaded_entry.run_id}",
+                f"   run {s.loaded_entry.entity}/{s.loaded_entry.project}/{s.loaded_entry.run_id}",
             )
             if s.loaded_entry.description:
                 imgui.text_wrapped(s.loaded_entry.description)
         elif s.model_run_id is not None:
-            imgui.text_colored(
-                imgui.ImVec4(0.0, 1.0, 0.0, 1.0), f"✓ custom run {s.model_run_id}"
-            )
+            imgui.text_colored(imgui.ImVec4(0.0, 1.0, 0.0, 1.0), f"✓ custom run {s.model_run_id}")
         else:
             imgui.text_colored(
                 imgui.ImVec4(0.7, 0.7, 0.7, 1.0),
@@ -450,9 +447,7 @@ class DemoApp:
         if imgui.tree_node("Custom W&B run ID"):
             _, self.wandb.entity = imgui.input_text("Entity", self.wandb.entity)
             _, self.wandb.project = imgui.input_text("Project", self.wandb.project)
-            _, self._wandb_run_id_buffer = imgui.input_text(
-                "Run ID", self._wandb_run_id_buffer
-            )
+            _, self._wandb_run_id_buffer = imgui.input_text("Run ID", self._wandb_run_id_buffer)
             if imgui.button("Load custom run"):
                 self.wandb.run_id = self._wandb_run_id_buffer or None
                 ok = self.session.load_model_from_wandb(self.wandb)
@@ -540,9 +535,7 @@ class DemoApp:
                 f"✓ {entry.run_id}",
             )
             if imgui.button("Load this model"):
-                ok = self.session.load_model_from_gallery(
-                    self.gallery_task, self.gallery_recipe
-                )
+                ok = self.session.load_model_from_gallery(self.gallery_task, self.gallery_recipe)
                 if ok:
                     self._on_model_loaded()
 
@@ -566,9 +559,7 @@ class DemoApp:
                 self._on_model_loaded()
         # Active description.
         active = regimes[self.regime_idx]
-        imgui.text_colored(
-            imgui.ImVec4(0.6, 0.6, 0.6, 1.0), REGIME_DESCRIPTIONS[active]
-        )
+        imgui.text_colored(imgui.ImVec4(0.6, 0.6, 0.6, 1.0), REGIME_DESCRIPTIONS[active])
         # Width slider is *always* shown when Regime IV is active.
         if active == Regime.WIDTH_SWEEP:
             wf_current = float(
@@ -577,9 +568,7 @@ class DemoApp:
                 else self.session.cfg.circuit.width_factor
             )
             wf_min, wf_max = SCALE_FREE_WIDTH_FACTORS[0], SCALE_FREE_WIDTH_FACTORS[-1]
-            changed, wf_new = imgui.slider_float(
-                "Width factor", wf_current, wf_min, wf_max, "%.2f"
-            )
+            changed, wf_new = imgui.slider_float("Width factor", wf_current, wf_min, wf_max, "%.2f")
             if changed and abs(wf_new - wf_current) > 1e-3:
                 self.session.width_factor = float(wf_new)
                 self.session.bootstrap()
@@ -639,13 +628,9 @@ class DemoApp:
 
         # Wiring mode override.
         wiring_idx = list(self.WIRING_MODES).index(s.wiring_mode)
-        changed, wiring_idx = imgui.combo(
-            "Wiring##ood", wiring_idx, list(self.WIRING_MODES)
-        )
+        changed, wiring_idx = imgui.combo("Wiring##ood", wiring_idx, list(self.WIRING_MODES))
         if changed:
-            s.apply_cfg_changes(
-                **{"training.wiring_mode": list(self.WIRING_MODES)[wiring_idx]}
-            )
+            s.apply_cfg_changes(**{"training.wiring_mode": list(self.WIRING_MODES)[wiring_idx]})
             self._on_model_loaded()
         label_with_status("Wiring", "wiring_mode")
 
@@ -724,9 +709,7 @@ class DemoApp:
     def _render_damage_section(self) -> None:
         imgui.separator_text("Damage")
         s = self.session
-        _, s.damage_enabled = imgui.checkbox(
-            "Stochastic faults each step", s.damage_enabled
-        )
+        _, s.damage_enabled = imgui.checkbox("Stochastic faults each step", s.damage_enabled)
         _, s.permanent_damage = imgui.slider_float(
             "Permanence", s.permanent_damage, 0.0, 1.0, "%.2f"
         )
@@ -737,17 +720,13 @@ class DemoApp:
         if imgui.button("Pre-grow with BP"):
             s.pre_grow_with_bp(n_steps=300)
             self._refresh_image_cache(force=True)
-        imgui.text_colored(
-            imgui.ImVec4(0.7, 0.7, 0.7, 1.0), damage_status_string(s.damage_params)
-        )
+        imgui.text_colored(imgui.ImVec4(0.7, 0.7, 0.7, 1.0), damage_status_string(s.damage_params))
 
     # ---------- Visualisation options ------------------------------------
 
     def _render_visualization_section(self) -> None:
         imgui.separator_text("Visualisation")
-        _, self.plot_type_idx = imgui.combo(
-            "Plot", self.plot_type_idx, list(self.PLOT_TYPES)
-        )
+        _, self.plot_type_idx = imgui.combo("Plot", self.plot_type_idx, list(self.PLOT_TYPES))
         _, self.loss_display_mode_idx = imgui.combo(
             "Display", self.loss_display_mode_idx, list(self.LOSS_DISPLAY_MODES)
         )
@@ -891,10 +870,7 @@ class DemoApp:
                         group_idx = i // max(group_size, 1)
                         gate_idx = i % max(group_size, 1)
                         layer_logits = s.logits[li - 1]
-                        if (
-                            group_idx < layer_logits.shape[0]
-                            and gate_idx < layer_logits.shape[1]
-                        ):
+                        if group_idx < layer_logits.shape[0] and gate_idx < layer_logits.shape[1]:
                             hover_gate = (x, y, layer_logits[group_idx, gate_idx])
                     if io.mouse_clicked[0]:
                         if li == 0:
@@ -909,10 +885,7 @@ class DemoApp:
                             self._refresh_image_cache(force=True)
 
                 # Damaged-gate overlay (red).
-                if (
-                    s.gate_mask_flat is not None
-                    and 0 < li < len(layer_sizes) - 1
-                ):
+                if s.gate_mask_flat is not None and 0 < li < len(layer_sizes) - 1:
                     flat_idx = sum(g for g, _ in layer_sizes[:li]) + i
                     if (
                         flat_idx < s.gate_mask_flat.shape[0]
@@ -939,11 +912,7 @@ class DemoApp:
                 wires = wires_np[li - 1].T
                 masks = self._wire_use_mask[li - 1].T
                 src_x = prev_gate_x[wires]
-                dst_x = (
-                    group_x
-                    + (np.arange(s.arity) + 0.5) / s.arity * group_w
-                    - group_w / 2
-                )
+                dst_x = group_x + (np.arange(s.arity) + 0.5) / s.arity * group_w - group_w / 2
                 my = (prev_y + y) / 2
                 for x0, x1, si, m in zip(
                     src_x.ravel(),
@@ -1040,9 +1009,7 @@ class DemoApp:
             if imgui.is_item_hovered() and imgui.is_mouse_clicked(0):
                 mx = imgui.get_io().mouse_pos.x - p0.x
                 mx_ratio = mx / max(p1.x - p0.x, 1)
-                self.active_case_i = max(
-                    0, min(int(mx_ratio * case_n), case_n - 1)
-                )
+                self.active_case_i = max(0, min(int(mx_ratio * case_n), case_n - 1))
         except Exception as e:
             imgui.text(f"Error rendering {name}: {e}")
 

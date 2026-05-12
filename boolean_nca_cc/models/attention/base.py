@@ -5,6 +5,7 @@ This module provides common components used by both CircuitSelfAttention,
 PerceiverCircuitAttention, and CircuitGatheredAttention models.
 """
 
+import jax
 import jax.numpy as jp
 from flax import nnx
 
@@ -174,6 +175,126 @@ class AttentionBlock(nnx.Module):
         # FFN + ReZero residual
         x = x + self.ffn_rezero(self.ffn(x))
 
+        return x
+
+
+class GatheredAttentionBlock(nnx.Module):
+    """
+    Gathered neighborhood self-attention block.
+
+    Mirrors AttentionBlock's structure (Pre-LN, QK-norm, ReZero residuals, FFN)
+    but replaces the dense O(N^2) attention with gathered attention over each
+    node's local graph neighborhood, computed as dense batched einsums on a
+    padded [N, max_neighbors, D] tensor. Self-attention only — there is no
+    graph topology between gates and external tokens, so cross-attention has
+    nothing to gather over.
+
+    Operates on un-batched [N, dim] tensors (the gather step is over the node
+    axis, so a leading batch dim would force a vmap; callers using batched
+    layouts should squeeze/unsqueeze around this block).
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        mlp_dim: int | None = None,
+        num_heads: int = 4,
+        *,
+        rngs: nnx.Rngs,
+        re_zero: bool = True,
+        warm_start: bool = True,
+    ):
+        if dim % num_heads != 0:
+            raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
+
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+
+        if mlp_dim is None:
+            mlp_dim = dim * 2
+
+        # Pre-LN: single norm since Q/K/V all come from the same source (self-attn)
+        self.attn_norm = nnx.LayerNorm(dim, rngs=rngs)
+
+        # Q/K/V/O projections (same structure as nnx.MultiHeadAttention)
+        self.query_proj = nnx.Linear(dim, dim, rngs=rngs)
+        self.key_proj = nnx.Linear(dim, dim, rngs=rngs)
+        self.value_proj = nnx.Linear(dim, dim, rngs=rngs)
+        self.output_proj = nnx.Linear(dim, dim, rngs=rngs)
+
+        # QK-normalization: per-head LayerNorm (no bias), ViT-22B / Flax convention
+        self.query_ln = nnx.LayerNorm(self.head_dim, use_bias=False, rngs=rngs)
+        self.key_ln = nnx.LayerNorm(self.head_dim, use_bias=False, rngs=rngs)
+
+        # ReZero for attention residual
+        self.attn_rezero = ReZero(rngs=rngs, warm_start=warm_start) if re_zero else PassThrough()
+
+        # FFN (Pre-LN inside)
+        self.ffn = nnx.Sequential(
+            nnx.LayerNorm(dim, rngs=rngs),
+            nnx.Linear(
+                dim,
+                mlp_dim,
+                rngs=rngs,
+                kernel_init=nnx.initializers.kaiming_normal(),
+            ),
+            nnx.gelu,
+            nnx.Linear(
+                mlp_dim,
+                dim,
+                rngs=rngs,
+                kernel_init=nnx.initializers.kaiming_normal(),
+            ),
+        )
+        self.ffn_rezero = ReZero(rngs=rngs, warm_start=warm_start) if re_zero else PassThrough()
+
+    def _gathered_attention(
+        self,
+        x: jp.ndarray,
+        neighbor_indices: jp.ndarray,
+        neighbor_mask: jp.ndarray,
+    ) -> jp.ndarray:
+        """Multi-head self-attention restricted to each node's gathered neighbors."""
+        N = x.shape[0]
+        H = self.num_heads
+        D = self.head_dim
+
+        x_normed = self.attn_norm(x)
+
+        Q = self.query_proj(x_normed).reshape(N, H, D)
+        K = self.key_proj(x_normed).reshape(N, H, D)
+        V = self.value_proj(x_normed).reshape(N, H, D)
+
+        Q = self.query_ln(Q)
+        K = self.key_ln(K)
+
+        # Gather neighbor keys/values: [N, max_neighbors, H, D]
+        K_gathered = K[neighbor_indices]
+        V_gathered = V[neighbor_indices]
+
+        # Q_i · K_j over the head_dim → [N, H, max_neighbors]
+        logits = jp.einsum("nhd,nmhd->nhm", Q, K_gathered) / jp.sqrt(jp.float32(D))
+
+        # Mask padding slots before softmax
+        mask = neighbor_mask[:, None, :]
+        logits = jp.where(mask, logits, jp.finfo(jp.float32).min)
+        weights = jax.nn.softmax(logits, axis=-1)
+
+        # Weighted aggregation over neighbors
+        attn_output = jp.einsum("nhm,nmhd->nhd", weights, V_gathered)
+        attn_output = attn_output.reshape(N, self.dim)
+
+        return self.output_proj(attn_output)
+
+    def __call__(
+        self,
+        x: jp.ndarray,  # [N, dim]
+        neighbor_indices: jp.ndarray,  # [N, max_neighbors] int
+        neighbor_mask: jp.ndarray,  # [N, max_neighbors] bool
+    ) -> jp.ndarray:
+        x = x + self.attn_rezero(self._gathered_attention(x, neighbor_indices, neighbor_mask))
+        x = x + self.ffn_rezero(self.ffn(x))
         return x
 
 
