@@ -20,12 +20,12 @@ import os
 # Configure JAX/XLA memory allocation BEFORE importing JAX
 # Use "platform" allocator - slower but actually releases memory after pool resets
 # The default BFC allocator is faster but pools memory aggressively, causing OOM at pool resets
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "true"
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 # os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
 # os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
 
 # GPU VISIBILITY
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 import logging
 
@@ -607,6 +607,15 @@ def main(cfg: DictConfig) -> None:
     # Alternatively, we could inspect cfg.model._target_ if 'type' was removed.
     if cfg.model.type in ["self_attention", "perceiver_attention"]:
         instantiate_overrides["n_node"] = n_nodes
+
+    # Perceiver-specific: inject the input / output layer sizes from the
+    # eagerly-computed layer_sizes so the cross-attention slicing optimisation
+    # has Python-static K values. ``layer_sizes`` is
+    # ``[(input_n, 1), (gate_layer_1_n, gs), ..., (output_n, 1)]`` so the
+    # input layer is index 0 and the output (last gate) layer is the final entry.
+    if cfg.model.type == "perceiver_attention":
+        instantiate_overrides["input_layer_size"] = int(layer_sizes[0][0])
+        instantiate_overrides["output_layer_size"] = int(layer_sizes[-1][0])
     # CircuitGNN does not require n_node in its constructor based on original setup.
 
     # Instantiate the model using Hydra

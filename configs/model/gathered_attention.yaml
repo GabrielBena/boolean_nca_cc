@@ -8,7 +8,22 @@ defaults:
 
 type: "gathered_attention"
 
-# max_neighbors: fixed width of the neighbor tensor; must be >= max GATE degree.
-# Input nodes (layer=0) can exceed this but are never updated, so truncation is harmless.
-# For arity=4: gate degree = arity + fan-out + self ~ 9.
+# max_neighbors: fixed width of the neighbor tensor.
+#
+# MUST be >= max GATE-NODE degree (layer > 0). Gate-node truncation corrupts
+# the attention outputs that drive logit/hidden updates and the circuit loss —
+# the topology validator will raise on that case before training starts.
+#
+# Input nodes (layer=0) ARE updated by the model, but the circuit reads raw
+# input bits from the data tensor, not from input-node logits — so input-node
+# attention error doesn't enter the loss directly. It does leak a small,
+# bounded error into subsequent self-attn steps (gates attending to corrupted
+# input-node K/V projections), which the optimizer typically learns to ignore.
+# With bidirectional_edges=True and a narrow input layer, the input-node
+# degree can be much higher than the gate degree (e.g. 33 for input_n=8 with
+# a 64-wide first gate layer): if you choose a small max_neighbors you'll be
+# tolerating that leak. The validator surfaces this as a warning by default;
+# bump max_neighbors to cover input nodes too if you want zero leak.
+#
+# For arity=4 with bidirectional_edges: gate degree ~ arity + fan-out + self ~ 9.
 max_neighbors: 10

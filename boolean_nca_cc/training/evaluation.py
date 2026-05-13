@@ -245,6 +245,29 @@ def apply_model_and_compute_loss(
     return updated_graph, loss, current_logits, aux_data
 
 
+def _layer_node_indices(
+    layer_indices,
+    target_layer: int,
+    size: int,
+) -> jp.ndarray:
+    """Static [size] int32 array of node positions where ``layer == target_layer``.
+
+    Must be JIT-safe: this is called from ``_prepare_model_fn`` which itself can
+    be traced (when invoked from inside ``nnx.vmap`` / ``nnx.jit`` during the
+    training loop). We use ``jp.where(mask, size=size, fill_value=0)`` so the
+    output shape is a Python-static int — downstream gather/scatter
+    (``gate_latents[:, idx, :]``) requires that.
+
+    ``size`` must be supplied by the caller (usually pulled from
+    ``model.input_layer_size`` / ``model.output_layer_size``). The layer-membership
+    pattern is wire-independent — it depends only on the circuit's layer
+    structure, which is fixed for the lifetime of a given training run.
+    """
+    mask = layer_indices == target_layer
+    idx = jp.where(mask, size=size, fill_value=0)[0]
+    return idx.astype(jp.int32)
+
+
 def _prepare_model_fn(
     model: CircuitGatheredAttention | CircuitGNN | CircuitSelfAttention | PerceiverCircuitAttention,
     graph,
@@ -276,15 +299,57 @@ def _prepare_model_fn(
         layer_indices = graph.nodes["layer"]
         max_layer = jp.max(layer_indices)
 
-        if model.restrict_input_cross_attn_to_first_layer:
-            input_output_gate = model._create_output_gate(layer_indices, allowed_layer=0)
+        # Static layer-index arrays for the cross-attn slicing optimization.
+        # Asymmetric semantics that mirror the model's restriction flags:
+        #   input cross-attn  → input pins (layer == 0); K_in  = input_layer_size
+        #   output cross-attn → last gate layer (layer == max); K_out = output_layer_size
+        # Attending only on K queries instead of all N nodes saves a factor of
+        # N/K in cross-attention FLOPs. See PerceiverCircuitAttention.__call__
+        # for the slicing branch. The static K comes from
+        # ``model.input_layer_size`` / ``output_layer_size`` set at construction
+        # time (injected by train.py from layer_sizes); if those aren't set we
+        # skip slicing and fall through to the dense+gate path.
+        input_layer_idx = None
+        output_layer_idx = None
+        if (
+            model.restrict_input_cross_attn_to_input_layer
+            and model.input_layer_size is not None
+        ):
+            input_layer_idx = _layer_node_indices(
+                layer_indices, target_layer=0, size=model.input_layer_size,
+            )
+        if (
+            model.restrict_output_cross_attn_to_last_gate_layer
+            and model.output_layer_size is not None
+        ):
+            # max_layer here is a tracer in JIT; we use the model's stored
+            # size and rely on the layer-index pattern being identical across
+            # all circuits (it is — layer structure is wire-independent).
+            output_layer_idx = _layer_node_indices(
+                layer_indices, target_layer=max_layer, size=model.output_layer_size,
+            )
 
-        if model.restrict_output_cross_attn_to_last_layer:
+        # output_gate kept as a fallback (used only if slicing indices are None).
+        if model.restrict_input_cross_attn_to_input_layer:
+            input_output_gate = model._create_output_gate(layer_indices, allowed_layer=0)
+        if model.restrict_output_cross_attn_to_last_gate_layer:
             output_output_gate = model._create_output_gate(layer_indices, allowed_layer=max_layer)
 
         if model.self_attn_kind == "gathered":
-            from boolean_nca_cc.models.attention.base import build_neighbor_indices
+            from boolean_nca_cc.models.attention.base import (
+                build_neighbor_indices,
+                validate_gathered_topology,
+            )
 
+            validate_gathered_topology(
+                graph.senders,
+                graph.receivers,
+                model.n_node,
+                model.max_neighbors,
+                model.use_attention_mask,
+                strict=True,
+                layer_indices=layer_indices,
+            )
             neighbor_indices, neighbor_mask = build_neighbor_indices(
                 graph.senders,
                 graph.receivers,
@@ -300,6 +365,8 @@ def _prepare_model_fn(
                     neighbor_mask=neighbor_mask,
                     input_output_gate=input_output_gate,
                     output_output_gate=output_output_gate,
+                    input_layer_idx=input_layer_idx,
+                    output_layer_idx=output_layer_idx,
                 )
 
         else:
@@ -313,6 +380,8 @@ def _prepare_model_fn(
                     attention_mask=attention_mask,
                     input_output_gate=input_output_gate,
                     output_output_gate=output_output_gate,
+                    input_layer_idx=input_layer_idx,
+                    output_layer_idx=output_layer_idx,
                 )
 
     elif isinstance(model, CircuitSelfAttention):
@@ -324,9 +393,21 @@ def _prepare_model_fn(
 
     elif isinstance(model, CircuitGatheredAttention):
         # Gathered attention: precompute neighbor indices from graph topology
-        from boolean_nca_cc.models.attention.base import build_neighbor_indices
+        from boolean_nca_cc.models.attention.base import (
+            build_neighbor_indices,
+            validate_gathered_topology,
+        )
 
         n_node = graph.nodes["layer"].shape[0]
+        validate_gathered_topology(
+            graph.senders,
+            graph.receivers,
+            n_node,
+            model.max_neighbors,
+            model.use_attention_mask,
+            strict=True,
+            layer_indices=graph.nodes["layer"],
+        )
         neighbor_indices, neighbor_mask = build_neighbor_indices(
             graph.senders,
             graph.receivers,
@@ -395,12 +476,16 @@ def _apply_model_with_cache(
     cache: dict | None,
     perceiver_input_gate=None,
     perceiver_output_gate=None,
+    perceiver_input_layer_idx=None,
+    perceiver_output_layer_idx=None,
 ):
     """Run ``model`` using an externally-supplied topology cache.
 
     Counterpart of the closure ``base_fn`` produced by ``_prepare_model_fn``,
     but takes the cache as an explicit argument so the scan can refresh it
-    when wires change.
+    when wires change. The Perceiver-specific frozen inputs (output gates and
+    layer-index arrays) are not in the cache because they are wire-independent —
+    they depend only on the layer structure, which is fixed across wire shuffles.
     """
     if isinstance(model, CircuitGatheredAttention):
         return model(
@@ -418,12 +503,16 @@ def _apply_model_with_cache(
                 neighbor_mask=cache["neighbor_mask"],
                 input_output_gate=perceiver_input_gate,
                 output_output_gate=perceiver_output_gate,
+                input_layer_idx=perceiver_input_layer_idx,
+                output_layer_idx=perceiver_output_layer_idx,
             )
         return model(
             graph,
             attention_mask=cache["attention_mask"],
             input_output_gate=perceiver_input_gate,
             output_output_gate=perceiver_output_gate,
+            input_layer_idx=perceiver_input_layer_idx,
+            output_layer_idx=perceiver_output_layer_idx,
         )
     return model(graph)
 
@@ -732,18 +821,31 @@ def run_model_scan_with_loss(
         _refresh_arity = arity if arity is not None else int(wires[0].shape[0])
         _n_node_static = int(graph.nodes["layer"].shape[0])
 
-        # Static (wire-independent) Perceiver gates — computed once, frozen for scan.
+        # Static (wire-independent) Perceiver state — computed once, frozen for scan.
+        # Both the legacy output gates and the new static layer-index arrays depend
+        # only on ``nodes["layer"]`` (the layer membership pattern), which never
+        # changes under wire shuffles. So they live outside the topology cache.
         _perceiver_input_gate = None
         _perceiver_output_gate = None
+        _perceiver_input_layer_idx = None
+        _perceiver_output_layer_idx = None
         if isinstance(model, PerceiverCircuitAttention):
             _layer_indices = graph.nodes["layer"]
             _max_layer = jp.max(_layer_indices)
-            if model.restrict_input_cross_attn_to_first_layer:
+            if model.restrict_input_cross_attn_to_input_layer:
                 _perceiver_input_gate = model._create_output_gate(_layer_indices, allowed_layer=0)
-            if model.restrict_output_cross_attn_to_last_layer:
+                if model.input_layer_size is not None:
+                    _perceiver_input_layer_idx = _layer_node_indices(
+                        _layer_indices, target_layer=0, size=model.input_layer_size,
+                    )
+            if model.restrict_output_cross_attn_to_last_gate_layer:
                 _perceiver_output_gate = model._create_output_gate(
                     _layer_indices, allowed_layer=_max_layer
                 )
+                if model.output_layer_size is not None:
+                    _perceiver_output_layer_idx = _layer_node_indices(
+                        _layer_indices, target_layer=_max_layer, size=model.output_layer_size,
+                    )
 
         initial_topology_cache = _compute_topology_cache(
             model, graph.senders, graph.receivers, _n_node_static
@@ -764,7 +866,9 @@ def run_model_scan_with_loss(
 
         def _apply_model_dynamic(g, cache):
             return _apply_model_with_cache(
-                model, g, cache, _perceiver_input_gate, _perceiver_output_gate
+                model, g, cache,
+                _perceiver_input_gate, _perceiver_output_gate,
+                _perceiver_input_layer_idx, _perceiver_output_layer_idx,
             )
 
         apply_model_remat = (

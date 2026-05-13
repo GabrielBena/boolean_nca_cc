@@ -46,8 +46,6 @@ from boolean_nca_cc.training.sharding import (
     create_device_mesh,
     get_data_sharding,
     get_replicated_sharding,
-    replicate_pytree,
-    shard_pytree,
     validate_batch_size,
 )
 

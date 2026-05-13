@@ -19,7 +19,12 @@ from tqdm.auto import tqdm
 import wandb
 from boolean_nca_cc.circuits.train import LOSS_L4, LossConfig
 from boolean_nca_cc.circuits.viz import plot_wandb_stepwise_results
-from boolean_nca_cc.models import CircuitGatheredAttention, CircuitGNN, CircuitSelfAttention
+from boolean_nca_cc.models import (
+    CircuitGatheredAttention,
+    CircuitGNN,
+    CircuitSelfAttention,
+    PerceiverCircuitAttention,
+)
 from boolean_nca_cc.training.checkpointing import (
     BestModelTracker,
     EarlyStopping,
@@ -885,6 +890,30 @@ def train_model(
         initial_diversity=initial_diversity if wiring_mode in ["fixed", "genetic"] else pool_size,
         noise_scale=pool_noise_scale,
     )
+
+    # === One-shot eager topology validation for gathered self-attention ===
+    # ``validate_gathered_topology`` is a no-op inside JIT/vmap; running it here,
+    # eagerly, on an example graph from the freshly built pool guarantees that
+    # any ``max_neighbors`` < ``max_degree`` config bug fails loudly *before* the
+    # training scan ever starts (preventing silent truncation of gathered
+    # neighborhoods). Skipped for non-gathered models. The pool is vmapped over
+    # ``pool_size`` so we index the first circuit to get a concrete topology.
+    from boolean_nca_cc.models.attention.base import validate_gathered_topology
+
+    _has_gathered_self_attn = isinstance(model, CircuitGatheredAttention) or (
+        isinstance(model, PerceiverCircuitAttention) and model.self_attn_kind == "gathered"
+    )
+    if _has_gathered_self_attn:
+        _example_graph = jax.tree_util.tree_map(lambda x: x[0], circuit_pool.graphs)
+        validate_gathered_topology(
+            _example_graph.senders,
+            _example_graph.receivers,
+            int(_example_graph.nodes["layer"].shape[0]),
+            model.max_neighbors,
+            model.use_attention_mask,
+            strict=True,
+            layer_indices=_example_graph.nodes["layer"],
+        )
 
     # =========================================================================
     # Multi-GPU sharding setup

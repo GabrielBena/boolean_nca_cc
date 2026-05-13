@@ -19,21 +19,38 @@ token_pe_dim: 16                   # Sinusoidal PE dimension for sample/bit posi
 # Reduces cross-attention cost from O(N_gates * N_samples * N_bits) to O(N_gates * k * N_bits).
 # Promotes incremental in-context learning: the model integrates data over many recurrent steps
 # rather than seeing everything at once. Set to null to attend to all samples per step.
-samples_per_step: 24
+samples_per_step: null
 
-# Structural constraints (respect circuit topology)
-# If true, only first gate layer can attend to inputs (mirrors circuit input flow)
-restrict_input_cross_attn_to_first_layer: true
-# If true, only output layer can attend to residuals (mirrors circuit output flow)
-restrict_output_cross_attn_to_last_layer: true
+# Structural constraints. The two sides are intentionally ASYMMETRIC, reflecting
+# the asymmetric structure of the circuit graph:
+#   - input cross-attn target = INPUT LAYER (layer == 0). The "input pins" act as
+#     an address-book layer: pin i ingests a learned summary of input bit i's
+#     per-sample values via cross-attention, and the first GATE layer reaches
+#     that data via wire-based self-attention to its connected pins. This
+#     wire-aware join is the mechanism that lets a shared-weight policy
+#     reason about random wiring topologies.
+#   - output cross-attn target = LAST GATE LAYER (layer == max_layer). These are
+#     the real circuit-output gates; they cross-attend to residual tokens and
+#     update their logits directly. One-hop loss feedback.
+# Only the output-side name carries the "_gate_layer" qualifier because only
+# that side actually targets a gate layer.
+restrict_input_cross_attn_to_input_layer: true
+restrict_output_cross_attn_to_last_gate_layer: true
+
+# input_layer_size / output_layer_size are NOT set here — train.py injects
+# them at instantiation time from the eagerly-computed layer_sizes
+# (== input_n and output_n respectively). They let the cross-attention slicing
+# path attend only on K queries (K << N) instead of all N nodes. They must be
+# Python ints (JIT-safe gather/scatter).
 
 # Self-attention backend among gates.
 # "dense"    — O(N^2) masked MultiHeadAttention (default; matches prior behavior).
 # "gathered" — O(N * max_neighbors) gathered neighborhood attention. Cross-attention
 #              to data is unchanged either way (no graph topology to exploit there).
-self_attn_kind: dense
+self_attn_kind: gathered
 # Only used when self_attn_kind == "gathered". Must be >= max gate degree
 # (typically arity + fan-out + 1 self-loop).
-max_neighbors: 16
+# See max_neighbors docs in gathered_attention.yaml for details.
+max_neighbors: 10
 
 use_node_loss: false

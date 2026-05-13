@@ -33,21 +33,21 @@ graph:
 # Training parameters
 training:
   # WIRING MODE : "random" or "fixed"
-  wiring_mode: "fixed"  # Options: "fixed", "genetic", or "random"
+  wiring_mode: "random"  # Options: "fixed", "genetic", or "random"
   # Diversity will always be fully random for random mode. This controls number of different wirings for fixed.
   initial_diversity: 1
   # INNER LOOP
   n_message_steps: 5  # Number of message passing steps per training iteration
   # DATA FRACTION
-  data_per_batch: 64  # Number of data points per batch (null means use all data)
+  data_per_batch: null  # Number of data points per batch (null means use all data)
   # RANDOM LOSS STEP
   random_loss_step: false  # Use random message passing step for loss computation
   random_loss_step_min: 2
   use_beta_loss_step: false  # Use beta distribution for random loss step (varies from early to late steps through training)
   # TRAIN/TEST SPLIT
-  test_num: 64  # Fraction/absolute number of data to use for testing (from all input combinations)
+  test_num: 0.1  # Fraction/absolute number of data to use for testing (from all input combinations)
   # BATCH SIZE
-  meta_batch_size: 256 
+  meta_batch_size: 128 
   
   # MULTI-GPU DATA PARALLELISM
   # Distributes batch across GPUs, each device processes batch_size/num_devices circuits
@@ -99,7 +99,7 @@ training:
 
   # NUMBER OF EPOCHS
   epochs: null
-  epochs_power_of_2: 18 # 2^n
+  epochs_power_of_2: 16 # 2^n
   # USE SCAN
   use_scan: true
   # GRADIENT CHECKPOINTING (remat)

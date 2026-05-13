@@ -76,9 +76,32 @@ class PerceiverCircuitAttention(nnx.Module):
         use_output_cross_attention: bool = True,
         token_pe_dim: int = 8,
         samples_per_step: int | None = None,
-        # Structural constraints
-        restrict_input_cross_attn_to_first_layer: bool = False,
-        restrict_output_cross_attn_to_last_layer: bool = False,
+        # Structural constraints. The two sides are intentionally ASYMMETRIC:
+        #   - input  cross-attn target = INPUT LAYER (layer == 0). The "input
+        #     pins" are address-book nodes: each pin i carries the static
+        #     intra_layer_pe identifying bit position i, and via cross-attention
+        #     ingests a learned summary of input bit i's per-sample values. The
+        #     first GATE layer then self-attends to its wired pins (topology
+        #     mask) and reads the data through that join — "I'm wired to bit
+        #     position 3, and here's what bit 3 looks like in the batch." This
+        #     wire-aware join is the mechanism that lets a single shared-weight
+        #     policy reason about random wiring topologies.
+        #   - output cross-attn target = LAST GATE LAYER (layer == max_layer).
+        #     The output gates ARE real circuit-output gates; they cross-attend
+        #     to residual tokens and update their logits directly. One-hop.
+        # The naming reflects the asymmetry: only the output side renamed to
+        # ``..._gate_layer`` because only that side actually targets a gate layer.
+        restrict_input_cross_attn_to_input_layer: bool = False,
+        restrict_output_cross_attn_to_last_gate_layer: bool = False,
+        # Static layer sizes — enable the cross-attention slicing optimization.
+        # When provided AND the matching restrict flag is on, cross-attention
+        # runs only on K queries (K = layer size) instead of all N nodes,
+        # saving a factor of N/K in cross-attention FLOPs. K must be a Python
+        # int so downstream gather/scatter and jp.where(size=K) stay JIT-safe.
+        # ``input_layer_size``  == input_n  (number of input pins).
+        # ``output_layer_size`` == output_n (size of the last gate layer).
+        input_layer_size: int | None = None,
+        output_layer_size: int | None = None,
         # Self-attention backend among gates
         self_attn_kind: str = "dense",
         max_neighbors: int = 16,
@@ -116,8 +139,22 @@ class PerceiverCircuitAttention(nnx.Module):
                 promotes incremental, in-context learning over many recurrent steps.
                 Reduces cross-attention compute from O(N_gates * N_samples * N_bits) to
                 O(N_gates * samples_per_step * N_bits) per step.
-            restrict_input_cross_attn_to_first_layer: Only first gate layer attends to inputs
-            restrict_output_cross_attn_to_last_layer: Only output layer attends to residuals
+            restrict_input_cross_attn_to_input_layer: If True, only the INPUT LAYER
+                (layer == 0, the "input pins" / address-book nodes) cross-attends to
+                input data tokens. The first gate layer then reaches the data through
+                wire-based self-attention to its connected pins — preserving the
+                wire-topology address-book mechanism required for the policy to
+                generalise across random wirings.
+            restrict_output_cross_attn_to_last_gate_layer: If True, only the LAST GATE
+                LAYER (layer == max_layer, the circuit's output gates) cross-attends to
+                residual tokens. Direct one-hop loss feedback to the gates whose logits
+                drive the prediction.
+            input_layer_size: Static size of the input layer (== input_n) — enables
+                the cross-attention slicing optimization on the input side. Must be a
+                Python int (downstream gather/scatter requires it). Pulled from
+                layer_sizes by train.py at instantiation.
+            output_layer_size: Static size of the output (last gate) layer (== output_n);
+                analogous role for output-side slicing.
             self_attn_kind: Backend for self-attention among gates.
                 "dense"    — O(N^2) masked MultiHeadAttention via AttentionBlock (default).
                 "gathered" — O(N * max_neighbors) gathered neighborhood attention via
@@ -139,8 +176,18 @@ class PerceiverCircuitAttention(nnx.Module):
         self.use_layer_PE = use_layer_PE
         self.use_input_cross_attention = use_input_cross_attention
         self.use_output_cross_attention = use_output_cross_attention
-        self.restrict_input_cross_attn_to_first_layer = restrict_input_cross_attn_to_first_layer
-        self.restrict_output_cross_attn_to_last_layer = restrict_output_cross_attn_to_last_layer
+        self.restrict_input_cross_attn_to_input_layer = (
+            restrict_input_cross_attn_to_input_layer
+        )
+        self.restrict_output_cross_attn_to_last_gate_layer = (
+            restrict_output_cross_attn_to_last_gate_layer
+        )
+        self.input_layer_size = (
+            int(input_layer_size) if input_layer_size is not None else None
+        )
+        self.output_layer_size = (
+            int(output_layer_size) if output_layer_size is not None else None
+        )
         self.token_pe_dim = token_pe_dim
         self.samples_per_step = samples_per_step
         self.re_zero_attn = re_zero_attn
@@ -316,14 +363,20 @@ class PerceiverCircuitAttention(nnx.Module):
 
     def _encode_data(self, data: jp.ndarray) -> jp.ndarray:
         """
-        Encode data as tokens with normalized sinusoidal positional encodings.
+        Encode data as tokens with sinusoidal positional encodings.
 
-        Uses normalized positions [0, 1] for both sample and bit indices,
-        ensuring scale-free generalization across different data batch sizes
-        and different numbers of input/output bits.
+        **Bit PE is aligned with the graph's input-pin ``intra_layer_pe``.**
+        Both use ``get_positional_encoding(absolute_index, max_val=10000)`` with
+        the same frequency basis. That alignment is essential: input pin `i`
+        has ``intra_layer_pe = PE(i)`` and ingests data via cross-attention to
+        the bit-`i` data tokens; if the two PE bases differ, the cross-attn
+        Q·K join has to first learn a coordinate transform. With aligned PEs
+        the match is geometric — bit-`i` tokens and pin `i` live in the same
+        positional sub-space.
 
-        The sample PE links corresponding samples across input/output cross-attention
-        (same sample index → same PE). The bit PE distinguishes bit positions.
+        Sample PE is kept normalized (no graph analog to align with) — its
+        only purpose is to link corresponding samples across the input and
+        output cross-attentions (same sample index → same PE).
 
         Args:
             data: Input data [N_samples, N_bits]
@@ -333,22 +386,32 @@ class PerceiverCircuitAttention(nnx.Module):
         """
         N_samples, N_bits = data.shape
 
-        # Normalized positional encodings: positions in [0, 1]
-        # Scale by a fixed constant for good sinusoidal frequency spread
-        pe_scale = 1000.0
-
-        # Sample PE: normalized sample position [0, 1]
+        # Sample PE: normalized sample position [0, 1] scaled by pe_scale.
+        # No graph counterpart to align with, so a normalized scheme is fine
+        # and preserves invariance to N_samples.
+        sample_pe_scale = 1000.0
         normalized_sample_pos = jp.arange(N_samples, dtype=jp.float32) / jp.maximum(
             N_samples - 1, 1
         )
         sample_pe = get_positional_encoding(
-            normalized_sample_pos * pe_scale, self.token_pe_dim, max_val=pe_scale
+            normalized_sample_pos * sample_pe_scale,
+            self.token_pe_dim,
+            max_val=sample_pe_scale,
         )
 
-        # Bit PE: normalized bit position [0, 1]
-        normalized_bit_pos = jp.arange(N_bits, dtype=jp.float32) / jp.maximum(N_bits - 1, 1)
+        # Bit PE: ABSOLUTE bit indices with max_val matching graph PEs.
+        # ``build_graph`` uses ``get_positional_encoding(jp.arange(input_n), pe_dim,
+        # max_val=positional_encoding_max_val)`` for input-pin intra_layer_pe
+        # (default max_val=10000). We use the same basis here so the bit-position
+        # geometry is shared between data tokens and pins. Note: this trades
+        # scale-freedom across N_bits for cross-attn alignment — at a given
+        # N_bits the frequencies match, but pin 3 in an input_n=8 circuit and
+        # pin 3 in an input_n=12 circuit have identical PEs (different from the
+        # previous normalized scheme, where pin 3 would have shifted).
+        BIT_PE_MAX_VAL = 10000.0  # match graph_builder.py default
+        bit_indices = jp.arange(N_bits, dtype=jp.float32)
         bit_pe = get_positional_encoding(
-            normalized_bit_pos * pe_scale, self.token_pe_dim, max_val=pe_scale
+            bit_indices, self.token_pe_dim, max_val=BIT_PE_MAX_VAL
         )
 
         # Broadcast to [N_samples, N_bits, pe_dim]
@@ -376,6 +439,8 @@ class PerceiverCircuitAttention(nnx.Module):
         output_output_gate: jp.ndarray | None = None,
         neighbor_indices: jp.ndarray | None = None,
         neighbor_mask: jp.ndarray | None = None,
+        input_layer_idx: jp.ndarray | None = None,
+        output_layer_idx: jp.ndarray | None = None,
         return_intermediate_latents: bool = False,
     ) -> jraph.GraphsTuple:
         """
@@ -387,13 +452,27 @@ class PerceiverCircuitAttention(nnx.Module):
             input_cross_attn_mask: Optional pre-computed mask for input cross-attention
             output_cross_attn_mask: Optional pre-computed mask for output cross-attention
             input_output_gate: Optional pre-computed output gate for input cross-attention
-                [1, N_nodes, 1] - hard zeros non-allowed layers' contributions
+                [1, N_nodes, 1] - hard zeros non-allowed layers' contributions.
+                Ignored when ``input_layer_idx`` is provided (slicing path takes precedence).
             output_output_gate: Optional pre-computed output gate for output cross-attention
-                [1, N_nodes, 1] - hard zeros non-allowed layers' contributions
+                [1, N_nodes, 1] - hard zeros non-allowed layers' contributions.
+                Ignored when ``output_layer_idx`` is provided.
             neighbor_indices: Optional pre-computed [N, max_neighbors] index tensor
                 (gathered self-attn only). Built from graph topology if omitted.
             neighbor_mask: Optional pre-computed [N, max_neighbors] bool mask
                 (gathered self-attn only). Built from graph topology if omitted.
+            input_layer_idx: Optional pre-computed [K_in] static int array of node
+                positions that should participate in input cross-attention (the input
+                pins at layer == 0, K_in = input_n). When provided AND
+                ``restrict_input_cross_attn_to_input_layer`` is True, the model runs
+                cross-attention only on these K_in queries (O(K_in * N_tokens)
+                instead of O(N * N_tokens)) and scatters the updated rows back into
+                ``gate_latents``. Mathematically equivalent to the dense+gate path
+                for the allowed rows, while leaving non-allowed rows unchanged.
+                Built statically from ``nodes["layer"]`` by the training scaffolding;
+                see ``_prepare_model_fn`` in ``boolean_nca_cc.training.evaluation``.
+            output_layer_idx: Same as input_layer_idx but for output cross-attention
+                (the last gate layer, layer == max_layer, of size ``output_n``).
 
         Returns:
             Updated graph with new logits and hidden states
@@ -448,44 +527,113 @@ class PerceiverCircuitAttention(nnx.Module):
             intermediate_latents.append(gate_latents.copy())
 
         # === Cross-attention to input data ===
+        # Two paths, identical in intent ("only allowed layer(s) get cross-attn updates")
+        # but with very different compute cost:
+        #   - SLICED: ``input_layer_idx`` precomputed -> attend only on K_in << N rows.
+        #     Cost ~ O(K_in * N_tokens * D). Updated rows scattered back; non-allowed
+        #     rows are bit-identical to their pre-cross-attn values.
+        #   - DENSE+GATE: full N queries, ``output_gate`` zeros the attention residual
+        #     for non-allowed rows. Cost ~ O(N * N_tokens * D). Slight FFN leak via
+        #     ReZero residual to non-allowed rows (small at init, can grow during
+        #     training as ReZero scale increases).
+        # Slicing is selected automatically whenever ``input_layer_idx`` is supplied
+        # AND no external ``input_cross_attn_mask`` overrides the dense path.
         if self.use_input_cross_attention and x_data is not None:
             input_features = self._encode_data(x_data)
             input_tokens = self.input_encoder(input_features)[None, ...]
 
-            # Create input gate if layer restriction is enabled
-            if input_output_gate is None and self.restrict_input_cross_attn_to_first_layer:
-                input_output_gate = self._create_output_gate(layer_indices, allowed_layer=0)
+            use_input_slicing = (
+                input_layer_idx is not None
+                and self.restrict_input_cross_attn_to_input_layer
+                and input_cross_attn_mask is None
+            )
 
-            for cross_attn in self.input_cross_attn_layers:
-                gate_latents = cross_attn(
-                    gate_latents,
-                    input_tokens,
-                    mask=input_cross_attn_mask,  # Can still be passed externally for fine control
-                    output_gate=input_output_gate,
-                )
-                if return_intermediate_latents:
-                    intermediate_latents.append(gate_latents.copy())
+            if use_input_slicing:
+                # [1, K_in, D] — only input-pin latents (layer == 0).
+                # The input pins are address-book nodes: pin i carries
+                # intra_layer_pe == i and ingests a learned summary of input
+                # bit i's per-sample values via this cross-attention. The
+                # first gate layer reaches that data via wire-based
+                # self-attention to its connected pins — the wire-topology
+                # join that lets a single shared-weight policy reason about
+                # random wiring topologies.
+                q_subset = gate_latents[:, input_layer_idx, :]
+                for cross_attn in self.input_cross_attn_layers:
+                    q_subset = cross_attn(
+                        q_subset,
+                        input_tokens,
+                        mask=None,
+                        output_gate=None,
+                    )
+                    if return_intermediate_latents:
+                        # Reconstruct full [1, N, D] for traceability
+                        scattered = gate_latents.at[:, input_layer_idx, :].set(q_subset)
+                        intermediate_latents.append(scattered.copy())
+                gate_latents = gate_latents.at[:, input_layer_idx, :].set(q_subset)
+            else:
+                # Dense + (optional) gate path — same restriction semantics.
+                # If we got here with the restrict flag on but no precomputed
+                # ``input_layer_idx``, fall back to building a gate that allows
+                # only layer == 0 (the input pins / address-book layer).
+                if (
+                    input_output_gate is None
+                    and self.restrict_input_cross_attn_to_input_layer
+                ):
+                    input_output_gate = self._create_output_gate(layer_indices, allowed_layer=0)
+
+                for cross_attn in self.input_cross_attn_layers:
+                    gate_latents = cross_attn(
+                        gate_latents,
+                        input_tokens,
+                        mask=input_cross_attn_mask,
+                        output_gate=input_output_gate,
+                    )
+                    if return_intermediate_latents:
+                        intermediate_latents.append(gate_latents.copy())
 
         # === Cross-attention to output residuals ===
+        # Same two-path structure as input cross-attention above.
         if self.use_output_cross_attention and residuals is not None:
             output_features = self._encode_data(residuals)
             output_tokens = self.output_encoder(output_features)[None, ...]
 
-            # Create output gate if layer restriction is enabled
-            if output_output_gate is None and self.restrict_output_cross_attn_to_last_layer:
-                output_output_gate = self._create_output_gate(
-                    layer_indices, allowed_layer=max_layer
-                )
+            use_output_slicing = (
+                output_layer_idx is not None
+                and self.restrict_output_cross_attn_to_last_gate_layer
+                and output_cross_attn_mask is None
+            )
 
-            for cross_attn in self.output_cross_attn_layers:
-                gate_latents = cross_attn(
-                    gate_latents,
-                    output_tokens,
-                    mask=output_cross_attn_mask,  # Can still be passed externally for fine control
-                    output_gate=output_output_gate,
-                )
-                if return_intermediate_latents:
-                    intermediate_latents.append(gate_latents.copy())
+            if use_output_slicing:
+                q_subset = gate_latents[:, output_layer_idx, :]
+                for cross_attn in self.output_cross_attn_layers:
+                    q_subset = cross_attn(
+                        q_subset,
+                        output_tokens,
+                        mask=None,
+                        output_gate=None,
+                    )
+                    if return_intermediate_latents:
+                        scattered = gate_latents.at[:, output_layer_idx, :].set(q_subset)
+                        intermediate_latents.append(scattered.copy())
+                gate_latents = gate_latents.at[:, output_layer_idx, :].set(q_subset)
+            else:
+                if (
+                    output_output_gate is None
+                    and self.restrict_output_cross_attn_to_last_gate_layer
+                ):
+                    output_output_gate = self._create_output_gate(
+                        layer_indices, allowed_layer=max_layer
+                    )
+
+                for cross_attn in self.output_cross_attn_layers:
+                    gate_latents = cross_attn(
+                        gate_latents,
+                        output_tokens,
+                        mask=output_cross_attn_mask,
+                        output_gate=output_output_gate,
+                    )
+                    if return_intermediate_latents:
+                        intermediate_latents.append(gate_latents.copy())
 
         # === Self-attention among gates ===
         # Derive n_node from graph (scale-free: works with any circuit size).
