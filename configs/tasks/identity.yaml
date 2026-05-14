@@ -1,0 +1,3 @@
+# Fixed library task: identity (y == x).
+type: fixed
+name: identity

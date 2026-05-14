@@ -4,6 +4,7 @@ Test script to demonstrate the initial_diversity feature.
 
 This script shows how the initial_diversity parameter controls
 the number of different initial wirings in genetic mode.
+DEPRECATED
 """
 
 import jax

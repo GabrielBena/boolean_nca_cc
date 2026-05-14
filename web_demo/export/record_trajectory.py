@@ -229,11 +229,20 @@ def record_for_model(
         topology, weights.config, rng, noise_scale=float(cfg.pool.noise_scale)
     )
 
+    from boolean_nca_cc.utils.task_compat import get_fixed_task_name
+
+    task_name = get_fixed_task_name(cfg)
+    if task_name is None:
+        raise ValueError(
+            "record_trajectory requires a fixed task in the checkpoint cfg "
+            "(cfg.tasks.name or legacy cfg.circuit.task)."
+        )
+
     if task_style == "text-reverse":
-        if cfg.circuit.task != "reverse":
+        if task_name != "reverse":
             raise ValueError(
                 f"--task-style=text-reverse only makes sense for the reverse task, "
-                f"got cfg.circuit.task={cfg.circuit.task!r}"
+                f"got task={task_name!r}"
             )
         if input_bits != output_bits:
             raise ValueError(
@@ -247,7 +256,7 @@ def record_for_model(
         case_n = n_cases_actual
     else:
         (x_full, y_full), _, _ = get_task_data(
-            cfg.circuit.task,
+            task_name,
             case_n=case_n,
             input_bits=input_bits,
             output_bits=output_bits,
@@ -292,7 +301,7 @@ def record_for_model(
 
     doc = {
         "header": {
-            "task": str(cfg.circuit.task),
+            "task": str(task_name),
             "task_style": task_style,
             "text": text if task_style == "text-reverse" else None,
             "input_bits": input_bits,

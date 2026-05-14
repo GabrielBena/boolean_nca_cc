@@ -474,12 +474,21 @@ def load_task_data(
         else jax.random.fold_in(train_key, 1)
     )
 
+    from boolean_nca_cc.utils.task_compat import get_fixed_task_name, get_task_text
+
+    task_name = get_fixed_task_name(cfg)
+    if task_name is None:
+        raise ValueError(
+            "demo.py requires a fixed task; cfg has no cfg.tasks.name (new) "
+            "or cfg.circuit.task (legacy). Sampler-mode configs are not "
+            "supported here."
+        )
     (x_train, y_train), (x_test, y_test), (x_total, y_total) = get_task_data(
-        cfg.circuit.task,
+        task_name,
         case_n,
         input_bits=int(cfg.circuit.input_bits),
         output_bits=int(cfg.circuit.output_bits),
-        text=cfg.circuit.get("text", None),
+        text=get_task_text(cfg),
         train_test_split=test_ratio is not None,
         test_ratio=test_ratio,
         seed=eval_key,
@@ -1510,7 +1519,13 @@ class DemoSession:
 
     @property
     def task_name(self) -> str:
-        return str(self.cfg.circuit.task)
+        from boolean_nca_cc.utils.task_compat import get_fixed_task_name
+        name = get_fixed_task_name(self.cfg)
+        if name is None:
+            raise ValueError(
+                "Demo state has no fixed task (sampler-mode cfg not supported here)."
+            )
+        return str(name)
 
     @property
     def case_n(self) -> int:

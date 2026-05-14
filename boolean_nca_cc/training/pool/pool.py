@@ -45,6 +45,16 @@ class GraphPool(struct.PyTreeNode):
                    Values: 0.0 = knocked out, 1.0 = active
         damage_count: Number of knocked-out gates per circuit [pool_size]
         reset_counter: Tracks how many epochs since each element was reset
+        y_task: Per-circuit task target table with shape
+                ``[pool_size, 2^input_n, output_n]`` or None.
+                When None, the pool follows the legacy global-task path
+                (a single ``(x_train, y_train)`` shared across all slots).
+                When set, the slot at index i is bound to task ``y_task[i]``
+                for its entire lifetime — reset replaces (wires, logits,
+                y_task) together as a coherent triple. ``x`` is shared
+                across the pool (it is the deterministic input enumeration
+                ``boolean_nca_cc.tasks.build_task_x(input_n)``), so storing
+                only ``y`` is sufficient.
     """
 
     size: int = struct.field(pytree_node=False)
@@ -54,6 +64,7 @@ class GraphPool(struct.PyTreeNode):
     gate_masks: jp.ndarray | None = None
     damage_count: jp.ndarray | None = None
     reset_counter: Array | None = None
+    y_task: jp.ndarray | None = None
 
     @classmethod
     def create(
@@ -64,6 +75,7 @@ class GraphPool(struct.PyTreeNode):
         gate_masks: jp.ndarray | None = None,
         damage_count: jp.ndarray | None = None,
         reset_counter: Array | None = None,
+        y_task: jp.ndarray | None = None,
     ) -> "GraphPool":
         """
         Create a new GraphPool instance from a batched GraphsTuple.
@@ -100,6 +112,7 @@ class GraphPool(struct.PyTreeNode):
             gate_masks=gate_masks,
             damage_count=damage_count,
             reset_counter=reset_counter,
+            y_task=y_task,
         )
 
     @jax.jit
@@ -110,6 +123,7 @@ class GraphPool(struct.PyTreeNode):
         batch_of_wires: PyTree = None,
         batch_of_logits: PyTree = None,
         batch_of_gate_masks: jp.ndarray | None = None,
+        batch_of_y_task: jp.ndarray | None = None,
     ) -> "GraphPool":
         """
         Update graphs in the pool at the specified indices.
@@ -176,6 +190,11 @@ class GraphPool(struct.PyTreeNode):
             batch_damage = jp.sum(1.0 - batch_of_gate_masks, axis=1).astype(jp.int32)
             updated_damage_count = self.damage_count.at[idxs].set(batch_damage)
 
+        # Update y_task if provided (per-circuit-task path only)
+        updated_y_task = self.y_task
+        if batch_of_y_task is not None and self.y_task is not None:
+            updated_y_task = self.y_task.at[idxs].set(batch_of_y_task)
+
         # Reset the counter for updated indices
         updated_reset_counter = (
             self.reset_counter.at[idxs].set(0) if self.reset_counter is not None else None
@@ -188,6 +207,7 @@ class GraphPool(struct.PyTreeNode):
             gate_masks=updated_gate_masks,
             damage_count=updated_damage_count,
             reset_counter=updated_reset_counter,
+            y_task=updated_y_task,
         )
 
     @partial(jax.jit, static_argnames=("batch_size",))
@@ -402,13 +422,16 @@ class GraphPool(struct.PyTreeNode):
         new_wires: PyTree = None,
         new_logits: PyTree = None,
         new_gate_masks: jp.ndarray | None = None,
+        new_y_task: jp.ndarray | None = None,
         reset_strategy: str = "uniform",
         combined_weights: tuple[float, float] = (0.5, 0.5),
     ) -> tuple["GraphPool", float]:
         """
         Reset a random fraction of the pool with fresh graphs.
 
-        Damage counts are reset to zero for the reset circuits.
+        Damage counts are reset to zero for the reset circuits. When the pool
+        carries ``y_task`` (per-circuit-task path), ``new_y_task`` must be
+        supplied so the reset slots get a fresh (wires, logits, y_task) triple.
 
         Args:
             key: Random key for selection
@@ -417,6 +440,8 @@ class GraphPool(struct.PyTreeNode):
             new_wires: Fresh wires to use for reset
             new_logits: Fresh logits to use for reset
             new_gate_masks: Fresh gate masks (default: all active)
+            new_y_task: Fresh per-circuit y_task targets (required when
+                ``self.y_task`` is not None, ignored otherwise).
             reset_strategy: Strategy for selecting graphs to reset
             combined_weights: Weights for combined strategy
 
@@ -449,10 +474,12 @@ class GraphPool(struct.PyTreeNode):
             else None
         )
         reset_gate_masks = new_gate_masks[sample_idxs] if new_gate_masks is not None else None
+        reset_y_task = new_y_task[sample_idxs] if new_y_task is not None else None
 
         # Update pool
         reset_pool = self.update(
-            reset_idxs, reset_graphs, reset_wires, reset_logits, reset_gate_masks
+            reset_idxs, reset_graphs, reset_wires, reset_logits, reset_gate_masks,
+            batch_of_y_task=reset_y_task,
         )
 
         # Increment reset counter for all elements
@@ -611,6 +638,8 @@ def get_wires_and_logits(
     noise_scale: float = 0.0,
     wiring_mode: str = "random",
     initial_diversity: int = 1,
+    init_logits: str = "soft_wires",
+    random_init_scale: float = 1.0,
 ) -> tuple[PyTree, PyTree]:
     """
     Get wires and logits for a pool of graphs.
@@ -618,6 +647,8 @@ def get_wires_and_logits(
     Args:
         wires_key: Random key for generating wires
         logits_key: Random key for generating logits
+        init_logits: Logit initializer (see ``gen_circuit``).
+        random_init_scale: Scale for ``init_logits="random"``.
     """
 
     # Generate circuit wirings based on wiring mode
@@ -629,6 +660,8 @@ def get_wires_and_logits(
             layer_sizes=layer_sizes,
             arity=arity,
             noise_scale=noise_scale,
+            init_logits=init_logits,
+            random_init_scale=random_init_scale,
         ),
     )
 
@@ -671,12 +704,16 @@ def initialize_graph_pool(
     initial_diversity: int = 1,
     initialize_gate_masks: bool = True,
     noise_scale: float = 0.0,
+    init_logits: str = "soft_wires",
+    random_init_scale: float = 1.0,
+    y_task: jp.ndarray | None = None,
 ) -> GraphPool:
     """
     Initialize a pool of graphs for training.
 
     Args:
-        rng: Random key
+        wires_key: Random key for wire generation
+        logits_key: Random key for logit generation
         layer_sizes: Circuit layer sizes
         pool_size: Number of graphs in the pool
         input_n: Number of inputs to the circuit
@@ -689,6 +726,17 @@ def initialize_graph_pool(
                     "genetic" - starts like fixed, mutations applied during resets
         initial_diversity: Number of different initial wirings (for fixed/genetic modes)
         initialize_gate_masks: Whether to initialize gate masks (all active initially)
+        noise_scale: Std-dev of Gaussian noise added to soft-wires logit init
+            (only used when ``init_logits="soft_wires"``).
+        init_logits: Logit initializer name — one of ``soft_wires`` (current
+            default; round-robin identity passthrough + noise), ``zeros``
+            (constant 0.5 outputs), or ``random`` (iid N(0, random_init_scale)).
+            See ``boolean_nca_cc.circuits.model.INIT_LOGITS``.
+        random_init_scale: Std-dev for the ``random`` init.
+        y_task: Optional pre-sampled per-circuit task targets of shape
+            ``[pool_size, 2^input_n, output_n]``. When provided, the pool
+            enters per-circuit-task mode (see ``GraphPool.y_task``). When
+            None, the pool uses the legacy global-task path.
 
     Returns:
         Initialized GraphPool
@@ -703,6 +751,8 @@ def initialize_graph_pool(
         noise_scale=noise_scale,
         wiring_mode=wiring_mode,
         initial_diversity=initial_diversity,
+        init_logits=init_logits,
+        random_init_scale=random_init_scale,
     )
 
     # Initialize gate masks
@@ -746,6 +796,15 @@ def initialize_graph_pool(
     reset_counter = jp.zeros(pool_size, dtype=jp.int32)
     damage_count = jp.zeros(pool_size, dtype=jp.int32)
 
+    # Sanity-check y_task shape: must be batched per-pool-slot if provided.
+    if y_task is not None:
+        if y_task.ndim != 3 or y_task.shape[0] != pool_size:
+            raise ValueError(
+                f"y_task must have shape [pool_size, 2^input_n, output_n]; "
+                f"got {y_task.shape} (expected leading dim == pool_size={pool_size})"
+            )
+
     return GraphPool.create(
-        graphs, all_wires, all_logits, all_gate_masks, damage_count, reset_counter
+        graphs, all_wires, all_logits, all_gate_masks, damage_count, reset_counter,
+        y_task=y_task,
     )

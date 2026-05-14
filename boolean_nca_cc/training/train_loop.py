@@ -345,12 +345,29 @@ def run_unified_periodic_evaluation(
 
             return result, metrics
 
-        # Run evaluations: loop over wiring (in/out) x data (train/test)
+        # Per-wiring data scenarios. Legacy ``data_scenarios`` (built from
+        # data_dict["x_test"]/y_test, shared across wirings) are extended with
+        # a wiring-specific ``"task"`` entry when per-circuit-task eval is
+        # configured: each wiring side has its own batched y_task tensor, so
+        # the x/y pair varies per wiring. Built once per call.
+        def scenarios_for(wiring_key: str):
+            wiring_scenarios_extra = list(data_scenarios)
+            y_task_for_wiring = (
+                datasets.in_distribution_y_task if wiring_key == "in"
+                else datasets.out_of_distribution_y_task
+            )
+            if y_task_for_wiring is not None and datasets.x_task is not None:
+                wiring_scenarios_extra.append(
+                    ("task", datasets.x_task, y_task_for_wiring)
+                )
+            return wiring_scenarios_extra
+
+        # Run evaluations: loop over wiring (in/out) x data (train/test/task)
         for wiring_key, wires, logits, batch_size, wiring_desc in wiring_scenarios:
             if wires is None:
                 log.info(f"No {wiring_desc} evaluation data available.")
                 continue
-            for data_suffix, x, y in data_scenarios:
+            for data_suffix, x, y in scenarios_for(wiring_key):
                 full_key = f"{wiring_key}_{data_suffix}"
                 step_metrics[full_key], final_metrics[full_key] = run_eval(
                     wiring_key, data_suffix, wires, logits, batch_size, x, y, wiring_desc
@@ -361,7 +378,7 @@ def run_unified_periodic_evaluation(
             for wiring_key, wires, logits, batch_size, wiring_desc in wiring_scenarios:
                 if wires is None:
                     continue
-                for data_suffix, x, y in data_scenarios:
+                for data_suffix, x, y in scenarios_for(wiring_key):
                     full_key = f"damaged_{wiring_key}_{data_suffix}"
                     step_metrics[full_key], final_metrics[full_key] = run_eval(
                         wiring_key,
@@ -427,7 +444,7 @@ def run_unified_periodic_evaluation(
                         if wires is None:
                             continue
 
-                        for data_suffix, x, y in data_scenarios:
+                        for data_suffix, x, y in scenarios_for(wiring_key):
                             full_key = f"{wiring_key}_{data_suffix}"
                             prefix = f"eval_{full_key}"
 
@@ -487,12 +504,12 @@ def run_unified_periodic_evaluation(
                 return f", {n_chunks} chunks"
             return ""
 
-        # Log results for each wiring x data combination
+        # Log results for each wiring x data combination (incl. per-circuit "task")
         for wiring_key, batch_size, wiring_desc in [
             ("in", datasets.in_actual_batch_size, "IN-distribution"),
             ("out", datasets.out_actual_batch_size, "OUT-of-distribution"),
         ]:
-            for data_suffix, _, _ in data_scenarios:
+            for data_suffix, _, _ in scenarios_for(wiring_key):
                 full_key = f"{wiring_key}_{data_suffix}"
                 m = final_metrics.get(full_key)
                 if m is not None:
@@ -642,6 +659,15 @@ def train_model(
     initial_diversity: int = 1,  # Number of distinct initial wirings
     genetic_mutation_rate: float = 0.0,  # Fraction of connections to mutate (0.0 to 1.0)
     genetic_swaps_per_layer: int = 1,  # Number of swaps per layer for genetic mutation
+    # ── Per-circuit-task meta-learning ──────────────────────────────────
+    task_sampler_cfg: dict | None = None,
+    # When set, each pool slot is bound to a freshly sampled task
+    # (x_train/y_train from data_dict are ignored). When None (default),
+    # the legacy global-task path is used unchanged. See
+    # ``boolean_nca_cc.tasks.sample_task_batch`` for the cfg schema
+    # (must have a ``name`` field).
+    init_logits: str = "soft_wires",  # one of: "soft_wires", "zeros", "random"
+    random_init_scale: float = 1.0,  # std-dev for init_logits="random"
     # ── Damage / resilience ─────────────────────────────────────────────
     damage_enabled: bool = False,
     p_fault: float | None = None,  # p_fault for training (tuned for pool.expected_updates)
@@ -806,6 +832,36 @@ def train_model(
 
     # Get dimension from layer sizes
     input_n = layer_sizes[0][0]
+    output_n = layer_sizes[-1][0]
+
+    # ── Per-circuit-task setup ──────────────────────────────────────────
+    # When task_sampler_cfg is set, each pool slot owns its own task. ``x``
+    # becomes the deterministic input enumeration (shared) and ``y`` is
+    # sliced per-circuit from the pool at every step. The legacy
+    # global-task path (task_sampler_cfg is None) remains bit-identical.
+    use_task_sampler = task_sampler_cfg is not None
+    if use_task_sampler:
+        if wiring_mode == "genetic":
+            raise ValueError(
+                "task_sampler_cfg is incompatible with wiring_mode='genetic': "
+                "genetic mode evolves wires across generations, while per-circuit "
+                "task sampling treats each slot's task as bound to its lifetime. "
+                "Use wiring_mode='random' or 'fixed' with task_sampler_cfg."
+            )
+        from boolean_nca_cc.tasks import build_task_x, sample_task_batch
+
+        x_task_global = build_task_x(input_n)
+        train_key, task_init_key = jax.random.split(train_key)
+        initial_y_task = sample_task_batch(
+            task_init_key, pool_size, input_n, output_n, task_sampler_cfg
+        )
+        log.info(
+            f"Per-circuit-task mode: sampler={task_sampler_cfg.get('name')}, "
+            f"y_task shape={tuple(initial_y_task.shape)}, init_logits={init_logits!r}"
+        )
+    else:
+        x_task_global = None
+        initial_y_task = None
 
     # Initialize metrics storage
     if initial_metrics is None:
@@ -889,6 +945,9 @@ def train_model(
         wiring_mode=wiring_mode,
         initial_diversity=initial_diversity if wiring_mode in ["fixed", "genetic"] else pool_size,
         noise_scale=pool_noise_scale,
+        init_logits=init_logits,
+        random_init_scale=random_init_scale,
+        y_task=initial_y_task,
     )
 
     # === One-shot eager topology validation for gathered self-attention ===
@@ -1003,7 +1062,10 @@ def train_model(
             else:
                 return n_message_steps - 1
 
-        def loss_fn_scan(model, graph, logits, wires, loss_key, permanent_damage):
+        def loss_fn_scan(model, graph, logits, wires, loss_key, permanent_damage, y_local):
+            # y_local is per-circuit when per-circuit-task path is active (in_axes=0
+            # in batch_loss_fn) and the global ``y_target`` when not (in_axes=None).
+            # See batch_loss_fn below for the dispatch.
             # Store original shapes for reconstruction
             logits_original_shapes = [logit.shape for logit in logits]
 
@@ -1020,7 +1082,7 @@ def train_model(
                 logits_original_shapes=logits_original_shapes,
                 wires=wires,
                 x_data=x,
-                y_data=y_target,
+                y_data=y_local,
                 loss_cfg=loss_cfg,
                 layer_sizes=layer_sizes,
                 data_fraction=data_fraction,
@@ -1058,7 +1120,8 @@ def train_model(
 
             return final_loss, (final_aux, final_graph, final_logits, loss_step)
 
-        def loss_fn_no_scan(model, graph, logits, wires, loss_key, permanent_damage):
+        def loss_fn_no_scan(model, graph, logits, wires, loss_key, permanent_damage, y_local):
+            # ``y_local``: see comment in ``loss_fn_scan``.
             # Store original shapes for reconstruction
             from boolean_nca_cc.training.evaluation import (
                 _prepare_model_fn,
@@ -1083,7 +1146,7 @@ def train_model(
                     logits_original_shapes=logits_original_shapes,
                     wires=wires,
                     x_data=x,
-                    y_data=y_target,
+                    y_data=y_local,
                     loss_cfg=loss_cfg,
                     layer_sizes=layer_sizes,
                 )
@@ -1112,10 +1175,17 @@ def train_model(
                 permanent_damage_val = float(permanent_damage)
             permanent_damage = jax.numpy.full(graphs.n_node.shape[0], permanent_damage_val)
 
+            # ``y_target.ndim`` selects the path at trace time (shape is static):
+            #   - ndim == 2 [N_samples, output_n]            → global task, shared across batch.
+            #   - ndim == 3 [batch, N_samples, output_n]     → per-circuit task path.
+            # Mixing in_axes per-arg lets a single vmap handle both cases without
+            # duplicating the call site.
+            y_in_axes = 0 if y_target.ndim == 3 else None
+
             loss_keys = jax.random.split(loss_key, graphs.n_node.shape[0])
             loss, (aux, updated_graphs, updated_logits, loss_steps) = nnx.vmap(
-                loss_fn, in_axes=(None, 0, 0, 0, 0, 0)
-            )(model, graphs, logits, wires, loss_keys, permanent_damage)
+                loss_fn, in_axes=(None, 0, 0, 0, 0, 0, y_in_axes)
+            )(model, graphs, logits, wires, loss_keys, permanent_damage, y_target)
 
             return jp.mean(loss), (
                 jax.tree.map(lambda x: jp.mean(x, axis=0), aux),
@@ -1283,11 +1353,23 @@ def train_model(
                 sample_key, meta_batch_size
             )
 
+            # Resolve this step's (x, y_target) — per-circuit-task path uses
+            # the deterministic input enumeration and slices y from the pool;
+            # legacy path uses the global (x_train, y_train).
+            if use_task_sampler:
+                x_step = x_task_global
+                y_step = circuit_pool.y_task[idxs]
+            else:
+                x_step = x_train
+                y_step = y_train
+
             # Shard batch data across devices for multi-GPU training
             if sharding_ctx.enabled and sharding_ctx.mesh is not None:
                 graphs = sharding_ctx.shard(graphs)
                 wires = sharding_ctx.shard(wires)
                 logits = sharding_ctx.shard(logits)
+                if use_task_sampler:
+                    y_step = sharding_ctx.shard(y_step)
 
             # Perform pool training step (single batch, possibly sharded across devices)
             (
@@ -1301,8 +1383,8 @@ def train_model(
                 graphs=graphs,
                 wires=wires,
                 logits=logits,
-                x=x_train,
-                y_target=y_train,
+                x=x_step,
+                y_target=y_step,
                 layer_sizes=layer_sizes,
                 n_message_steps=n_message_steps,
                 loss_cfg=loss_cfg,
@@ -1353,6 +1435,19 @@ def train_model(
 
                     wires_key, logits_key = jax.random.split(pool_key)
 
+                    # When on the per-circuit-task path, sample a fresh y_task
+                    # batch alongside fresh wires/logits so the reset slots get
+                    # a coherent (wires, logits, y_task) triple. Non-reset slots
+                    # are untouched (see GraphPool.reset_fraction).
+                    if use_task_sampler:
+                        train_key, fresh_task_key = jax.random.split(train_key)
+                        fresh_y_task = sample_task_batch(
+                            fresh_task_key, pool_size, input_n, output_n,
+                            task_sampler_cfg,
+                        )
+                    else:
+                        fresh_y_task = None
+
                     fresh_pool = initialize_graph_pool(
                         wires_key=wires_key,
                         logits_key=logits_key,
@@ -1367,6 +1462,9 @@ def train_model(
                         else pool_size,
                         initialize_gate_masks=True,
                         noise_scale=pool_noise_scale,
+                        init_logits=init_logits,
+                        random_init_scale=random_init_scale,
+                        y_task=fresh_y_task,
                     )
 
                     train_key, reset_key = jax.random.split(train_key)
@@ -1378,6 +1476,7 @@ def train_model(
                         new_wires=fresh_pool.wires,
                         new_logits=fresh_pool.logits,
                         new_gate_masks=fresh_pool.gate_masks,
+                        new_y_task=fresh_pool.y_task,
                         reset_strategy=reset_strategy,
                         combined_weights=combined_weights,
                     )

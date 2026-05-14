@@ -1,0 +1,3 @@
+# Fixed library task: parity of all input bits (1 output bit).
+type: fixed
+name: parity

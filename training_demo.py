@@ -622,7 +622,16 @@ class DemoApp:
             task_idx = 0
         changed, task_idx = imgui.combo("Task##ood", task_idx, tasks)
         if changed:
-            s.apply_cfg_changes(**{"circuit.task": tasks[task_idx]})
+            # New schema: cfg.tasks.{type,name}. Legacy fallback: cfg.circuit.task.
+            # Set whichever path the loaded cfg uses (mirror both for safety —
+            # the back-compat helper prefers cfg.tasks.name when present).
+            cfg_changes: dict = {}
+            if "tasks" in s.cfg and s.cfg.tasks is not None:
+                cfg_changes["tasks.type"] = "fixed"
+                cfg_changes["tasks.name"] = tasks[task_idx]
+            else:
+                cfg_changes["circuit.task"] = tasks[task_idx]
+            s.apply_cfg_changes(**cfg_changes)
             self._on_model_loaded()
         label_with_status("Task", "task")
 

@@ -278,7 +278,7 @@ setup_complete_flax_compatibility()'''
     print("        'config.circuit.arity': 4,")
     print("        'config.circuit.num_layers': 3,")
     print("        'config.model.type': 'self_attention',")
-    print("        'config.circuit.task': 'reverse',")
+    print("        'config.tasks.name': 'reverse',  # or legacy 'config.circuit.task'")
     print("        'config.training.wiring_mode': 'random',")
     print("    },")
     print("    select_by_best_metric=False,")

@@ -1,0 +1,28 @@
+defaults:
+  - _self_
+
+
+# Circuit topology — what the substrate looks like. The task (what the
+# circuit is supposed to compute) lives in ``cfg.tasks``; the two are now
+# fully decoupled.
+
+input_bits: 8
+output_bits: 8
+arity: 4
+num_layers: 4
+width_factor: 1
+layer_sizes: null  # Auto-generate if null
+
+circuit_hidden_dim: 16
+
+# Initial logit distribution at circuit creation and on pool resets.
+#   soft_wires (default): round-robin identity passthrough + Gaussian noise.
+#                         Strong structural prior; preserves historical behavior.
+#   zeros:                all logits = 0 -> constant 0.5 outputs. Cleanest
+#                         "chance start" for task-agnostic meta-learning, but
+#                         weakest early gradient signal.
+#   random:               iid N(0, random_init_scale) logits. ~0.5 marginal
+#                         output with nontrivial input dependence — chance
+#                         start with usable gradients from step 0.
+init_logits: soft_wires
+random_init_scale: 1.0  # std-dev of N(0,.) for init_logits=random

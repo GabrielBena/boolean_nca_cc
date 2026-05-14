@@ -357,7 +357,14 @@ def run_jax_parity_test(
     )
 
     # Task data — full truth table for the configured task.
-    task = str(cfg.circuit.task)
+    from boolean_nca_cc.utils.task_compat import get_fixed_task_name
+    _task_name = get_fixed_task_name(cfg)
+    if _task_name is None:
+        raise ValueError(
+            "test_oracle requires a fixed task in the checkpoint cfg "
+            "(cfg.tasks.name or legacy cfg.circuit.task)."
+        )
+    task = str(_task_name)
     case_n = 1 << input_bits
     (x_data, y_data), _, _ = get_task_data(
         task,
@@ -556,7 +563,14 @@ def run_perturbation_parity_test(
         noise_scale=float(cfg.pool.noise_scale),
     )
     original_shapes = [tuple(lgt.shape) for lgt in layered_logits_jax]
-    task = str(cfg.circuit.task)
+    from boolean_nca_cc.utils.task_compat import get_fixed_task_name
+    _task_name = get_fixed_task_name(cfg)
+    if _task_name is None:
+        raise ValueError(
+            "test_oracle requires a fixed task in the checkpoint cfg "
+            "(cfg.tasks.name or legacy cfg.circuit.task)."
+        )
+    task = str(_task_name)
     case_n = 1 << input_bits
     (x_data, y_data), _, _ = get_task_data(
         task,

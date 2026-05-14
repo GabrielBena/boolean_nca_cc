@@ -32,6 +32,14 @@ class UnifiedEvaluationDatasets:
         in_actual_batch_size: Actual IN-distribution batch size (may exceed target for full diversity)
         out_actual_batch_size: Actual OUT-of-distribution batch size
         training_config: Dictionary containing the training configuration used
+        in_distribution_y_task: Per-circuit task targets for IN-distribution eval,
+            shape ``[in_actual_batch_size, 2^input_n, output_n]``, or None for
+            the legacy global-task path.
+        out_of_distribution_y_task: Per-circuit task targets for OOD eval (from
+            a held-out task family), same shape semantics, or None.
+        x_task: The shared input enumeration for per-circuit-task eval
+            (``build_task_x(input_n)``), or None for legacy path. When per-
+            circuit y_task arrays are present, this is the corresponding x.
     """
 
     def __init__(
@@ -44,6 +52,9 @@ class UnifiedEvaluationDatasets:
         in_actual_batch_size: int,
         out_actual_batch_size: int,
         training_config: dict[str, Any],
+        in_distribution_y_task: jp.ndarray | None = None,
+        out_of_distribution_y_task: jp.ndarray | None = None,
+        x_task: jp.ndarray | None = None,
     ):
         self.in_distribution_wires = in_distribution_wires
         self.in_distribution_logits = in_distribution_logits
@@ -53,6 +64,9 @@ class UnifiedEvaluationDatasets:
         self.in_actual_batch_size = in_actual_batch_size
         self.out_actual_batch_size = out_actual_batch_size
         self.training_config = training_config
+        self.in_distribution_y_task = in_distribution_y_task
+        self.out_of_distribution_y_task = out_of_distribution_y_task
+        self.x_task = x_task
 
     def get_summary(self) -> str:
         """Get a summary string of the evaluation datasets."""
@@ -89,6 +103,10 @@ def create_unified_evaluation_datasets(
     eval_batch_size_out: int,
     do_ood_evaluation: bool = True,
     pool_noise_scale: float = 0.0,
+    init_logits: str = "soft_wires",
+    random_init_scale: float = 1.0,
+    task_sampler_cfg_in: dict | None = None,
+    task_sampler_cfg_ood: dict | None = None,
 ) -> UnifiedEvaluationDatasets:
     """
     Create unified evaluation datasets that properly match training patterns.
@@ -132,6 +150,8 @@ def create_unified_evaluation_datasets(
             wiring_mode=training_wiring_mode,
             initial_diversity=training_initial_diversity,
             noise_scale=pool_noise_scale,
+            init_logits=init_logits,
+            random_init_scale=random_init_scale,
         )
     else:
         in_distribution_wires, in_distribution_logits = None, None
@@ -149,9 +169,39 @@ def create_unified_evaluation_datasets(
             wiring_mode="random",  # Always random for OOD
             initial_diversity=eval_batch_size_out,  # Full diversity for OOD
             noise_scale=pool_noise_scale,
+            init_logits=init_logits,
+            random_init_scale=random_init_scale,
         )
     else:
         out_distribution_wires, out_distribution_logits = None, None
+
+    # 3. Per-circuit y_task arrays (only when a sampler config is provided).
+    #    IN-side: same family as training, held-out RNG seed → fresh in-dist tasks.
+    #    OOD-side: a held-out task family (e.g., library tasks like add/parity/…).
+    in_distribution_y_task = None
+    out_of_distribution_y_task = None
+    x_task = None
+    if task_sampler_cfg_in is not None or task_sampler_cfg_ood is not None:
+        from boolean_nca_cc.tasks import build_task_x, sample_task_batch
+
+        input_n = layer_sizes[0][0]
+        output_n = layer_sizes[-1][0]
+        x_task = build_task_x(input_n)
+
+        if task_sampler_cfg_in is not None and in_distribution_wires is not None:
+            in_task_key = jax.random.fold_in(eval_key, 101)
+            in_distribution_y_task = sample_task_batch(
+                in_task_key, eval_batch_size_in, input_n, output_n, task_sampler_cfg_in
+            )
+        if task_sampler_cfg_ood is not None and out_distribution_wires is not None:
+            ood_task_key = jax.random.fold_in(eval_key, 202)
+            out_of_distribution_y_task = sample_task_batch(
+                ood_task_key, eval_batch_size_out, input_n, output_n, task_sampler_cfg_ood
+            )
+        log.info(
+            f"Per-circuit-task eval: in_sampler={task_sampler_cfg_in!r}, "
+            f"ood_sampler={task_sampler_cfg_ood!r}"
+        )
 
     # Store training configuration for reference
     training_config = {
@@ -161,6 +211,8 @@ def create_unified_evaluation_datasets(
         "arity": arity,
         "in_distribution_key": in_distribution_key,
         "out_of_distribution_key": out_of_distribution_key,
+        "task_sampler_cfg_in": task_sampler_cfg_in,
+        "task_sampler_cfg_ood": task_sampler_cfg_ood,
     }
 
     datasets = UnifiedEvaluationDatasets(
@@ -172,6 +224,9 @@ def create_unified_evaluation_datasets(
         in_actual_batch_size=eval_batch_size_in,
         out_actual_batch_size=eval_batch_size_out,
         training_config=training_config,
+        in_distribution_y_task=in_distribution_y_task,
+        out_of_distribution_y_task=out_of_distribution_y_task,
+        x_task=x_task,
     )
 
     return datasets

@@ -1,0 +1,32 @@
+# Per-circuit k-junta meta-learning with library held-out OOD eval.
+#
+# Training: every pool slot is bound to a freshly sampled k-junta over its
+# circuit lifetime (re-sampled on reset alongside wires/logits). With
+# ``balanced: true``, every output bit has exactly 0.5 marginal — no shortcut
+# via the marginal.
+#
+# Eval: in-distribution eval slots draw fresh k-juntas (held-out RNG seed);
+# OOD eval slots draw from a library of named Boolean tasks (add / parity /
+# reverse / binary_multiply). The OOD family is intentionally a SHIFT from
+# the training distribution — it tests whether the meta-learned optimizer
+# can in-context fit functions outside the k-junta family.
+type: sampler
+
+# Sampler for the training pool (also used for in-distribution eval slots
+# with a held-out key).
+train:
+  name: k_junta
+  k: 4               # junta width (1 <= k <= cfg.circuit.input_bits)
+  balanced: true     # exactly 2^(k-1) ones per LUT -> per-bit marginal == 0.5
+
+# Held-out OOD family used by ``create_unified_evaluation_datasets`` to
+# generate per-circuit OOD task targets. Each OOD eval slot draws uniformly
+# from these named tasks; library tasks are zero-padded on the right to
+# match the circuit's output width (see ``sample_library_batch``).
+eval_ood:
+  name: library
+  task_names:
+    - add
+    - parity
+    - reverse
+    - binary_multiply

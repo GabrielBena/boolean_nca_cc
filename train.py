@@ -556,16 +556,39 @@ def main(cfg: DictConfig) -> None:
     else:
         test_ratio = None
 
-    (x_train, y_train), (x_test, y_test), (x_total, y_total) = get_task_data(
-        cfg.circuit.task,
-        case_n,
-        input_bits=input_n,
-        output_bits=output_n,
-        text=cfg.circuit.get("text", None),
-        train_test_split=test_ratio is not None,
-        test_ratio=test_ratio,
-        seed=eval_key,
-    )
+    # ── Dispatch on cfg.tasks.type ──────────────────────────────────────
+    # "fixed":   single library task shared across the pool (legacy path).
+    # "sampler": per-circuit task sampling — data_dict carries a placeholder,
+    #            actual targets come from the pool's y_task at every step.
+    tasks_type = cfg.tasks.type
+    if tasks_type == "fixed":
+        (x_train, y_train), (x_test, y_test), (x_total, y_total) = get_task_data(
+            cfg.tasks.name,
+            case_n,
+            input_bits=input_n,
+            output_bits=output_n,
+            text=cfg.tasks.get("text", None),
+            train_test_split=test_ratio is not None,
+            test_ratio=test_ratio,
+            seed=eval_key,
+        )
+    elif tasks_type == "sampler":
+        # Placeholder data — train loop ignores these when task_sampler_cfg
+        # is set; the per-circuit eval datasets carry the real targets.
+        # Setting x_test/y_test to None disables the "test" data_scenario in
+        # ``run_unified_periodic_evaluation`` so eval routes through the
+        # per-circuit "task" scenario instead.
+        from boolean_nca_cc.tasks import build_task_x
+
+        x_total = build_task_x(input_n)
+        y_total = jax.numpy.zeros((x_total.shape[0], output_n), dtype=jax.numpy.float32)
+        x_train, y_train = x_total, y_total
+        x_test, y_test = None, None
+    else:
+        raise ValueError(
+            f"cfg.tasks.type must be 'fixed' or 'sampler', got {tasks_type!r}"
+        )
+
     data_dict = {
         "x_train": x_train,
         "y_train": y_train,
@@ -672,6 +695,33 @@ def main(cfg: DictConfig) -> None:
     # Compute probabilistic wire-shuffle parameters from target_shuffles_per_lifecycle
     shuffle_params = compute_shuffle_params(cfg, log)
 
+    # Resolve task-sampler configs (per-circuit meta-learning). cfg.tasks.type
+    # is the discriminator: ``fixed`` → legacy global-task path (sampler args
+    # all None); ``sampler`` → per-circuit-task plumbing in train/eval.
+    if cfg.tasks.type == "fixed":
+        task_sampler_cfg_train = None
+        task_sampler_cfg_eval_in = None
+        task_sampler_cfg_eval_ood = None
+    elif cfg.tasks.type == "sampler":
+        task_sampler_cfg_train = OmegaConf.to_container(cfg.tasks.train, resolve=True)
+        # In-distribution eval reuses the training sampler (held-out RNG seed
+        # is handled by create_unified_evaluation_datasets).
+        task_sampler_cfg_eval_in = task_sampler_cfg_train
+        task_sampler_cfg_eval_ood = (
+            OmegaConf.to_container(cfg.tasks.eval_ood, resolve=True)
+            if cfg.tasks.get("eval_ood") is not None
+            else None
+        )
+        log.info(
+            f"Per-circuit meta-learning tasks enabled "
+            f"(train={task_sampler_cfg_train['name']}, "
+            f"ood={None if task_sampler_cfg_eval_ood is None else task_sampler_cfg_eval_ood['name']})"
+        )
+    else:
+        raise ValueError(
+            f"cfg.tasks.type must be 'fixed' or 'sampler', got {cfg.tasks.type!r}"
+        )
+
     # Create evaluation datasets
     eval_datasets = create_unified_evaluation_datasets(
         eval_key=eval_key,
@@ -689,6 +739,10 @@ def main(cfg: DictConfig) -> None:
         if cfg.eval.do_ood_evaluation is not None
         else cfg.training.wiring_mode == "random",
         pool_noise_scale=cfg.pool.noise_scale,
+        init_logits=cfg.circuit.get("init_logits", "soft_wires"),
+        random_init_scale=float(cfg.circuit.get("random_init_scale", 1.0)),
+        task_sampler_cfg_in=task_sampler_cfg_eval_in,
+        task_sampler_cfg_ood=task_sampler_cfg_eval_ood,
     )
 
     log.info(eval_datasets.get_summary())
@@ -813,6 +867,10 @@ def main(cfg: DictConfig) -> None:
         initial_diversity=cfg.pool.initial_diversity,
         genetic_mutation_rate=cfg.pool.mutation_rate,
         genetic_swaps_per_layer=cfg.pool.n_swaps_per_layer,
+        # ── Per-circuit-task meta-learning ──────────────────────────────
+        task_sampler_cfg=task_sampler_cfg_train,
+        init_logits=cfg.circuit.get("init_logits", "soft_wires"),
+        random_init_scale=float(cfg.circuit.get("random_init_scale", 1.0)),
         # ── Damage / resilience ─────────────────────────────────────────
         damage_enabled=damage_params["enabled"],
         p_fault=damage_params["p_fault_train"],

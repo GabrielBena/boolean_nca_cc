@@ -1,0 +1,3 @@
+# Fixed library task: split multiplication (lower half * upper half of input).
+type: fixed
+name: binary_multiply

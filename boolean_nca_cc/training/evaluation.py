@@ -1654,18 +1654,31 @@ def evaluate_model_stepwise_batched(
     """
     batch_size = batch_logits[0].shape[0]
 
+    # ``y_data.ndim`` selects the per-circuit-task path the same way the
+    # train loop does (see ``batch_loss_fn`` in train_loop.py):
+    #   - 2D [N_samples, output_n]            → global task, shared across batch.
+    #   - 3D [batch_size, N_samples, output_n] → per-circuit task path.
+    # When per-circuit, chunking must slice y_data too.
+    y_is_per_circuit = y_data.ndim == 3
+    if y_is_per_circuit and y_data.shape[0] != batch_size:
+        raise ValueError(
+            f"per-circuit y_data has leading dim {y_data.shape[0]} but "
+            f"batch_size is {batch_size}"
+        )
+
     # Handle chunking for large batches
     if chunk_size is not None and batch_size > chunk_size:
         log.info(f"Using chunked evaluation (chunks of {chunk_size})")
         chunks = []
         for i in range(0, batch_size, chunk_size):
             end = min(i + chunk_size, batch_size)
+            y_chunk = y_data[i:end] if y_is_per_circuit else y_data
             chunk_final_graphs, chunk_step_metrics = evaluate_model_stepwise_batched(
                 model=model,
                 batch_wires=[w[i:end] for w in batch_wires],
                 batch_logits=[lg[i:end] for lg in batch_logits],
                 x_data=x_data,
-                y_data=y_data,
+                y_data=y_chunk,
                 input_n=input_n,
                 arity=arity,
                 circuit_hidden_dim=circuit_hidden_dim,
@@ -1747,7 +1760,9 @@ def evaluate_model_stepwise_batched(
     wire_shuffle_keys = jax.random.split(wire_shuffle_key, batch_size)
 
     # Run unified scan for each circuit in batch
-    def run_single_scan(graph, wires, logits, scan_key, permanent_damage, ws_key):
+    def run_single_scan(graph, wires, logits, scan_key, permanent_damage, ws_key, y_local):
+        # ``y_local`` is per-circuit when y_is_per_circuit (in_axes=0 below)
+        # and the shared y_data otherwise (in_axes=None).
         return run_model_scan_with_loss(
             model=model,
             graph=graph,
@@ -1755,7 +1770,7 @@ def evaluate_model_stepwise_batched(
             logits_original_shapes=[logit.shape for logit in logits],
             wires=wires,
             x_data=x_data,
-            y_data=y_data,
+            y_data=y_local,
             loss_cfg=loss_cfg,
             layer_sizes=layer_sizes,
             data_fraction=1.0,
@@ -1777,9 +1792,13 @@ def evaluate_model_stepwise_batched(
             wire_shuffle_fraction=wire_shuffle_fraction,
         )
 
-    # Vmap over batch
-    final_graphs, batch_step_outputs = nnx.vmap(run_single_scan)(
-        batch_graphs, batch_wires, batch_logits, damage_keys, permanent_damage, wire_shuffle_keys
+    # Vmap over batch — last in_axes element switches per shape of y_data.
+    y_in_axes = 0 if y_is_per_circuit else None
+    final_graphs, batch_step_outputs = nnx.vmap(
+        run_single_scan, in_axes=(0, 0, 0, 0, 0, 0, y_in_axes)
+    )(
+        batch_graphs, batch_wires, batch_logits, damage_keys, permanent_damage,
+        wire_shuffle_keys, y_data,
     )
 
     # Extract and average metrics

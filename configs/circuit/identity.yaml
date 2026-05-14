@@ -1,4 +1,0 @@
-defaults:
-  - _base
-
-task: identity

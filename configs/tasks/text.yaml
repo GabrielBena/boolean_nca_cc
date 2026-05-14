@@ -1,0 +1,6 @@
+# Fixed library task: produce a fixed text pattern as the output mapping.
+# The ``text`` field is the target string the circuit must learn to emit;
+# its length determines the case count.
+type: fixed
+name: text
+text: "Hello Neural CA! Self-Organizing Circuits are Real!"

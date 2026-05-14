@@ -1,8 +1,0 @@
-defaults:
-  - _base
-
-
-input_bits: 8
-output_bits: 8
-task: "text"
-text: "Hello Neural CA! Self-Organizing Circuits are Real!"

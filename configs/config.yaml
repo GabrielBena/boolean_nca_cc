@@ -2,8 +2,10 @@
 
 # Default parameters for experiment
 defaults:
-  - model: perceiver_attention  # Default model (gnn or self_attention or perceiver_attention)
-  - circuit: reverse
+  - model: gathered_attention  # Default model (gnn or self_attention or perceiver_attention)
+  - circuit: small  # Circuit topology only — size: small / mid / large
+  - tasks: reverse  # What the circuit should compute. Fixed: reverse / add /
+                    # binary_multiply / identity / parity / text. Sampler: k_junta.
   - loss: bce  # Options: l2, l4, bce, bce_w3, focal, asym, focal_asym
   - _self_  # For self-overrides
 
@@ -32,7 +34,6 @@ graph:
 
 # Training parameters
 training:
-  # WIRING MODE : "random" or "fixed"
   wiring_mode: "random"  # Options: "fixed", "genetic", or "random"
   # Diversity will always be fully random for random mode. This controls number of different wirings for fixed.
   initial_diversity: 1

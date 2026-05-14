@@ -43,13 +43,29 @@ def make_nops(gate_n, arity, group_size, nop_scale=3.0):
     return logits.reshape(gate_n // group_size, group_size, -1)
 
 
-def make_nops_with_noise(gate_n, arity, group_size, key, nop_scale=3.0, noise_scale=0.0):
+def make_nops_with_noise(gate_n, arity, group_size, key, nop_scale=3.0, noise_scale=0.0, **_):
     """
+    "Soft wires" initialization: each gate's LUT is set so the gate acts as an
+    identity pass-through on one of its inputs (assigned round-robin), with
+    optional additive Gaussian noise to break symmetry.
+
+    This is a strong structural prior — at t=0 the circuit computes some
+    permutation/projection of its inputs, NOT a constant. Useful for fast
+    convergence on known tasks; less appropriate for task-agnostic
+    meta-learning where a "chance-level start for any task" claim matters
+    (see ``make_zero_logits`` / ``make_random_logits``).
+
     Args:
-        key: A JAX random key (REQUIRED for randomness)
-        noise_scale: How much noise to add (e.g., 0.1 or 0.5)
+        gate_n: Total gates in layer.
+        arity: Fan-in per gate.
+        group_size: Gates per group.
+        key: PRNG key (REQUIRED).
+        nop_scale: Scale of the deterministic passthrough logits.
+        noise_scale: Std-dev of additive Gaussian noise (0.0 = exact passthrough).
+
+    Returns:
+        Logits of shape ``(gate_n // group_size, group_size, 2^arity)``.
     """
-    # ... existing code ...
     I = jp.arange(1 << arity)
     bits = (I >> I[:arity, None]) & 1
     luts = bits[jp.arange(gate_n) % arity]
@@ -64,6 +80,53 @@ def make_nops_with_noise(gate_n, arity, group_size, key, nop_scale=3.0, noise_sc
     logits = base_logits + noise
 
     return logits.reshape(gate_n // group_size, group_size, -1)
+
+
+def make_zero_logits(gate_n, arity, group_size, key, **_):
+    """
+    Zero-init: all logits = 0 → sigmoid(0) = 0.5 → every gate outputs 0.5
+    regardless of input.
+
+    Cleanest "starts at chance" claim: starting circuit accuracy is exactly 0.5
+    for any target, and there is *no* input dependence at t=0 — every bit of
+    task-conditional behavior must come from the policy's updates. Cost:
+    weakest early gradient signal, since residuals are uniformly ``0.5 - y``
+    across all inputs until the policy moves logits off the zero plateau.
+
+    ``key`` is accepted for signature uniformity (other inits need it) but
+    unused — the output is deterministic.
+    """
+    return jp.zeros((gate_n // group_size, group_size, 1 << arity), dtype=jp.float32)
+
+
+def make_random_logits(gate_n, arity, group_size, key, random_init_scale=1.0, **_):
+    """
+    Random-init: each LUT entry's logit is drawn iid ``N(0, random_init_scale)``.
+
+    At ``random_init_scale=1.0`` this gives a "random Boolean-ish function of
+    the inputs" at t=0: marginal output ≈ 0.5 (so accuracy ≈ chance) but with
+    real input dependence, so the policy gets non-trivial gradients from the
+    first step. A reasonable default for task-agnostic meta-learning when you
+    want chance-level starting accuracy *without* the dead-gradient problem
+    of zero-init.
+
+    Args:
+        random_init_scale: Std-dev of the normal distribution. Larger values
+            push outputs harder toward 0/1; smaller values keep them near 0.5.
+    """
+    shape = (gate_n // group_size, group_size, 1 << arity)
+    return jax.random.normal(key, shape=shape) * random_init_scale
+
+
+# Registry: name → init function. Adding a new init is one line here.
+# All functions share the signature
+#   (gate_n, arity, group_size, key, **kwargs) -> [group_n, group_size, 2^arity]
+# and consume only the kwargs they care about (the rest are absorbed by **_).
+INIT_LOGITS = {
+    "soft_wires": make_nops_with_noise,
+    "zeros": make_zero_logits,
+    "random": make_random_logits,
+}
 
 
 @jax.jit
@@ -155,37 +218,52 @@ def gen_circuit(
     layer_sizes,
     arity=4,
     verbose=False,
-    init_logits_fn=make_nops_with_noise,
+    init_logits_fn=None,
     noise_scale=0.0,
+    init_logits: str = "soft_wires",
+    random_init_scale: float = 1.0,
 ):
     """
-    Generate a complete circuit with random wiring and initial operations.
+    Generate a complete circuit with random wiring and initial logits.
 
     Args:
-        key: JAX random key for wiring (used for both wiring and logits if logits_key is not provided)
-        logit_key: JAX random key for logits
-        layer_sizes: List of tuples (nodes, group_size) for each layer
-        arity: Number of inputs per gate (fan-in)
-        local_noise: Amount of noise to add to local connections
-        init_logits_fn: Function to initialize logits
-        logits_key: JAX random key for logits (if not provided, key is used for both wiring and logits)
+        wires_key: JAX random key for wiring.
+        logits_key: JAX random key for logits (if None, ``wires_key`` is split).
+        layer_sizes: List of (nodes, group_size) tuples for each layer.
+        arity: Fan-in per gate.
+        init_logits: Which logit initializer to use (see ``INIT_LOGITS``):
+            - "soft_wires": round-robin identity passthrough + Gaussian noise
+              (default, preserves historical behavior).
+            - "zeros": all-zero logits → constant 0.5 outputs, exact chance start.
+            - "random": iid ``N(0, random_init_scale)`` logits → input-dependent
+              but random outputs, ~chance start with non-trivial early gradients.
+        noise_scale: Used only by ``"soft_wires"`` — additive Gaussian noise
+            on the passthrough logits.
+        random_init_scale: Used only by ``"random"`` — std-dev of the normal
+            distribution.
+        init_logits_fn: DEPRECATED. If provided, takes precedence over
+            ``init_logits`` (back-compat). Prefer the string knob.
 
     Returns:
-        Tuple of (wires, logits) where each is a list per layer
+        Tuple of (wires, logits), each a list per gate layer.
     """
     in_n = layer_sizes[0][0]
     all_wires, all_logits = [], []
     if logits_key is None:
         wires_key, logits_key = jax.random.split(wires_key, 2)
 
+    if init_logits_fn is None:
+        if init_logits not in INIT_LOGITS:
+            raise ValueError(
+                f"init_logits={init_logits!r} not in {sorted(INIT_LOGITS)}"
+            )
+        init_logits_fn = INIT_LOGITS[init_logits]
+
     for out_n, group_size in layer_sizes[1:]:
         if verbose:
             print(f"in_n: {in_n}, out_n: {out_n}, group_size: {group_size}")
 
-        wires = gen_wires(
-            wires_key, in_n, out_n, arity, group_size
-        )  # Assuming gen_wires also takes local_noise if needed
-        # Use the provided function to initialize logits:
+        wires = gen_wires(wires_key, in_n, out_n, arity, group_size)
 
         logits_key, random_key = jax.random.split(logits_key)
         logits = init_logits_fn(
@@ -194,6 +272,7 @@ def gen_circuit(
             group_size=group_size,
             key=random_key,
             noise_scale=noise_scale,
+            random_init_scale=random_init_scale,
         )
         in_n = out_n
         all_wires.append(wires)

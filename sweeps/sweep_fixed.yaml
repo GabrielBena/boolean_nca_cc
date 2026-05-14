@@ -9,7 +9,9 @@ sweep:
     seed: [0, 1, 2]
     
     training.wiring_mode: [fixed, random]
-    circuit: [reverse_large, add_large, binary_multiply_large]
+    # Circuit topology is now independent of task; sweep both axes.
+    circuit: [large]
+    tasks: [reverse, add, binary_multiply]
 
     # FIXED PARAMETERS
     model: [perceiver_attention]
