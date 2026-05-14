@@ -44,6 +44,7 @@ warnings.filterwarnings('ignore', message='.*computation placer already register
 import numpy as np
 import jax.numpy as jp
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation, PillowWriter
 try:
     from umap import UMAP
 except ImportError:
@@ -209,6 +210,7 @@ def visualize_umap(
     edge_linewidth: float = 0.5,
     edge_color: str = None,
     highlight_cycles: bool = False,
+    embedding: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Create UMAP embedding and visualize with depth coloring.
@@ -236,21 +238,20 @@ def visualize_umap(
     Returns:
         UMAP embedding array
     """
-    log.info(f"Running UMAP on {len(feature_matrix)} circuits...")
-    log.info(f"  Feature matrix shape: {feature_matrix.shape}")
-    log.info(f"  UMAP parameters: n_neighbors={n_neighbors}, min_dist={min_dist}, metric={metric}")
-    
-    # Create UMAP reducer
-    reducer = UMAP(
-        n_neighbors=n_neighbors,
-        min_dist=min_dist,
-        n_components=n_components,
-        metric=metric,
-    )
-    
-    # Fit and transform
-    embedding = reducer.fit_transform(feature_matrix)
-    log.info(f"  Embedding shape: {embedding.shape}")
+    if embedding is None:
+        log.info(f"Running UMAP on {len(feature_matrix)} circuits...")
+        log.info(f"  Feature matrix shape: {feature_matrix.shape}")
+        log.info(f"  UMAP parameters: n_neighbors={n_neighbors}, min_dist={min_dist}, metric={metric}")
+        reducer = UMAP(
+            n_neighbors=n_neighbors,
+            min_dist=min_dist,
+            n_components=n_components,
+            metric=metric,
+        )
+        embedding = reducer.fit_transform(feature_matrix)
+        log.info(f"  Embedding shape: {embedding.shape}")
+    else:
+        log.info(f"Using precomputed UMAP embedding (shape: {embedding.shape})")
     
     # Save results if save_dir is provided
     if save_dir is not None:
@@ -512,6 +513,229 @@ def visualize_umap(
     return embedding
 
 
+def build_depth_frames(
+    exploration_results: list,
+    root_hash: str,
+    distances: dict,
+) -> Tuple[List[set], List[List[Tuple[str, str, bool]]], int]:
+    """
+    Group exploration history into per-depth cumulative frames.
+
+    Frame k contains the root plus every circuit whose BFS distance from
+    the root is <= k. Edges enter at frame `source_depth + 1` (i.e. the
+    frame in which the target first becomes visible).
+
+    Args:
+        exploration_results: Ordered list of perturbation-recovery records.
+        root_hash: Hash of the root circuit (visible from frame 0).
+        distances: Mapping circuit_hash -> BFS distance from root.
+
+    Returns:
+        (nodes_per_frame, edges_per_frame, max_depth)
+        - nodes_per_frame[k]: cumulative set of visible circuit hashes at frame k
+        - edges_per_frame[k]: cumulative list of (source, target, is_cycle) at frame k
+        - max_depth: index of the final frame
+    """
+    finite_depths = [d for d in distances.values() if d != float('inf')]
+    max_depth = int(max(finite_depths)) if finite_depths else 0
+
+    nodes_per_frame: List[set] = [set() for _ in range(max_depth + 1)]
+    edges_per_frame: List[List[Tuple[str, str, bool]]] = [[] for _ in range(max_depth + 1)]
+
+    # Seed frame 0 with the root.
+    nodes_per_frame[0].add(root_hash)
+
+    # Place each node at its depth frame.
+    for circuit_hash, d in distances.items():
+        if d == float('inf'):
+            continue
+        di = int(d)
+        if 0 <= di <= max_depth:
+            nodes_per_frame[di].add(circuit_hash)
+
+    # Place each edge at the frame where its target becomes visible.
+    # Deduplicate by (source, target) so revisits don't double-count.
+    seen_edges = set()
+    for rec in exploration_results:
+        src = rec.get("source_hash")
+        tgt = rec.get("recovered_hash")
+        if src is None or tgt is None:
+            continue
+        if (src, tgt) in seen_edges:
+            continue
+        seen_edges.add((src, tgt))
+
+        src_d = distances.get(src, float('inf'))
+        tgt_d = distances.get(tgt, float('inf'))
+        if src_d == float('inf') or tgt_d == float('inf'):
+            continue
+        # Edge enters when the target appears; for self-loops that's the
+        # source's own depth.
+        enter_frame = int(tgt_d) if src != tgt else int(src_d)
+        if 0 <= enter_frame <= max_depth:
+            edges_per_frame[enter_frame].append((src, tgt, src == tgt))
+
+    # Make cumulative.
+    for k in range(1, max_depth + 1):
+        nodes_per_frame[k] |= nodes_per_frame[k - 1]
+        edges_per_frame[k] = edges_per_frame[k - 1] + edges_per_frame[k]
+
+    return nodes_per_frame, edges_per_frame, max_depth
+
+
+def animate_umap(
+    embedding: np.ndarray,
+    depth_values: list,
+    circuit_hashes: list,
+    root_hash: str,
+    exploration_results: list,
+    distances: dict,
+    output_path: Path,
+    cmap: str = "viridis",
+    figsize: tuple = (10, 8),
+    fps: int = 4,
+    hold_frames: int = 6,
+    show_edges: bool = True,
+    edge_alpha: float = 0.08,
+    edge_linewidth: float = 0.5,
+    edge_color: str = None,
+    highlight_cycles: bool = False,
+) -> None:
+    """
+    Render an animated GIF of the UMAP embedding, revealing one BFS depth
+    layer per frame.
+
+    The embedding is precomputed (positions are fixed across frames); only
+    visibility of points and edges changes per frame.
+    """
+    if embedding.shape[1] != 2:
+        raise ValueError(
+            f"animate_umap requires a 2D embedding (got {embedding.shape[1]}D)."
+        )
+
+    nodes_per_frame, edges_per_frame, max_depth = build_depth_frames(
+        exploration_results=exploration_results,
+        root_hash=root_hash,
+        distances=distances,
+    )
+
+    log.info(f"\nBuilding animation: {max_depth + 1} depth frames "
+             f"(+ {hold_frames} hold frames), fps={fps}")
+
+    hash_to_idx = {h: i for i, h in enumerate(circuit_hashes)}
+    depth_array = np.array(depth_values, dtype=float)
+    finite_depths = depth_array[np.isfinite(depth_array)]
+    vmin = float(finite_depths.min()) if finite_depths.size else 0.0
+    vmax = float(finite_depths.max()) if finite_depths.size else 1.0
+
+    # Fixed axes limits with a small margin so the camera doesn't jump.
+    x_min, x_max = embedding[:, 0].min(), embedding[:, 0].max()
+    y_min, y_max = embedding[:, 1].min(), embedding[:, 1].max()
+    x_pad = 0.05 * (x_max - x_min) if x_max > x_min else 1.0
+    y_pad = 0.05 * (y_max - y_min) if y_max > y_min else 1.0
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Build the colorbar once using a dummy mappable so it stays put across frames.
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=vmin, vmax=vmax))
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax)
+    cbar.set_label('Perturbations from Root', fontsize=18)
+    cbar.ax.tick_params(labelsize=10)
+
+    edge_col = edge_color if edge_color is not None else "gray"
+    total_frames = (max_depth + 1) + max(0, hold_frames)
+
+    def draw_frame(frame_idx: int) -> None:
+        # Clamp held frames to the last real depth.
+        k = min(frame_idx, max_depth)
+        ax.clear()
+        ax.set_xlim(x_min - x_pad, x_max + x_pad)
+        ax.set_ylim(y_min - y_pad, y_max + y_pad)
+        ax.set_xlabel('UMAP Dimension 1', fontsize=18)
+        ax.set_ylabel('UMAP Dimension 2', fontsize=18)
+        ax.tick_params(axis='both', labelsize=10)
+        ax.set_title(f'Depth {k} / {max_depth}', fontsize=16)
+
+        # Edges (background).
+        if show_edges:
+            for src, tgt, is_cycle in edges_per_frame[k]:
+                if is_cycle and not highlight_cycles:
+                    continue
+                si = hash_to_idx.get(src)
+                ti = hash_to_idx.get(tgt)
+                if si is None or ti is None:
+                    continue
+                if is_cycle:
+                    ax.plot(
+                        [embedding[si, 0], embedding[ti, 0]],
+                        [embedding[si, 1], embedding[ti, 1]],
+                        color=edge_col,
+                        alpha=min(edge_alpha * 2, 1.0),
+                        linewidth=edge_linewidth * 2,
+                        linestyle='--',
+                        zorder=0,
+                    )
+                else:
+                    ax.plot(
+                        [embedding[si, 0], embedding[ti, 0]],
+                        [embedding[si, 1], embedding[ti, 1]],
+                        color=edge_col,
+                        alpha=edge_alpha,
+                        linewidth=edge_linewidth,
+                        zorder=0,
+                    )
+
+        # Visible points.
+        visible_idx = [hash_to_idx[h] for h in nodes_per_frame[k] if h in hash_to_idx]
+        if visible_idx:
+            visible_idx = np.array(visible_idx)
+            ax.scatter(
+                embedding[visible_idx, 0],
+                embedding[visible_idx, 1],
+                c=depth_array[visible_idx],
+                cmap=cmap,
+                vmin=vmin,
+                vmax=vmax,
+                alpha=0.6,
+                s=50,
+                edgecolors='black',
+                linewidths=0.5,
+                zorder=2,
+            )
+
+        # Root marker on top.
+        root_idx = hash_to_idx.get(root_hash)
+        if root_idx is not None:
+            ax.scatter(
+                embedding[root_idx, 0],
+                embedding[root_idx, 1],
+                c='red',
+                marker='*',
+                s=500,
+                edgecolors='black',
+                linewidths=2,
+                label='Root circuit',
+                zorder=10,
+            )
+            ax.legend(loc='best', fontsize=14)
+
+    anim = FuncAnimation(
+        fig,
+        draw_frame,
+        frames=total_frames,
+        interval=1000 / max(fps, 1),
+        blit=False,
+        repeat=True,
+    )
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    anim.save(output_path, writer=PillowWriter(fps=fps))
+    plt.close(fig)
+    log.info(f"  Saved animation: {output_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Visualize degenerate circuit solutions using UMAP"
@@ -602,8 +826,29 @@ def main():
         action="store_true",
         help="Highlight self-recovery cycles (A -> A) with dashed lines",
     )
-    
+    parser.add_argument(
+        "--animate",
+        action="store_true",
+        help="Also produce an animated GIF revealing one BFS depth layer per frame "
+        "(2D only; saved alongside the static figure).",
+    )
+    parser.add_argument(
+        "--animation-fps",
+        type=int,
+        default=4,
+        help="Frames per second for the animation (default: 4).",
+    )
+    parser.add_argument(
+        "--animation-hold-frames",
+        type=int,
+        default=6,
+        help="Extra repeats of the final frame so the GIF pauses before looping (default: 6).",
+    )
+
     args = parser.parse_args()
+
+    if args.animate and args.n_components != 2:
+        parser.error("--animate is only supported for --n-components 2")
     
     # Parse figure size
     try:
@@ -648,9 +893,22 @@ def main():
         distances=distances,
     )
     
+    # If animating, precompute the embedding once and reuse it for both the
+    # static figure and the GIF so the layouts match.
+    precomputed_embedding = None
+    if args.animate:
+        log.info(f"\nFitting UMAP once for static + animation (n={len(feature_matrix)})...")
+        reducer = UMAP(
+            n_neighbors=args.n_neighbors,
+            min_dist=args.min_dist,
+            n_components=args.n_components,
+            metric=args.metric,
+        )
+        precomputed_embedding = reducer.fit_transform(feature_matrix)
+
     # Create visualization
     log.info("\nCreating UMAP visualization...")
-    visualize_umap(
+    embedding = visualize_umap(
         feature_matrix=feature_matrix,
         depth_values=depth_values,
         circuit_hashes=circuit_hashes,
@@ -669,8 +927,34 @@ def main():
         edge_linewidth=args.edge_linewidth,
         edge_color=args.edge_color,
         highlight_cycles=args.highlight_cycles,
+        embedding=precomputed_embedding,
     )
-    
+
+    if args.animate:
+        # Save animation alongside other UMAP artifacts; fall back to the
+        # exploration directory when no save_dir was derived (sweep mode).
+        anim_dir = umap_viz_dir if umap_viz_dir is not None else results_dir
+        anim_path = Path(anim_dir) / "animation.gif"
+        log.info(f"\nRendering animation to {anim_path}...")
+        animate_umap(
+            embedding=embedding,
+            depth_values=depth_values,
+            circuit_hashes=circuit_hashes,
+            root_hash=results["root_hash"],
+            exploration_results=results["exploration_results"],
+            distances=distances,
+            output_path=anim_path,
+            cmap=args.cmap,
+            figsize=figsize,
+            fps=args.animation_fps,
+            hold_frames=args.animation_hold_frames,
+            show_edges=args.show_edges,
+            edge_alpha=args.edge_alpha,
+            edge_linewidth=args.edge_linewidth,
+            edge_color=args.edge_color,
+            highlight_cycles=args.highlight_cycles,
+        )
+
     if umap_viz_dir is not None:
         log.info(f"\nUMAP results saved to: {umap_viz_dir}")
 
