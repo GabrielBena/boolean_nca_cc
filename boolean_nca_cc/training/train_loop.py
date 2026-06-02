@@ -171,6 +171,13 @@ def run_unified_periodic_evaluation(
     p_fault_onset_step: int = 0,
     # No-repair baseline
     compute_no_repair_baseline: bool = False,
+    # Memory: pass-through to evaluate_model_stepwise_batched. False (default
+    # for the periodic-eval path) drops the heavy [batch, n_steps, ...graph]
+    # tensor and per-circuit per-step metric arrays from the returned
+    # step_metrics. The cheap per-step damage fraction is still kept so the
+    # stepwise damage-overlay plot keeps rendering. Set True if you need the
+    # full graphs / all_metrics from a debugging callsite.
+    keep_full_graphs: bool = False,
 ) -> dict:
     """
     Run unified periodic evaluation with IN/OUT distribution and train/test data splits.
@@ -323,6 +330,9 @@ def run_unified_periodic_evaluation(
                 damage_steps=damage_steps if discrete_damage else None,
                 knockout_per_damage_step=knockout_per_damage_step,
                 damage_key=damage_key,
+                # Memory: gate the heavy per-step graphs / all_metrics
+                # tensors. False by default to keep periodic eval lean.
+                keep_full_graphs=keep_full_graphs,
             )
 
             prefix = f"eval_{full_key}"
@@ -431,7 +441,17 @@ def run_unified_periodic_evaluation(
                     import matplotlib.pyplot as plt
 
                     def _damage_frac(result_dict):
-                        """Extract damage fraction from graphs if available."""
+                        """Extract per-step damage fraction for the stepwise plot.
+
+                        Prefers the precomputed list (cheap, always present
+                        when ``keep_full_graphs=False``) over recomputing from
+                        the full graphs tensor. Falls back to recomputing
+                        when only the full graphs are available (legacy
+                        keep_full_graphs=True path).
+                        """
+                        precomputed = result_dict.get("damaged_fraction_per_step")
+                        if precomputed is not None:
+                            return precomputed
                         graphs = result_dict.get("graphs")
                         if graphs is None:
                             return None
@@ -692,6 +712,12 @@ def train_model(
     periodic_eval_inner_steps: int = 100,
     periodic_eval_log_stepwise: bool = False,
     periodic_eval_log_pool_scatter: bool = False,
+    # Memory: pass-through to evaluate_model_stepwise_batched via
+    # run_unified_periodic_evaluation. Default False so periodic eval
+    # doesn't pin huge [batch, n_steps, ...graph] tensors in the BFC
+    # pool. Set True if you want the per-circuit per-step graphs/metrics
+    # available for debugging (matches notebook-style direct access).
+    periodic_eval_keep_full_graphs: bool = False,
     # ── Early stopping ──────────────────────────────────────────────────
     early_stopping: EarlyStopping | None = None,
     # ── Checkpointing & best model tracking ─────────────────────────────
@@ -1639,6 +1665,8 @@ def train_model(
                     # Delayed onset & no-repair baseline
                     p_fault_onset_step=p_fault_onset_step_eval,
                     compute_no_repair_baseline=compute_no_repair_baseline,
+                    # Memory gating for the heavy per-step graphs / metrics
+                    keep_full_graphs=periodic_eval_keep_full_graphs,
                 )
                 # Merge all final metrics into one dict for early stopping
                 # (covers IN-dist, OOD, damaged, etc.)

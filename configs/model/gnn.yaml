@@ -22,11 +22,9 @@ message_passing: true
 use_attention: true
 num_heads: 8
 
-# Node loss (adds one extra feature to the node features)
-use_node_loss: true
-
-# Positional encodings (aligned with self_attention config)
-# layer_PE: normalized depth fraction [0,1] — scale-free across circuit depths
-# intra_layer_PE: absolute gate index within layer — breaks scale-freedom for random wiring
-use_intra_layer_PE: false
-use_layer_PE: true
+# Per-node features and PEs — sourced from cfg.graph (single source of truth).
+# The GNN model doesn't currently consume dist_pe / rwse, so those flags are not
+# threaded through; add them here when graph-PE support is wired into the GNN.
+use_node_loss: ${graph.use_node_loss}
+use_intra_layer_PE: ${graph.use_intra_layer_PE}
+use_layer_PE: ${graph.use_layer_PE}

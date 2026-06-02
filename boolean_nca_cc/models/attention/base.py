@@ -547,6 +547,8 @@ def extract_node_features(
     use_node_loss: bool = False,
     use_intra_layer_PE: bool = False,
     use_layer_PE: bool = False,
+    use_dist_pe: bool = False,
+    use_rwse: bool = False,
 ) -> jp.ndarray:
     """
     Extract and concatenate node features for attention.
@@ -554,6 +556,15 @@ def extract_node_features(
     Args:
         nodes: Dictionary of node features
         use_node_loss: Whether to include per-node loss in features
+        use_intra_layer_PE: Append ``intra_layer_pe`` (deprecated: not topology-aware).
+        use_layer_PE: Append ``layer_pe`` (normalized depth-fraction sinusoidal PE).
+        use_dist_pe: Append ``dist_pe`` — sinusoidal encoding of
+            ``(dist_from_input, dist_to_output)`` on the directed DAG. Directional,
+            absolute, scale-free across depth changes. Requires ``build_graph``
+            to have been called with ``use_dist_pe=True``.
+        use_rwse: Append ``rwse`` — Random Walk Structural Encoding (per-node K-vector
+            of return probabilities). Pure topology signature. Requires ``build_graph``
+            to have been called with ``use_rwse=True``.
 
     Returns:
         Concatenated features tensor of shape [n_node, feature_dim]
@@ -569,6 +580,10 @@ def extract_node_features(
         features = jp.concatenate([features, intra_layer_pe], axis=-1)
     if use_layer_PE:
         features = jp.concatenate([features, layer_pe], axis=-1)
+    if use_dist_pe:
+        features = jp.concatenate([features, nodes["dist_pe"]], axis=-1)
+    if use_rwse:
+        features = jp.concatenate([features, nodes["rwse"]], axis=-1)
 
     if use_node_loss:
         features = jp.concatenate([features, nodes["loss"][:, None]], axis=-1)

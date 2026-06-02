@@ -8,6 +8,19 @@ when training boolean circuits, using either Graph Neural Networks or Self-Atten
 
 import os
 
+# Redirect JAX/XLA temp + compilation cache off the near-full root partition (95% used)
+# onto /mnt/8TB_HDD (2.9T free). Avoids "No space left on device" during PTX writes.
+# The per-user dir must be pre-created by an admin (we're not in the hddaccess group):
+#   sudo mkdir -p /mnt/8TB_HDD/$USER && sudo chown -R $USER:$USER /mnt/8TB_HDD/$USER
+_user_disk = os.path.join("/mnt/8TB_HDD", os.environ.get("USER", ""))
+if os.access(_user_disk, os.W_OK):
+    _tmpdir = os.path.join(_user_disk, "tmp")
+    _jax_cache = os.path.join(_user_disk, "jax_cache")
+    os.makedirs(_tmpdir, exist_ok=True)
+    os.makedirs(_jax_cache, exist_ok=True)
+    os.environ.setdefault("TMPDIR", _tmpdir)
+    os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", _jax_cache)
+
 # === Optional CPU-only run ===
 # To run on CPU only, set the below environment variable before JAX import.
 # You can set this via an environment variable or command line argument:
@@ -22,10 +35,10 @@ import os
 # The default BFC allocator is faster but pools memory aggressively, causing OOM at pool resets
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 # os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
-# os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
+os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
 
 # GPU VISIBILITY
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 import logging
 
@@ -429,6 +442,9 @@ def main(cfg: DictConfig) -> None:
     configure_build_graph(
         neighboring_connections=cfg.graph.neighboring_connections,
         bidirectional_edges=cfg.graph.bidirectional_edges,
+        use_dist_pe=cfg.graph.get("use_dist_pe", False),
+        use_rwse=cfg.graph.get("use_rwse", False),
+        rwse_k=cfg.graph.get("rwse_k", 8),
     )
 
     # Verify configuration was applied
@@ -585,9 +601,7 @@ def main(cfg: DictConfig) -> None:
         x_train, y_train = x_total, y_total
         x_test, y_test = None, None
     else:
-        raise ValueError(
-            f"cfg.tasks.type must be 'fixed' or 'sampler', got {tasks_type!r}"
-        )
+        raise ValueError(f"cfg.tasks.type must be 'fixed' or 'sampler', got {tasks_type!r}")
 
     data_dict = {
         "x_train": x_train,
@@ -649,6 +663,32 @@ def main(cfg: DictConfig) -> None:
             f"Error instantiating model {cfg.model._target_ if '_target_' in cfg.model else cfg.model.type}: {e}"
         )
         raise
+
+    # Fail fast on producer/consumer PE mismatch.
+    # The model reads nodes["dist_pe"] / nodes["rwse"] only when its own flag is on;
+    # those features exist only if build_graph was configured to emit them. Both sides
+    # interpolate from cfg.graph.*, so a mismatch means an inconsistent config (or an
+    # ad-hoc override) — catch it here instead of as a cryptic KeyError deep in the scan.
+    from boolean_nca_cc.utils.configured_graph_builder import get_configured_pe_flags
+
+    _pe_flags = get_configured_pe_flags()
+    for _flag, _key in (("use_dist_pe", "dist_pe"), ("use_rwse", "rwse")):
+        _model_wants = bool(getattr(model, _flag, False))
+        _graph_emits = bool(_pe_flags[_flag])
+        if _model_wants and not _graph_emits:
+            raise ValueError(
+                f"Model has {_flag}=True but build_graph is configured with "
+                f"{_flag}=False, so nodes['{_key}'] will never be emitted. "
+                f"Set graph.{_flag}=true (cfg.graph is the single source of truth; "
+                f"cfg.model.{_flag} interpolates from it)."
+            )
+        if _graph_emits and not _model_wants:
+            # Not fatal — graph carries an unused feature — but always a config smell.
+            log.warning(
+                f"build_graph emits nodes['{_key}'] (graph.{_flag}=true) but the model "
+                f"has {_flag}=False, so it is computed and ignored. Disable graph.{_flag} "
+                f"to save the compute, or enable it on the model."
+            )
 
     # Count and log model parameters with detailed breakdown
     log.info(f"Model instantiated: {cfg.model.type}")
@@ -718,9 +758,7 @@ def main(cfg: DictConfig) -> None:
             f"ood={None if task_sampler_cfg_eval_ood is None else task_sampler_cfg_eval_ood['name']})"
         )
     else:
-        raise ValueError(
-            f"cfg.tasks.type must be 'fixed' or 'sampler', got {cfg.tasks.type!r}"
-        )
+        raise ValueError(f"cfg.tasks.type must be 'fixed' or 'sampler', got {cfg.tasks.type!r}")
 
     # Create evaluation datasets
     eval_datasets = create_unified_evaluation_datasets(
@@ -895,6 +933,10 @@ def main(cfg: DictConfig) -> None:
         periodic_eval_inner_steps=cfg.eval.inner_steps,
         periodic_eval_log_stepwise=cfg.eval.log_stepwise,
         periodic_eval_log_pool_scatter=cfg.eval.log_pool_scatter,
+        # Default False keeps periodic eval's memory footprint small. Flip to
+        # True via cfg.eval.keep_full_graphs if you need notebook-style access
+        # to the per-circuit per-step graphs / all_metrics during training.
+        periodic_eval_keep_full_graphs=cfg.eval.get("keep_full_graphs", False),
         # ── Early stopping ──────────────────────────────────────────────
         early_stopping=EarlyStopping(
             metric=cfg.stop_accuracy.metric,
@@ -991,6 +1033,10 @@ def main(cfg: DictConfig) -> None:
             damage_key=damage_key,
             p_fault_onset_step=damage_params["p_fault_onset_step_eval"],
             compute_no_repair_baseline=damage_params["compute_no_repair_baseline"],
+            # Memory: same gate as periodic eval. Default False is fine for the
+            # final eval since downstream consumers (create_and_save_final_results)
+            # only read the small final_metrics summary, not the per-step graphs.
+            keep_full_graphs=cfg.eval.get("keep_full_graphs", False),
             # ── Pool ────────────────────────────────────────────────────────
             pool=None,
         )

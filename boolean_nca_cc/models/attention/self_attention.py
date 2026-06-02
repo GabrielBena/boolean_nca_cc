@@ -48,6 +48,9 @@ class CircuitSelfAttention(nnx.Module):
         warm_start: bool = True,
         use_intra_layer_PE: bool = False,
         use_layer_PE: bool = True,
+        use_dist_pe: bool = False,
+        use_rwse: bool = False,
+        rwse_k: int = 8,
     ):
         """
         Initialize the circuit self-attention model.
@@ -71,6 +74,12 @@ class CircuitSelfAttention(nnx.Module):
             re_zero_attn: Whether to use ReZero for attention
             use_intra_layer_PE: Whether to include intra-layer positional encodings in features
             use_layer_PE: Whether to include layer depth positional encodings in features
+            use_dist_pe: Append ``dist_pe`` — sinusoidal encoding of
+                ``(dist_from_input, dist_to_output)`` on the directed DAG.
+                Requires ``build_graph(..., use_dist_pe=True)``.
+            use_rwse: Append ``rwse`` — Random Walk Structural Encoding.
+                Requires ``build_graph(..., use_rwse=True)``.
+            rwse_k: RWSE walk length / per-node feature dim. Must match graph build setting.
             warm_start: Whether to use warm start for training
         """
         self.n_node = int(n_node)
@@ -84,6 +93,9 @@ class CircuitSelfAttention(nnx.Module):
         self.use_node_loss = use_node_loss
         self.use_intra_layer_PE = use_intra_layer_PE
         self.use_layer_PE = use_layer_PE
+        self.use_dist_pe = use_dist_pe
+        self.use_rwse = use_rwse
+        self.rwse_k = int(rwse_k)
         self.warm_start = warm_start
         if mlp_dim is None:
             mlp_dim = attention_dim * mlp_dim_multiplier
@@ -99,6 +111,10 @@ class CircuitSelfAttention(nnx.Module):
             input_feature_dim += circuit_hidden_dim
         if self.use_layer_PE:
             input_feature_dim += circuit_hidden_dim
+        if self.use_dist_pe:
+            input_feature_dim += 2 * (circuit_hidden_dim // 2)
+        if self.use_rwse:
+            input_feature_dim += self.rwse_k
         if self.use_node_loss:
             input_feature_dim += 1
 
@@ -175,7 +191,12 @@ class CircuitSelfAttention(nnx.Module):
 
         # Extract and concatenate node features
         features = extract_node_features(
-            nodes, self.use_node_loss, self.use_intra_layer_PE, self.use_layer_PE
+            nodes,
+            self.use_node_loss,
+            self.use_intra_layer_PE,
+            self.use_layer_PE,
+            self.use_dist_pe,
+            self.use_rwse,
         )
 
         # Add batch dimension [1, n_node, feature_dim]

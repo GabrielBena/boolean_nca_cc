@@ -2,18 +2,21 @@
 Perceiver-style circuit optimization with cross-attention to input/output data.
 
 This module extends the self-attention approach by adding cross-attention
-to input data patterns and output residuals, giving the model access to
-the information that backpropagation uses for credit assignment.
+to input data patterns and output targets/predictions, giving the model access
+to the information that backpropagation uses for credit assignment.
 
 Key differences from pure self-attention:
 - Gates cross-attend to input data → understand data distribution/correlations
-- Gates cross-attend to output residuals → understand per-sample, per-bit errors
+- Gates cross-attend to output targets/predictions → understand the absolute
+  task spec AND per-sample/per-bit error
 - Self-attention among gates → propagate information through circuit topology
 
 The graph structure is extended to include (via GraphGlobals NamedTuple):
 - globals.x_data: Input data batch [N_samples, N_input_bits]
 - globals.y_data: Target output batch [N_samples, N_output_bits]
 - globals.residuals: Current prediction errors [N_samples, N_output_bits]
+  (defined as ``pred - y_target`` in circuits/train.py; ŷ recovered as
+  ``y_data + residuals``)
 """
 
 import jax
@@ -71,9 +74,23 @@ class PerceiverCircuitAttention(nnx.Module):
         re_zero_updates: bool = True,
         use_intra_layer_PE: bool = False,
         use_layer_PE: bool = True,
+        # Graph-based positional encodings (require build_graph(..., use_dist_pe/use_rwse=True))
+        use_dist_pe: bool = False,
+        use_rwse: bool = False,
+        rwse_k: int = 8,
         # Perceiver-specific options
         use_input_cross_attention: bool = True,
         use_output_cross_attention: bool = True,
+        # Signal carried by output cross-attention tokens:
+        #   "target_and_pred" — each token carries (y_i, ŷ_i): absolute target +
+        #                       current prediction. Preserves the task spec
+        #                       across recurrent steps (y is static); the
+        #                       residual y - ŷ is a trivial linear combination
+        #                       the encoder can compute from the two channels.
+        #   "residuals"       — each token carries the scalar residual ŷ - y.
+        #                       Self-quenches at convergence but the model
+        #                       never sees the absolute target.
+        output_cross_attn_signal: str = "target_and_pred",
         token_pe_dim: int = 8,
         samples_per_step: int | None = None,
         # Structural constraints. The two sides are intentionally ASYMMETRIC:
@@ -130,8 +147,26 @@ class PerceiverCircuitAttention(nnx.Module):
             use_node_loss: Whether to include per-node loss in features
             use_intra_layer_PE: Whether to include intra-layer positional encodings in features
             use_layer_PE: Whether to include layer depth positional encodings in features
+            use_dist_pe: Append ``dist_pe`` — sinusoidal encoding of
+                ``(dist_from_input, dist_to_output)`` on the directed DAG. Absolute and
+                directional; replaces the brittle scale-free normalised layer PE for
+                varying-depth circuits. Requires ``build_graph(..., use_dist_pe=True)``.
+            use_rwse: Append ``rwse`` — Random Walk Structural Encoding (per-node K-vector
+                of return probabilities on the bidirectional graph). Pure-topology signature
+                that disambiguates gates with identical graph distances. Requires
+                ``build_graph(..., use_rwse=True)``.
+            rwse_k: Walk length / RWSE feature dim. Must match the graph build setting.
             use_input_cross_attention: Enable cross-attention to input data
-            use_output_cross_attention: Enable cross-attention to output residuals
+            use_output_cross_attention: Enable cross-attention to output side
+                (targets/predictions or residuals — see ``output_cross_attn_signal``)
+            output_cross_attn_signal: What each output token encodes.
+                ``"target_and_pred"`` (default) packs ``[y_i, ŷ_i]`` per output
+                bit (2 value channels). The absolute target y is static across
+                recurrent steps, so the model keeps a stable task reference; the
+                residual y - y_hat is a trivial linear combination the encoder can
+                derive from the two channels. ``"residuals"`` reproduces the
+                original behavior (single scalar residual per bit) — self-quenches
+                at convergence but the model never sees the absolute target.
             token_pe_dim: Dimension for sinusoidal positional encodings
             samples_per_step: Number of data samples to subsample per NCA step for cross-attention.
                 None = use all samples (no subsampling). When set, each step randomly selects
@@ -174,8 +209,17 @@ class PerceiverCircuitAttention(nnx.Module):
         self.use_node_loss = use_node_loss
         self.use_intra_layer_PE = use_intra_layer_PE
         self.use_layer_PE = use_layer_PE
+        self.use_dist_pe = use_dist_pe
+        self.use_rwse = use_rwse
+        self.rwse_k = int(rwse_k)
         self.use_input_cross_attention = use_input_cross_attention
         self.use_output_cross_attention = use_output_cross_attention
+        if output_cross_attn_signal not in ("residuals", "target_and_pred"):
+            raise ValueError(
+                "output_cross_attn_signal must be 'residuals' or 'target_and_pred', "
+                f"got {output_cross_attn_signal!r}"
+            )
+        self.output_cross_attn_signal = output_cross_attn_signal
         self.restrict_input_cross_attn_to_input_layer = (
             restrict_input_cross_attn_to_input_layer
         )
@@ -216,6 +260,11 @@ class PerceiverCircuitAttention(nnx.Module):
             input_feature_dim += circuit_hidden_dim
         if self.use_layer_PE:
             input_feature_dim += circuit_hidden_dim
+        if self.use_dist_pe:
+            # dist_pe = [PE(dist_from_input), PE(dist_to_output)], each pe_dim = circuit_hidden_dim // 2
+            input_feature_dim += 2 * (circuit_hidden_dim // 2)
+        if self.use_rwse:
+            input_feature_dim += self.rwse_k
         if self.use_node_loss:
             input_feature_dim += 1
 
@@ -228,9 +277,11 @@ class PerceiverCircuitAttention(nnx.Module):
             kernel_init=nnx.initializers.kaiming_normal(),
         )
 
-        def create_cross_attention_layers() -> tuple[nnx.Sequential, nnx.List]:
-            # Encodes (bit_value, sample_pe, bit_pe) -> attention_dim
-            token_input_dim = 1 + 2 * token_pe_dim
+        def create_cross_attention_layers(
+            n_value_channels: int = 1,
+        ) -> tuple[nnx.Sequential, nnx.List]:
+            # Encodes (bit_values [C], sample_pe, bit_pe) -> attention_dim
+            token_input_dim = n_value_channels + 2 * token_pe_dim
             # === Input data encoder ===
             encoder = nnx.Sequential(
                 nnx.LayerNorm(token_input_dim, rngs=rngs),
@@ -269,9 +320,14 @@ class PerceiverCircuitAttention(nnx.Module):
         if use_input_cross_attention:
             self.input_encoder, self.input_cross_attn_layers = create_cross_attention_layers()
 
-        # === Cross-attention to output residuals ===
+        # === Cross-attention to output targets/predictions ===
+        # "target_and_pred" packs [y, ŷ] per output bit → 2 value channels;
+        # "residuals" keeps the original scalar residual → 1 channel.
         if use_output_cross_attention:
-            self.output_encoder, self.output_cross_attn_layers = create_cross_attention_layers()
+            output_value_channels = 2 if self.output_cross_attn_signal == "target_and_pred" else 1
+            self.output_encoder, self.output_cross_attn_layers = create_cross_attention_layers(
+                n_value_channels=output_value_channels
+            )
 
         # === Self-attention layers among gates ===
         # Dense (O(N^2)) or gathered-neighborhood (O(N * max_neighbors)) variants
@@ -379,12 +435,16 @@ class PerceiverCircuitAttention(nnx.Module):
         output cross-attentions (same sample index → same PE).
 
         Args:
-            data: Input data [N_samples, N_bits]
+            data: Input data ``[N_samples, N_bits]`` (single-channel) or
+                ``[N_samples, N_bits, C]`` (multi-channel — e.g. ``C=2`` carrying
+                ``[y, ŷ]`` for the output side under ``target_and_pred``).
 
         Returns:
-            Encoded tokens [N_samples * N_bits, 1 + 2 * token_pe_dim]
+            Encoded tokens ``[N_samples * N_bits, C + 2 * token_pe_dim]``
         """
-        N_samples, N_bits = data.shape
+        if data.ndim == 2:
+            data = data[..., None]  # [N_samples, N_bits, 1]
+        N_samples, N_bits, C = data.shape
 
         # Sample PE: normalized sample position [0, 1] scaled by pe_scale.
         # No graph counterpart to align with, so a normalized scheme is fine
@@ -421,11 +481,11 @@ class PerceiverCircuitAttention(nnx.Module):
         bit_pe_broadcast = jp.broadcast_to(
             bit_pe[None, :, :], (N_samples, N_bits, self.token_pe_dim)
         )
-        # Concatenate [value, sample_pe, bit_pe] and flatten
+        # Concatenate [values..., sample_pe, bit_pe] and flatten
         features = jp.concatenate(
-            [data[:, :, None], sample_pe_broadcast, bit_pe_broadcast], axis=-1
+            [data, sample_pe_broadcast, bit_pe_broadcast], axis=-1
         )
-        features = features.reshape(-1, 1 + 2 * self.token_pe_dim)
+        features = features.reshape(-1, C + 2 * self.token_pe_dim)
 
         return features
 
@@ -481,6 +541,7 @@ class PerceiverCircuitAttention(nnx.Module):
 
         # Extract data from globals
         x_data = globals_.x_data if globals_ is not None else None
+        y_data = globals_.y_data if globals_ is not None else None
         residuals = globals_.residuals if globals_ is not None else None
 
         # === Stochastic sample subsampling ===
@@ -503,9 +564,11 @@ class PerceiverCircuitAttention(nnx.Module):
                 sample_indices = jax.random.randint(
                     step_key, shape=(self.samples_per_step,), minval=0, maxval=n_samples
                 )
-                # Use same indices for both: input/residual pairs stay linked
+                # Use same indices for all three: input/target/residual stay aligned per sample
                 if x_data is not None:
                     x_data = x_data[sample_indices]
+                if y_data is not None:
+                    y_data = y_data[sample_indices]
                 if residuals is not None:
                     residuals = residuals[sample_indices]
 
@@ -515,7 +578,12 @@ class PerceiverCircuitAttention(nnx.Module):
 
         # Encode gate features (normalize heterogeneous features before projection)
         gate_features = extract_node_features(
-            nodes, self.use_node_loss, self.use_intra_layer_PE, self.use_layer_PE
+            nodes,
+            self.use_node_loss,
+            self.use_intra_layer_PE,
+            self.use_layer_PE,
+            self.use_dist_pe,
+            self.use_rwse,
         )
         gate_latents = self.feature_proj(self.input_norm(gate_features))[
             None, ...
@@ -591,10 +659,24 @@ class PerceiverCircuitAttention(nnx.Module):
                     if return_intermediate_latents:
                         intermediate_latents.append(gate_latents.copy())
 
-        # === Cross-attention to output residuals ===
+        # === Cross-attention to output targets/predictions ===
         # Same two-path structure as input cross-attention above.
+        # Signal selected by self.output_cross_attn_signal:
+        #   "target_and_pred" — stack [y, ŷ] per output bit. ŷ recovered as
+        #       y_data + residuals (since residuals = pred - y_target).
+        #       Encoder sees the absolute task spec at every step (y is static)
+        #       and can compute the residual as a trivial linear combination.
+        #   "residuals" — original behavior: encode the scalar residual only.
         if self.use_output_cross_attention and residuals is not None:
-            output_features = self._encode_data(residuals)
+            if self.output_cross_attn_signal == "target_and_pred":
+                # Caller is responsible for providing y_data alongside residuals
+                # when this signal mode is selected. Both come from the same
+                # GraphGlobals update in get_loss_and_update_graph.
+                y_hat = y_data + residuals
+                output_signal = jp.stack([y_data, y_hat], axis=-1)
+            else:
+                output_signal = residuals
+            output_features = self._encode_data(output_signal)
             output_tokens = self.output_encoder(output_features)[None, ...]
 
             use_output_slicing = (

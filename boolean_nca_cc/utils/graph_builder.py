@@ -18,7 +18,11 @@ import jax
 import jax.numpy as jp
 import jraph
 
-from boolean_nca_cc.utils.positional_encoding import get_positional_encoding
+from boolean_nca_cc.utils.positional_encoding import (
+    compute_dag_distance_pe,
+    compute_rwse,
+    get_positional_encoding,
+)
 
 
 class GraphGlobals(NamedTuple):
@@ -64,6 +68,9 @@ def build_graph(
     faulty_logit_value: float = -10.0,
     gate_knockout_mask: jp.ndarray | list[jp.ndarray] | None = None,
     positional_encoding_max_val: float = 10000.0,
+    use_dist_pe: bool = False,
+    use_rwse: bool = False,
+    rwse_k: int = 8,
 ) -> jraph.GraphsTuple:
     """
     Construct a jraph.GraphsTuple representation of a boolean circuit.
@@ -95,6 +102,13 @@ def build_graph(
                            Layered format: list of arrays, one per layer with shape (gate_n,)
                            Values: 0.0 = knocked out, 1.0 = active
         positional_encoding_max_val: Maximum value for positional encoding frequency calculation
+        use_dist_pe: If True, add ``nodes["dist_pe"]`` — sinusoidal encoding of
+            ``(dist_from_input, dist_to_output)`` on the directed DAG. Total dim
+            ``circuit_hidden_dim`` (== ``2 * (circuit_hidden_dim // 2)``). Wire-dependent;
+            must be refreshed when wires shuffle (see ``training/evaluation.py``).
+        use_rwse: If True, add ``nodes["rwse"]`` — Random Walk Structural Encoding.
+            Per-node K-vector of return probabilities. Wire-dependent.
+        rwse_k: Walk length / RWSE feature dim when ``use_rwse`` is enabled.
 
     Returns:
         A jraph.GraphsTuple representing the circuit with:
@@ -297,6 +311,42 @@ def build_graph(
     n_node = current_global_node_idx
     n_edge = len(senders)
 
+    # ── Optional graph-based positional encodings ────────────────────────
+    # Both are wire-dependent: they must be recomputed when wires shuffle.
+    # The wire-shuffle path in training/evaluation.py refreshes these
+    # alongside (senders, receivers); see ``refresh_topology`` there.
+    if use_dist_pe:
+        # Forward edges only — directional BFS needs the DAG, not the symmetrized graph.
+        if all_forward_senders:
+            forward_senders_arr = jp.concatenate(all_forward_senders).astype(jp.int32)
+            forward_receivers_arr = jp.concatenate(all_forward_receivers).astype(jp.int32)
+        else:
+            forward_senders_arr = jp.array([], dtype=jp.int32)
+            forward_receivers_arr = jp.array([], dtype=jp.int32)
+        # Half the budget for each side so total matches the existing layer_pe size.
+        per_side_dim = circuit_hidden_dim // 2
+        # ``len(layer_sizes)`` iterations is always sufficient on a strict layered DAG
+        # (one relaxation step propagates one layer).
+        all_nodes["dist_pe"] = compute_dag_distance_pe(
+            forward_senders_arr,
+            forward_receivers_arr,
+            all_nodes["layer"],
+            n_node=n_node,
+            n_iterations=len(layer_sizes),
+            pe_dim=per_side_dim,
+            max_val=positional_encoding_max_val,
+        )
+
+    if use_rwse:
+        # RWSE on the bidirectional graph used by attention — captures the topology
+        # the message-passing layers actually traverse.
+        all_nodes["rwse"] = compute_rwse(
+            senders.astype(jp.int32),
+            receivers.astype(jp.int32),
+            n_node=n_node,
+            k=rwse_k,
+        )
+
     # Store globals as NamedTuple for consistent access across all models
     globals_tuple = GraphGlobals(
         loss=float(loss_value),
@@ -396,6 +446,62 @@ def compute_circuit_edges(
             receivers = jp.concatenate([receivers, jp.array(neighboring_receivers, dtype=jp.int32)])
 
     return senders.astype(jp.int32), receivers.astype(jp.int32)
+
+
+def refresh_wire_dependent_pe(
+    nodes: dict,
+    wires: list[jp.ndarray],
+    senders: jp.ndarray,
+    receivers: jp.ndarray,
+    layer_sizes: tuple,
+    arity: int,
+    positional_encoding_max_val: float = 10000.0,
+) -> dict:
+    """Recompute wire-dependent PE entries (``dist_pe``, ``rwse``) for a new wiring.
+
+    Mirrors the PE-computation in :func:`build_graph` exactly so that node
+    features can be reused while topology is refreshed mid-scan (e.g. after
+    a wire shuffle). Only refreshes keys that already exist in ``nodes`` —
+    if a PE was never built into the graph, the corresponding refresh is a
+    no-op. Returns a new dict; the input is not mutated.
+
+    Args:
+        nodes: Current node-feature dict (read-only).
+        wires: Updated wire list (one array per gate layer).
+        senders: Updated bidirectional senders (for RWSE).
+        receivers: Updated bidirectional receivers (for RWSE).
+        layer_sizes: Full topology tuple including input layer first.
+        arity: Number of inputs per gate.
+        positional_encoding_max_val: Frequency basis for ``dist_pe``. Must match
+            the value used at :func:`build_graph` time.
+
+    Returns:
+        New node-feature dict with refreshed PE entries.
+    """
+    new_nodes = dict(nodes)
+    n_node = nodes["layer"].shape[0]
+    if "dist_pe" in nodes:
+        fwd_s, fwd_r = compute_circuit_edges(
+            wires, layer_sizes, arity,
+            bidirectional_edges=False, neighboring_connections=False,
+        )
+        pe_dim_per_side = nodes["dist_pe"].shape[1] // 2
+        new_nodes["dist_pe"] = compute_dag_distance_pe(
+            fwd_s, fwd_r, nodes["layer"],
+            n_node=n_node,
+            n_iterations=len(layer_sizes),
+            pe_dim=pe_dim_per_side,
+            max_val=positional_encoding_max_val,
+        )
+    if "rwse" in nodes:
+        k = nodes["rwse"].shape[1]
+        new_nodes["rwse"] = compute_rwse(
+            senders.astype(jp.int32),
+            receivers.astype(jp.int32),
+            n_node=n_node,
+            k=k,
+        )
+    return new_nodes
 
 
 def _ensure_layered_mask(

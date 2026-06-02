@@ -13,7 +13,7 @@ num_layers: 4
 width_factor: 1
 layer_sizes: null  # Auto-generate if null
 
-circuit_hidden_dim: 16
+circuit_hidden_dim: 64
 
 # Initial logit distribution at circuit creation and on pool resets.
 #   soft_wires (default): round-robin identity passthrough + Gaussian noise.

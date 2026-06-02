@@ -4,8 +4,8 @@ defaults:
 
 # Large circuit topology. Task lives in ``cfg.tasks``.
 
-input_bits: 12
-output_bits: 12
+input_bits: 14
+output_bits: 14
 arity: 4
 num_layers: 3
 width_factor: 2

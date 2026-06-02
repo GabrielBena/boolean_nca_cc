@@ -3,7 +3,7 @@
 # Default parameters for experiment
 defaults:
   - model: gathered_attention  # Default model (gnn or self_attention or perceiver_attention)
-  - circuit: small  # Circuit topology only — size: small / mid / large
+  - circuit: large  # Circuit topology only — size: small / mid / large
   - tasks: reverse  # What the circuit should compute. Fixed: reverse / add /
                     # binary_multiply / identity / parity / text. Sampler: k_junta.
   - loss: bce  # Options: l2, l4, bce, bce_w3, focal, asym, focal_asym
@@ -27,10 +27,36 @@ wandb:
   group: null
   dir: null  # Output directory (null means use current working directory)
 
-# Graph configuration
+# Graph configuration — single source of truth for all node-feature toggles.
+# Model configs interpolate from here via ${graph.*}, so the build_graph computation
+# and the model's feature_proj input dim always agree.
 graph:
-  neighboring_connections: false  # Enable neighboring connections between adjacent gates in the same layer
-  bidirectional_edges: true  # Create edges in both forward and backward directions
+  # --- Topology ---
+  neighboring_connections: false  # Add intra-layer adjacent edges
+  bidirectional_edges: true       # Mirror forward wires as backward edges
+
+  # --- Per-node features (model consumes if flag is on) ---
+  # All are stored in graph.nodes; the model's ``extract_node_features`` decides
+  # which to concatenate into the attention input. Per-model overrides are still
+  # possible (e.g. perceiver disables use_node_loss because it gets per-sample
+  # residuals through cross-attention).
+  use_node_loss: true              # Per-node scalar loss as a feature
+
+  # Sinusoidal layer-position PEs — always emitted by build_graph (cheap).
+  use_layer_PE: false               # Normalised depth-fraction PE (the brittle one)
+  use_intra_layer_PE: false        # Absolute gate index within a layer (deprecated for random wirings)
+
+  # Graph-derived PEs — only computed by build_graph when their flag is on
+  # (more expensive than the layer PEs).
+  # dist_pe: sinusoidal encoding of (dist_from_input, dist_to_output) on the
+  # directed DAG. Absolute, directional, scale-free across depth changes —
+  # the principled fix for the normalised-depth brittleness.
+  use_dist_pe: true
+  # rwse: Random Walk Structural Encoding. Per-node K-vector of return
+  # probabilities on the bidirectional graph. Pure topology signature that
+  # disambiguates gates with identical graph distances.
+  use_rwse: true
+  rwse_k: 8                        # RWSE walk length / feature dim
 
 # Training parameters
 training:
@@ -38,17 +64,17 @@ training:
   # Diversity will always be fully random for random mode. This controls number of different wirings for fixed.
   initial_diversity: 1
   # INNER LOOP
-  n_message_steps: 5  # Number of message passing steps per training iteration
+  n_message_steps: 10  # Number of message passing steps per training iteration
   # DATA FRACTION
-  data_per_batch: null  # Number of data points per batch (null means use all data)
+  data_per_batch: 128  # Number of data points per batch (null means use all data)
   # RANDOM LOSS STEP
   random_loss_step: false  # Use random message passing step for loss computation
   random_loss_step_min: 2
   use_beta_loss_step: false  # Use beta distribution for random loss step (varies from early to late steps through training)
   # TRAIN/TEST SPLIT
-  test_num: 0.1  # Fraction/absolute number of data to use for testing (from all input combinations)
+  test_num: 256  # Fraction/absolute number of data to use for testing (from all input combinations)
   # BATCH SIZE
-  meta_batch_size: 128 
+  meta_batch_size: 256
   
   # MULTI-GPU DATA PARALLELISM
   # Distributes batch across GPUs, each device processes batch_size/num_devices circuits
@@ -58,7 +84,7 @@ training:
     num_devices: null  # Number of devices to use (null = all available)
   
   # OPTIMIZATION
-  learning_rate: 3e-4
+  learning_rate: 2e-4
   weight_decay: 1e-5
   # LEARNING RATE SCHEDULER
   # Options: "constant", "exponential", "cosine", "linear_warmup", "adaptive", "reduce_on_plateau"
@@ -100,7 +126,7 @@ training:
 
   # NUMBER OF EPOCHS
   epochs: null
-  epochs_power_of_2: 16 # 2^n
+  epochs_power_of_2: 19 # 2^n
   # USE SCAN
   use_scan: true
   # GRADIENT CHECKPOINTING (remat)
@@ -125,7 +151,7 @@ pool:
   # Automatic parameter computation based on target expected updates
   # If expected_updates is specified and some parameters above are null, 
   # the system will automatically compute the missing parameter(s)
-  expected_updates: 128  # Target expected updates per circuit (e.g., 50.0)
+  expected_updates: 256  # Target expected updates per circuit (e.g., 50.0)
   
   # Genetic mutation parameters
   mutation_rate: 1e-3 # For genetic mutation rate
@@ -170,7 +196,7 @@ damage:
   # Compute loss/accuracy right after damage but before the NCA runs.
   # Measures the raw damage impact, useful for quantifying NCA repair benefit.
   # Only adds overhead during evaluation (one extra circuit execution per step).
-  compute_no_repair_baseline: true
+  compute_no_repair_baseline: false
 
   # === SHARED ===
   faulty_logit_value: -10.0  # Large negative value -> sigmoid outputs ~0
@@ -223,13 +249,22 @@ eval:
   inner_steps: 256
   log_stepwise: true  # Whether to log detailed step-by-step metrics to wandb
   # batch_size_in: ${training.meta_batch_size}  # Batch size for IN-distribution evaluation (None means use initial_diversity)
-  batch_size_in: 64  # Batch size for IN-distribution evaluation (None means use initial_diversity)
+  batch_size_in: 32  # Batch size for IN-distribution evaluation (None means use initial_diversity)
   # batch_size_out: ${training.meta_batch_size}  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
-  batch_size_out: 64  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
+  batch_size_out: 32  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
   log_pool_scatter: true
   do_ood_evaluation: null # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
   get_all_wirings: true # Whether to get all wirings (True) or a subset (False)
-  
+  # Memory: when false (default), periodic eval drops the heavy
+  # [batch, n_steps, ...graph] tensor + per-circuit per-step metric arrays
+  # from the returned step_metrics. The cheap per-step damage fraction and
+  # batch-averaged stepwise metrics are still kept, so the stepwise wandb
+  # plot still renders the damage-fraction overlay correctly. Flip to true
+  # if you want notebook-style access to step_metrics["graphs"] /
+  # step_metrics["all_metrics"] during training (rarely needed; the OOM
+  # fix relies on this defaulting to false).
+  keep_full_graphs: false
+
 # Early stopping based on accuracy
 stop_accuracy:
   enabled: true

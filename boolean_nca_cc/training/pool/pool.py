@@ -23,10 +23,46 @@ from flax import struct
 from jax import Array
 
 from boolean_nca_cc.circuits.model import gen_circuit
-from boolean_nca_cc.utils.configured_graph_builder import configured_build_graph as build_graph
+from boolean_nca_cc.utils.configured_graph_builder import (
+    configured_build_graph as build_graph,
+    get_configured_pe_flags,
+)
 from boolean_nca_cc.utils.extraction import extract_logits_from_graph
+from boolean_nca_cc.utils.positional_encoding import compute_rwse_batched
 
 PyTree = Any
+
+
+def _attach_pool_rwse(graphs):
+    """Attach RWSE to a batched pool graph using a memory-flat batched pass.
+
+    RWSE is computed OUTSIDE the ``vmap`` over pool slots: naively vmapping the
+    dense ``[n_node, n_node]`` random-walk powers across a 4096-slot pool holds
+    gigabytes live at once. We instead build the pool graphs with ``use_rwse=False``
+    (so the heavy step is skipped inside the vmap) and recompute RWSE here via
+    :func:`compute_rwse_batched`, whose chunked ``lax.map`` bounds peak memory by
+    ``chunk_size × n_node²`` regardless of pool size. ``dist_pe`` and edges stay
+    vmapped in ``build_graph`` — they are cheap (no dense ``n_node²``).
+
+    No-op when RWSE is not enabled in the configured build_graph. Reads the flag
+    and ``k`` from :func:`get_configured_pe_flags` so it stays consistent with
+    whatever ``train.py`` configured.
+
+    Args:
+        graphs: Batched ``jraph.GraphsTuple`` with leading pool axis. Must already
+            carry ``senders``/``receivers`` (bidirectional, as ``build_graph`` emits).
+
+    Returns:
+        The same graph with ``nodes["rwse"]`` populated (or unchanged if disabled).
+    """
+    pe_flags = get_configured_pe_flags()
+    if not pe_flags["use_rwse"]:
+        return graphs
+    n_node = int(graphs.nodes["layer"].shape[1])  # [pool, n_node]
+    rwse = compute_rwse_batched(
+        graphs.senders, graphs.receivers, n_node=n_node, k=pe_flags["rwse_k"]
+    )
+    return graphs._replace(nodes={**graphs.nodes, "rwse": rwse})
 
 
 class GraphPool(struct.PyTreeNode):
@@ -600,7 +636,9 @@ class GraphPool(struct.PyTreeNode):
         new_flat_masks = batch_layered_to_flat_mask(layered_knockout_masks)
         combined_masks = current_masks * new_flat_masks  # Both must be 1.0 for gate to be active
 
-        # Build new graphs with updated damage
+        # Build new graphs with updated damage.
+        # use_rwse=False inside the vmap; RWSE is reattached batched (memory-flat)
+        # via _attach_pool_rwse below. dist_pe stays vmapped (cheap).
         vmap_build_graph = jax.vmap(
             lambda logit, wires, mask: build_graph(
                 logits=logit,
@@ -612,9 +650,11 @@ class GraphPool(struct.PyTreeNode):
                 update_steps=0,
                 gate_knockout_mask=mask,
                 faulty_logit_value=faulty_value,
+                use_rwse=False,
             )
         )
         modified_graphs = vmap_build_graph(modified_logits, selected_wires, combined_masks)
+        modified_graphs = _attach_pool_rwse(modified_graphs)
 
         # update graphs so that they keep their current loss value and update steps
         modified_graphs = modified_graphs._replace(
@@ -762,7 +802,10 @@ def initialize_graph_pool(
     else:
         all_gate_masks = None
 
-    # Build graphs
+    # Build graphs.
+    # use_rwse=False inside the vmap; RWSE is reattached batched (memory-flat) via
+    # _attach_pool_rwse below — naively vmapping its dense n_node² powers across the
+    # full pool would hold gigabytes live. dist_pe stays vmapped (cheap, no n_node²).
     if initialize_gate_masks:
         vmap_build_graph = jax.vmap(
             lambda logit, wires, gate_mask: build_graph(
@@ -775,6 +818,7 @@ def initialize_graph_pool(
                 update_steps=0,
                 gate_knockout_mask=gate_mask,
                 faulty_logit_value=-10.0,
+                use_rwse=False,
             )
         )
         graphs = vmap_build_graph(all_logits, all_wires, all_gate_masks)
@@ -788,9 +832,11 @@ def initialize_graph_pool(
                 circuit_hidden_dim=circuit_hidden_dim,
                 loss_value=loss_value,
                 update_steps=0,
+                use_rwse=False,
             )
         )
         graphs = vmap_build_graph(all_logits, all_wires)
+    graphs = _attach_pool_rwse(graphs)
 
     # Initialize counters
     reset_counter = jp.zeros(pool_size, dtype=jp.int32)

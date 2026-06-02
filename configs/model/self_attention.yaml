@@ -21,11 +21,11 @@ warm_start: False
 num_self_attn_layers: 1
 use_attention_mask: true
 
-# Node loss (adds one extra feature to the node features)
-use_node_loss: true
-
-# Positional encodings
-# layer_PE: normalized depth fraction [0,1] — scale-free across circuit depths
-# intra_layer_PE: absolute gate index within layer — breaks scale-freedom for random wiring
-use_intra_layer_PE: false
-use_layer_PE: true
+# Per-node features and PEs — all sourced from cfg.graph (single source of truth).
+# Override here per-model if a specific model needs a different setting.
+use_node_loss: ${graph.use_node_loss}
+use_intra_layer_PE: ${graph.use_intra_layer_PE}
+use_layer_PE: ${graph.use_layer_PE}
+use_dist_pe: ${graph.use_dist_pe}
+use_rwse: ${graph.use_rwse}
+rwse_k: ${graph.rwse_k}

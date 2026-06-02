@@ -8,10 +8,10 @@ input_bits: 10
 output_bits: 10
 arity: 4
 num_layers: 3
-width_factor: 2
+width_factor: 1.5
 layer_sizes: null  # Auto-generate if null
 
-circuit_hidden_dim: 32
+circuit_hidden_dim: 64
 
 init_logits: soft_wires
 random_init_scale: 1.0

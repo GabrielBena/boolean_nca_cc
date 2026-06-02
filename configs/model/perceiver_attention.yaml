@@ -11,7 +11,17 @@ type: "perceiver_attention"
 # Cross-attention (gates query data)
 num_cross_attn_layers: 1
 use_input_cross_attention: true   # Cross-attend to input bit patterns
-use_output_cross_attention: true  # Cross-attend to output residuals
+use_output_cross_attention: true  # Cross-attend to output side (see signal below)
+# What each output cross-attention token carries:
+#   "target_and_pred" (default) — stack [y, y_hat] per output bit (2 channels).
+#                                 The target y is static across recurrent steps,
+#                                 giving the model a stable task reference; the
+#                                 residual y - y_hat is a trivial linear combo
+#                                 the encoder learns immediately.
+#   "residuals"                 — original behavior: single scalar residual.
+#                                 Self-quenches at convergence but no absolute
+#                                 target reference.
+output_cross_attn_signal: "target_and_pred"
 token_pe_dim: 16                   # Sinusoidal PE dimension for sample/bit positions
                                   # Enables linking samples across input/output cross-attention
 
@@ -19,7 +29,7 @@ token_pe_dim: 16                   # Sinusoidal PE dimension for sample/bit posi
 # Reduces cross-attention cost from O(N_gates * N_samples * N_bits) to O(N_gates * k * N_bits).
 # Promotes incremental in-context learning: the model integrates data over many recurrent steps
 # rather than seeing everything at once. Set to null to attend to all samples per step.
-samples_per_step: null
+samples_per_step: 64
 
 # Structural constraints. The two sides are intentionally ASYMMETRIC, reflecting
 # the asymmetric structure of the circuit graph:
@@ -49,8 +59,11 @@ restrict_output_cross_attn_to_last_gate_layer: true
 #              to data is unchanged either way (no graph topology to exploit there).
 self_attn_kind: gathered
 # Only used when self_attn_kind == "gathered". Must be >= max gate degree
-# (typically arity + fan-out + 1 self-loop).
+# (typically arity + fan-out + 1 self-loop) for central gates
+# (tipically arity * 2 * width_factor + 1) for input gates 
 # See max_neighbors docs in gathered_attention.yaml for details.
 max_neighbors: 10
 
+# Perceiver gets per-sample residuals via output cross-attention, so the per-node
+# scalar loss is redundant. Override the graph-level default (true) for this model only.
 use_node_loss: false

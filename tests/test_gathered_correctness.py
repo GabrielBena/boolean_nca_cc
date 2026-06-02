@@ -416,6 +416,10 @@ def _build_test_perceiver_for_slicing(arity=4, input_n=8, output_n=8, layer_n=3,
         restrict_output_cross_attn_to_last_gate_layer=True,
         input_layer_size=input_layer_size,
         output_layer_size=output_layer_size,
+        # Slicing equivalence is orthogonal to the output signal format;
+        # use the single-channel residual path to keep the hand-rolled
+        # cross-attn reconstruction below in sync with the model.
+        output_cross_attn_signal="residuals",
     )
     layer_indices = graph.nodes["layer"]
     max_layer = int(jp.max(layer_indices))

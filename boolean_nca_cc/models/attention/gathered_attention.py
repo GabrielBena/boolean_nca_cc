@@ -58,6 +58,9 @@ class CircuitGatheredAttention(nnx.Module):
         warm_start: bool = True,
         use_intra_layer_PE: bool = False,
         use_layer_PE: bool = True,
+        use_dist_pe: bool = False,
+        use_rwse: bool = False,
+        rwse_k: int = 8,
         # Accepted from self_attention.yaml defaults (ignored — not used by this model)
         num_self_attn_layers: int = 1,
         dropout_rate: float = 0.0,
@@ -85,6 +88,11 @@ class CircuitGatheredAttention(nnx.Module):
             warm_start: Whether to use warm start for ReZero
             use_intra_layer_PE: Whether to include intra-layer positional encodings
             use_layer_PE: Whether to include layer depth positional encodings
+            use_dist_pe: Append ``dist_pe`` (directed-DAG distance PE). Requires
+                ``build_graph(..., use_dist_pe=True)``.
+            use_rwse: Append ``rwse`` (Random Walk Structural Encoding). Requires
+                ``build_graph(..., use_rwse=True)``.
+            rwse_k: RWSE walk length / per-node feature dim. Must match graph build setting.
             num_self_attn_layers: Ignored (absorbed from self_attention config)
             dropout_rate: Ignored (absorbed from self_attention config)
             n_node: Ignored (absorbed from self_attention config)
@@ -100,6 +108,9 @@ class CircuitGatheredAttention(nnx.Module):
         self.use_node_loss = use_node_loss
         self.use_intra_layer_PE = use_intra_layer_PE
         self.use_layer_PE = use_layer_PE
+        self.use_dist_pe = use_dist_pe
+        self.use_rwse = use_rwse
+        self.rwse_k = int(rwse_k)
 
         if mlp_dim is None:
             mlp_dim = attention_dim * mlp_dim_multiplier
@@ -115,6 +126,10 @@ class CircuitGatheredAttention(nnx.Module):
             input_feature_dim += circuit_hidden_dim
         if use_layer_PE:
             input_feature_dim += circuit_hidden_dim
+        if use_dist_pe:
+            input_feature_dim += 2 * (circuit_hidden_dim // 2)
+        if use_rwse:
+            input_feature_dim += self.rwse_k
         if use_node_loss:
             input_feature_dim += 1
 
@@ -186,7 +201,12 @@ class CircuitGatheredAttention(nnx.Module):
 
         # --- Extract & project features ---
         features = extract_node_features(
-            nodes, self.use_node_loss, self.use_intra_layer_PE, self.use_layer_PE
+            nodes,
+            self.use_node_loss,
+            self.use_intra_layer_PE,
+            self.use_layer_PE,
+            self.use_dist_pe,
+            self.use_rwse,
         )
         x = self.feature_proj(self.input_norm(features))  # [N, D]
 

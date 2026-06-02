@@ -407,9 +407,13 @@ def build_layer_sizes(cfg: DictConfig, width_factor: float | None = None) -> lis
 def configure_global_graph_builder(cfg: DictConfig) -> None:
     """Configure the global graph builder once per session, like train.py does."""
     configure_build_graph(
-        neighboring_connections=bool(cfg.graph.neighboring_connections),
-        bidirectional_edges=bool(cfg.graph.bidirectional_edges),
+        neighboring_connections=cfg.graph.neighboring_connections,
+        bidirectional_edges=cfg.graph.bidirectional_edges,
+        use_dist_pe=cfg.graph.get("use_dist_pe", False),
+        use_rwse=cfg.graph.get("use_rwse", False),
+        rwse_k=cfg.graph.get("rwse_k", 8),
     )
+
 
 
 def initialize_demo_pool(

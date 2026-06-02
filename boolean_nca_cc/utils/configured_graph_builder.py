@@ -64,6 +64,26 @@ def get_configured_build_graph() -> Callable:
     return _configured_build_graph
 
 
+def get_configured_pe_flags() -> dict:
+    """Return the graph-PE / node-feature flags baked into the configured build_graph.
+
+    Reads them off the stored ``functools.partial`` keywords so callers (e.g.
+    pool initialisation, build-time assertions) can introspect what
+    ``build_graph`` will emit without re-plumbing config. Falls back to
+    ``build_graph``'s own defaults for any flag not explicitly configured.
+
+    Returns:
+        Dict with keys ``use_dist_pe`` (bool), ``use_rwse`` (bool), ``rwse_k`` (int).
+    """
+    fn = get_configured_build_graph()
+    kw = getattr(fn, "keywords", {}) or {}
+    return {
+        "use_dist_pe": kw.get("use_dist_pe", False),
+        "use_rwse": kw.get("use_rwse", False),
+        "rwse_k": kw.get("rwse_k", 8),
+    }
+
+
 def is_configured() -> bool:
     """
     Check if build_graph has been explicitly configured.

@@ -42,7 +42,7 @@ from boolean_nca_cc.utils import (
     update_output_node_from_residuals,
 )
 from boolean_nca_cc.utils.configured_graph_builder import configured_build_graph as build_graph
-from boolean_nca_cc.utils.graph_builder import compute_circuit_edges
+from boolean_nca_cc.utils.graph_builder import compute_circuit_edges, refresh_wire_dependent_pe
 
 
 class StepResult(NamedTuple):
@@ -311,12 +311,11 @@ def _prepare_model_fn(
         # skip slicing and fall through to the dense+gate path.
         input_layer_idx = None
         output_layer_idx = None
-        if (
-            model.restrict_input_cross_attn_to_input_layer
-            and model.input_layer_size is not None
-        ):
+        if model.restrict_input_cross_attn_to_input_layer and model.input_layer_size is not None:
             input_layer_idx = _layer_node_indices(
-                layer_indices, target_layer=0, size=model.input_layer_size,
+                layer_indices,
+                target_layer=0,
+                size=model.input_layer_size,
             )
         if (
             model.restrict_output_cross_attn_to_last_gate_layer
@@ -326,7 +325,9 @@ def _prepare_model_fn(
             # size and rely on the layer-index pattern being identical across
             # all circuits (it is — layer structure is wire-independent).
             output_layer_idx = _layer_node_indices(
-                layer_indices, target_layer=max_layer, size=model.output_layer_size,
+                layer_indices,
+                target_layer=max_layer,
+                size=model.output_layer_size,
             )
 
         # output_gate kept as a fallback (used only if slicing indices are None).
@@ -836,7 +837,9 @@ def run_model_scan_with_loss(
                 _perceiver_input_gate = model._create_output_gate(_layer_indices, allowed_layer=0)
                 if model.input_layer_size is not None:
                     _perceiver_input_layer_idx = _layer_node_indices(
-                        _layer_indices, target_layer=0, size=model.input_layer_size,
+                        _layer_indices,
+                        target_layer=0,
+                        size=model.input_layer_size,
                     )
             if model.restrict_output_cross_attn_to_last_gate_layer:
                 _perceiver_output_gate = model._create_output_gate(
@@ -844,7 +847,9 @@ def run_model_scan_with_loss(
                 )
                 if model.output_layer_size is not None:
                     _perceiver_output_layer_idx = _layer_node_indices(
-                        _layer_indices, target_layer=_max_layer, size=model.output_layer_size,
+                        _layer_indices,
+                        target_layer=_max_layer,
+                        size=model.output_layer_size,
                     )
 
         initial_topology_cache = _compute_topology_cache(
@@ -852,7 +857,7 @@ def run_model_scan_with_loss(
         )
 
         def refresh_topology(current_graph, current_wires):
-            """Recompute senders/receivers and topology cache from new wires."""
+            """Recompute senders/receivers, wire-dependent node PEs, and topology cache."""
             new_senders, new_receivers = compute_circuit_edges(
                 current_wires,
                 layer_sizes,
@@ -860,15 +865,32 @@ def run_model_scan_with_loss(
                 bidirectional_edges=bidirectional_edges,
                 neighboring_connections=neighboring_connections,
             )
-            new_graph = current_graph._replace(senders=new_senders, receivers=new_receivers)
+            # Refresh dist_pe / rwse if they were built into the graph. ``refresh_wire_dependent_pe``
+            # is a no-op for keys that aren't present, so this stays correct when those PEs are
+            # disabled in the build config.
+            new_nodes = refresh_wire_dependent_pe(
+                current_graph.nodes,
+                current_wires,
+                new_senders,
+                new_receivers,
+                layer_sizes,
+                _refresh_arity,
+            )
+            new_graph = current_graph._replace(
+                nodes=new_nodes, senders=new_senders, receivers=new_receivers
+            )
             new_cache = _compute_topology_cache(model, new_senders, new_receivers, _n_node_static)
             return new_graph, new_cache
 
         def _apply_model_dynamic(g, cache):
             return _apply_model_with_cache(
-                model, g, cache,
-                _perceiver_input_gate, _perceiver_output_gate,
-                _perceiver_input_layer_idx, _perceiver_output_layer_idx,
+                model,
+                g,
+                cache,
+                _perceiver_input_gate,
+                _perceiver_output_gate,
+                _perceiver_input_layer_idx,
+                _perceiver_output_layer_idx,
             )
 
         apply_model_remat = (
@@ -878,9 +900,7 @@ def run_model_scan_with_loss(
         def detect_wire_change(old_wires, new_wires):
             """Cheap per-element comparison summed across layers. ``True`` if any wire changed."""
             return jp.any(
-                jp.stack(
-                    [jp.any(o != n) for o, n in zip(old_wires, new_wires, strict=True)]
-                )
+                jp.stack([jp.any(o != n) for o, n in zip(old_wires, new_wires, strict=True)])
             )
     else:
         initial_topology_cache = None
@@ -1610,6 +1630,17 @@ def evaluate_model_stepwise_batched(
     # Chunking and details
     chunk_size: int | None = None,
     return_first_circuit_details: bool = False,
+    # Memory: when False, drop the heavy per-step batched ``graphs`` GraphsTuple
+    # and ``all_metrics`` (per-circuit per-step arrays) from the returned
+    # ``step_metrics``. The cheap ``damaged_fraction_per_step`` is *always*
+    # included so stepwise plotting/damage overlays keep working. Default
+    # ``True`` preserves backward compatibility for direct callers (notebooks
+    # at trained_models.ipynb / random_boolean_nets.ipynb index
+    # ``step_metrics["all_metrics"]`` and ``step_metrics["graphs"]``). The
+    # periodic-eval path in train_loop.py flips this to False to keep the
+    # JAX BFC pool from being pinned by ``[batch, n_steps, ...graph_shape]``
+    # tensors across the three eval scenarios.
+    keep_full_graphs: bool = True,
     verbose: bool = False,
 ) -> tuple[jp.ndarray, dict]:
     """
@@ -1662,8 +1693,7 @@ def evaluate_model_stepwise_batched(
     y_is_per_circuit = y_data.ndim == 3
     if y_is_per_circuit and y_data.shape[0] != batch_size:
         raise ValueError(
-            f"per-circuit y_data has leading dim {y_data.shape[0]} but "
-            f"batch_size is {batch_size}"
+            f"per-circuit y_data has leading dim {y_data.shape[0]} but batch_size is {batch_size}"
         )
 
     # Handle chunking for large batches
@@ -1699,6 +1729,7 @@ def evaluate_model_stepwise_batched(
                 wire_shuffle_fraction=wire_shuffle_fraction,
                 chunk_size=None,  # Don't recurse further
                 return_first_circuit_details=return_first_circuit_details and (i == 0),
+                keep_full_graphs=keep_full_graphs,
             )
             chunks.append((end - i, chunk_final_graphs, chunk_step_metrics))
         # Weighted average across chunks
@@ -1719,6 +1750,13 @@ def evaluate_model_stepwise_batched(
                 step_metrics[k] = [
                     sum(w * r[k][s] for w, r in chunks) / total for s in range(n_message_steps)
                 ]
+        # ``damaged_fraction_per_step`` is a per-step batch-averaged scalar list
+        # (cheap), so we keep it across chunks regardless of ``keep_full_graphs``.
+        if "damaged_fraction_per_step" in chunks[0][2]:
+            step_metrics["damaged_fraction_per_step"] = [
+                sum(w * r["damaged_fraction_per_step"][s] for w, r in chunks) / total
+                for s in range(n_message_steps)
+            ]
         if "first_circuit_results" in chunks[0][1]:
             step_metrics["first_circuit_results"] = chunks[0][1]["first_circuit_results"]
         return final_graphs, step_metrics
@@ -1797,53 +1835,92 @@ def evaluate_model_stepwise_batched(
     final_graphs, batch_step_outputs = nnx.vmap(
         run_single_scan, in_axes=(0, 0, 0, 0, 0, 0, y_in_axes)
     )(
-        batch_graphs, batch_wires, batch_logits, damage_keys, permanent_damage,
-        wire_shuffle_keys, y_data,
+        batch_graphs,
+        batch_wires,
+        batch_logits,
+        damage_keys,
+        permanent_damage,
+        wire_shuffle_keys,
+        y_data,
     )
 
     # Extract and average metrics
     all_batch_graphs, losses, _, aux_data = batch_step_outputs
 
-    # Average across batch dimension
+    # ── Host-side averaging in a single device→host transfer per metric ──
+    # losses / aux_data["..."] are [batch, n_steps] (vmap over scan). The old
+    # form did `n_steps` separate `float(jp.mean(x[:, i]))` calls, each blocking
+    # on the device and allocating a tiny output buffer — 1024 such calls per
+    # eval, which is both slow and pressures the BFC allocator. One axis-mean +
+    # one `.tolist()` is functionally identical, only cheaper.
+    def _mean_to_list(arr):
+        return jp.mean(arr, axis=0).tolist()
+
     step_metrics = {
         "step": list(range(1, n_message_steps + 1)),
-        "loss": [float(jp.mean(losses[:, i])) for i in range(n_message_steps)],
-        "hard_loss": [float(jp.mean(aux_data["hard_loss"][:, i])) for i in range(n_message_steps)],
-        "accuracy": [float(jp.mean(aux_data["accuracy"][:, i])) for i in range(n_message_steps)],
-        "hard_accuracy": [
-            float(jp.mean(aux_data["hard_accuracy"][:, i])) for i in range(n_message_steps)
-        ],
-        # Vmapped graphs: size [batch_size, n_steps, ...graph_shape...]
-        "graphs": all_batch_graphs,
-        "all_metrics": {
-            "loss": jp.stack(losses),
-            "hard_loss": jp.stack(aux_data["hard_loss"]),
-            "accuracy": jp.stack(aux_data["accuracy"]),
-            "hard_accuracy": jp.stack(aux_data["hard_accuracy"]),
-        },
+        "loss": _mean_to_list(losses),
+        "hard_loss": _mean_to_list(aux_data["hard_loss"]),
+        "accuracy": _mean_to_list(aux_data["accuracy"]),
+        "hard_accuracy": _mean_to_list(aux_data["hard_accuracy"]),
     }
+
+    # Pre-compute the cheap per-step damage fraction here (it only reads
+    # ``nodes["gate_knockout_mask"]`` + ``nodes["layer"]``), so the heavy
+    # ``all_batch_graphs`` GraphsTuple can be dropped when not requested while
+    # the stepwise damage-overlay plot still has data to render. ``.tolist()``
+    # materialises to host so the source can be GC'd.
+    step_metrics["damaged_fraction_per_step"] = get_fraction_damaged_gates(
+        all_batch_graphs
+    ).tolist()
+
+    # ── Heavy, per-circuit-per-step tensors: gated by ``keep_full_graphs`` ──
+    # Default ``True`` preserves backward compat for direct callers (notebooks
+    # rely on ``step_metrics["all_metrics"][metric][b, t]``). The periodic-eval
+    # path in train_loop.py flips this to ``False`` to avoid pinning
+    # ``[batch, n_steps, ...graph_shape]`` tensors across the three eval
+    # scenarios (out_test undamaged → damaged → discrete_damaged); see also
+    # the memory audit comment in the function docstring.
+    if keep_full_graphs:
+        # Vmapped graphs: size [batch_size, n_steps, ...graph_shape...]
+        step_metrics["graphs"] = all_batch_graphs
+        # Per-circuit per-step metric tensors. ``losses`` / ``aux_data[...]``
+        # are already stacked along the scan axis by ``jax.lax.scan`` and
+        # vmap'd over the batch axis, so they are already [batch, n_steps];
+        # the prior ``jp.stack(...)`` was a no-op-shape-wise but allocated
+        # an extra buffer.
+        step_metrics["all_metrics"] = {
+            "loss": losses,
+            "hard_loss": aux_data["hard_loss"],
+            "accuracy": aux_data["accuracy"],
+            "hard_accuracy": aux_data["hard_accuracy"],
+        }
+    else:
+        # Sentinel so callers can ``result.get("graphs") is None`` check.
+        step_metrics["graphs"] = None
+        step_metrics["all_metrics"] = None
 
     # Include no-repair baseline metrics if computed
     if compute_no_repair_baseline and "no_repair_loss" in aux_data:
-        step_metrics["no_repair_loss"] = [
-            float(jp.mean(aux_data["no_repair_loss"][:, i])) for i in range(n_message_steps)
-        ]
-        step_metrics["no_repair_hard_loss"] = [
-            float(jp.mean(aux_data["no_repair_hard_loss"][:, i])) for i in range(n_message_steps)
-        ]
-        step_metrics["no_repair_accuracy"] = [
-            float(jp.mean(aux_data["no_repair_accuracy"][:, i])) for i in range(n_message_steps)
-        ]
-        step_metrics["no_repair_hard_accuracy"] = [
-            float(jp.mean(aux_data["no_repair_hard_accuracy"][:, i]))
-            for i in range(n_message_steps)
-        ]
+        step_metrics["no_repair_loss"] = _mean_to_list(aux_data["no_repair_loss"])
+        step_metrics["no_repair_hard_loss"] = _mean_to_list(aux_data["no_repair_hard_loss"])
+        step_metrics["no_repair_accuracy"] = _mean_to_list(aux_data["no_repair_accuracy"])
+        step_metrics["no_repair_hard_accuracy"] = _mean_to_list(aux_data["no_repair_hard_accuracy"])
 
-    # Optionally extract detailed results for first circuit (for visualization)
+    # Optionally extract detailed results for first circuit (for visualization).
+    # Must run before the explicit ``del`` below so ``batch_step_outputs`` is
+    # still alive.
     if return_first_circuit_details:
         step_metrics["first_circuit_results"] = _extract_single_circuit_step_results(
             batch_step_outputs, circuit_idx=0, n_message_steps=n_message_steps
         )
+
+    # When the caller doesn't want the heavy tensors, explicitly drop our
+    # references so refcounting can release the underlying device buffers
+    # before this function returns (Python wouldn't otherwise free them
+    # until the local scope exits, which keeps them alive across
+    # ``return final_graphs, step_metrics`` in some interpreters).
+    if not keep_full_graphs:
+        del batch_step_outputs, all_batch_graphs, losses, aux_data
 
     if verbose:
         # Print summary if tqdm was requested (for compatibility)
