@@ -25,10 +25,11 @@
       "task": "reverse",
       "recipe": "random_damage",
       "label": "Random wires \u00b7 damage-trained",
-      "description": "Regime III, random wiring + damage. \u00a74.3 fig. 4.",
+      "description": "Regime III, random wiring + damage. \u00a74.3 fig. 4. (Best raw acc 0.93/0.89; curated perfect-first topology pool.)",
       "runId": "1u5ssulx",
       "weightsPath": "reverse_random_damage.json",
-      "bootstrapPath": "reverse_random_damage_demo.json"
+      "bootstrapPath": "reverse_random_damage_demo.json",
+      "topologyPoolPath": "reverse_random_topology_pool.json"
     }
   ]
 }

@@ -1,0 +1,30 @@
+# BETA round-trip test for SSH-Slurm on S3IT.
+# Tiny epochs, REAL batch sizes (so VRAM footprint is representative).
+# Goal: validate submit -> env activate -> GPU -> train -> results stream back
+# to /mnt -> clean logs -> /loop monitoring. NOT a science run.
+defaults:
+  - override hydra/launcher: basic
+
+sweep:
+  grid:
+    seed: [0]
+    circuit: [twelve]
+    tasks: [reverse]
+
+    model: [gathered_attention]
+    model.attention_dim: [128]
+
+    training.wiring_mode: [fixed, random]   # 2 tasks
+    training.n_message_steps: [5]
+    # 2048 epochs at the REAL eval cadence (eval.interval=1024) -> evals fire at
+    # epoch 0, 1024, 2048: exercises the SECOND eval (the OOM-prone path) and crosses
+    # checkpoint.interval=1031, while keeping timing representative for 2^18 extrapolation.
+    training.epochs_power_of_2: [11]
+    training.meta_batch_size: [128]          # ≤32GB target; beta measures real VRAM
+    training.data_per_batch: [256]
+
+    graph.use_dist_pe: [true]
+    graph.use_rwse: [true]
+    graph.use_layer_PE: [false]
+
+    damage.enabled: [false]

@@ -157,6 +157,21 @@ def _subsample_middle(
     return np.ascontiguousarray(x_full[sl]), np.ascontiguousarray(y_full[sl])
 
 
+def _subsample_random(
+    x_full: np.ndarray, y_full: np.ndarray, n_cases: int, seed: int = 0
+) -> tuple[np.ndarray, np.ndarray]:
+    """Pick ``n_cases`` UNIFORMLY-RANDOM rows. Unlike ``_subsample_middle`` this
+    keeps the batch maximally diverse, which keeps the per-output-node residual
+    ``r_i`` (a TMT feature) informative — a sequential middle slice leaves the
+    high-order output bits near-constant and starves that signal (the
+    2026-06-03 residual-starvation finding)."""
+    full = x_full.shape[0]
+    if n_cases >= full:
+        return x_full, y_full
+    idx = np.sort(np.random.default_rng(seed).permutation(full)[:n_cases])
+    return np.ascontiguousarray(x_full[idx]), np.ascontiguousarray(y_full[idx])
+
+
 def record_for_model(
     weights: "TMTWeights",
     cfg: "DictConfig",
@@ -170,6 +185,7 @@ def record_for_model(
     text: str = "Welcome to Self Organising Circuits! The Future is Now!",
     n_cases: int = 0,
     render_width: int | None = None,
+    subsample: str = "middle",
 ) -> None:
     """Core record logic — callable from export_gallery or main().
 
@@ -265,9 +281,12 @@ def record_for_model(
         x_np = to_np(x_full)
         y_np = to_np(y_full)
         if 0 < n_cases < case_n:
-            x_np, y_np = _subsample_middle(x_np, y_np, n_cases)
+            if subsample == "random":
+                x_np, y_np = _subsample_random(x_np, y_np, n_cases, seed=seed)
+            else:
+                x_np, y_np = _subsample_middle(x_np, y_np, n_cases)
             case_n = x_np.shape[0]
-            print(f"  task-style: sequential (middle subsample, n_cases={case_n})")
+            print(f"  task-style: sequential ({subsample} subsample, n_cases={case_n})")
         else:
             print(f"  task-style: sequential (full, n_cases={case_n})")
 

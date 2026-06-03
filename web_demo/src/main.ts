@@ -15,7 +15,7 @@
  * on hard predictions).
  */
 
-import { Controller, type ControllerSnapshot } from "./controller";
+import { Controller, type ControllerSnapshot, type DisplayMode } from "./controller";
 import type { LayerSize } from "./circuit";
 import {
   type RenderTarget,
@@ -48,6 +48,9 @@ export interface GalleryEntry {
   runId: string;
   weightsPath: string;  // relative to /weights/
   bootstrapPath: string;
+  /** Optional ranked topology pool (best-first). When present, the demo boots on
+   *  rank-0 and "Shuffle wires" walks the pool. */
+  topologyPoolPath?: string;
 }
 
 export interface Gallery {
@@ -66,6 +69,10 @@ function weightsUrl(entry: GalleryEntry): string {
 
 function bootstrapUrl(entry: GalleryEntry): string {
   return `${BASE}weights/${entry.bootstrapPath}`;
+}
+
+function poolUrl(entry: GalleryEntry): string | null {
+  return entry.topologyPoolPath ? `${BASE}weights/${entry.topologyPoolPath}` : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -100,6 +107,7 @@ interface UI {
   resetBtn: HTMLButtonElement;
   shuffleBtn: HTMLButtonElement;
   shotgunBtn: HTMLButtonElement;
+  textToggleBtn: HTMLButtonElement;
   readout: HTMLDivElement;
 }
 
@@ -131,7 +139,9 @@ function buildUI(root: HTMLElement): UI {
   const resetBtn = el<HTMLButtonElement>("button", "sodc-btn", "⟲ Reset");
   const shuffleBtn = el<HTMLButtonElement>("button", "sodc-btn", "⤬ Shuffle wires");
   const shotgunBtn = el<HTMLButtonElement>("button", "sodc-btn", "🔫 Shotgun");
-  controls.append(playBtn, resetBtn, shuffleBtn, shotgunBtn);
+  const textToggleBtn = el<HTMLButtonElement>("button", "sodc-btn", "🅰 Text");
+  textToggleBtn.style.display = "none"; // shown only when the model ships text columns
+  controls.append(playBtn, resetBtn, shuffleBtn, shotgunBtn, textToggleBtn);
 
   const hint = el<HTMLDivElement>(
     "div",
@@ -214,6 +224,7 @@ function buildUI(root: HTMLElement): UI {
     resetBtn,
     shuffleBtn,
     shotgunBtn,
+    textToggleBtn,
     readout,
   };
 }
@@ -298,6 +309,12 @@ interface BootstrapData {
   /** Pre-computed wires from the training run. Present for fixed-wires models;
    *  absent for random-wires models (Controller generates its own). */
   wires?: Int32Array[];
+  /** Text-reverse display columns (enables the "Text" display toggle). */
+  textXData?: Float32Array;
+  textYData?: Float32Array;
+  textCaseN?: number;
+  /** Which display the model boots into ("text" for the fixed showcase models). */
+  defaultDisplay?: "cases" | "text";
 }
 
 interface RawB64 {
@@ -326,6 +343,15 @@ function decodeInt32(entry: RawB64): Int32Array {
   return new Int32Array(buf);
 }
 
+/** Decode a ranked topology pool JSON → array of topologies, each a list of
+ *  per-gate-layer wire arrays (best-first; index 0 = rank-0). */
+async function fetchTopologyPool(url: string): Promise<Int32Array[][]> {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`fetch topology pool (${url}): ${resp.status}`);
+  const raw = (await resp.json()) as { topologies: { wires: RawB64[] }[] };
+  return raw.topologies.map((t) => t.wires.map(decodeInt32));
+}
+
 async function fetchBootstrap(url: string): Promise<BootstrapData> {
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`fetch bootstrap (${url}): ${resp.status}`);
@@ -336,10 +362,12 @@ async function fetchBootstrap(url: string): Promise<BootstrapData> {
       output_bits: number;
       task_style?: string;
       text?: string | null;
+      default_display?: "cases" | "text";
     };
     layer_sizes: [number, number][];
     wires?: RawB64[];
     task_data: { x: RawB64; y: RawB64 };
+    text_data?: { x: RawB64; y: RawB64 };
   };
   return {
     caseN: raw.header.case_n,
@@ -351,6 +379,14 @@ async function fetchBootstrap(url: string): Promise<BootstrapData> {
     taskStyle: raw.header.task_style ?? "sequential",
     text: raw.header.text ?? null,
     ...(raw.wires ? { wires: raw.wires.map(decodeInt32) } : {}),
+    ...(raw.text_data
+      ? {
+          textXData: decodeFloat32(raw.text_data.x),
+          textYData: decodeFloat32(raw.text_data.y),
+          textCaseN: raw.text_data.x.shape[0],
+        }
+      : {}),
+    ...(raw.header.default_display ? { defaultDisplay: raw.header.default_display } : {}),
   };
 }
 
@@ -363,11 +399,13 @@ type EventKind = "damage" | "shotgun" | "shuffle" | "reset";
 interface AccuracyHistory {
   hard: number[];
   soft: number[];
+  /** Text-reconstruction accuracy per tick; null on ticks shown in "cases" mode. */
+  text: Array<number | null>;
   events: Array<{ tick: number; kind: EventKind }>;
 }
 
 function makeHistory(): AccuracyHistory {
-  return { hard: [], soft: [], events: [] };
+  return { hard: [], soft: [], text: [], events: [] };
 }
 
 const EVENT_COLORS: Record<EventKind, string> = {
@@ -376,6 +414,10 @@ const EVENT_COLORS: Record<EventKind, string> = {
   shuffle: "#388bfd",
   reset: "#848d97",
 };
+
+/** Colour-blind-safe accuracy-trace palette (blue / orange / grey), reinforced
+ *  by line style in the chart (hard solid, text dashed, soft dim). */
+const ACC_COLORS = { hard: "#58a6ff", text: "#f0883e", soft: "#8b949e" } as const;
 
 function drawAccuracyChart(canvas: HTMLCanvasElement, history: AccuracyHistory): void {
   const dpr = window.devicePixelRatio || 1;
@@ -415,21 +457,38 @@ function drawAccuracyChart(canvas: HTMLCanvasElement, history: AccuracyHistory):
   ctx.lineTo(cssW, LEGEND_H);
   ctx.stroke();
 
-  // "hard acc" swatch
+  // Colour-blind-safe palette + line styles: blue solid (hard), orange dashed
+  // (text), grey dim (soft) — distinguishable by both hue and dash pattern.
+  ctx.textAlign = "left";
+
+  // "hard acc" swatch — blue, solid
   let legX = PAD_L + 4;
-  ctx.strokeStyle = "#3fb950";
+  ctx.strokeStyle = ACC_COLORS.hard;
   ctx.lineWidth = 2;
+  ctx.setLineDash([]);
   ctx.beginPath();
   ctx.moveTo(legX, legY);
   ctx.lineTo(legX + 14, legY);
   ctx.stroke();
   ctx.fillStyle = "#d0d7de";
-  ctx.textAlign = "left";
   ctx.fillText("hard acc", legX + 18, legY);
-  legX += 82;
+  legX += 74;
 
-  // "soft acc" swatch
-  ctx.strokeStyle = "#1f6feb";
+  // "text acc" swatch — orange, dashed
+  ctx.strokeStyle = ACC_COLORS.text;
+  ctx.lineWidth = 2;
+  ctx.setLineDash([4, 3]);
+  ctx.beginPath();
+  ctx.moveTo(legX, legY);
+  ctx.lineTo(legX + 14, legY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = "#d0d7de";
+  ctx.fillText("text acc", legX + 18, legY);
+  legX += 72;
+
+  // "soft acc" swatch — grey, dim
+  ctx.strokeStyle = ACC_COLORS.soft;
   ctx.lineWidth = 1;
   ctx.globalAlpha = 0.6;
   ctx.beginPath();
@@ -439,7 +498,7 @@ function drawAccuracyChart(canvas: HTMLCanvasElement, history: AccuracyHistory):
   ctx.globalAlpha = 1;
   ctx.fillStyle = "#8b949e";
   ctx.fillText("soft acc", legX + 18, legY);
-  legX += 82;
+  legX += 74;
 
   // Event type swatches (dashed vertical lines)
   const evTypes: [EventKind, string][] = [
@@ -503,7 +562,7 @@ function drawAccuracyChart(canvas: HTMLCanvasElement, history: AccuracyHistory):
 
   // Soft accuracy (dim blue)
   if (history.soft.length === history.hard.length) {
-    ctx.strokeStyle = "#1f6feb";
+    ctx.strokeStyle = ACC_COLORS.soft;
     ctx.lineWidth = 1;
     ctx.globalAlpha = 0.55;
     ctx.beginPath();
@@ -516,8 +575,35 @@ function drawAccuracyChart(canvas: HTMLCanvasElement, history: AccuracyHistory):
     ctx.globalAlpha = 1;
   }
 
+  // Text-reconstruction accuracy (amber) — only the ticks shown in text mode,
+  // so the trace appears/breaks as the user toggles.
+  if (history.text.length === history.hard.length) {
+    ctx.strokeStyle = ACC_COLORS.text;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    let pen = false;
+    for (let i = startTick; i < n; i++) {
+      const v = history.text[i];
+      if (v === null || v === undefined) {
+        pen = false;
+        continue;
+      }
+      const x = xOf(i);
+      const y = yOf(v);
+      if (!pen) {
+        ctx.moveTo(x, y);
+        pen = true;
+      } else {
+        ctx.lineTo(x, y);
+      }
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
   // Hard accuracy (bright green)
-  ctx.strokeStyle = "#3fb950";
+  ctx.strokeStyle = ACC_COLORS.hard;
   ctx.lineWidth = 2;
   ctx.beginPath();
   for (let i = startTick; i < n; i++) {
@@ -528,7 +614,7 @@ function drawAccuracyChart(canvas: HTMLCanvasElement, history: AccuracyHistory):
   ctx.stroke();
 
   // Dot at last point
-  ctx.fillStyle = "#3fb950";
+  ctx.fillStyle = ACC_COLORS.hard;
   ctx.beginPath();
   ctx.arc(xOf(n - 1), yOf(history.hard[n - 1]!), 3, 0, Math.PI * 2);
   ctx.fill();
@@ -575,17 +661,47 @@ function updateReadout(app: AppState, snap: ControllerSnapshot): void {
     `step ${snap.step}` +
     `  ·  hard_acc ${snap.hardAccuracy.toFixed(4)}` +
     `  ·  soft_acc ${snap.softAccuracy.toFixed(4)}` +
+    (snap.textAccuracy !== null ? `  ·  text_acc ${snap.textAccuracy.toFixed(4)}` : "") +
     `  ·  damaged ${snap.damaged}/${total}` +
-    `  ·  case ${app.activeCase}/${app.bootstrap.caseN}`;
+    `  ·  case ${app.activeCase}/${snap.displayCaseN}`;
 }
 
 function refreshFrame(app: AppState, snap: ControllerSnapshot): void {
-  drawBitImage(app.ui.currentCanvas, snap.predHard, snap.caseN, snap.outputBits);
+  const n = snap.displayCaseN;
+  drawBitImage(app.ui.currentCanvas, snap.predHard.subarray(0, n * snap.outputBits), n, snap.outputBits);
   redrawCircuit(app);
   updateReadout(app, snap);
   app.history.hard.push(snap.hardAccuracy);
   app.history.soft.push(snap.softAccuracy);
+  app.history.text.push(snap.textAccuracy);
   drawAccuracyChart(app.ui.chartCanvas, app.history);
+}
+
+/** Show the Text toggle only for models that ship text columns; reset its label. */
+function syncTextToggle(app: AppState): void {
+  app.ui.textToggleBtn.style.display = app.ctrl.hasTextMode ? "" : "none";
+  app.ui.textToggleBtn.textContent = "🅰 Text";
+}
+
+/** Boot a model into its preferred display ("text" for the fixed showcase models). */
+function applyDefaultDisplay(app: AppState): void {
+  if (app.bootstrap.defaultDisplay !== "text" || !app.ctrl.hasTextMode) return;
+  const snap = app.ctrl.setDisplayMode("text");
+  if (!snap) return;
+  app.ui.textToggleBtn.textContent = "🔢 All cases";
+  app.activeCase = Math.min(app.activeCase, app.ctrl.displayCaseN - 1);
+  redrawIOStrips(app);
+  refreshFrame(app, snap);
+  setActiveCase(app, app.activeCase);
+}
+
+/** Redraw the static Input / Expected strips from the controller's ACTIVE display
+ *  slice (text columns in text mode, diverse cases otherwise). */
+function redrawIOStrips(app: AppState): void {
+  const { ctrl } = app;
+  const n = ctrl.displayCaseN;
+  drawBitImage(app.ui.inputCanvas, ctrl.displayXData.subarray(0, n * ctrl.inputBits), n, ctrl.inputBits);
+  drawBitImage(app.ui.expectedCanvas, ctrl.displayYData.subarray(0, n * ctrl.outputBits), n, ctrl.outputBits);
 }
 
 /** Move the active-case marker on a wrap to ``activeCase``'s column. */
@@ -599,10 +715,11 @@ function updateActiveMarker(wrap: HTMLDivElement, activeCase: number, caseN: num
 /** Set the active case (which input pattern flows through the circuit) and
  *  refresh everything that depends on it. */
 function setActiveCase(app: AppState, idx: number): void {
+  const n = app.ctrl.displayCaseN;
   app.activeCase = idx;
-  updateActiveMarker(app.ui.inputWrap, idx, app.bootstrap.caseN);
-  updateActiveMarker(app.ui.currentWrap, idx, app.bootstrap.caseN);
-  updateActiveMarker(app.ui.expectedWrap, idx, app.bootstrap.caseN);
+  updateActiveMarker(app.ui.inputWrap, idx, n);
+  updateActiveMarker(app.ui.currentWrap, idx, n);
+  updateActiveMarker(app.ui.expectedWrap, idx, n);
   redrawCircuit(app);
   // Echo the current case in the readout subtitle row.
   app.ui.readout.dataset["activeCase"] = String(idx);
@@ -617,8 +734,8 @@ function pickCase(canvas: HTMLCanvasElement, ev: MouseEvent, caseN: number): num
 
 function redrawCircuit(app: AppState): void {
   if (app.circuitTarget.width <= 1) return; // not yet sized by rAF
-  const { ctrl, bootstrap } = app;
-  const x1 = activeCaseInput(bootstrap.xData, app.activeCase, bootstrap.inputBits);
+  const { ctrl } = app;
+  const x1 = activeCaseInput(ctrl.displayXData, app.activeCase, ctrl.inputBits);
   const acts = singleCaseActivations(ctrl.topology, ctrl.state, x1, ctrl.arity);
   // Combine highlights: hovered + recent-shotgun + last-clicked. The renderer
   // only shows which is "current"; we just want the user to see "yes, that's
@@ -681,15 +798,17 @@ async function switchModel(app: AppState, entry: GalleryEntry): Promise<void> {
   // Disable all controls while loading.
   const allBtns = app.ui.modelPicker.querySelectorAll<HTMLButtonElement>("button");
   allBtns.forEach((b) => (b.disabled = true));
-  for (const b of [app.ui.playBtn, app.ui.resetBtn, app.ui.shuffleBtn, app.ui.shotgunBtn])
+  for (const b of [app.ui.playBtn, app.ui.resetBtn, app.ui.shuffleBtn, app.ui.shotgunBtn, app.ui.textToggleBtn])
     b.disabled = true;
   app.ui.status.textContent = `Loading ${entry.label} …`;
   app.ui.status.className = "sodc-status";
 
   try {
-    const [weights, bs] = await Promise.all([
+    const purl = poolUrl(entry);
+    const [weights, bs, pool] = await Promise.all([
       loadWeights(weightsUrl(entry)),
       fetchBootstrap(bootstrapUrl(entry)),
+      purl ? fetchTopologyPool(purl) : Promise.resolve(undefined),
     ]);
 
     // Replace the controller with a fresh one.
@@ -702,6 +821,10 @@ async function switchModel(app: AppState, entry: GalleryEntry): Promise<void> {
       layerSizes: bs.layerSizes,
       rngSeed: 44,
       ...(bs.wires ? { precomputedWires: bs.wires } : {}),
+      ...(pool ? { topologyPool: pool } : {}),
+      ...(bs.textXData && bs.textYData && bs.textCaseN
+        ? { textXData: bs.textXData, textYData: bs.textYData, textCaseN: bs.textCaseN }
+        : {}),
     });
     app.bootstrap = bs;
     app.activeModelId = entry.id;
@@ -713,6 +836,7 @@ async function switchModel(app: AppState, entry: GalleryEntry): Promise<void> {
     // Redraw static strips.
     drawBitImage(app.ui.inputCanvas, bs.xData, bs.caseN, bs.inputBits);
     drawBitImage(app.ui.expectedCanvas, bs.yData, bs.caseN, bs.outputBits);
+    syncTextToggle(app);
 
     // Reset circuit canvas size (new model may have different architecture).
     const w = Math.floor(app.ui.circuitCanvas.getBoundingClientRect().width) || 1000;
@@ -723,6 +847,7 @@ async function switchModel(app: AppState, entry: GalleryEntry): Promise<void> {
 
     refreshFrame(app, app.ctrl.reset());
     setActiveCase(app, app.activeCase);
+    applyDefaultDisplay(app);
 
     // Update picker active state.
     populateModelPicker(app);
@@ -732,7 +857,7 @@ async function switchModel(app: AppState, entry: GalleryEntry): Promise<void> {
     app.ui.status.classList.add("fail");
     app.ui.status.style.display = "block";
   } finally {
-    for (const b of [app.ui.playBtn, app.ui.resetBtn, app.ui.shuffleBtn, app.ui.shotgunBtn])
+    for (const b of [app.ui.playBtn, app.ui.resetBtn, app.ui.shuffleBtn, app.ui.shotgunBtn, app.ui.textToggleBtn])
       b.disabled = false;
     app.ui.modelPicker.querySelectorAll<HTMLButtonElement>("button")
       .forEach((b) => (b.disabled = false));
@@ -777,11 +902,23 @@ function wireControls(app: AppState): void {
     app.history.events.push({ tick: app.history.hard.length, kind: "shotgun" });
     refreshFrame(app, snapshot);
   });
+  app.ui.textToggleBtn.addEventListener("click", () => {
+    // Instant: the circuit keeps evolving on the diverse batch; we just re-render
+    // the SAME circuit forwarded on the text columns. No re-settle, no FPS hit.
+    const next: DisplayMode = app.ctrl.displayMode === "text" ? "cases" : "text";
+    const snap = app.ctrl.setDisplayMode(next);
+    if (!snap) return;
+    app.ui.textToggleBtn.textContent = next === "text" ? "🔢 All cases" : "🅰 Text";
+    app.activeCase = Math.min(app.activeCase, app.ctrl.displayCaseN - 1);
+    redrawIOStrips(app);
+    refreshFrame(app, snap);
+    setActiveCase(app, app.activeCase);
+  });
 
   // ---- Click-on-strip → set active case ------------------------------
   for (const canvas of [app.ui.inputCanvas, app.ui.currentCanvas, app.ui.expectedCanvas]) {
     canvas.addEventListener("click", (ev) => {
-      const idx = pickCase(canvas, ev, app.bootstrap.caseN);
+      const idx = pickCase(canvas, ev, app.ctrl.displayCaseN);
       setActiveCase(app, idx);
     });
   }
@@ -871,9 +1008,11 @@ async function bootstrap(): Promise<void> {
     const defaultEntry = gallery.models[gallery.models.length - 1] ?? gallery.models[0];
     if (!defaultEntry) throw new Error("gallery.json contains no models");
 
-    const [weights, bs] = await Promise.all([
+    const dpurl = poolUrl(defaultEntry);
+    const [weights, bs, pool] = await Promise.all([
       loadWeights(weightsUrl(defaultEntry)),
       fetchBootstrap(bootstrapUrl(defaultEntry)),
+      dpurl ? fetchTopologyPool(dpurl) : Promise.resolve(undefined),
     ]);
     ui.status.textContent = summariseWeights(weights);
     ui.status.classList.add("pass");
@@ -887,6 +1026,10 @@ async function bootstrap(): Promise<void> {
       layerSizes: bs.layerSizes,
       rngSeed: 44,
       ...(bs.wires ? { precomputedWires: bs.wires } : {}),
+      ...(pool ? { topologyPool: pool } : {}),
+      ...(bs.textXData && bs.textYData && bs.textCaseN
+        ? { textXData: bs.textXData, textYData: bs.textYData, textCaseN: bs.textCaseN }
+        : {}),
     });
     // Bootstrap with a 1-px placeholder; the rAF below sets the real size once
     // the DOM has laid out and clientWidth is reliable.
@@ -911,14 +1054,16 @@ async function bootstrap(): Promise<void> {
 
     drawBitImage(ui.inputCanvas, bs.xData, bs.caseN, bs.inputBits);
     drawBitImage(ui.expectedCanvas, bs.yData, bs.caseN, bs.outputBits);
+    syncTextToggle(app);
 
     // Render initial frame (post step-0 residual recompute).
     refreshFrame(app, ctrl.reset());
     // Position the active-case markers + ensure the readout shows the case.
     setActiveCase(app, app.activeCase);
+    applyDefaultDisplay(app);
 
     wireControls(app);
-    for (const b of [ui.playBtn, ui.resetBtn, ui.shuffleBtn, ui.shotgunBtn]) b.disabled = false;
+    for (const b of [ui.playBtn, ui.resetBtn, ui.shuffleBtn, ui.shotgunBtn, ui.textToggleBtn]) b.disabled = false;
 
     // Defer circuit setup to after first paint so getBoundingClientRect() is accurate.
     requestAnimationFrame(() => {

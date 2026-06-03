@@ -3,6 +3,26 @@ dist/
 .vite/
 *.log
 
+# Local weight backups (rollback copies; regenerable) — never commit/serve.
+export/weights_backup_*/
+*.bak.json
+
+# Research / exploration scripts + recovered run configs — kept LOCAL. The
+# reproducible pipeline + the deployed demo are what matter; these are scratch.
+export/probe_*.py
+export/ceiling_probe.py
+export/fast_screen.py
+export/curate_*.py
+export/export_local_weights.py
+export/record_local.py
+export/run_configs/
+
+# Generated demo artifacts (weights / pool / bootstrap / parity trajectory).
+# Regenerable from the export pipeline; deployed to the GitHub-Pages repo via
+# `npm run deploy`, which is their version-control home. gallery.json (the small
+# hand-maintained model registry) stays tracked.
+public/weights/reverse_*.json
+
 __pycache__/
 *.pyc
 .pytest_cache/

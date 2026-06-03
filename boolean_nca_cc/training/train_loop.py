@@ -1588,6 +1588,20 @@ def train_model(
                 if early_stopping.first_epoch is not None:
                     metrics_dict["early_stop/first_epoch"] = early_stopping.first_epoch
 
+            # GPU memory — JAX allocator's TRUE peak working set, correct even
+            # with preallocation on (so timing stays representative). Logged
+            # every log_interval; never allowed to break training.
+            try:
+                import jax as _jax
+
+                _mstats = _jax.devices()[0].memory_stats() or {}
+                if _mstats.get("peak_bytes_in_use") is not None:
+                    metrics_dict["system/gpu_peak_gb"] = _mstats["peak_bytes_in_use"] / 1e9
+                if _mstats.get("bytes_in_use") is not None:
+                    metrics_dict["system/gpu_inuse_gb"] = _mstats["bytes_in_use"] / 1e9
+            except Exception:
+                pass
+
             _log_to_wandb(wandb_run, metrics_dict, epoch, log_interval)
 
             # Update progress bar with current metrics

@@ -1,0 +1,51 @@
+# =============================================================================
+# Retrain sweep — does 1u5ssulx's recipe (data_per_batch=64, lr=4e-4) recover the
+# +3% raw accuracy gap, while keeping dist_pe's carry-logits shuffle robustness
+# and no-jitter? 3 cells, single seed.
+#
+#   1: layerPE    — completeness CONTROL: should reproduce ~1u5ssulx (0.93/0.89).
+#                   Tells us if the jitter is recipe-induced and if layerPE alone
+#                   suffices once the recipe is right.
+#   2: dist       — deploy candidate: carry-logits shuffle-robust + (hoped) ~0.93.
+#   3: dist+rwse  — best-PE variant.
+#
+# The existing 256/2e-4 runs (a7neu6pl / 2ir2kerg / filut2ch) are the controls
+# for the OTHER recipe corner, so this doubles as a clean batch/lr ablation.
+#
+# LAUNCH (locally on anahita GPUs 2 & 3, in a persistent tmux):
+#   conda activate bool_nca
+#   hsm sweep run -c sweeps/sweep_salvage_retrain_64.yaml --mode local --gpus 2,3
+#
+# Each 2^18 12×12 T=5 run ≈ 7-10h on a local GPU; 2 run in parallel, 1 queues.
+# NOTE (expectations): retraining is fiddly — it may NOT reproduce 1u5ssulx's acc.
+# This is a no-promises experiment running in parallel to the 1u5ssulx salvage.
+# =============================================================================
+defaults:
+  - override hydra/launcher: basic
+
+sweep:
+  grid:
+    seed: [0]
+    circuit: [twelve]
+    tasks: [reverse]
+    model: [gathered_attention]
+    model.attention_dim: [128]
+    circuit.circuit_hidden_dim: [64]
+    training.n_message_steps: [5]
+    # --- the recipe under test (matches 1u5ssulx) ---
+    training.data_per_batch: [64]
+    training.learning_rate: [4e-4]
+    training.meta_batch_size: [128]
+    training.epochs_power_of_2: [18]
+    training.wiring_mode: [random]
+    damage.enabled: [true]
+    damage.permanent: [0.5]          # == "random" (train_loop.py:1196), pinned explicit
+    damage.target_damage_fraction: [0.10]
+    model.max_neighbors: [10]
+
+  paired:
+    - run:
+        #                       layerPE   dist    dist+rwse
+        graph.use_layer_PE:   [true,    false,   false]
+        graph.use_dist_pe:    [false,   true,    true]
+        graph.use_rwse:       [false,   false,   true]

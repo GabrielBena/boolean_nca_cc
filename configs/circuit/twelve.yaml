@@ -1,0 +1,19 @@
+defaults:
+  - _self_
+
+
+# 12×12 circuit topology — the demo / paper size. Task lives in ``cfg.tasks``.
+# generate_layer_sizes(12, 12, arity=4, layer_n=3, width_factor=2) yields hidden
+# layers (96, 96, 48), matching the paper's three-hidden-layer architecture.
+
+input_bits: 12
+output_bits: 12
+arity: 4
+num_layers: 3
+width_factor: 2
+layer_sizes: null  # Auto-generate if null
+
+circuit_hidden_dim: 64
+
+init_logits: soft_wires
+random_init_scale: 1.0

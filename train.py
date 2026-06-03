@@ -38,7 +38,11 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
 
 # GPU VISIBILITY
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+# Pin a specific GPU only for LOCAL dev. Under SLURM (or any launcher that sets
+# CUDA_VISIBLE_DEVICES / a GPU cgroup), respect the allocation — hardcoding "3"
+# here made cluster jobs silently fall back to CPU (allocated GPU is index 0).
+if "SLURM_JOB_ID" not in os.environ and "CUDA_VISIBLE_DEVICES" not in os.environ:
+    os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 import logging
 
