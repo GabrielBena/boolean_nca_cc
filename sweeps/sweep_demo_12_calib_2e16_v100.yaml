@@ -1,0 +1,70 @@
+# =============================================================================
+# SCREENING CALIBRATION — does a 2^16-epoch run RANK recipes like 2^18 does?
+# 10 reruns of recipes with established 2^18 references, identical seeds,
+# only training.epochs_power_of_2 16 vs 18. ~4.4h each on V100 (vs 17.5h),
+# i.e. the gate for running the Round-1 broad screen at 1/4 cost.
+#
+# Calibration set spans all three quality axes (2^18 reference demo_* below):
+#
+#   col  arm    recipe                          ref settled/carry/flip   (source)
+#   1    B3s0   T8 mean_tail .25, 2e-4/w50      0.931 / 0.893 / 0.002    v3.1 t5
+#   2    B3s1   "                               0.918 / 0.881 / 0.018    v3.1 t6
+#   3    B1s0   T8 mean_tail .50, 2e-4/w50      0.891 / 0.887 / 0.011    v3.1 t1
+#   4    B2s1   T8 mean_tail .50 cons .3        0.892 / 0.867 / 0.056    v3.1 t4
+#   5    ENDs0  T8 endpoint,      2e-4/w50      0.908 / 0.919 / 0.032    v3 t3
+#   6    ENDs1  "                               0.913 / 0.891 / 0.046    v3 t4
+#   7    R2s0   T8 endpoint,      3e-4/w25      0.902 / 0.856 / 0.084    v3.1 t9
+#   8    R2s1   "                               0.919 / 0.914 / 0.071    v3.1 t10
+#   9    A1s0   T5 endpoint,      2e-4/w50      ~0.88 / 0.61  / low      v3 t1
+#   10   A11s0  T5 endpoint,      1e-4/w50      worst-of-everything      v3 t19
+#
+# JUDGE (pre-registered): Spearman rho(2^16, 2^18) per metric across the 10
+# pairs. PASS for screening use: rho >= 0.8 on settled AND flip; carry judged
+# band-level only (top/mid/bottom preserved) — it is a seed lottery even at
+# 2^18, so exact carry rank fidelity is not expected. Seed pairs (B3, END, R2)
+# additionally show whether within-recipe spread at 2^16 stays comparable.
+# NOTE: cosine lr schedule + damage accrual both scale with their own bases
+# (schedule: total epochs; p_fault: pool.expected_updates) — a 2^16 run is a
+# faithful quarter-budget run, not a truncated 2^18 one.
+#
+# LAUNCH GATE: explicit green light required; check V100 pending-demand first
+# (v3.2 burst array may still hold 12 cards).
+#   hsm sweep run -c sweeps/sweep_demo_12_calib_2e16_v100.yaml --mode array \
+#       --remote uzh-v100 --walltime 06:00:00 --group demo_sweep_12_calib
+# =============================================================================
+defaults:
+  - override hydra/launcher: basic
+
+sweep:
+  grid:
+    circuit: [twelve]
+    tasks: [reverse]
+    model: [gathered_attention]
+    model.attention_dim: [128]
+    model.max_neighbors: [10]
+    circuit.circuit_hidden_dim: [64]
+    training.meta_batch_size: [128]
+    training.wiring_mode: [random]
+    training.epochs_power_of_2: [16]
+    training.data_per_batch: [256]
+    graph.use_layer_PE: [false]
+    graph.use_dist_pe: [true]
+    graph.use_rwse: [false]
+    loss: [bce]
+    damage.enabled: [true]
+    damage.target_damage_fraction: [0.10]
+    damage.permanent: [random]
+    damage.burst.enabled: [false]
+    shuffle.enabled: [false]
+
+  paired:
+    - run:
+        # arm:                          B3s0  B3s1  B1s0  B2s1  ENDs0 ENDs1 R2s0  R2s1  A1s0  A11s0
+        # col:                          1     2     3     4     5     6     7     8     9     10
+        seed:                          [0,    1,    0,    1,    0,    1,    0,    1,    0,    0]
+        training.n_message_steps:      [8,    8,    8,    8,    8,    8,    8,    8,    5,    5]
+        training.loss_step_mode:       [mean_tail, mean_tail, mean_tail, mean_tail, null, null, null, null, null, null]
+        training.loss_tail_fraction:   [0.25, 0.25, 0.5,  0.5,  0.5,  0.5,  0.5,  0.5,  0.5,  0.5]
+        training.consistency_weight:   [0.0,  0.0,  0.0,  0.3,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0]
+        training.learning_rate:        [2e-4, 2e-4, 2e-4, 2e-4, 2e-4, 2e-4, 3e-4, 3e-4, 2e-4, 1e-4]
+        training.lr_scheduler_params.cosine.warmup_steps_factor: [50, 50, 50, 50, 50, 50, 25, 25, 50, 50]

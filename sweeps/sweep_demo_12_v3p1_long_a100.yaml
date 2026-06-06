@@ -1,0 +1,47 @@
+# =============================================================================
+# v3.1 LAUNCH FILE B — the 6 long-horizon arms (T=12/16), on A100/standard
+# (medium QOS, 48h cap; these exceed lowprio's 24h MaxWall on V100).
+# Counterpart of sweep_demo_12_v3p1_t8_v100.yaml — see that file's header.
+#
+#   c1-2  B4  T=12 tail=0.5            seeds 0,1   (horizon ladder)
+#   c3-4  B5  T=12 tail=0.5 cons=0.3   seeds 0,1
+#   c5-6  B6  T=16 tail=0.5            seeds 0,1   (ladder top, ~23h on A100)
+#
+# Launch:
+#   hsm sweep run -c sweeps/sweep_demo_12_v3p1_long_a100.yaml --mode array \
+#       --remote uzh --walltime 26:00:00 --group demo_sweep_12_v3p1
+# =============================================================================
+defaults:
+  - override hydra/launcher: basic
+
+sweep:
+  grid:
+    circuit: [twelve]
+    tasks: [reverse]
+    model: [gathered_attention]
+    model.attention_dim: [128]
+    model.max_neighbors: [10]
+    circuit.circuit_hidden_dim: [64]
+    training.meta_batch_size: [128]
+    training.wiring_mode: [random]
+    training.epochs_power_of_2: [18]
+    training.data_per_batch: [256]
+    training.learning_rate: [2e-4]
+    training.loss_step_mode: [mean_tail]
+    training.loss_tail_fraction: [0.5]
+    graph.use_layer_PE: [false]
+    graph.use_dist_pe: [true]
+    graph.use_rwse: [false]
+    loss: [bce]
+    damage.enabled: [true]
+    damage.target_damage_fraction: [0.10]
+    damage.permanent: [random]
+    shuffle.enabled: [false]
+
+  paired:
+    - run:
+        # arm:                          B4s0  B4s1  B5s0  B5s1  B6s0  B6s1
+        # col:                          1     2     3     4     5     6
+        seed:                          [0,    1,    0,    1,    0,    1]
+        training.n_message_steps:      [12,   12,   12,   12,   16,   16]
+        training.consistency_weight:   [0.0,  0.0,  0.3,  0.3,  0.0,  0.0]

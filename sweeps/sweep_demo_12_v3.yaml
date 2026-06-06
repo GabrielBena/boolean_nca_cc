@@ -1,0 +1,89 @@
+# =============================================================================
+# Demo sweep v3 — 12×12 reverse, S3IT A100 via SSH-Slurm. 22 zipped runs.
+#
+# Goal: the FINAL deployable demo model — jointly target (a) post-shuffle
+# recovery (high carry_settled, LOW tail std — no limit cycle), (b) settled
+# crispness (low jitter/flip rate), (c) raw settled accuracy (+~3% vs demo_12),
+# (d) stable training (lr anchored ≤2e-4; 4e-4 is the known-unstable corner).
+#
+# Every run SELF-SCORES on the demo objective: the post-training batched
+# demo-probe (boolean_nca_cc/training/demo_probe.py, demo_probe config block)
+# writes demo_* columns (settled acc / tail std / flip rate / best-of-N /
+# carry-recovery) into final_results.csv + wandb final/demo_*.
+# Selection = aggregate the CSVs; deep-probe the top-3 via demo_probe_cli.
+#
+# Anchor recipe (col 1): dist_pe, T=5, damage on (0.10/random), shuffle off,
+# bce, lr 2e-4, db 256, mb 128, 2^18 epochs. Every arm = one labeled delta.
+#   A1  c1-2   anchor, seeds 0/1            (control + seed variance)
+#   A2  c3-4   T=8 train horizon            (anti-jitter/recovery: demo settles
+#                                            40-256 steps vs T=5 training;
+#                                            filut2ch peak_step≈33 ≫ 5)
+#   A3  c5-6   random+beta loss step        (reward a fixed point at EVERY
+#                                            step, not just step T)
+#   A4  c7     T=8 + random loss step       (combined horizon lever)
+#   A5  c8-9   dist_pe+rwse                 (PE: best-known accuracy variant)
+#   A6  c10    layer_PE control             (1u5ssulx repro; no-TS-work deploy
+#                                            fallback)
+#   A7  c11-12 SHUFFLE-TRAINED arm          (mid-flight full reshuffle, ~2 per
+#                                            lifecycle; damage OFF for clean
+#                                            attribution)
+#   A8  c13    shuffle + T=8                (shuffle recovery needs rollout room)
+#   A9  c14-15 stronger damage 0.20         (the "more shotgun" arm —
+#                                            probabilistic p_fault IS the
+#                                            training shotgun analog; discrete
+#                                            volleys are eval-only by design)
+#   A10 c16    shuffle + damage combo       (lone combo: damage & shuffle key
+#                                            streams share a parent key
+#                                            (evaluation.py:671 vs 784) — mild
+#                                            correlation, functionally fine)
+#   A11 c17    lr 1e-4                      (training-stability probe)
+#   A12 c18    lr 3e-4, 2× longer warmup    (stabilized higher-lr probe)
+#   A13 c19-20 data_per_batch 64            (1u5ssulx recipe retest at STABLE
+#                                            lr 2e-4, not the unstable 4e-4)
+#   A14 c21    loss bce_w3                  (margin sharpening → less flicker)
+#   A15 c22    clean control                (no damage, no shuffle)
+#
+# Judge shuffle-trained arms (c11-13, c16) on the probe's fresh topologies —
+# the demo's shuffle button stays honest held-out data.
+#
+# LAUNCH (after smoke A/B/C pass; ~7 h/run at T=5, ~11-12 h at T=8 on A100):
+#   conda activate bool_nca
+#   hsm sweep run -c sweeps/sweep_demo_12_v3.yaml --mode array --remote uzh \
+#       --walltime 18:00:00
+# Verify completion via `sacct` over ssh (hsm mislabels FAILED as COMPLETED).
+# =============================================================================
+defaults:
+  - override hydra/launcher: basic
+
+sweep:
+  grid:
+    circuit: [twelve]
+    tasks: [reverse]
+    model: [gathered_attention]
+    model.attention_dim: [128]
+    model.max_neighbors: [10]
+    circuit.circuit_hidden_dim: [64]
+    training.meta_batch_size: [128]
+    training.wiring_mode: [random]
+    training.epochs_power_of_2: [18]
+    damage.permanent: [random]
+
+  paired:
+    - run:
+        # arm:                                  A1    A1    A2    A2    A3    A3    A4    A5    A5    A6    A7    A7    A8    A9    A9    A10   A11   A12   A13   A13   A14   A15
+        # col:                                  1     2     3     4     5     6     7     8     9     10    11    12    13    14    15    16    17    18    19    20    21    22
+        seed:                                  [0,    1,    0,    1,    0,    1,    0,    0,    1,    0,    0,    1,    0,    0,    1,    0,    0,    0,    0,    1,    0,    0]
+        graph.use_layer_PE:                    [false,false,false,false,false,false,false,false,false,true, false,false,false,false,false,false,false,false,false,false,false,false]
+        graph.use_dist_pe:                     [true, true, true, true, true, true, true, true, true, false,true, true, true, true, true, true, true, true, true, true, true, true]
+        graph.use_rwse:                        [false,false,false,false,false,false,false,true, true, false,false,false,false,false,false,false,false,false,false,false,false,false]
+        training.n_message_steps:              [5,    5,    8,    8,    5,    5,    8,    5,    5,    5,    5,    5,    8,    5,    5,    5,    5,    5,    5,    5,    5,    5]
+        training.random_loss_step:             [false,false,false,false,true, true, true, false,false,false,false,false,false,false,false,false,false,false,false,false,false,false]
+        training.use_beta_loss_step:           [false,false,false,false,true, true, true, false,false,false,false,false,false,false,false,false,false,false,false,false,false,false]
+        loss:                                  [bce,  bce,  bce,  bce,  bce,  bce,  bce,  bce,  bce,  bce,  bce,  bce,  bce,  bce,  bce,  bce,  bce,  bce,  bce,  bce,  bce_w3,bce]
+        training.learning_rate:                [2e-4, 2e-4, 2e-4, 2e-4, 2e-4, 2e-4, 2e-4, 2e-4, 2e-4, 2e-4, 2e-4, 2e-4, 2e-4, 2e-4, 2e-4, 2e-4, 1e-4, 3e-4, 2e-4, 2e-4, 2e-4, 2e-4]
+        training.lr_scheduler_params.cosine.warmup_steps_factor: [50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 25, 50, 50, 50, 50]
+        training.data_per_batch:               [256,  256,  256,  256,  256,  256,  256,  256,  256,  256,  256,  256,  256,  256,  256,  256,  256,  256,  64,   64,   256,  256]
+        damage.enabled:                        [true, true, true, true, true, true, true, true, true, true, false,false,false,true, true, true, true, true, true, true, true, false]
+        damage.target_damage_fraction:         [0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.20, 0.20, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10]
+        shuffle.enabled:                       [false,false,false,false,false,false,false,false,false,false,true, true, true, false,false,true, false,false,false,false,false,false]
+        shuffle.target_shuffles_per_lifecycle: [0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  2.0,  2.0,  2.0,  0.0,  0.0,  2.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0]
