@@ -770,6 +770,47 @@ def compute_damage_params(cfg, layer_sizes, log=None) -> dict:
         result["p_fault_train"] = _p_fault_from_fraction(target_frac, train_steps)
         result["p_fault_eval"] = _p_fault_from_fraction(target_frac, eval_steps)
 
+    # --- Bursty background damage ("solar events", training only) --------
+    # Doubly-stochastic p_fault: a quiet base rate punctuated by short windows
+    # of elevated rate. The single ``target_damage_fraction`` budget is split
+    # by ``damage_share``: quiet accrual keeps (1-share), bursts deliver share.
+    # Expected gates per burst ≈ n_eligible * p_burst * length — a SOFT volley,
+    # easing the eval shotgun into training while keeping the literal
+    # K-gates-at-once event OOD. Eval p_fault stays flat (comparability).
+    burst_cfg = cfg.damage.get("burst", None)
+    burst_on = burst_cfg is not None and bool(burst_cfg.get("enabled", False))
+    result["burst"] = {"enabled": False}
+    if burst_on and target_frac > 0.0:
+        b_len = max(1, int(burst_cfg.get("length", 4)))
+        b_per_life = float(burst_cfg.get("per_lifecycle", 2.0))
+        b_share = min(max(float(burst_cfg.get("damage_share", 0.5)), 0.0), 1.0)
+        quiet_frac = (1.0 - b_share) * target_frac
+        burst_frac = b_share * target_frac
+        expected_burst_ticks = max(b_per_life * b_len, 1e-9)
+        p_quiet = _p_fault_from_fraction(quiet_frac, train_steps) if quiet_frac > 0 else 0.0
+        p_burst = _p_fault_from_fraction(burst_frac, expected_burst_ticks)
+        # The quiet rate REPLACES the flat train rate; the schedule swaps in
+        # p_burst inside windows (see run_model_scan_with_loss).
+        result["p_fault_train"] = p_quiet
+        result["burst"] = {
+            "enabled": True,
+            "p_fault_burst_train": float(p_burst),
+            "burst_start_rate_train": float(b_per_life / train_steps),
+            "length": b_len,
+            "per_lifecycle": b_per_life,
+            "damage_share": b_share,
+            "expected_gates_per_burst": float(p_burst * b_len * n_eligible),
+        }
+        if log:
+            log.info(
+                f"Burst damage params (share {b_share:.0%} of {target_frac:.1%} budget):\n"
+                f"  p_quiet  = {p_quiet:.2e}/tick   p_burst = {p_burst:.2e}/tick\n"
+                f"  windows: {b_per_life:g} per lifecycle x {b_len} ticks "
+                f"(start rate {result['burst']['burst_start_rate_train']:.2e}/tick)\n"
+                f"  expected gates per burst ~ "
+                f"{result['burst']['expected_gates_per_burst']:.1f} of {n_eligible}"
+            )
+
     # --- Discrete knockouts (shotgun) ------------------------------------
     n_dmg = result["n_damage_steps"]
     explicit_ko = cfg.damage.get("knockouts_per_event")

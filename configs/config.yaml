@@ -71,6 +71,19 @@ training:
   random_loss_step: false  # Use random message passing step for loss computation
   random_loss_step_min: 2
   use_beta_loss_step: false  # Use beta distribution for random loss step (varies from early to late steps through training)
+  # TAIL-MEAN LOSS (path constraint: reach the solution AND hold it)
+  # null = legacy behavior (flags above). "mean_tail" = loss is the MEAN over the
+  # last ceil(loss_tail_fraction * n_message_steps) steps — anti-limit-cycle
+  # pressure; metrics still report the final step.
+  loss_step_mode: null
+  loss_tail_fraction: 0.5
+  # Optional: penalize (soft) prediction churn between consecutive tail steps —
+  # the differentiable counterpart of the demo flip-rate. 0.0 = off.
+  consistency_weight: 0.0
+  # Pool-return depth for mean_tail (decoupled from the loss): "final" = circuits
+  # re-enter the pool at step T; "random_tail" = at a random tail step (async pool
+  # maturities — the intentional side-effect of legacy random_loss_step, isolated).
+  pool_return_step: "final"
   # TRAIN/TEST SPLIT
   test_num: 256  # Fraction/absolute number of data to use for testing (from all input combinations)
   # BATCH SIZE
@@ -179,6 +192,19 @@ damage:
   p_fault: null
   
   # === DISCRETE "SHOTGUN" (evaluation / OOD testing) ===
+  # === BURSTY BACKGROUND DAMAGE (training-only "solar events") ===
+  # Doubly-stochastic p_fault: quiet base rate punctuated by short windows of
+  # elevated rate (a SOFT volley — eases the eval shotgun into training while
+  # keeping the literal K-gates-at-once event OOD). The target_damage_fraction
+  # budget is split: bursts deliver damage_share, quiet accrual the rest.
+  # Defaults (target .10): p_quiet~2e-4/tick, p_burst~6.4e-3/tick -> ~6 gates
+  # spread over a 4-tick window per event, ~2 events per circuit lifecycle.
+  burst:
+    enabled: false
+    length: 4  # ticks of elevated rate per window
+    per_lifecycle: 2.0  # expected windows per circuit lifetime (pool.expected_updates ticks)
+    damage_share: 0.5  # fraction of target_damage_fraction delivered by bursts
+
   # Number of damage volleys during evaluation stepwise run
   n_damage_steps: 2
   # Gates knocked out per volley. null = auto-computed:
@@ -264,6 +290,25 @@ eval:
   # step_metrics["all_metrics"] during training (rarely needed; the OOM
   # fix relies on this defaulting to false).
   keep_full_graphs: false
+
+# Post-training demo probe (batched — boolean_nca_cc/training/demo_probe.py).
+# Runs once after training + final eval, inside the same job: scores the deploy
+# checkpoint on the live-demo objective (settled accuracy / jitter over random
+# topologies + carry-logits shuffle recovery). Metrics land in final_results.csv
+# and wandb final/demo_* keys.
+demo_probe:
+  enabled: true
+  which: "best"  # "best" = reload best_model_<best_metric>.pkl (falls back to final); "final" = in-memory final model
+  best_metric: "eval_out_test_hard_accuracy"  # the demo's deploy-checkpoint convention (undamaged best)
+  n_topologies: 64  # random topologies for the clean-settle screen
+  n_pairs: 16  # topology pairs for the shuffle-recovery probe
+  steps: 64  # rollout length (the demo settles well within this)
+  settle_window: 8  # tail window for settled acc / jitter
+  chunk_size: 32  # topologies per batched rollout (memory bound)
+  # Paper protocol: shotgun_volleys volleys totalling damage.target_damage_fraction
+  # of hidden gates (null = auto: ceil(0.10 * 240 / 2) = 12/volley on 12-bit).
+  shotgun_gates: null  # per-volley knockouts (explicit override; 0 = skip phase)
+  shotgun_volleys: 2
 
 # Early stopping based on accuracy
 stop_accuracy:

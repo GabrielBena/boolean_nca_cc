@@ -540,6 +540,13 @@ def run_model_scan_with_loss(
     permanent_damage: float = 1.0,
     # Delayed probabilistic damage onset
     p_fault_onset_step: int = 0,
+    # Bursty background damage (doubly-stochastic p_fault — "solar events"):
+    # quiet base rate ``p_fault`` punctuated by windows of ``p_fault_burst``.
+    # A window opens per tick with prob ``burst_start_rate`` and lasts
+    # ``burst_length`` ticks. None/0.0 = flat p_fault (legacy behavior).
+    p_fault_burst: float | None = None,
+    burst_start_rate: float = 0.0,
+    burst_length: int = 4,
     # No-repair baseline: compute loss right after damage, before NCA runs
     compute_no_repair_baseline: bool = False,
     # Wire shuffling parameters (discrete: explicit step indices)
@@ -674,14 +681,34 @@ def run_model_scan_with_loss(
         discrete_damage_enabled = False
 
     # === Probabilistic damage setup ===
-    prob_damage_enabled = p_fault is not None and p_fault > 0.0
+    burst_enabled = (
+        p_fault_burst is not None and p_fault_burst > 0.0 and burst_start_rate > 0.0
+    )
+    prob_damage_enabled = (p_fault is not None and p_fault > 0.0) or burst_enabled
     if prob_damage_enabled:
         eligible_mask = create_eligible_gate_mask(layer_sizes)
         # Pre-split keys for all steps (for reproducibility and JIT compatibility)
         prob_damage_keys = jax.random.split(prob_key, num_steps)
+        base_p = float(p_fault) if p_fault is not None else 0.0
+        if burst_enabled:
+            # Realize this rollout's burst windows: Bernoulli starts per tick,
+            # each start elevates p for ``burst_length`` ticks ("solar event").
+            # Drawn from prob_key's stream → same sharing semantics as the
+            # per-step damage draws themselves.
+            sched_key = jax.random.fold_in(prob_key, 0xB5)
+            starts = jax.random.bernoulli(sched_key, burst_start_rate, (num_steps,))
+            tick = jp.arange(num_steps)
+            in_window = (tick[:, None] >= tick[None, :]) & (
+                tick[:, None] < tick[None, :] + burst_length
+            )
+            burst_active = jp.any(starts[None, :] & in_window, axis=1)
+            p_fault_schedule = jp.where(burst_active, p_fault_burst, base_p)
+        else:
+            p_fault_schedule = jp.full((num_steps,), base_p)
     else:
         eligible_mask = None
         prob_damage_keys = None
+        p_fault_schedule = None
 
     def apply_discrete_damage_if_needed(graph, step_idx, gate_mask):
         """Apply damage at specific steps using vectorized conditional."""
@@ -927,7 +954,9 @@ def run_model_scan_with_loss(
             graph.nodes["logits"],
             gate_mask,
             eligible_mask,
-            p_fault,
+            # Per-tick rate from the (possibly bursty) schedule; reduces to the
+            # flat p_fault when bursts are disabled.
+            p_fault_schedule[step_idx],
             faulty_value,
         )
 

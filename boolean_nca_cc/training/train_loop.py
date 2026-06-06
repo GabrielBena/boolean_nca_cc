@@ -660,6 +660,19 @@ def train_model(
     random_loss_step: bool = False,  # Use random message passing step for loss computation
     random_loss_step_min: int = 0,
     use_beta_loss_step: bool = False,  # Use beta distribution for random loss step
+    # Tail-mean loss: None = legacy behavior (flags above); "mean_tail" = loss is the
+    # MEAN over the last ceil(loss_tail_fraction * n_message_steps) steps — a path
+    # constraint (reach the solution AND hold it; anti-limit-cycle), optionally with a
+    # consistency penalty on consecutive tail (soft) predictions (training-time
+    # flip-rate pressure). Metrics/pool state still come from the final step.
+    loss_step_mode: str | None = None,
+    loss_tail_fraction: float = 0.5,
+    consistency_weight: float = 0.0,
+    # Pool-return depth for mean_tail mode (decoupled from the loss): "final" =
+    # circuits re-enter the pool at step T; "random_tail" = at a random tail step
+    # (async pool maturities — the intentional side-effect of the legacy
+    # random_loss_step, now controllable independently).
+    pool_return_step: str = "final",
     # ── Wiring & batching ───────────────────────────────────────────────
     wiring_mode: str = "random",  # Options: 'fixed', 'random', or 'genetic'
     meta_batch_size: int = 64,
@@ -698,6 +711,11 @@ def train_model(
     knockouts_per_event: int = 1,  # Gates per volley (auto-computed if null in config)
     p_fault_onset_step_train: int = 0,  # Onset step for training scan
     p_fault_onset_step_eval: int = 0,  # Onset step for eval scan
+    # Bursty background damage (training-only "solar events"; see
+    # run_model_scan_with_loss). p_fault above becomes the QUIET base rate.
+    p_fault_burst: float | None = None,
+    burst_start_rate: float = 0.0,
+    burst_length: int = 4,
     compute_no_repair_baseline: bool = False,
     # ── Probabilistic wire shuffle (training-only) ──────────────────────
     p_shuffle: float | None = None,  # Per-step circuit-wide shuffle prob (None = disabled)
@@ -1040,6 +1058,10 @@ def train_model(
         p_fault: float | None = None,
         faulty_value: float = -10.0,
         permanent_damage: float | str = 1.0,
+        # Bursty background damage (see run_model_scan_with_loss)
+        p_fault_burst: float | None = None,
+        burst_start_rate: float = 0.0,
+        burst_length: int = 4,
         # Probabilistic wire shuffle parameters
         p_shuffle: float | None = None,
         shuffle_fraction: float = 1.0,
@@ -1118,6 +1140,10 @@ def train_model(
                 p_fault=p_fault,
                 faulty_value=faulty_value,
                 permanent_damage=permanent_damage,
+                # Bursty background damage ("solar events")
+                p_fault_burst=p_fault_burst,
+                burst_start_rate=burst_start_rate,
+                burst_length=burst_length,
                 # Delayed onset (let circuit converge before damage starts)
                 p_fault_onset_step=p_fault_onset_step_train,
                 # Probabilistic wire shuffle during training
@@ -1130,19 +1156,38 @@ def train_model(
                 neighboring_connections=neighboring_connections,
             )
 
-            loss_step = get_loss_step(loss_key)
-
-            final_graph, final_loss, final_logits, final_aux = jax.tree.map(
-                lambda arr: arr[loss_step], step_outputs
-            )
-
-            # # Take the mean of the losses until the loss step: more grads !
-            # # Use masking instead of dynamic_slice since loss_step is a traced value
-            # all_losses = step_outputs[1]  # shape: [n_message_steps]
-            # indices = jp.arange(n_message_steps)
-            # mask = indices <= loss_step
-            # # Compute masked mean: sum of valid losses / count of valid losses
-            # final_loss = jp.sum(jp.where(mask, all_losses, 0.0)) / (loss_step + 1)
+            if loss_step_mode == "mean_tail":
+                # Tail-mean loss: average over the last K steps so the rollout must
+                # REACH the solution and HOLD it (path constraint / anti-limit-cycle)
+                # instead of only being right at one step. BPTT through the endpoint
+                # already gives every step gradient, but only via its effect on the
+                # endpoint — this makes intermediate correctness the target itself.
+                tail_len = max(1, int(round(loss_tail_fraction * n_message_steps)))
+                all_losses = step_outputs[1]  # [n_message_steps]
+                final_loss = all_losses[-tail_len:].mean()
+                if consistency_weight > 0.0 and tail_len > 1:
+                    # Soft-prediction churn between consecutive tail steps —
+                    # the differentiable counterpart of the demo flip-rate.
+                    tail_preds = step_outputs[3]["predictions"][-tail_len:]
+                    consistency = jp.mean((tail_preds[1:] - tail_preds[:-1]) ** 2)
+                    final_loss = final_loss + consistency_weight * consistency
+                # Pool/metrics state: final step by default; "random_tail" returns
+                # the circuit to the pool at a random tail depth (async maturities)
+                # while the loss above still grades the whole tail.
+                if pool_return_step == "random_tail":
+                    loss_step = jax.random.randint(
+                        loss_key, (), n_message_steps - tail_len, n_message_steps
+                    )
+                else:
+                    loss_step = n_message_steps - 1
+                final_graph, _, final_logits, final_aux = jax.tree.map(
+                    lambda arr: arr[loss_step], step_outputs
+                )
+            else:
+                loss_step = get_loss_step(loss_key)
+                final_graph, final_loss, final_logits, final_aux = jax.tree.map(
+                    lambda arr: arr[loss_step], step_outputs
+                )
 
             return final_loss, (final_aux, final_graph, final_logits, loss_step)
 
@@ -1181,10 +1226,29 @@ def train_model(
             # Stack all results using jax.tree_map
             stacked_results = jax.tree.map(lambda *args: jp.stack(args), *all_results)
 
-            # Index at n_loss_step
-            final_loss, final_aux, final_graph, final_logits = jax.tree.map(
-                lambda arr: arr[loss_step], stacked_results
-            )
+            if loss_step_mode == "mean_tail":
+                # Same tail-mean semantics as loss_fn_scan (see comment there).
+                tail_len = max(1, int(round(loss_tail_fraction * n_message_steps)))
+                final_loss = stacked_results[0][-tail_len:].mean()
+                if consistency_weight > 0.0 and tail_len > 1:
+                    tail_preds = stacked_results[1]["predictions"][-tail_len:]
+                    final_loss = final_loss + consistency_weight * jp.mean(
+                        (tail_preds[1:] - tail_preds[:-1]) ** 2
+                    )
+                if pool_return_step == "random_tail":
+                    loss_step = jax.random.randint(
+                        loss_key, (), n_message_steps - tail_len, n_message_steps
+                    )
+                else:
+                    loss_step = n_message_steps - 1
+                _, final_aux, final_graph, final_logits = jax.tree.map(
+                    lambda arr: arr[loss_step], stacked_results
+                )
+            else:
+                # Index at n_loss_step
+                final_loss, final_aux, final_graph, final_logits = jax.tree.map(
+                    lambda arr: arr[loss_step], stacked_results
+                )
 
             return final_loss, (final_aux, final_graph, final_logits, loss_step)
 
@@ -1257,6 +1321,10 @@ def train_model(
         p_fault: float | None = None,
         faulty_value: float = -10.0,
         permanent_damage: float | str = 1.0,
+        # Bursty background damage (see run_model_scan_with_loss)
+        p_fault_burst: float | None = None,
+        burst_start_rate: float = 0.0,
+        burst_length: int = 4,
         # Probabilistic wire shuffle parameters
         p_shuffle: float | None = None,
         shuffle_fraction: float = 1.0,
@@ -1308,6 +1376,9 @@ def train_model(
             p_fault=p_fault,
             faulty_value=faulty_value,
             permanent_damage=permanent_damage,
+            p_fault_burst=p_fault_burst,
+            burst_start_rate=burst_start_rate,
+            burst_length=burst_length,
             p_shuffle=p_shuffle,
             shuffle_fraction=shuffle_fraction,
         )
@@ -1340,6 +1411,9 @@ def train_model(
             "p_fault",
             "faulty_value",
             "permanent_damage",
+            "p_fault_burst",
+            "burst_start_rate",
+            "burst_length",
             "p_shuffle",
             "shuffle_fraction",
         ),
@@ -1421,6 +1495,10 @@ def train_model(
                 p_fault=p_fault,
                 faulty_value=faulty_logit_value,
                 permanent_damage=permanent_damage,
+                # Bursty background damage ("solar events")
+                p_fault_burst=p_fault_burst,
+                burst_start_rate=burst_start_rate,
+                burst_length=burst_length,
                 # Probabilistic wire shuffle during training
                 p_shuffle=p_shuffle,
                 shuffle_fraction=shuffle_fraction,

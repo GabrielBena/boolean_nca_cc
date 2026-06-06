@@ -59,7 +59,12 @@ from boolean_nca_cc.circuits.model import gen_circuit
 from boolean_nca_cc.circuits.tasks import get_task_data
 from boolean_nca_cc.circuits.train import LossConfig
 from boolean_nca_cc.circuits.viz import plot_wandb_stepwise_results
-from boolean_nca_cc.training.checkpointing import EarlyStopping, save_checkpoint
+from boolean_nca_cc.training.checkpointing import (
+    EarlyStopping,
+    load_checkpoint_with_compatibility,
+    save_checkpoint,
+)
+from boolean_nca_cc.training.demo_probe import demo_probe, format_demo_metrics
 from boolean_nca_cc.training.eval_datasets import (
     create_unified_evaluation_datasets,
 )
@@ -148,6 +153,7 @@ def create_and_save_final_results(
     output_dir,
     wandb_run=None,
     total_params=None,
+    demo_metrics=None,
 ):
     """
     Create comprehensive final results dictionary, save as CSV, and log results.
@@ -236,6 +242,10 @@ def create_and_save_final_results(
                     ),
                 }
             )
+
+    # Demo-probe metrics (batched post-training probe — see training/demo_probe.py)
+    if demo_metrics:
+        final_results.update(demo_metrics)
 
     # Save to CSV
     results_df = pd.DataFrame([final_results])
@@ -895,6 +905,10 @@ def main(cfg: DictConfig) -> None:
         random_loss_step=cfg.training.random_loss_step,
         random_loss_step_min=cfg.training.random_loss_step_min,
         use_beta_loss_step=cfg.training.use_beta_loss_step,
+        loss_step_mode=cfg.training.get("loss_step_mode", None),
+        loss_tail_fraction=float(cfg.training.get("loss_tail_fraction", 0.5)),
+        consistency_weight=float(cfg.training.get("consistency_weight", 0.0)),
+        pool_return_step=str(cfg.training.get("pool_return_step", "final")),
         # ── Wiring & batching ───────────────────────────────────────────
         wiring_mode=cfg.training.wiring_mode,
         meta_batch_size=cfg.training.meta_batch_size,
@@ -923,6 +937,11 @@ def main(cfg: DictConfig) -> None:
         knockouts_per_event=damage_params["knockouts_per_event"],
         p_fault_onset_step_train=damage_params["p_fault_onset_step_train"],
         p_fault_onset_step_eval=damage_params["p_fault_onset_step_eval"],
+        # Bursty background damage (training-only; p_fault_train above is the
+        # quiet base rate when the burst block is enabled)
+        p_fault_burst=damage_params["burst"].get("p_fault_burst_train"),
+        burst_start_rate=float(damage_params["burst"].get("burst_start_rate_train", 0.0)),
+        burst_length=int(damage_params["burst"].get("length", 4)),
         compute_no_repair_baseline=damage_params["compute_no_repair_baseline"],
         # ── Probabilistic wire shuffle (training-only) ──────────────────
         p_shuffle=shuffle_params["p_shuffle_train"],
@@ -1050,6 +1069,60 @@ def main(cfg: DictConfig) -> None:
     if "metrics" in model_results:
         model_results.update(model_results["metrics"])
 
+    # ── Post-training demo probe ─────────────────────────────────────────────
+    # Batched scoring of the deploy checkpoint on the live-demo objective
+    # (settled accuracy / jitter on random topologies + carry-logits shuffle
+    # recovery) — see boolean_nca_cc/training/demo_probe.py. Runs on the GPU
+    # this job already holds; metrics land in final_results.csv + final/demo_*.
+    demo_metrics = None
+    if cfg.get("demo_probe") is not None and cfg.demo_probe.enabled:
+        try:
+            probe_model = model_results["model"]
+            probed = "final"
+            if str(cfg.demo_probe.which) == "best":
+                wandb_id = wandb_run.run.id if (cfg.wandb.enabled and wandb_run) else None
+                if wandb_id and checkpoint_dir is not None:
+                    best_path = os.path.join(
+                        checkpoint_dir,
+                        f"run_{wandb_id}",
+                        f"best_model_{cfg.demo_probe.best_metric}.pkl",
+                    )
+                    if os.path.exists(best_path):
+                        # In-place update is safe: the final model was already
+                        # saved + evaluated above; only metrics are used below.
+                        loaded = load_checkpoint_with_compatibility(best_path)
+                        nnx.update(probe_model, loaded["model"])
+                        probed = f"best ({cfg.demo_probe.best_metric})"
+                    else:
+                        log.warning(
+                            f"Demo probe: best checkpoint not found at {best_path}; "
+                            "probing final model instead"
+                        )
+            log.info(f"Running demo probe on the {probed} model ...")
+            demo_metrics = demo_probe(
+                probe_model,
+                cfg,
+                x_test,
+                y_test,
+                layer_sizes,
+                key=jax.random.fold_in(eval_key, 0xD3),
+                n_topologies=int(cfg.demo_probe.n_topologies),
+                n_pairs=int(cfg.demo_probe.n_pairs),
+                steps=int(cfg.demo_probe.steps),
+                settle_window=int(cfg.demo_probe.settle_window),
+                chunk_size=int(cfg.demo_probe.chunk_size),
+                shotgun_gates=(
+                    None
+                    if cfg.demo_probe.get("shotgun_gates", None) is None
+                    else int(cfg.demo_probe.shotgun_gates)
+                ),
+                shotgun_volleys=int(cfg.demo_probe.get("shotgun_volleys", 2)),
+            )
+            log.info("Demo probe results:\n" + format_demo_metrics(demo_metrics))
+        except Exception:  # noqa: BLE001 — never let the probe kill a finished run
+            log.exception("Demo probe failed; continuing without demo metrics")
+            demo_metrics = None
+
     # Collect comprehensive final results
     final_results = create_and_save_final_results(
         cfg,
@@ -1059,6 +1132,7 @@ def main(cfg: DictConfig) -> None:
         output_dir,
         wandb_run,
         total_params,
+        demo_metrics=demo_metrics,
     )
 
     # Close wandb if enabled
