@@ -166,6 +166,11 @@ def cfg_to_tmt_config(cfg: DictConfig) -> TMTConfig:
     mlp_dim = cfg.model.get("mlp_dim", None)
     if mlp_dim is None:
         mlp_dim = int(cfg.model.get("mlp_dim_multiplier", 2)) * attention_dim
+    if bool(cfg.model.get("use_rwse", False)):
+        raise ValueError(
+            "use_rwse=True checkpoints are not supported by the web export "
+            "(no RWSE in the TS runtime); only dist_pe is wired up."
+        )
     return TMTConfig(
         arity=int(cfg.circuit.arity),
         circuit_hidden_dim=int(cfg.model.circuit_hidden_dim),
@@ -175,6 +180,7 @@ def cfg_to_tmt_config(cfg: DictConfig) -> TMTConfig:
         use_layer_PE=bool(cfg.model.get("use_layer_PE", True)),
         use_intra_layer_PE=bool(cfg.model.get("use_intra_layer_PE", False)),
         use_node_loss=bool(cfg.model.get("use_node_loss", False)),
+        use_dist_pe=bool(cfg.model.get("use_dist_pe", False)),
         model_kind=kind,
         max_neighbors=int(cfg.model.get("max_neighbors", 16)),
     )
@@ -340,6 +346,7 @@ def _summarise(weights: TMTWeights) -> str:
         f"  feature_dim:        {cfg.feature_dim}  (logits + hidden + PE/loss flags)\n"
         f"  use_layer_PE:       {cfg.use_layer_PE}\n"
         f"  use_intra_layer_PE: {cfg.use_intra_layer_PE}\n"
+        f"  use_dist_pe:        {cfg.use_dist_pe}\n"
         f"  use_node_loss:      {cfg.use_node_loss}\n"
         f"  max_neighbors:      {cfg.max_neighbors}\n"
         f"  total parameters:   {n_params_total:,}\n"
@@ -528,6 +535,7 @@ def serialize_weights(
         "use_layer_PE": cfg.use_layer_PE,
         "use_intra_layer_PE": cfg.use_intra_layer_PE,
         "use_node_loss": cfg.use_node_loss,
+        "use_dist_pe": cfg.use_dist_pe,
         "max_neighbors": cfg.max_neighbors,
         "logit_dim": cfg.logit_dim,
         "feature_dim": cfg.feature_dim,
@@ -581,6 +589,8 @@ def deserialize_weights(json_path: str) -> TMTWeights:
         use_layer_PE=bool(header["use_layer_PE"]),
         use_intra_layer_PE=bool(header["use_intra_layer_PE"]),
         use_node_loss=bool(header["use_node_loss"]),
+        # Absent in pre-dist_pe exports — default False keeps old JSONs loadable.
+        use_dist_pe=bool(header.get("use_dist_pe", False)),
         model_kind=header["model_kind"],
         max_neighbors=int(header["max_neighbors"]),
     )

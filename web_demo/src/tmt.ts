@@ -95,8 +95,11 @@ function extractFeatures(
   topology: Topology,
   header: TMTHeader,
 ): void {
-  const { logitDim, circuitHiddenDim, useLayerPE, useIntraLayerPE, useNodeLoss, featureDim } = header;
+  const { logitDim, circuitHiddenDim, useLayerPE, useIntraLayerPE, useNodeLoss, useDistPe, featureDim } =
+    header;
   const N = topology.nNodes;
+  // dist_pe is 2 * (h >> 1) wide — equal to circuitHiddenDim for even h.
+  const distPeDim = 2 * (circuitHiddenDim >> 1);
   for (let n = 0; n < N; n++) {
     const base = n * featureDim;
     let off = 0;
@@ -113,6 +116,11 @@ function extractFeatures(
     if (useLayerPE) {
       for (let h = 0; h < circuitHiddenDim; h++) out[base + off + h] = topology.layerPe[n * circuitHiddenDim + h];
       off += circuitHiddenDim;
+    }
+    if (useDistPe) {
+      // Order matches ``extract_node_features``: intra -> layer -> dist -> loss.
+      for (let h = 0; h < distPeDim; h++) out[base + off + h] = topology.distPe[n * distPeDim + h];
+      off += distPeDim;
     }
     if (useNodeLoss) {
       out[base + off] = state.loss[n];

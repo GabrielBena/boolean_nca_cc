@@ -23,6 +23,8 @@ export interface TMTHeader {
   useLayerPE: boolean;
   useIntraLayerPE: boolean;
   useNodeLoss: boolean;
+  /** DAG-distance PE (wire-dependent). Absent in pre-dist_pe exports → false. */
+  useDistPe: boolean;
   maxNeighbors: number;
   logitDim: number;
   featureDim: number;
@@ -167,6 +169,7 @@ interface RawDoc {
     use_layer_PE: boolean;
     use_intra_layer_PE: boolean;
     use_node_loss: boolean;
+    use_dist_pe?: boolean;
     max_neighbors: number;
     logit_dim: number;
     feature_dim: number;
@@ -198,6 +201,7 @@ function parseHeader(raw: RawDoc["header"]): TMTHeader {
     useLayerPE: raw.use_layer_PE,
     useIntraLayerPE: raw.use_intra_layer_PE,
     useNodeLoss: raw.use_node_loss,
+    useDistPe: raw.use_dist_pe ?? false,
     maxNeighbors: raw.max_neighbors,
     logitDim: raw.logit_dim,
     featureDim: raw.feature_dim,

@@ -300,6 +300,9 @@ class TMTConfig:
     use_layer_PE: bool = True
     use_intra_layer_PE: bool = False
     use_node_loss: bool = True
+    # DAG-distance PE — sinusoidal (dist_from_input, dist_to_output), wire-dependent.
+    # Mirrors ``utils.positional_encoding.compute_dag_distance_pe``.
+    use_dist_pe: bool = False
     # ``self_attention`` mirrors ``CircuitSelfAttention`` (dense [N, N]
     # attention with separate LN_q / LN_kv and ``DenseGeneral`` QKV).
     # ``gathered_attention`` mirrors ``CircuitGatheredAttention`` (sparse
@@ -320,6 +323,10 @@ class TMTConfig:
             d += self.circuit_hidden_dim
         if self.use_layer_PE:
             d += self.circuit_hidden_dim
+        if self.use_dist_pe:
+            # Half the hidden budget per side; total matches layer_pe's size
+            # for even hidden dims (the only case we deploy).
+            d += 2 * (self.circuit_hidden_dim // 2)
         if self.use_node_loss:
             d += 1
         return d
@@ -368,6 +375,9 @@ class Topology:
     attention_mask: np.ndarray  # [N, N] bool
     layer_pe: np.ndarray  # [N, h]
     intra_layer_pe: np.ndarray  # [N, h]
+    # DAG-distance PE ``[N, 2 * (h // 2)]`` — wire-dependent, rebuilt on shuffle
+    # together with everything else in ``build_topology``.
+    dist_pe: np.ndarray | None = None
     # Optional gathered-attention caches; populated by ``build_topology``
     # when a ``max_neighbors`` value is supplied (or refreshed lazily on
     # the first ``tmt_step`` call for a gathered-kind model).
@@ -406,6 +416,37 @@ def gen_wires(rng: np.random.Generator, in_n: int, out_n: int, arity: int, group
     n = max(in_n, edge_n)
     perm = rng.permutation(n)[:edge_n]
     return (perm.reshape(arity, -1) % in_n).astype(np.int32)
+
+
+def compute_dag_distance_pe(
+    forward_senders: np.ndarray,
+    forward_receivers: np.ndarray,
+    layer_indices: np.ndarray,
+    n_node: int,
+    n_iterations: int,
+    pe_dim: int,
+    max_val: float = 10000.0,
+) -> np.ndarray:
+    """Sinusoidal encoding of ``(dist_from_input, dist_to_output)`` on the DAG.
+
+    Line-for-line port of ``utils.positional_encoding.compute_dag_distance_pe``:
+    Bellman-Ford relaxation on forward edges (input side) and reversed forward
+    edges (output side), distances saturating at ``n_iterations + 1`` for nodes
+    unreachable in that direction (e.g. gates whose output is never consumed).
+    """
+    inf_val = np.float32(n_iterations + 1)
+    max_layer = int(layer_indices.max()) if layer_indices.size else 0
+
+    dist_in = np.where(layer_indices == 0, 0.0, inf_val).astype(np.float32)
+    dist_out = np.where(layer_indices == max_layer, 0.0, inf_val).astype(np.float32)
+    for _ in range(n_iterations):
+        # ``np.minimum.at`` mirrors JAX's ``dist.at[...].min(...)`` scatter-min.
+        np.minimum.at(dist_in, forward_receivers, dist_in[forward_senders] + 1.0)
+        np.minimum.at(dist_out, forward_senders, dist_out[forward_receivers] + 1.0)
+
+    pe_in = get_positional_encoding(dist_in, pe_dim, max_val=max_val)
+    pe_out = get_positional_encoding(dist_out, pe_dim, max_val=max_val)
+    return np.concatenate([pe_in, pe_out], axis=-1)
 
 
 def build_topology(
@@ -475,6 +516,22 @@ def build_topology(
     layer_pe = np.concatenate(layer_pe_chunks, axis=0).astype(np.float32)
     intra_pe = np.concatenate(intra_pe_chunks, axis=0).astype(np.float32)
 
+    # DAG-distance PE — uses the *forward-only* edge list built above (the
+    # bidirectional mirror exists only in the attention mask). ``len(layer_sizes)``
+    # relaxation steps always suffice on a strictly layered DAG.
+    layer_of_node = np.concatenate(
+        [np.full(g, li, dtype=np.int32) for li, (g, _) in enumerate(layer_sizes)]
+    )
+    dist_pe = compute_dag_distance_pe(
+        senders,
+        receivers,
+        layer_of_node,
+        n_node=n_nodes,
+        n_iterations=len(layer_sizes),
+        pe_dim=hidden_dim // 2,
+        max_val=pe_max_val,
+    )
+
     output_start = sum(g for g, _ in layer_sizes[:-1])
     output_end = output_start + layer_sizes[-1][0]
 
@@ -494,6 +551,7 @@ def build_topology(
         attention_mask=mask,
         layer_pe=layer_pe,
         intra_layer_pe=intra_pe,
+        dist_pe=dist_pe,
         neighbor_indices=neighbor_indices,
         neighbor_mask=neighbor_mask,
     )
@@ -621,6 +679,12 @@ def extract_features(state: CircuitState, topology: Topology, cfg: TMTConfig) ->
         parts.append(topology.intra_layer_pe)
     if cfg.use_layer_PE:
         parts.append(topology.layer_pe)
+    if cfg.use_dist_pe:
+        # Order matches ``models.attention.base.extract_node_features``:
+        # intra -> layer -> dist_pe -> (rwse, unsupported here) -> loss.
+        if topology.dist_pe is None:
+            raise ValueError("cfg.use_dist_pe=True but topology has no dist_pe")
+        parts.append(topology.dist_pe)
     if cfg.use_node_loss:
         parts.append(state.loss[:, None])
     return np.concatenate(parts, axis=-1).astype(np.float32)

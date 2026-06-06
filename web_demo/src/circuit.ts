@@ -44,6 +44,10 @@ export interface Topology {
   layerPe: Float32Array;
   /** Sinusoidal intra-layer PE, ``[nNodes, hiddenDim]``. */
   intraLayerPe: Float32Array;
+  /** DAG-distance PE ``[nNodes, 2 * (hiddenDim >> 1)]`` — sinusoidal encoding of
+   *  (dist_from_input, dist_to_output) over forward edges. Wire-dependent:
+   *  rebuilt on shuffle along with the rest of the topology. */
+  distPe: Float32Array;
   /** Padded neighbour indices for gathered attention, ``[nNodes, maxNeighbors]``. */
   neighborIndices: Int32Array;
   /** Per-row flag: ``true`` for real neighbours, ``false`` for pad slots. */
@@ -152,6 +156,59 @@ function buildPositionalEncodings(
   return { layerPe, intraLayerPe, nNodes, layerStart };
 }
 
+/** DAG-distance PE — line-for-line port of the NumPy oracle's
+ *  ``compute_dag_distance_pe`` (itself mirroring
+ *  ``utils.positional_encoding.compute_dag_distance_pe``).
+ *
+ *  Bellman-Ford relaxation over the *forward-only* edge list: dist-from-input
+ *  seeds layer 0, dist-to-output seeds the last layer and relaxes reversed
+ *  edges. Distances saturate at ``nIterations + 1`` for unreachable nodes
+ *  (e.g. gates whose output no downstream gate consumes). Each side is
+ *  sinusoidally encoded at ``hiddenDim >> 1`` dims and concatenated. */
+function buildDistancePe(
+  layerSizes: LayerSize[],
+  layerStart: number[],
+  senders: Int32Array,
+  receivers: Int32Array,
+  nNodes: number,
+  hiddenDim: number,
+): Float32Array {
+  const nIterations = layerSizes.length;
+  const infVal = nIterations + 1;
+  const distIn = new Float32Array(nNodes).fill(infVal);
+  const distOut = new Float32Array(nNodes).fill(infVal);
+  const inputN = layerSizes[0][0];
+  for (let i = 0; i < inputN; i++) distIn[i] = 0;
+  const outStart = layerStart[layerSizes.length - 1];
+  for (let i = outStart; i < nNodes; i++) distOut[i] = 0;
+
+  const E = senders.length;
+  for (let it = 0; it < nIterations; it++) {
+    // dist[r] = min(dist[r], dist[s] + 1) — forward; mirrored for the output side.
+    for (let e = 0; e < E; e++) {
+      const s = senders[e];
+      const r = receivers[e];
+      const candIn = distIn[s] + 1;
+      if (candIn < distIn[r]) distIn[r] = candIn;
+      const candOut = distOut[r] + 1;
+      if (candOut < distOut[s]) distOut[s] = candOut;
+    }
+  }
+
+  const perSide = hiddenDim >> 1;
+  const distPe = new Float32Array(nNodes * 2 * perSide);
+  const peIn = new Float32Array(nNodes * perSide);
+  const peOut = new Float32Array(nNodes * perSide);
+  sinusoidalPE(peIn, distIn, perSide);
+  sinusoidalPE(peOut, distOut, perSide);
+  // Concatenate [PE(dist_in), PE(dist_out)] per node.
+  for (let n = 0; n < nNodes; n++) {
+    distPe.set(peIn.subarray(n * perSide, (n + 1) * perSide), n * 2 * perSide);
+    distPe.set(peOut.subarray(n * perSide, (n + 1) * perSide), n * 2 * perSide + perSide);
+  }
+  return distPe;
+}
+
 /** Convert the dense ``[N, N]`` attention mask into padded neighbour indices.
  *
  *  Mirrors ``boolean_nca_cc.models.attention.base.build_neighbor_indices`` and
@@ -194,6 +251,7 @@ export function buildTopology(
   const { layerPe, intraLayerPe, nNodes, layerStart } = buildPositionalEncodings(layerSizes, hiddenDim);
   const { senders, receivers } = fillSenders(layerSizes, layerStart, wires, wiresShape, arity);
   const attentionMask = buildAttentionMask(senders, receivers, nNodes);
+  const distPe = buildDistancePe(layerSizes, layerStart, senders, receivers, nNodes, hiddenDim);
   const cache = buildNeighborCache(attentionMask, nNodes, maxNeighbors);
 
   const outputStart = layerStart[layerSizes.length - 1];
@@ -211,6 +269,7 @@ export function buildTopology(
     attentionMask,
     layerPe,
     intraLayerPe,
+    distPe,
     neighborIndices: cache.neighborIndices,
     neighborMask: cache.neighborMask,
     maxNeighbors: cache.maxNeighbors,

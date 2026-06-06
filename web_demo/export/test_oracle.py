@@ -266,6 +266,8 @@ def run_jax_parity_test(
     max_steps: int = 8,
     tol: float = 1e-4,
     weights_json: str | None = None,
+    ckpt: str | None = None,
+    cfg_path: str | None = None,
     verbose: bool = True,
 ) -> bool:
     """Cross-validate the NumPy oracle against the JAX policy.
@@ -307,10 +309,19 @@ def run_jax_parity_test(
         tmt_step,
     )
 
-    rid = run_id or DEFAULT_RUN_ID
-    if verbose:
-        print(f"[jax-parity] loading run {rid} ...")
-    model, cfg, _ = load_run(run_id=rid)
+    if ckpt is not None:
+        # Local checkpoint path (e.g. cluster-trained runs whose pkl never hit
+        # W&B). ``load_model_and_cfg`` also configures the global graph builder.
+        from web_demo.export.ceiling_probe import load_model_and_cfg
+
+        if verbose:
+            print(f"[jax-parity] loading local ckpt {ckpt} ...")
+        model, cfg, _, _ = load_model_and_cfg(ckpt, cfg_path)
+    else:
+        rid = run_id or DEFAULT_RUN_ID
+        if verbose:
+            print(f"[jax-parity] loading run {rid} ...")
+        model, cfg, _ = load_run(run_id=rid)
     if weights_json is not None:
         if verbose:
             print(f"[jax-parity] loading quantised weights from {weights_json}")
@@ -354,6 +365,9 @@ def run_jax_parity_test(
         input_n=input_bits,
         arity=arity,
         circuit_hidden_dim=hidden_dim,
+        # Wire-dependent PE: the JAX model consumes nodes["dist_pe"] when the
+        # checkpoint was trained with it (oracle mirrors via topology.dist_pe).
+        use_dist_pe=bool(cfg.model.get("use_dist_pe", False)),
     )
 
     # Task data — full truth table for the configured task.
@@ -476,6 +490,8 @@ def run_perturbation_parity_test(
     click_idx: int | None = None,
     hard_acc_tol: float = 0.05,
     weights_json: str | None = None,
+    ckpt: str | None = None,
+    cfg_path: str | None = None,
     verbose: bool = True,
 ) -> bool:
     """Parity test for the four user-facing actions in the demo.
@@ -532,11 +548,18 @@ def run_perturbation_parity_test(
         tmt_step,
     )
 
-    rid = run_id or DEFAULT_RUN_ID
-    if verbose:
-        kind = "quantised (JSON)" if weights_json is not None else "float (extracted)"
-        print(f"[perturbation-parity] loading run {rid} ... weights={kind}")
-    model, cfg, _ = load_run(run_id=rid)
+    kind = "quantised (JSON)" if weights_json is not None else "float (extracted)"
+    if ckpt is not None:
+        from web_demo.export.ceiling_probe import load_model_and_cfg
+
+        if verbose:
+            print(f"[perturbation-parity] loading local ckpt {ckpt} ... weights={kind}")
+        model, cfg, _, _ = load_model_and_cfg(ckpt, cfg_path)
+    else:
+        rid = run_id or DEFAULT_RUN_ID
+        if verbose:
+            print(f"[perturbation-parity] loading run {rid} ... weights={kind}")
+        model, cfg, _ = load_run(run_id=rid)
     if weights_json is not None:
         weights = deserialize_weights(weights_json)
     else:
@@ -589,6 +612,9 @@ def run_perturbation_parity_test(
             arity=arity,
             circuit_hidden_dim=hidden_dim,
             gate_knockout_mask=gate_mask,
+            # Recomputed per call — the shuffle path below rebuilds with new
+            # wires, which is exactly when dist_pe must refresh.
+            use_dist_pe=bool(cfg.model.get("use_dist_pe", False)),
         )
         if hidden is not None:
             g = g._replace(nodes={**g.nodes, "hidden": hidden})
@@ -845,7 +871,15 @@ def main() -> None:
         default=None,
         help="Use int8 weights from this JSON instead of extracting from the live model.",
     )
+    parser.add_argument(
+        "--ckpt",
+        default=None,
+        help="Local checkpoint .pkl (with --cfg) instead of a W&B --run-id.",
+    )
+    parser.add_argument("--cfg", default=None, help="The run's resolved config.yaml (with --ckpt).")
     args = parser.parse_args()
+    if args.ckpt and not args.cfg:
+        parser.error("--ckpt requires --cfg")
 
     if args.all_parity:
         args.self_test = True
@@ -866,6 +900,8 @@ def main() -> None:
             max_steps=args.max_steps,
             tol=args.tol,
             weights_json=args.weights_json,
+            ckpt=args.ckpt,
+            cfg_path=args.cfg,
         ):
             rc = 1
     if args.perturbation_parity:
@@ -876,6 +912,8 @@ def main() -> None:
             n_shotgun=args.n_shotgun,
             click_idx=args.click_idx,
             weights_json=args.weights_json,
+            ckpt=args.ckpt,
+            cfg_path=args.cfg,
         ):
             rc = 1
     sys.exit(rc)

@@ -22,8 +22,16 @@ import { parseWeightsFromJson } from "../src/weights.ts";
 import { runReplayFromJson } from "../src/replay.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const WEIGHTS_PATH = resolve(HERE, "../public/weights/reverse_random_damage.json");
-const TRAJECTORY_PATH = resolve(HERE, "../public/weights/reverse_trajectory.json");
+// Optional argv overrides (resolved against this script's dir):
+//   node --experimental-strip-types scripts/replay_node.ts [weights.json] [trajectory.json]
+const WEIGHTS_PATH = resolve(
+  HERE,
+  process.argv[2] ?? "../public/weights/reverse_random_damage.json",
+);
+const TRAJECTORY_PATH = resolve(
+  HERE,
+  process.argv[3] ?? "../public/weights/reverse_trajectory.json",
+);
 
 async function main() {
   console.log(`[ts-replay] reading ${WEIGHTS_PATH}`);
