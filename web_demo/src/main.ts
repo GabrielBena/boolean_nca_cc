@@ -32,7 +32,10 @@ const BASE = import.meta.env.BASE_URL; // "/" in dev, "/assets/sodc-demo/" in pr
 const GALLERY_URL = `${BASE}weights/gallery.json`;
 
 // Default knobs. Tweakable from the URL hash later if needed.
-const DEFAULT_SHOTGUN_GATES = 8;
+// One eval "volley" = ceil(0.10 * 240 hidden gates / 2 volleys) = 12, so a single
+// shotgun click matches one eval volley and two clicks = the full paper protocol
+// (2x12 = 10% of hidden gates). Eval-consistent by construction.
+const DEFAULT_SHOTGUN_GATES = 12;
 const TICK_THROTTLE_MS = 16; // ≤ 60 FPS — actual ticks gated by compute time
 
 // ---------------------------------------------------------------------------
