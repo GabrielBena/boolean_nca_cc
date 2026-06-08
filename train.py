@@ -500,10 +500,64 @@ def main(cfg: DictConfig) -> None:
     else:
         output_dir = os.getcwd()
 
+    # HSM resumable-chain CONTRACT [CONTRACT 1: consume the resume pointer]
+    # (HPC-Sweep-Manager issue #12). In `hsm sweep run --resumable` mode HSM exports
+    # HSM_RESUME_FROM (non-empty => resume; empty on chunk 1) and HSM_RESUME_TO (the
+    # persistent dir holding the checkpoint). We resolve them into
+    # cfg.training.resume_from so the rest of the pipeline (wandb peek + train_model)
+    # is untouched. Env-only by default; an explicit cfg.training.resume_from wins.
+    _hsm_from = os.environ.get("HSM_RESUME_FROM")
+    _hsm_to = os.environ.get("HSM_RESUME_TO")
+    if not cfg.training.get("resume_from", None) and _hsm_from:
+        _cand = None
+        if os.path.isfile(_hsm_from):
+            _cand = _hsm_from  # FROM points directly at the checkpoint file
+        else:
+            _base = _hsm_to or (_hsm_from if os.path.isdir(_hsm_from) else None)
+            if _base:
+                _cand = os.path.join(_base, "latest_checkpoint.pkl")
+        if _cand and os.path.exists(_cand):
+            with open_dict(cfg):
+                cfg.training.resume_from = _cand
+            log.info(f"HSM resumable chain: resuming from {_cand}")
+        else:
+            log.info(
+                f"HSM_RESUME_FROM set ({_hsm_from!r}) but no checkpoint found yet "
+                "— starting fresh (treating as chunk 1)."
+            )
+
     # Initialize wandb if enabled
     wandb_run = None
     if cfg.wandb.enabled:
-        wandb.init(
+        # ── WandB resume continuity ───────────────────────────────────────
+        # If this is a mid-training resume, peek the checkpoint for the wandb
+        # run id saved by the original run and pass it as TOP-LEVEL init args
+        # (id=, resume="must") so the continued run logs to the SAME wandb run
+        # with a continuous curve — instead of spawning a fresh run. The id
+        # lives in the checkpoint's resume block (resume.wandb_run_id); we read
+        # it here, BEFORE wandb.init, because train_model only discovers it much
+        # later (after it loads the checkpoint). See wandb resuming docs.
+        resume_from = cfg.training.get("resume_from", None)
+        resume_wandb_id = None
+        if resume_from is not None:
+            try:
+                _peek = load_checkpoint_with_compatibility(resume_from)
+                resume_wandb_id = (_peek.get("resume") or {}).get("wandb_run_id")
+                del _peek
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    f"Could not peek wandb_run_id from resume checkpoint {resume_from!r}: {e}. "
+                    "wandb will start a fresh run for the resumed half."
+                )
+            if resume_wandb_id:
+                log.info(f"Resuming wandb run id={resume_wandb_id} (resume='must').")
+            else:
+                log.warning(
+                    "resume_from is set but no wandb_run_id was found in the checkpoint; "
+                    "wandb will start a fresh run for the resumed half."
+                )
+
+        init_kwargs = dict(
             project=cfg.wandb.project,
             entity=cfg.wandb.entity,
             name=cfg.wandb.run_name,
@@ -512,7 +566,25 @@ def main(cfg: DictConfig) -> None:
             group=cfg.wandb.group,
             reinit="finish_previous",
         )
+        if resume_wandb_id:
+            # Top-level resume args (NOT inside config=) — this is what actually
+            # makes wandb continue the existing run rather than create a new one.
+            init_kwargs["id"] = resume_wandb_id
+            init_kwargs["resume"] = "must"
+
+        wandb.init(**init_kwargs)
         wandb_run = wandb
+
+        # X-axis continuity across the kill+resume seam. wandb's internal _step
+        # counter restarts to 0 on a resumed run, which would draw the two halves
+        # on top of each other. Pin every metric to the monotonic "epoch" field
+        # instead, so the web UI overlays the two halves into one continuous
+        # curve regardless of _step. Every .log call includes "epoch".
+        try:
+            wandb.define_metric("epoch")
+            wandb.define_metric("*", step_metric="epoch")
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"Could not define wandb step metric 'epoch': {e}")
 
     log.info(f"Output directory: {output_dir}")
 
@@ -982,6 +1054,9 @@ def main(cfg: DictConfig) -> None:
         checkpoint_interval=cfg.checkpoint.interval,
         save_best=cfg.checkpoint.save_best,
         track_metrics=track_metrics,
+        # Bit-faithful mid-training resume + full cfg for self-sufficient saves.
+        resume_from=cfg.training.get("resume_from", None),
+        cfg=cfg,
         # ── Logging & WandB ─────────────────────────────────────────────
         wandb_logging=cfg.wandb.enabled,
         log_interval=cfg.logging.log_interval,

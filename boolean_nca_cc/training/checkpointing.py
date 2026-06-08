@@ -389,7 +389,17 @@ def instantiate_model_from_config(config, seed=0, **overrides: Any):
         raise
 
 
-def save_checkpoint(model, optimizer, metrics, cfg, step, output_dir, filename=None):
+def save_checkpoint(
+    model,
+    optimizer,
+    metrics,
+    cfg,
+    step,
+    output_dir,
+    filename=None,
+    *,
+    resume_state: dict | None = None,
+):
     """Save a checkpoint of the model and optimizer.
 
     Args:
@@ -400,6 +410,31 @@ def save_checkpoint(model, optimizer, metrics, cfg, step, output_dir, filename=N
         step: Current training step
         output_dir: Directory to save the checkpoint
         filename: Optional custom filename for the checkpoint
+        resume_state: Optional dict of *resume-critical* mutable training state to
+            embed for bit-faithful mid-training resume. Recognised keys (all
+            optional; consumed by :func:`restore_resume_state`):
+
+            - ``epoch`` (int): the epoch just completed; resume starts at
+              ``epoch + 1``.
+            - ``pool`` (``GraphPool``): the full circuit pool — a
+              ``flax.struct.PyTreeNode`` whose leaves are JAX arrays (evolved
+              logits, hidden state in ``graphs.nodes``, wires, gate_masks,
+              damage_count, reset_counter, per-circuit y_task, and the
+              ``graphs.globals.update_steps`` maturity counter). Pickles as a
+              plain pytree.
+            - ``train_key`` (PRNGKey): the carried, re-split training key,
+              snapshotted at the *top of the epoch loop body* (before that
+              epoch's ``jax.random.split``), so the restored key reproduces
+              every subsequent draw bit-for-bit.
+            - ``last_reset_epoch`` (int): pool-reset phase bookkeeping.
+            - ``best_model_tracker`` (dict): ``{"best_metrics", "best_epochs"}``
+              so the first post-resume eval does not clobber the deploy best.
+            - ``early_stopping`` (dict | None):
+              ``{"count", "first_epoch", "triggered"}`` patience state.
+            - ``wandb_run_id`` (str | None): logging continuity (cosmetic).
+
+            Old checkpoints written without ``resume_state`` simply omit the
+            ``"resume"`` key; loaders guard with ``.get("resume")``.
 
     Returns:
         Path to the saved checkpoint
@@ -416,6 +451,12 @@ def save_checkpoint(model, optimizer, metrics, cfg, step, output_dir, filename=N
         else cfg,
         "step": step,
     }
+
+    # Embed the resume-critical mutable training state, if provided. Kept under a
+    # single "resume" key so old/demo-probe checkpoints (which don't pass it) stay
+    # byte-for-byte the same shape and load via `.get("resume")`.
+    if resume_state is not None:
+        checkpoint["resume"] = resume_state
 
     if filename is None:
         checkpoint_path = os.path.join(output_dir, f"checkpoint_{step}.pkl")
@@ -452,6 +493,51 @@ def load_checkpoint_legacy(checkpoint_path):
     """Load a checkpoint from a file using standard pickle (legacy method)."""
     with open(checkpoint_path, "rb") as f:
         return pickle.load(f)
+
+
+def restore_resume_state(model, optimizer, loaded_dict):
+    """Restore model + optimizer arrays from a loaded checkpoint dict, in-place.
+
+    This mirrors :func:`load_model_from_config_and_checkpoint` for the resume
+    path: it applies the backward-compat state migrations and ``nnx.update``-s
+    the **already-constructed** ``model`` and ``optimizer`` (which must have been
+    built with the identical architecture and the identical optax ``opt_fn`` /
+    schedule). It does NOT instantiate anything — the caller owns construction so
+    the optimizer's internal ``model`` reference and the rebuilt schedule stay
+    consistent (see CHECKPOINT_AUDIT.md §5.4).
+
+    Restores, in order:
+      1. ``model`` params (via the compat-aware migration + ``nnx.update``);
+      2. ``optimizer`` state — AdamW first/second moments (``mu``/``nu``) AND the
+         uint32 ``step``/``count`` that drives the static LR schedule.
+
+    The *non-array* resume state (pool, train_key, trackers, epoch,
+    last_reset_epoch, wandb id) lives under ``loaded_dict["resume"]`` and is
+    returned untouched for the caller to apply; this function only handles the
+    two nnx objects.
+
+    Args:
+        model: Freshly-constructed nnx model (architecture must match the ckpt).
+        optimizer: Freshly-constructed ``nnx.Optimizer`` wrapping ``model`` with
+            the same ``opt_fn``/schedule used originally.
+        loaded_dict: The dict returned by ``load_checkpoint``/the compat loader.
+
+    Returns:
+        The ``loaded_dict["resume"]`` sub-dict (or ``None`` for legacy
+        checkpoints that predate resume support).
+    """
+    # 1. Model params — reuse the compat migration path (handles Flax version
+    #    drift in pickled VariableState + module-layout migrations).
+    migrated_model_state = migrate_checkpoint_state(model, loaded_dict["model"])
+    nnx.update(model, migrated_model_state)
+
+    # 2. Optimizer arrays (AdamW moments + uint32 step). nnx.state(optimizer)
+    #    round-trips both (verified on flax 0.12 / optax 0.2). The optimizer must
+    #    already reference the restored `model` and a rebuilt `opt_fn`.
+    if "optimizer" in loaded_dict and loaded_dict["optimizer"] is not None:
+        nnx.update(optimizer, loaded_dict["optimizer"])
+
+    return loaded_dict.get("resume")
 
 
 # Best Model Tracking and Checkpointing Functions
@@ -537,8 +623,22 @@ def save_periodic_checkpoint(
     epoch: int,
     checkpoint_interval: int,
     wandb_run=None,
+    *,
+    cfg=None,
+    resume_state: dict | None = None,
 ) -> None:
-    """Save periodic checkpoint if interval allows."""
+    """Save periodic checkpoint if interval allows.
+
+    Args:
+        cfg: Full training config. Previously this function hard-coded
+            ``{"epoch": epoch}`` as the saved config, which dropped everything
+            needed to rebuild the optimizer / schedule and the curriculum on
+            resume. Pass the real cfg so ``latest_checkpoint.pkl`` is
+            self-sufficient for a faithful resume. Falls back to
+            ``{"epoch": epoch}`` only if ``cfg`` is None (back-compat).
+        resume_state: Optional resume-critical state dict; see
+            :func:`save_checkpoint`.
+    """
     if checkpoint_path is None or epoch == 0 or epoch % checkpoint_interval != 0:
         return
 
@@ -549,10 +649,11 @@ def save_periodic_checkpoint(
             model,
             optimizer,
             metrics,
-            {"epoch": epoch},
+            cfg if cfg is not None else {"epoch": epoch},
             epoch,
             checkpoint_path,
             filename=ckpt_filename,
+            resume_state=resume_state,
         )
 
         # Log to wandb if enabled

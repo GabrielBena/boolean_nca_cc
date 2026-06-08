@@ -140,6 +140,13 @@ training:
   # NUMBER OF EPOCHS
   epochs: null
   epochs_power_of_2: 19 # 2^n
+  # MID-TRAINING RESUME (bit-faithful)
+  # Path to a latest_checkpoint.pkl written by the resume-aware checkpoint path
+  # (periodic save / SIGTERM preemption hook). When set, model + optimizer +
+  # circuit pool + carried train_key + epoch/reset-phase + best/early-stop
+  # trackers are restored and training continues from epoch+1. null = fresh run.
+  # Keep `epochs` identical to the original run for a faithful schedule.
+  resume_from: null
   # USE SCAN
   use_scan: true
   # GRADIENT CHECKPOINTING (remat)

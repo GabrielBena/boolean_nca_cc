@@ -6,7 +6,10 @@ boolean circuits over multiple epochs.
 """
 
 import logging
+import os
+import signal
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 import jax
@@ -28,6 +31,9 @@ from boolean_nca_cc.models import (
 from boolean_nca_cc.training.checkpointing import (
     BestModelTracker,
     EarlyStopping,
+    load_checkpoint,
+    restore_resume_state,
+    save_checkpoint,
     save_periodic_checkpoint,
     setup_checkpoint_dir,
 )
@@ -430,7 +436,9 @@ def run_unified_periodic_evaluation(
 
         # Log to wandb if enabled
         if wandb_run:
-            wandb_run.log(combined_metrics)
+            # Tag with the current epoch (the wandb step_metric) so eval curves
+            # stay continuous across a kill+resume seam even if _step resets.
+            wandb_run.log({**combined_metrics, "epoch": epoch})
 
             if log_pool_scatter and pool is not None:
                 _log_pool_scatter(pool, epoch, wandb_run)
@@ -596,6 +604,7 @@ def run_unified_periodic_evaluation(
                         {
                             f"best_model_updates/{metric_key}": update_info["value"],
                             f"best_model_updates/{metric_key}_epoch": update_info["epoch"],
+                            "epoch": epoch,
                         }
                     )
 
@@ -744,6 +753,17 @@ def train_model(
     checkpoint_interval: int = 10,
     save_best: bool = True,
     track_metrics: list[str] | None = None,
+    # Path to a resume checkpoint (``latest_checkpoint.pkl`` written by
+    # save_periodic_checkpoint / the SIGTERM hook). When set, the model,
+    # optimizer, circuit pool, carried train_key, epoch/last_reset_epoch and the
+    # best/early-stop trackers are restored bit-faithfully and the loop continues
+    # from ``epoch + 1``. None (default) = fresh run. See CHECKPOINT_AUDIT.md.
+    resume_from: str | None = None,
+    # Full training config (OmegaConf/dict). Saved verbatim into periodic /
+    # SIGTERM checkpoints so they are self-sufficient for resume (rebuild the
+    # optimizer schedule + curriculum). None → periodic saves fall back to the
+    # legacy ``{"epoch": epoch}`` config blob.
+    cfg=None,
     # ── Logging & WandB ─────────────────────────────────────────────────
     wandb_logging: bool = False,
     log_interval: int = 1,
@@ -993,6 +1013,77 @@ def train_model(
         random_init_scale=random_init_scale,
         y_task=initial_y_task,
     )
+
+    # =========================================================================
+    # Bit-faithful mid-training resume
+    # =========================================================================
+    # Done here — after model/optimizer/pool are fully constructed (so the
+    # nnx objects, the optax opt_fn/schedule, and the pool pytree structure all
+    # exist) but BEFORE the multi-GPU sharding replicate (the audit requires
+    # restoring single-device arrays first). The restore OVERWRITES the freshly
+    # built state with the checkpointed state:
+    #   - model params + optimizer moments + uint32 step (restore_resume_state);
+    #   - the full circuit pool (the meta-curriculum — every mutable field);
+    #   - the CARRIED train_key (path-dependent; NOT re-derivable from seed);
+    #   - last_reset_epoch (pool-reset phase) and start_epoch;
+    #   - best-model / early-stop tracker seeds (applied where those objects are
+    #     constructed, a few hundred lines below).
+    start_epoch = 0
+    _resume_tracker_state = None  # best_model_tracker seed (applied at construction)
+    _resume_early_stop_state = None  # early_stopping seed (applied below)
+    _resume_wandb_run_id = None
+    if resume_from is not None:
+        log.info(f"Resuming training from checkpoint: {resume_from}")
+        loaded_dict = load_checkpoint(resume_from)
+        # Restore model params + optimizer arrays (moments + uint32 step) in-place.
+        resume_blob = restore_resume_state(model, optimizer, loaded_dict)
+        if resume_blob is None:
+            raise ValueError(
+                f"Checkpoint {resume_from!r} has no 'resume' block — it was written "
+                "without resume state (e.g. a best_model/demo-probe checkpoint) and "
+                "cannot be used to continue training faithfully. Point resume_from at "
+                "a latest_checkpoint.pkl saved by the resume-aware periodic/SIGTERM "
+                "save path."
+            )
+
+        # Circuit pool — the meta-curriculum. A flax.struct.PyTreeNode; its leaves
+        # are JAX arrays restored verbatim from the pickle. We tree-map onto the
+        # freshly built pool so the (static) `size` field and pytree structure are
+        # taken from the live pool while every array leaf comes from the ckpt —
+        # this also coerces numpy-on-load arrays back onto the active device.
+        saved_pool = resume_blob["pool"]
+        circuit_pool = jax.tree.map(
+            lambda live, saved: jp.asarray(saved),
+            circuit_pool,
+            saved_pool,
+        )
+
+        # Carried PRNG key (path-dependent; snapshotted at the saved epoch's loop top).
+        train_key = jp.asarray(resume_blob["train_key"])
+
+        # Epoch / reset-phase bookkeeping.
+        start_epoch = int(resume_blob["epoch"]) + 1
+        last_reset_epoch_resumed = int(resume_blob["last_reset_epoch"])
+
+        # Tracker / early-stop seeds (objects are constructed later; stash here).
+        _resume_tracker_state = resume_blob.get("best_model_tracker")
+        _resume_early_stop_state = resume_blob.get("early_stopping")
+        _resume_wandb_run_id = resume_blob.get("wandb_run_id")
+
+        # Re-seed the metrics history lists so reporting / epochs_completed reflect
+        # the full run (train.py doesn't pass initial_metrics on resume).
+        if initial_metrics is None:
+            saved_metrics = loaded_dict.get("metrics", {}) or {}
+            losses = list(saved_metrics.get("losses", []))
+            accuracies = list(saved_metrics.get("accuracies", []))
+            hard_losses = list(saved_metrics.get("hard_losses", []))
+            hard_accuracies = list(saved_metrics.get("hard_accuracies", []))
+            reset_steps = list(saved_metrics.get("reset_steps", []))
+
+        log.info(
+            f"Resumed: start_epoch={start_epoch}, last_reset_epoch={last_reset_epoch_resumed}, "
+            f"pool_size={circuit_pool.size}, metrics_history={len(losses)} epochs."
+        )
 
     # === One-shot eager topology validation for gathered self-attention ===
     # ``validate_gathered_topology`` is a no-op inside JIT/vmap; running it here,
@@ -1422,26 +1513,158 @@ def train_model(
     # We can't perfrom gradient checking on the JIT-compiled version
     pool_train_step = _pool_train_step if do_check_gradients else _pool_train_step_jit
 
-    # Setup wandb logging if enabled
+    # Setup wandb logging. The REAL wandb.init (with resume id/resume="must" on a
+    # mid-training resume) already ran in train.py BEFORE train_model — that's the
+    # only place that knows whether to resume, and it peeks the checkpoint for the
+    # saved wandb_run_id. Here _init_wandb is a no-op when a run already exists
+    # (it's gated on `if not wandb.run`); it just returns the live wandb module.
+    # So on resume the checkpoint subdir path `run_<id>` stays stable because
+    # wandb.run.id IS the resumed id. (`_resume_wandb_run_id` is the fallback if
+    # wandb is disabled but a run id was checkpointed.)
     wandb_run = _init_wandb(wandb_logging, wandb_run_config)
-    wandb_id = wandb_run.run.id if wandb_run else None
+    wandb_id = wandb_run.run.id if wandb_run else _resume_wandb_run_id
 
     # Setup checkpointing directory
     checkpoint_path = setup_checkpoint_dir(checkpoint_dir, wandb_id)
 
-    # Initialize best model tracker for unified tracking
+    # Initialize best model tracker for unified tracking. On resume, seed it from
+    # the checkpoint so the first post-resume eval doesn't spuriously "improve"
+    # over a better pre-preemption model and overwrite the deploy best.
     best_model_tracker = BestModelTracker()
+    if _resume_tracker_state is not None:
+        best_model_tracker.best_metrics = dict(_resume_tracker_state.get("best_metrics", {}))
+        best_model_tracker.best_epochs = dict(_resume_tracker_state.get("best_epochs", {}))
+        log.info(
+            f"Restored BestModelTracker: {len(best_model_tracker.best_metrics)} tracked metrics."
+        )
 
-    # Create progress bar for training
-    pbar = tqdm(range(epochs), desc="Training GNN")
+    # Restore EarlyStopping patience state so a run about to early-stop doesn't
+    # restart its countdown (or get extra epochs) after resume.
+    if early_stopping is not None and _resume_early_stop_state is not None:
+        early_stopping.count = int(_resume_early_stop_state.get("count", 0))
+        early_stopping.first_epoch = _resume_early_stop_state.get("first_epoch")
+        early_stopping.triggered = bool(_resume_early_stop_state.get("triggered", False))
+        log.info(
+            f"Restored EarlyStopping: count={early_stopping.count}, "
+            f"first_epoch={early_stopping.first_epoch}, triggered={early_stopping.triggered}."
+        )
+
+    # Create progress bar for training. On resume, start at start_epoch (not 0)
+    # so the beta-loss-step `epoch/(epochs-1)` schedule and reset gating line up.
+    pbar = tqdm(range(start_epoch, epochs), initial=start_epoch, total=epochs, desc="Training GNN")
     avg_steps_reset = 0
 
     # Track last reset epoch for scheduling
     last_reset_epoch = -1  # Initialize to -1 so first check works correctly
+    if resume_from is not None:
+        last_reset_epoch = last_reset_epoch_resumed
 
     # Track damage application / diversity of pool
     avg_damage_count = 0.0  # Average knockouts per circuit across pool
     diversity = 0.0
+
+    # Default epoch so the result/except blocks are well-defined even if the loop
+    # body never runs (e.g. resuming at/past `epochs`).
+    epoch = start_epoch - 1
+
+    def _build_resume_state(saved_epoch: int) -> dict:
+        """Snapshot the resume-critical mutable state at the top of `saved_epoch`.
+
+        Captured BEFORE that epoch's `jax.random.split(train_key, 3)` so the
+        restored key reproduces the epoch's draws bit-for-bit. Bundles every
+        mutable pool field (the whole GraphPool pytree), the carried train_key,
+        epoch/last_reset_epoch, and the best/early-stop tracker state.
+        """
+        return {
+            "epoch": int(saved_epoch),
+            "pool": circuit_pool,
+            "train_key": train_key,
+            "last_reset_epoch": int(last_reset_epoch),
+            "best_model_tracker": {
+                "best_metrics": dict(best_model_tracker.best_metrics),
+                "best_epochs": dict(best_model_tracker.best_epochs),
+            },
+            "early_stopping": (
+                {
+                    "count": int(early_stopping.count),
+                    "first_epoch": early_stopping.first_epoch,
+                    "triggered": bool(early_stopping.triggered),
+                }
+                if early_stopping is not None
+                else None
+            ),
+            "wandb_run_id": wandb_id,
+        }
+
+    # Slurm preemption hook. Slurm sends SIGTERM (not SIGINT) before SIGKILL on
+    # preempt; the loop only natively catches KeyboardInterrupt. We install a
+    # handler that flips a flag; the loop checks it after each epoch and writes a
+    # final resume checkpoint, so the next launch can `resume_from` it. Pair with
+    # `#SBATCH --signal=B:TERM@120` for a grace window. Only installed in the main
+    # thread (signal.signal raises elsewhere) and only when checkpointing is on.
+    _preempt_requested = {"flag": False}
+    _interrupted = {"flag": False}
+    _prev_sigterm_handler = None
+
+    # HSM resumable-chain CONTRACT (HPC-Sweep-Manager issue #12). HSM exports these
+    # env vars only in `--resumable` mode; standalone runs leave them unset and this
+    # whole block is inert. HSM knows only PATHS — never our checkpoint format.
+    #   HSM_RESUME_TO     dir to SAVE the resume checkpoint (persistent across chunks)
+    #   HSM_DONE_SENTINEL touch when the WHOLE budget is done -> chain stops
+    # (HSM_RESUME_FROM is resolved in train.py into `resume_from` above.)
+    _hsm_resume_to = os.environ.get("HSM_RESUME_TO") or None
+    _hsm_done_sentinel = os.environ.get("HSM_DONE_SENTINEL") or None
+    # The resume checkpoint goes to HSM_RESUME_TO when chained, else the normal dir.
+    _resume_save_dir = _hsm_resume_to or checkpoint_path
+    if _hsm_resume_to:
+        try:
+            os.makedirs(_hsm_resume_to, exist_ok=True)
+        except OSError as _e:
+            log.warning(f"Could not create HSM_RESUME_TO {_hsm_resume_to}: {_e}")
+
+    def _on_sigterm(signum, frame):
+        log.warning(f"Received SIGTERM (signal {signum}); will save resume checkpoint and exit.")
+        _preempt_requested["flag"] = True
+
+    # Install the handler whenever we have somewhere to save a resume checkpoint —
+    # the normal checkpoint dir OR the HSM-provided resume dir.
+    _resume_saveable = (checkpoint_enabled and checkpoint_path is not None) or bool(_hsm_resume_to)
+    _sigterm_installed = False
+    if _resume_saveable:
+        try:
+            _prev_sigterm_handler = signal.signal(signal.SIGTERM, _on_sigterm)
+            _sigterm_installed = True
+        except (ValueError, OSError) as _e:  # not in main thread / unsupported
+            log.debug(f"Could not install SIGTERM handler: {_e}")
+
+    def _save_resume_checkpoint(saved_epoch: int, reason: str) -> None:
+        """Write the single overwritten resume checkpoint (latest_checkpoint.pkl).
+
+        Targets HSM_RESUME_TO when chained (so HSM hands it to the next chunk),
+        else the run's normal checkpoint dir. [CONTRACT 2: save on SIGTERM + periodically]
+        """
+        if _resume_save_dir is None:
+            return
+        try:
+            save_checkpoint(
+                model,
+                optimizer,
+                {
+                    "losses": losses,
+                    "hard_losses": hard_losses,
+                    "accuracies": accuracies,
+                    "hard_accuracies": hard_accuracies,
+                    "reset_steps": reset_steps,
+                },
+                cfg if cfg is not None else {"epoch": saved_epoch},
+                saved_epoch,
+                _resume_save_dir,
+                filename="latest_checkpoint.pkl",
+                resume_state=_build_resume_state(saved_epoch),
+            )
+            log.info(f"Saved resume checkpoint at epoch {saved_epoch} ({reason}) -> {_resume_save_dir}.")
+        except Exception as _e:
+            log.warning(f"Failed to save resume checkpoint ({reason}): {_e}")
 
     # Training loop
     try:
@@ -1640,6 +1863,10 @@ def train_model(
 
             # Log to wandb if enabled
             metrics_dict = {
+                # Top-level "epoch" is the wandb step_metric (define_metric in
+                # train.py). Including it on EVERY .log keeps the curve continuous
+                # across a kill+resume seam even when wandb's internal _step resets.
+                "epoch": epoch,
                 "training/epoch": epoch,
                 "training/loss": float(loss),
                 "training/hard_loss": float(hard_loss),
@@ -1771,6 +1998,10 @@ def train_model(
                     current_eval_metrics = None
 
             # Step 3: Save periodic checkpoints (best models are now handled by unified system)
+            # The resume_state snapshots the pool / carried train_key / trackers at
+            # the START of the NEXT epoch (epoch + 1) — i.e. the state from which
+            # training would continue — so resume picks up exactly where this epoch
+            # left off. The cfg is the FULL config (fixes the {"epoch": epoch} bug).
             if checkpoint_enabled:
                 save_periodic_checkpoint(
                     checkpoint_path,
@@ -1786,7 +2017,21 @@ def train_model(
                     epoch,
                     checkpoint_interval,
                     wandb_run,
+                    cfg=cfg,
+                    resume_state=_build_resume_state(epoch),
                 )
+
+            # HSM resumable contract: also mirror the resume checkpoint to
+            # HSM_RESUME_TO periodically (independent of the run's own checkpointing)
+            # so a HARD crash without SIGTERM still leaves a resumable checkpoint at
+            # the path HSM hands to the next chunk. [CONTRACT 2]
+            if (
+                _hsm_resume_to
+                and checkpoint_interval
+                and epoch > 0
+                and epoch % checkpoint_interval == 0
+            ):
+                _save_resume_checkpoint(epoch, "periodic")
 
             # Step 4: Check for early stopping
             if early_stopping is not None and early_stopping.step(
@@ -1794,10 +2039,39 @@ def train_model(
             ):
                 break
 
+            # Step 5: Slurm preemption — save a final resume checkpoint and stop.
+            if _preempt_requested["flag"]:
+                _save_resume_checkpoint(epoch, reason="SIGTERM/preemption")
+                log.info(f"Exiting training loop at epoch {epoch} due to preemption.")
+                break
+
     except KeyboardInterrupt:
         log.info(f"Training interrupted by user at epoch {epoch}/{epochs}")
+        _interrupted["flag"] = True
+        # Save a resume checkpoint so a Ctrl-C'd run can be continued faithfully.
+        _save_resume_checkpoint(epoch, reason="KeyboardInterrupt")
         # Ensure progress bar is properly closed
         pbar.close()
+    finally:
+        # Restore the previous SIGTERM handler so we don't leak our handler into
+        # whatever runs after train_model (e.g. the post-training eval / demo probe).
+        if _sigterm_installed:
+            try:
+                signal.signal(signal.SIGTERM, _prev_sigterm_handler or signal.SIG_DFL)
+            except (ValueError, OSError):
+                pass
+
+    # HSM resumable contract [CONTRACT 3: signal done]: touch HSM_DONE_SENTINEL when
+    # the WHOLE budget is complete — i.e. the loop ran to the end OR early-stopped
+    # (both = nothing left to do). Do NOT touch it on preemption/interrupt, where
+    # more chunks ARE needed; the chain advances on the sentinel's ABSENCE.
+    if _hsm_done_sentinel and not _preempt_requested["flag"] and not _interrupted["flag"]:
+        try:
+            Path(_hsm_done_sentinel).parent.mkdir(parents=True, exist_ok=True)
+            Path(_hsm_done_sentinel).write_text("done\n")
+            log.info(f"Training budget complete — wrote HSM done sentinel: {_hsm_done_sentinel}")
+        except OSError as _e:
+            log.warning(f"Could not write HSM_DONE_SENTINEL {_hsm_done_sentinel}: {_e}")
 
     # Build result dict once after training loop completes (or is interrupted)
     result = {
