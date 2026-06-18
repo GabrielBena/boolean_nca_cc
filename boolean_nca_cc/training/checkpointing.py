@@ -467,7 +467,12 @@ def save_checkpoint(
         pickle.dump(checkpoint, f)
 
     # log.info(f"Saved checkpoint to {checkpoint_path}")
-    if hasattr(cfg, "wandb") and cfg.wandb.enabled:
+    # The resume checkpoint ("latest_checkpoint.pkl") carries the full circuit pool
+    # (~2.5GB) and is LOCAL-ONLY — hsm pulls it for resume. Uploading it to W&B every
+    # save bloated storage by ~150GB over a sweep day (betatest 2026-06-08). Only the
+    # small model checkpoints (best/latest model, ~3MB) go to W&B.
+    _is_resume_ckpt = filename is not None and "latest_checkpoint" in filename
+    if not _is_resume_ckpt and hasattr(cfg, "wandb") and cfg.wandb.enabled:
         try:
             import wandb
 
@@ -656,17 +661,11 @@ def save_periodic_checkpoint(
             resume_state=resume_state,
         )
 
-        # Log to wandb if enabled
-        if wandb_run:
-            wandb_run.save(os.path.join(checkpoint_path, ckpt_filename))
-
-            # Also log this as an artifact for better tracking in wandb
-            try:
-                artifact = wandb_run.Artifact("latest_checkpoint", type="model")
-                artifact.add_file(os.path.join(checkpoint_path, ckpt_filename))
-                wandb_run.log_artifact(artifact)
-            except Exception as e:
-                log.warning(f"Error logging checkpoint as artifact: {e}")
+        # The latest resume checkpoint (full circuit pool, ~2.5GB) is LOCAL-ONLY,
+        # deliberately NOT uploaded to W&B. Uploading it as a "latest_checkpoint"
+        # artifact every save bloated W&B by ~150GB over a sweep day (betatest
+        # 2026-06-08). hsm pulls it for resume; only small best_model artifacts
+        # (save_best_checkpoint) go to W&B.
 
     except Exception as e:
         log.warning(f"Error saving checkpoint: {e}")
