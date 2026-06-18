@@ -30,6 +30,7 @@ from boolean_nca_cc.tasks.registry import (
 )
 from boolean_nca_cc.tasks.samplers import (
     build_task_x,
+    sample_arith_family_y,
     sample_k_junta_y,
     sample_library_batch,
 )
@@ -37,6 +38,7 @@ from boolean_nca_cc.tasks.samplers import (
 __all__ = [
     "TASK_SAMPLERS",
     "build_task_x",
+    "sample_arith_family_y",
     "sample_k_junta_y",
     "sample_library_batch",
     "sample_task_batch",

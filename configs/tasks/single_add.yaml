@@ -1,0 +1,12 @@
+# Single-task ONLINE target: train on ADD only. Isolates the online inner-loop dynamics
+# from task diversity — does few-shot online streaming (predict-before-adapt) cross the
+# 0.73 plateau on add, with no multi-task confound? Library sampler, single task.
+type: sampler
+
+train:
+  name: library
+  task_names: [add]
+
+eval_ood:
+  name: library
+  task_names: [add, sub, reverse, binary_multiply]

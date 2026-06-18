@@ -1,0 +1,39 @@
+# Per-circuit ARITHMETIC-FAMILY meta-learning with library held-out OOD eval.
+#
+# The add-structured counterpart to k_junta.yaml. Training: every pool slot is bound
+# to a freshly sampled member of the addition family — binary add of two operands
+# carved from the input bits under a random INPUT-BIT PERMUTATION (which physical wire
+# feeds which operand bit varies per circuit). Every sample shares add's carry-chain
+# structure but routes operands differently, so a meta-learned rule must learn carry
+# computation robust to input routing (topology-agnostic carry) rather than memorise
+# one wiring. Re-sampled on reset alongside wires/logits.
+#
+# This is the "structured diversity" arm of the STRUCTURAL_DIRECTION "sweep both"
+# comparison (k_junta = generic diversity). Both are eval'd OOD on canonical `add`.
+#
+# Eval: the held-out OOD library — canonical `add` is exactly the π-identity member of
+# this family (sample_arith_family_y with permute_inputs=False, max_offset=0 is
+# bit-identical to library `add`), so OOD-`add` is a legitimate generalization target.
+# `reverse` is the value-independent control (prediction: online lifts add, leaves
+# reverse flat). parity / binary_multiply are extra readouts (match k_junta.yaml).
+type: sampler
+
+train:
+  name: arith_family
+  op: add                # base op for the train family (add | sub). Diversity = random input perm.
+  permute_inputs: true   # random input-bit permutation per circuit (the diversity)
+  max_offset: 0          # >0 adds a per-circuit constant offset (extra diversity; 0 = pure permuted op)
+
+# Held-out OOD readout. Interpretation when training on the ADD family (op=add):
+#   - sub, binary_multiply : GENUINE held-out arithmetic OOD — different ops, NEVER trained;
+#       the real "does add-structured online meta-learning generalize to new arithmetic?" test.
+#   - add                  : within-family transfer (canonical add = the identity-permutation
+#       member of the trained family) — informative, but NOT held-out. Don't read it as the OOD.
+#   - reverse              : value-independent routing control (prediction: stays low/flat).
+eval_ood:
+  name: library
+  task_names:
+    - add
+    - sub
+    - binary_multiply
+    - reverse

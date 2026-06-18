@@ -52,6 +52,22 @@ def binary_add(case_n, input_bits=8, output_bits=None):
     return unpack(x, input_bits), unpack(y, output_bits)
 
 
+def binary_subtract(case_n, input_bits=8, output_bits=None):
+    """Modular subtract of the two input halves: (low - high) mod 2^output_bits.
+
+    A genuine held-out arithmetic OOD for a model meta-trained on the add family:
+    it shares the carry/borrow-chain structure but is a different function. Same native
+    width convention as ``binary_add`` (input_bits//2 + 1)."""
+    if output_bits is None:
+        output_bits = input_bits // 2 + 1
+    x = jp.arange(case_n)
+    half = input_bits // 2
+    a = x & ((1 << half) - 1)
+    b = x >> half
+    y = (a - b) & ((1 << output_bits) - 1)  # two's-complement low bits = (a-b) mod 2^output_bits
+    return unpack(x, input_bits), unpack(y, output_bits)
+
+
 def parity(case_n, input_bits=8, output_bits=None):
     """Compute parity (number of 1 bits is odd/even)"""
     if output_bits is not None and output_bits != 1:
@@ -242,6 +258,7 @@ TASKS = {
     "and": bitwise_and,
     "xor": bitwise_xor,
     "add": binary_add,
+    "sub": binary_subtract,
     "parity": parity,
     "reverse": reverse_bits,
     "copy": copy,

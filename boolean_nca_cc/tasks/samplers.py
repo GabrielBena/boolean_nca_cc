@@ -113,6 +113,81 @@ def sample_k_junta_y(
     return y_columns.T                                            # [case_n, output_n]
 
 
+@partial(
+    jax.jit, static_argnames=("input_n", "output_n", "op", "permute_inputs", "max_offset")
+)
+def sample_arith_family_y(
+    key: jax.Array,
+    input_n: int,
+    output_n: int,
+    op: str = "add",
+    permute_inputs: bool = True,
+    max_offset: int = 0,
+) -> jp.ndarray:
+    """
+    Sample a single circuit's y_task from the ADDITION family under a random
+    input-bit permutation.
+
+    The base function is binary addition of the two operands carved from the input
+    bits exactly as ``boolean_nca_cc.circuits.tasks.binary_add``: operand A = the low
+    ``half = input_n // 2`` bits, operand B = the remaining ``input_n - half`` high
+    bits, ``y = A + B`` unpacked LSB-first to ``output_n`` (high bits zero).
+
+    Diversity comes from a random permutation π of the INPUT-bit positions applied
+    *before* the operand split: which physical input wire feeds which operand bit
+    varies per circuit. This is a topology-agnostic carry family — every sample shares
+    add's carry-chain structure but routes the operands differently, so a meta-learned
+    rule must learn carry computation robust to input routing rather than memorise one
+    wiring. This is the add-structured counterpart to the generic ``k_junta`` family;
+    "sweep both" compares them, both eval'd OOD on canonical ``add``.
+
+    With ``permute_inputs=False`` (π = identity) and ``max_offset=0`` this returns
+    BIT-IDENTICAL output to the library ``add`` task (zero-padded to ``output_n``) for
+    ``output_n >= input_n // 2 + 1`` — so OOD-``add`` is exactly the π-identity member
+    of this family (a legitimate held-out generalization target).
+
+    Args:
+        input_n: Number of input bits (static).
+        output_n: Number of output bits (static).
+        permute_inputs: If True, draw a random permutation of the input-bit positions
+            (the diversity). If False, identity → canonical ``add``.
+        max_offset: If > 0, add a per-circuit random constant in ``[0, max_offset]`` to
+            the sum before unpacking (extra diversity; shifts away from pure add).
+            Default 0 → pure permuted add.
+
+    Returns:
+        y of shape [2^input_n, output_n], float32 in {0.0, 1.0}.
+    """
+    half = input_n // 2
+    x_bits = build_task_x(input_n)  # [case_n, input_n], LSB-first
+
+    perm_key, offset_key = jax.random.split(key)
+    perm = (
+        jax.random.permutation(perm_key, input_n)
+        if permute_inputs
+        else jp.arange(input_n)
+    )
+    x_perm = x_bits[:, perm]  # [case_n, input_n] — operands carved from permuted bits
+
+    powers_a = (1 << jp.arange(half)).astype(jp.int32)             # [half]
+    powers_b = (1 << jp.arange(input_n - half)).astype(jp.int32)   # [input_n - half]
+    a = jp.sum(x_perm[:, :half].astype(jp.int32) * powers_a, axis=-1)   # [case_n]
+    b = jp.sum(x_perm[:, half:].astype(jp.int32) * powers_b, axis=-1)   # [case_n]
+    y_int = (a - b) if op == "sub" else (a + b)
+    if max_offset > 0:
+        y_int = y_int + jax.random.randint(offset_key, (), 0, max_offset + 1)
+
+    # Reduce mod 2^native_width (native_width = input_n//2 + 1, the library's add/sub
+    # output width) so π-identity matches the library task bit-for-bit (no-op for add at
+    # even input_n; handles sub's borrow / offset wraparound via two's-complement low bits).
+    native_width = input_n // 2 + 1
+    y_int = y_int & ((1 << native_width) - 1)
+
+    # Unpack LSB-first to output_n (matches circuits.tasks.unpack; high bits zero).
+    bit_idx = jp.arange(output_n)
+    return ((y_int[:, None] >> bit_idx[None, :]) & 1).astype(jp.float32)
+
+
 def sample_library_batch(
     key: jax.Array,
     pool_size: int,

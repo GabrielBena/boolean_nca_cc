@@ -22,7 +22,11 @@ from typing import Any
 import jax
 import jax.numpy as jp
 
-from boolean_nca_cc.tasks.samplers import sample_k_junta_y, sample_library_batch
+from boolean_nca_cc.tasks.samplers import (
+    sample_arith_family_y,
+    sample_k_junta_y,
+    sample_library_batch,
+)
 
 
 @partial(jax.jit, static_argnames=("pool_size", "input_n", "output_n", "k", "balanced"))
@@ -52,6 +56,42 @@ def _k_junta_from_cfg(
     return _sample_k_junta_batch(key, pool_size, input_n, output_n, k, balanced)
 
 
+@partial(
+    jax.jit,
+    static_argnames=("pool_size", "input_n", "output_n", "op", "permute_inputs", "max_offset"),
+)
+def _sample_arith_family_batch(
+    key: jax.Array,
+    pool_size: int,
+    input_n: int,
+    output_n: int,
+    op: str,
+    permute_inputs: bool,
+    max_offset: int,
+) -> jp.ndarray:
+    keys = jax.random.split(key, pool_size)
+    return jax.vmap(
+        lambda k_: sample_arith_family_y(
+            k_, input_n, output_n, op=op, permute_inputs=permute_inputs, max_offset=max_offset
+        )
+    )(keys)
+
+
+def _arith_family_from_cfg(
+    key: jax.Array,
+    pool_size: int,
+    input_n: int,
+    output_n: int,
+    cfg: Mapping[str, Any],
+) -> jp.ndarray:
+    op = str(cfg.get("op", "add"))
+    permute_inputs = bool(cfg.get("permute_inputs", True))
+    max_offset = int(cfg.get("max_offset", 0))
+    return _sample_arith_family_batch(
+        key, pool_size, input_n, output_n, op, permute_inputs, max_offset
+    )
+
+
 def _library_from_cfg(
     key: jax.Array,
     pool_size: int,
@@ -71,6 +111,7 @@ def _library_from_cfg(
 # Registry: name → batch sampler. Adding a new task family is one line.
 TASK_SAMPLERS = {
     "k_junta": _k_junta_from_cfg,
+    "arith_family": _arith_family_from_cfg,
     "library": _library_from_cfg,
 }
 

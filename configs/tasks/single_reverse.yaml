@@ -1,0 +1,13 @@
+# Single-task ONLINE control: train on REVERSE only — the one task known to TRAIN in the
+# batch setup (~0.92 across random topologies). The CANARY: if the online regime can't
+# reproduce reverse, it's broken independent of add (likely BPTT-depth instability).
+# Library sampler with one task_name = every circuit gets reverse (single-task, online).
+type: sampler
+
+train:
+  name: library
+  task_names: [reverse]
+
+eval_ood:
+  name: library
+  task_names: [reverse, add, sub, binary_multiply]
