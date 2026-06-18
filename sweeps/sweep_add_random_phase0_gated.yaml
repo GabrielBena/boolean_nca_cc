@@ -1,0 +1,54 @@
+# =============================================================================
+# PHASE-0 add — GATED FIRST WAVE (T≤32). Launch this; release T=64 separately.
+#
+# Parent design + rationale: sweep_add_random_phase0.yaml. This is cols 1-4 + 7 of
+# that file (the T=16/32 mean_tail ladder × reservoir, plus the T=32 endpoint
+# stability control). The three T=64 rungs are GATED behind these results
+# (~6+ V100-days each — don't spend them until T=32 is stable + lifting).
+#
+# WATCH chunk 1 for: (Q2) soft-collapse / instability at T=32 — compare col 3
+# (mean_tail) vs col 5 (endpoint) to see if tail-mean is what holds it together;
+# (Q1) first precision lift on random-wiring `add` over the coarse-pattern floor.
+# mean_tail blooms LATE (campaign) — do NOT call these early; full 2^18 budget.
+#
+# LAUNCH (resumable V100 chains — first real on-cluster --resumable test; T=16/32
+# exceed the 24h V100 cap so chains are mandatory):
+#   conda activate bool_nca
+#   hsm sweep run -c sweeps/sweep_add_random_phase0_gated.yaml --mode array \
+#       --remote uzh-v100 --resumable --chunk-walltime 23:00:00 \
+#       --group add_random_phase0
+#   # cross-check submission + terminal state via sacct over ssh.
+# =============================================================================
+defaults:
+  - override hydra/launcher: basic
+
+sweep:
+  grid:
+    circuit: [twelve]
+    tasks: [add]
+    model: [gathered_attention]
+    model.attention_dim: [128]
+    model.max_neighbors: [10]
+    training.wiring_mode: [random]
+    training.meta_batch_size: [128]          # PLACEHOLDER — confirm vs VRAM probe
+    training.data_per_batch: [256]
+    training.learning_rate: [2e-4]
+    training.epochs_power_of_2: [18]
+    training.loss_tail_fraction: [0.5]
+    training.consistency_weight: [0.0]
+    graph.use_dist_pe: [true]
+    graph.use_layer_PE: [false]
+    graph.use_rwse: [false]
+    loss: [bce]
+    damage.enabled: [false]
+    shuffle.enabled: [false]
+
+  paired:
+    - run:
+        # col:                          1     2     3     4      5(endpoint ctrl)
+        # rung:                         T16   T16   T32   T32    T32
+        # hidden:                       64    128   64    128    64
+        seed:                          [0,    0,    0,    0,     0]
+        training.n_message_steps:      [16,   16,   32,   32,    32]
+        circuit.circuit_hidden_dim:    [64,   128,  64,   128,   64]
+        training.loss_step_mode:       [mean_tail, mean_tail, mean_tail, mean_tail, null]

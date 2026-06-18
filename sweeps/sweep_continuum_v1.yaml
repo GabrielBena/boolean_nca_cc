@@ -1,0 +1,73 @@
+# =============================================================================
+# ONLINE↔BATCH CONTINUUM v1 — the clean relaunch after the UNIFIED inner-loop refactor
+# + loss fix (2026-06-17). ONE code path (run_inner_loop), one normalized (per-bit MEAN)
+# loss, parameterized by the dials below.
+#
+# THE AXES (a true continuum, run_inner_loop):
+#   training.data_mode   ∈ {stream, fixed}   — per-STEP vs per-ROLLOUT data commitment.
+#                          stream = online (fresh W-subset each round, predict-before-adapt
+#                          emerges); fixed = batch (one W-subset per rollout, refined).
+#   training.window_size ∈ {1, 8, 64, 256}   — W = inputs per round (the gradient-richness
+#                          knob unifying online window / batch data_per_batch).
+#   loss_reduction is COUPLED to data_mode (paired): stream→mean (the VSML online objective),
+#   fixed→mean_tail (the batch reach-AND-hold objective). Each regime uses its proper loss so
+#   the comparison isn't confounded by the reduction.
+# n_rounds=8, steps_per_round=1 → BPTT depth 8 (the proven-stable depth; batch's T=8 and the
+# online S=8,k=1 both map here). So a fixed,W=256 cell == the original batch regime, and a
+# stream,W=1 cell == pure online — same code, same loss, same depth. The continuum.
+#
+# THE READOUT: eval_online_out_reverse vs (W, data_mode) — does the CANARY recover ~0.92 at
+#   high W / fixed (→ per-step gradient RICHNESS was the 0.60 cap; continuum validated) or stay
+#   ~0.60 in stream at all W (→ the bottleneck is the FEEDBACK CHANNEL, value-blind nodes →
+#   next lever = value-aware feedback / Perceiver cross-attn-to-data, a MODEL change)? Plus
+#   eval_online_out_add (the prize). Eval = 256-NCA-step-from-fresh (inner_steps=256), the
+#   standardized budget; chunked (online_chunk_size) so the high-N from-fresh eval is VRAM-safe.
+#
+# 16 cells = {single_reverse(canary), single_add(target)} × W{1,8,64,256} × {stream, fixed}.
+# circuit=twelve, h64, attn128, dist_pe, meta_batch 128, gradient_checkpointing, 2^17, resumable.
+# VRAM: W=256 train ~16 GiB (V100-safe; W doesn't grow peak — batched fwd + checkpointing).
+#
+# LAUNCH (lowprio V100, free):
+#   hsm sweep run -c sweeps/sweep_continuum_v1.yaml --mode array --remote uzh-v100 \
+#       --resumable --chunk-walltime 19:00:00 --group continuum_v1
+# =============================================================================
+defaults:
+  - override hydra/launcher: basic
+
+sweep:
+  grid:
+    tasks: [single_reverse, single_add]              # reverse=canary, add=target
+    circuit: [twelve]
+    model: [gathered_attention]
+    model.max_neighbors: [10]
+    model.attention_dim: [128]
+    circuit.circuit_hidden_dim: [64]
+    training.wiring_mode: [random]
+    training.meta_batch_size: [128]
+    training.gradient_checkpointing: [true]
+    training.epochs_power_of_2: [17]
+    training.learning_rate: [2e-4]
+    training.inner_loop_regime: [unified]
+    training.n_rounds: [8]
+    training.steps_per_round: [1]
+    # W = inputs per round: the online↔batch richness axis (1=pure online … 256=batch-sized).
+    training.window_size: [1, 8, 64, 256]
+    graph.use_dist_pe: [true]
+    graph.use_layer_PE: [false]
+    graph.use_rwse: [false]
+    loss: [bce]
+    shuffle.enabled: [false]
+    damage.enabled: [false]
+    demo_probe.enabled: [false]
+    eval.enabled: [true]
+    eval.interval: [2048]
+    eval.inner_steps: [256]
+    eval.batch_size_out: [16]
+    eval.online_chunk_size: [8]
+    seed: [0]
+
+  paired:
+    - run:
+        # data_mode coupled to its proper loss reduction (stream→mean, fixed→mean_tail).
+        training.data_mode: [stream, fixed]
+        training.loss_reduction: [mean, mean_tail]

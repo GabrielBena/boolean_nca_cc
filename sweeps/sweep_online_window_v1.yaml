@@ -1,0 +1,62 @@
+# =============================================================================
+# ONLINE WINDOW (W) ABLATION — why does the reverse canary cap at ~0.60?
+#
+# DIAGNOSIS (from the data-flow): the meta-batch is fine (vmap over 128 circuits), but the
+# INNER-LOOP per-step signal is impoverished — W=1 feeds ONE example's per-bit residual to
+# the output nodes per adapt step. Batch reverse hit 0.92 because each of its T=8 steps used
+# a 256-input-AVERAGED residual (smooth, full-coverage routing-error signal); online W=1 gives
+# a single-input residual (noisy, partial coverage) → the rule learns only COARSE routing (~0.60),
+# the same flavor as add's plateau. ``online_window_size`` (W) is the lever: process a MINI-BATCH
+# of W examples per online position (residual averaged over the W window), still sequential/online
+# (predict-before-adapt across positions, hidden state accumulating). W interpolates pure-online
+# (W=1) ↔ batch (W=full table). TEST: does reverse break the 0.60 cap as W grows?
+#   - reverse climbs toward ~0.92 at some W  → the per-example residual VARIANCE was the cap;
+#     online needs mini-batch streaming. Then re-test add at that W.
+#   - reverse stays ~0.60 even at W=32       → the cap is the FEEDBACK CHANNEL (value-blind nodes,
+#     output-only scalar), not the data-batching → Stage-3 (value-aware feedback).
+#
+# 6 cells = {single_reverse(canary), single_add(target)} × W{1,8,32}. S=8, k=1 (proven-stable
+# depth; W is the variable). Eval = 256-step from-fresh budget, batch_size_out=16 (OOM-safe).
+# VRAM-probed before launch (W=32 eval is the heavy corner). 2^17, resumable.
+#
+# LAUNCH: hsm sweep run -c sweeps/sweep_online_window_v1.yaml --mode array --remote uzh-v100 \
+#           --resumable --chunk-walltime 19:00:00 --group online_window_v1
+# READ: eval_online_out_reverse (does it exceed ~0.60 at W>1?) + eval_online_out_add.
+# =============================================================================
+defaults:
+  - override hydra/launcher: basic
+
+sweep:
+  grid:
+    tasks: [single_reverse, single_add]              # reverse=canary, add=target
+    circuit: [twelve]
+    model: [gathered_attention]
+    model.max_neighbors: [10]
+    model.attention_dim: [128]
+    circuit.circuit_hidden_dim: [64]
+    training.wiring_mode: [random]
+    training.meta_batch_size: [128]
+    training.gradient_checkpointing: [true]
+    training.epochs_power_of_2: [17]
+    training.learning_rate: [2e-4]
+    training.inner_loop_regime: [online]
+    training.stream_length: [8]
+    training.nca_steps_per_example: [1]
+    training.online_loss_reduction: [mean]
+    graph.use_dist_pe: [true]
+    graph.use_layer_PE: [false]
+    graph.use_rwse: [false]
+    loss: [bce]
+    shuffle.enabled: [false]
+    damage.enabled: [false]
+    demo_probe.enabled: [false]
+    eval.enabled: [true]
+    eval.interval: [2048]
+    eval.inner_steps: [256]
+    eval.batch_size_out: [16]
+    seed: [0]
+
+  paired:
+    - run:
+        # the WINDOW axis: examples per online position (residual averaged over W).
+        training.online_window_size: [1, 8, 32]

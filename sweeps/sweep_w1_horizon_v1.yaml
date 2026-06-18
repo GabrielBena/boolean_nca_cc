@@ -1,0 +1,80 @@
+# =============================================================================
+# W=1 HORIZON sweep — can PURE-ONLINE (W=1) reverse train with LONGER horizons?
+# (group `w1_horizon_v1`). Born from the continuum result: W=1 stream reverse capped
+# ~0.58 while W>=8 recovered to ~0.80. G's hypothesis: W=1 isn't fundamentally capped —
+# the inner loop was just too SHORT (8 rounds = 8 streamed examples). Give the rule a
+# longer total horizon T = n_rounds × steps_per_round (BOTH knobs) so it can (a) see more
+# examples and (b) propagate each example's residual deeper, and learn to INTEGRATE a long
+# W=1 stream into the routing — the VSML promise.
+#
+# WHY longer T should help (mechanistic): at W=1 each round feeds ONE example's per-bit
+# residual + runs `steps_per_round` message steps. 8 rounds = 8 noisy single-example
+# updates → coarse routing (~0.58). More ROUNDS = more examples + a longer integration
+# horizon; more STEPS/round = each residual propagates deeper (circuit has a diameter).
+# ALSO (pool-fix, this session): with the corrected expected_updates wiring, long-n_rounds
+# cells reset after ~1 visit ⇒ each rollout is ~from-scratch ⇒ TRAINING matches the
+# from-scratch 256-step eval (the shallow n_rounds=8 cell trains on matured-pool circuits,
+# a train/eval mismatch). So longer horizon also aligns train with eval.
+#
+# AXIS = total horizon via BOTH rounds and steps (paired (n_rounds, steps_per_round)):
+#   (8,1)=T8  [baseline = the capped continuum cell]
+#   (64,1)=T64, (256,1)=T256   [ROUNDS ladder: more examples, steps=1]
+#   (8,8)=T64, (32,8)=T256     [STEPS-heavy at matched T: more propagation/example]
+# ⇒ at T=64 compare (64,1) vs (8,8); at T=256 compare (256,1) vs (32,8) — is it better to
+# spend horizon on more examples (rounds) or deeper propagation (steps)?
+# 10 cells = {single_reverse(canary), single_add(target)} × 5 horizon configs.
+# W=1, stream, meta_batch=128 (NOT bumped — horizon is the lever here). eval = fixed 256
+# NCA-steps-from-fresh (eval.inner_steps=256, split eval_n_rounds × steps_per_round).
+# 2^16 epochs (deep cells ~1.5 it/s ≈ 12h; resumable). pool reset auto-derived to 256
+# expected-updates (reset_interval null; the fixed wiring uses n_rounds·steps_per_round).
+#
+# THE SIGNAL: eval_online_out_reverse vs horizon — does W=1 reverse climb past ~0.58 toward
+#   ~0.9 as T grows (⟹ horizon, not richness, was the W=1 cap; pure-online CAN learn reverse)
+#   or stay ~0.58 even at T=256 (⟹ W=1 genuinely needs per-step richness W>1, horizon won't
+#   substitute). + eval_online_out_add vs horizon (does add move at all?).
+#
+# LAUNCH: hsm sweep run -c sweeps/sweep_w1_horizon_v1.yaml --mode array --remote uzh-v100 \
+#           --resumable --chunk-walltime 19:00:00 --group w1_horizon_v1
+# =============================================================================
+defaults:
+  - override hydra/launcher: basic
+
+sweep:
+  grid:
+    tasks: [single_reverse, single_add]              # reverse=canary, add=target
+    circuit: [twelve]
+    model: [gathered_attention]
+    model.max_neighbors: [10]
+    model.attention_dim: [128]
+    circuit.circuit_hidden_dim: [64]
+    training.wiring_mode: [random]
+    # meta_batch_size is PAIRED with the horizon below (128 for T<=64; 64 for the
+    # T=256 cells, which OOM a 32GB V100 at mb=128 — VRAM-probed 33GB). NOT in grid.
+    training.gradient_checkpointing: [true]
+    training.epochs_power_of_2: [16]
+    training.learning_rate: [2e-4]
+    training.inner_loop_regime: [unified]
+    training.data_mode: [stream]                     # pure online
+    training.window_size: [1]                        # W=1 — the cell we are trying to rescue
+    training.loss_reduction: [mean]
+    graph.use_dist_pe: [true]
+    graph.use_layer_PE: [false]
+    graph.use_rwse: [false]
+    loss: [bce]
+    shuffle.enabled: [false]
+    damage.enabled: [false]
+    demo_probe.enabled: [false]
+    eval.enabled: [true]
+    eval.interval: [2048]
+    eval.inner_steps: [256]                          # fixed 256-NCA-step-from-fresh eval
+    eval.batch_size_out: [16]
+    eval.online_chunk_size: [8]
+    seed: [0]
+
+  paired:
+    - run:
+        # horizon ladder: total T = n_rounds × steps_per_round, via BOTH knobs.
+        # T = 8, 64, 256, 64, 256. meta_batch=64 for the two T=256 cells (V100 VRAM); 128 else.
+        training.n_rounds:        [8,   64,  256, 8,   32]
+        training.steps_per_round: [1,   1,   1,   8,   8]
+        training.meta_batch_size: [128, 128, 64,  128, 64]

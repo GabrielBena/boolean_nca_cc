@@ -1,0 +1,79 @@
+# =============================================================================
+# PHASE-0 — random-topology ARITHMETIC learnability + high-T stability (task: add)
+#
+# THE OPEN PROBLEM (paper §"Random Topologies"): reverse generalises across random
+# wirings, but add/multiply "lack the precision required for exact arithmetic" —
+# stuck in a coarse-loss local minimum. LEARNABILITY, not capacity (fixed-topology
+# add already ~0.96 ≈ BP). Target: PRECISE bit patterns on RANDOM wirings.
+#
+# TWO COUPLED QUESTIONS (this sweep answers both):
+#   Q1 LEARNABILITY — does long-T settling + more per-node reservoir let `add`
+#      escape the coarse-pattern minimum on random wirings?
+#   Q2 STABILITY    — does mean_tail PREVENT the "soft collapse" (loss/acc crash /
+#      unstable training) that high T risks? We have ZERO data above T=8: the
+#      T=12/16 ladder (array 3779117) never scheduled. So we MEASURE it, not just
+#      hand-watch: endpoint-loss controls at T=32,64 vs their mean_tail twins.
+#
+# LEVERS (dist_pe FIXED ON — settled-good from the demo campaign; its on/off
+# ablation is deferred to a "necessity figure" AFTER arithmetic unlocks):
+#   - T = n_message_steps ∈ {16,32,64}  (horizon ladder; carry needs settling)
+#   - circuit_hidden_dim ∈ {64,128}     (reservoir per node; UNTESTED — campaign
+#                                        held 64; n_nodes/attention cost unchanged)
+#   - loss_step_mode {mean_tail, endpoint}  (the Q2 stability contrast)
+#
+# CAMPAIGN-DERIVED SETTINGS (do not re-discover):
+#   - lr 2e-4 (calm = stable; 3e-4/4e-4 add instability; 1e-4 worst). consistency=0.
+#   - 2^18 epochs (mean_tail blooms LATE — looks bad at 2^16; judge only at full
+#     budget). stop_accuracy 1.0 won't trigger on random arithmetic → full budget.
+#   - loss_tail_fraction 0.5 (OPEN: .25 beat .5 on T=8 crispness, but heavier tail
+#     may damp high-T divergence better — flagged; not yet an axis).
+#   - damage/shuffle/rwse OFF (resilience regularisers = pure friction for learning).
+#
+# 8 runs, seed 0. GATE: launch the T=16/32 rungs (cols 1-4,7) first, hand-watch the
+# first ~23h chunk for collapse + learnability, then release the T=64 rungs
+# (cols 5,6,8 — ~6+ V100-days each) only if T=32 is stable and shows lift.
+#
+# LAUNCH (resumable chains — first real on-cluster --resumable test; high-T runs
+# exceed the V100 24h cap so chains are mandatory, not optional):
+#   conda activate bool_nca
+#   hsm sweep run -c sweeps/sweep_add_random_phase0.yaml --mode array \
+#       --remote uzh-v100 --resumable --chunk-walltime 23:00:00 \
+#       --group add_random_phase0
+#   # VRAM-probe the T=64×hidden=128 corner first → patch meta_batch_size if it OOMs
+#   # on 32GB V100. cross-check terminal state via sacct over ssh.
+# =============================================================================
+defaults:
+  - override hydra/launcher: basic
+
+sweep:
+  grid:
+    circuit: [twelve]
+    tasks: [add]
+    model: [gathered_attention]
+    model.attention_dim: [128]
+    model.max_neighbors: [10]
+    training.wiring_mode: [random]
+    training.meta_batch_size: [128]          # PLACEHOLDER — VRAM-probe T=64×h128
+    training.data_per_batch: [256]
+    training.learning_rate: [2e-4]           # calm = stable (campaign)
+    training.epochs_power_of_2: [18]         # mean_tail blooms late — full budget
+    training.loss_tail_fraction: [0.5]       # OPEN knob (see header)
+    training.consistency_weight: [0.0]       # dead lever (campaign)
+    graph.use_dist_pe: [true]                # FIXED ON — settled
+    graph.use_layer_PE: [false]
+    graph.use_rwse: [false]                  # deprioritised — OFF
+    loss: [bce]
+    damage.enabled: [false]                  # learnability phase — OFF
+    shuffle.enabled: [false]                 # learnability phase — OFF
+
+  paired:
+    - run:
+        # ──────── mean_tail ladder × reservoir ────────  ── endpoint control ──
+        # col:                          1     2     3     4     5     6      7      8
+        # rung:                         T16   T16   T32   T32   T64   T64    T32    T64
+        # hidden:                       64    128   64    128   64    128    64     64
+        # gate:                         go    go    go    go    GATE  GATE   go     GATE
+        seed:                          [0,    0,    0,    0,    0,    0,     0,     0]
+        training.n_message_steps:      [16,   16,   32,   32,   64,   64,    32,    64]
+        circuit.circuit_hidden_dim:    [64,   128,  64,   128,  64,   128,   64,    64]
+        training.loss_step_mode:       [mean_tail, mean_tail, mean_tail, mean_tail, mean_tail, mean_tail, null, null]

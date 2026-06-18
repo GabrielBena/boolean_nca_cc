@@ -1,0 +1,75 @@
+# =============================================================================
+# STAGE-1b — INTEGRATED online campaign (all 5 fixes). DRAFT — finalize after the
+# k_junta learnability diagnostic (section C: does online k=1 train at all?).
+#
+# What changed vs sweep_online_v1 (the under-powered first screen):
+#   #1 LONGER + CURRICULUM : 2^17 (resumable), stream_length curriculum 8→64 (cheap early).
+#   #2 k_junta difficulty  : k_junta is high-entropy (resampled random target/circuit) → batch
+#       can't in-context-learn it (dead-flat chance). Use EASIER k=2 + the curriculum + long
+#       budget to test if online generic-diversity ever trains; arith_family is the trainable arm.
+#   #3 GENUINE held-out OOD : arith trains on add∘π; OOD = sub & binary_multiply (NEVER trained,
+#       genuinely held-out arithmetic). add = within-family transfer (don't read as OOD). reverse = routing control.
+#   #4 RECIPE knobs        : nca_steps_per_example=2 (carry depth > 1 hop/example).
+#   #5 PADDING-CORRECTED    : eval_online_out_<subject> now scores only real output bits (automatic).
+#
+# READOUT: eval_online_out_{sub,binary_multiply}/final_hard_accuracy = the genuine OOD adjudicator
+#   for arith_family (does add-structured online meta-learning generalize to NEW arithmetic?).
+#   eval_online_out_reverse = routing control (expect low). add = within-family reference.
+#   For k_junta arms: eval_online_out_{add,sub,multiply} are ALL genuine OOD (generic-diversity test).
+#
+# DIMENSIONING: VRAM-probed ~16 GiB at S=64/k=1/mbs128/gradient_checkpointing (V100-safe). k=2
+#   ~doubles inner steps; curriculum keeps early cheap. Resumable chains (regime+curriculum are
+#   epoch-based → resume-safe). Verify the first chunk's it/s before trusting the budget.
+#
+# LAUNCH (V100 lowprio, resumable):
+#   hsm sweep run -c sweeps/sweep_online_v2.yaml --mode array --remote uzh-v100 \
+#       --resumable --chunk-walltime 19:00:00 --group online_v2
+# =============================================================================
+defaults:
+  - override hydra/launcher: basic
+
+sweep:
+  grid:
+    circuit: [twelve]
+    model: [gathered_attention]
+    model.max_neighbors: [10]
+    model.attention_dim: [128]
+    circuit.circuit_hidden_dim: [64]
+    training.wiring_mode: [random]
+    training.meta_batch_size: [128]
+    training.gradient_checkpointing: [true]
+    training.epochs_power_of_2: [17]                       # #1 much longer (resumable)
+    training.learning_rate: [2e-4]
+    # online recipe (#1 curriculum, #4 k>1)
+    training.stream_length: [64]
+    training.stream_length_schedule: ["[[0.0,8],[0.2,16],[0.45,32],[0.7,64]]"]
+    training.nca_steps_per_example: [2]
+    training.online_loss_reduction: [mean]
+    # batch control knobs (ignored by online cells)
+    training.n_message_steps: [8]
+    training.data_per_batch: [256]
+    training.loss_step_mode: [mean_tail]
+    training.loss_tail_fraction: [0.25]
+    # shared recipe
+    graph.use_dist_pe: [true]
+    graph.use_layer_PE: [false]
+    graph.use_rwse: [false]
+    loss: [bce]
+    shuffle.enabled: [false]
+    damage.enabled: [false]
+    demo_probe.enabled: [false]
+    eval.enabled: [true]
+    eval.interval: [2048]
+    eval.inner_steps: [64]
+    eval.batch_size_out: [64]
+    seed: [0]
+
+  paired:
+    - run:
+        # 4 cells = {online, batch} × {arith_family (op=add, the trainable PRIMARY arm),
+        # k_junta (default k=4, the generic-diversity probe)}. The diagnostic showed batch
+        # k_junta is dead-flat at EVERY k (k=1 and k=4) — can't in-context-learn a resampled
+        # per-task target — so the question is whether ONLINE + curriculum + long budget trains it.
+        #                            online        online    batch         batch
+        tasks:                      [arith_family, k_junta,  arith_family, k_junta]
+        training.inner_loop_regime: [online,       online,   batch,        batch]

@@ -1,0 +1,72 @@
+# =============================================================================
+# STAGE-0 PROBE — does shrinking the inner-loop BATCH move random-topology `add`?
+#
+# CONTEXT (STRUCTURAL_DIRECTION.md §5.0): the arithmetic arc ruled out capacity/
+# stability/measurement/state — `add`'s 0.73 plateau is STRUCTURAL. The thesis:
+# the inner loop is a BATCH meta-gradient (evaluation.py:165 averages |residual|
+# over the input batch → per-input carry structure is averaged away → memorisation).
+# The fix is an ONLINE inner loop (being built in parallel). This probe is the
+# CHEAP, CONFIG-ONLY directional pre-check that runs while the build lands.
+#
+# THE TEST: hold the PROVEN add baseline recipe (= capacity-plane ref cell:
+# t12/random, T8, mean_tail .25, dist_pe, solar-burst 0.10, lr 2e-4, h64, attn128 —
+# which reproduces add ~0.736) and sweep ONLY the batch granularity:
+#     training.data_per_batch in {256, 16, 4, 1}
+# (config.yaml:69 → data_fraction in train.py:711 → subsample at evaluation.py:635).
+#
+# READ:
+#   - if `add` hard-acc CLIMBS as data_per_batch shrinks toward 1 → per-instance
+#     signal matters → supports the online hypothesis, de-risks the build.
+#   - if FLAT → the benefit needs the stream/memory machinery, not a smaller average.
+#
+# LIMITATION (why this is NOT true online): at data_per_batch=1 the scan still draws
+# ONE fixed example (evaluation.py:636, sampled once) and reuses it for all T steps —
+# NO stream, NO across-example memory accumulation. This probes "does a single-instance
+# gradient help?", not the VSML mechanism. Directional signal only.
+#
+# BUDGET: epochs_power_of_2=17 (~half the 2^18 campaign budget) so each arm fits ONE
+# 20h V100 chunk (non-resumable, fire-and-forget). add plateaus early + stays flat
+# (HANDOFF: "80% data already lands on the plateau"), so 2^17 reveals a climb if one
+# exists. Extend to 2^18 (resumable) only if an arm looks like it's still moving.
+#
+# LAUNCH (V100 lowprio, free pool):
+#   hsm sweep run -c sweeps/sweep_data_granularity_v1.yaml --mode array \
+#       --remote uzh-v100 --group data_granularity
+#   (uzh-v100 pre_script pins XLA_PYTHON_CLIENT_ALLOCATOR=platform — ~1.5x slower but
+#    safe; these h64/attn128 arms fit 32GB V100 with room, so BFC would also be fine.)
+# READ: eval_out_test_hard_accuracy (demo_probe OFF). add↔0.76 = breakout line.
+# =============================================================================
+defaults:
+  - override hydra/launcher: basic
+
+sweep:
+  grid:
+    circuit: [twelve]
+    model: [gathered_attention]
+    model.max_neighbors: [10]
+    model.attention_dim: [128]               # add baseline params (capacity-plane ref)
+    circuit.circuit_hidden_dim: [64]         # add baseline state (capacity-plane ref)
+    training.wiring_mode: [random]
+    training.meta_batch_size: [128]
+    training.epochs_power_of_2: [17]         # ~half budget → fits one 20h V100 chunk
+    training.n_message_steps: [8]
+    training.learning_rate: [2e-4]
+    training.loss_step_mode: [mean_tail]
+    training.loss_tail_fraction: [0.25]
+    training.consistency_weight: [0.0]
+    training.data_per_batch: [256, 16, 4, 1] # ── THE AXIS ──
+    graph.use_dist_pe: [true]
+    graph.use_layer_PE: [false]
+    graph.use_rwse: [false]
+    loss: [bce]
+    shuffle.enabled: [false]
+    demo_probe.enabled: [false]              # read eval_out_*_hard_accuracy
+    damage.enabled: [true]                   # burst-damage is load-bearing (match the recipe)
+    damage.burst.enabled: [true]
+    damage.target_damage_fraction: [0.10]
+    damage.permanent: [random]
+    damage.burst.length: [4]
+    damage.burst.per_lifecycle: [2.0]
+    damage.burst.damage_share: [1.0]         # pure solar (t12/seed10)
+    tasks: [add]
+    seed: [0]

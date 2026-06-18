@@ -1,0 +1,70 @@
+# =============================================================================
+# CROSSED {reverse, add} — controlled restart, T-ladder × lr + lever ablations
+#
+# WHY: add-only-at-unanchored-params can't be interpreted. Fix:
+#   - REVERSE = positive control (generalises across random wirings). The
+#     reverse<->add GAP at each condition is the readout. (Also runs the long-T
+#     reverse the cancelled A100 ladder never did.)
+#   - PROVEN recipe is the reference (t12/seed10): T=8, mean_tail tail=.25,
+#     dist_pe, solar-burst damage 0.10 (pure-solar), h64. Damage is ON (the demo
+#     found it load-bearing for settled acc + carry/transfer); -damage is the
+#     ablation.
+#
+# DESIGN (16 runs, seed 0):
+#   CORE factorial  {reverse,add} × T{8,16,32} × lr{2e-4,3e-4}     = 12  (h64, burst)
+#     -> reverse<->add gap across the horizon ladder + lr×T interaction
+#   ABLATIONS at reference (T8, lr2e-4):                             =  4
+#     +reservoir  : h128            (reverse, add)
+#     -damage     : damage OFF      (reverse, add)
+#
+# NOTE lr=3e-4 here uses DEFAULT warmup (clean lr ablation); the demo's stabilised
+#   hot recipe paired 3e-4 with 2× warmup (warmup_steps_factor 25) — add that if
+#   3e-4 looks unstable at long T.
+#
+# Runs on fast BFC (no arm is the T32×h128 fragmentation corner). T32 arms are the
+# expensive ones (~3 V100-days each, ~3 chunks).
+#
+# LAUNCH (durable tmux):
+#   hsm sweep run -c sweeps/sweep_crossed_reverse_add_v1.yaml --mode array \
+#       --remote uzh-v100 --resumable --chunk-walltime 23:00:00 --group crossed_rev_add
+# =============================================================================
+defaults:
+  - override hydra/launcher: basic
+
+sweep:
+  grid:
+    circuit: [twelve]
+    model: [gathered_attention]
+    model.attention_dim: [128]
+    model.max_neighbors: [10]
+    training.wiring_mode: [random]
+    training.meta_batch_size: [128]
+    training.data_per_batch: [256]
+    training.epochs_power_of_2: [18]
+    training.loss_step_mode: [mean_tail]
+    training.loss_tail_fraction: [0.25]
+    training.consistency_weight: [0.0]
+    graph.use_dist_pe: [true]
+    graph.use_layer_PE: [false]
+    graph.use_rwse: [false]
+    loss: [bce]
+    shuffle.enabled: [false]
+    demo_probe.enabled: [false]           # resilience suite irrelevant here; read eval_out_*_hard_accuracy
+    damage.target_damage_fraction: [0.10]
+    damage.permanent: [random]
+    damage.burst.length: [4]
+    damage.burst.per_lifecycle: [2.0]
+    damage.burst.damage_share: [1.0]      # pure solar (t12/seed10)
+
+  paired:
+    - run:
+        # ───────────── CORE: task × T{8,16,32} × lr{2e-4,3e-4} (h64, burst) ─────────────  │ ── ablations (T8,lr2e-4) ──
+        # cond:        anchor      +T16        +T32        T8/3e-4     T16/3e-4    T32/3e-4    │ +reservoir   -damage
+        # col:         1     2     3     4     5     6     7     8     9     10    11    12    │ 13    14     15    16
+        tasks:                      [reverse,add, reverse,add, reverse,add, reverse,add, reverse,add, reverse,add, reverse,add, reverse,add]
+        seed:                       [0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0]
+        training.n_message_steps:   [8,    8,    16,   16,   32,   32,   8,    8,    16,   16,   32,   32,   8,    8,    8,    8]
+        training.learning_rate:     [2e-4, 2e-4, 2e-4, 2e-4, 2e-4, 2e-4, 3e-4, 3e-4, 3e-4, 3e-4, 3e-4, 3e-4, 2e-4, 2e-4, 2e-4, 2e-4]
+        circuit.circuit_hidden_dim: [64,   64,   64,   64,   64,   64,   64,   64,   64,   64,   64,   64,   128,  128,  64,   64]
+        damage.enabled:             [true, true, true, true, true, true, true, true, true, true, true, true, true, true, false,false]
+        damage.burst.enabled:       [true, true, true, true, true, true, true, true, true, true, true, true, true, true, false,false]

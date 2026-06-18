@@ -1,0 +1,58 @@
+# =============================================================================
+# ONLINE WINDOW continuum — HIGH-W extension (W=64, 256). Joins online_window_v1
+# (W=1,8,32) in the SAME wandb group → full continuum W∈{1,8,32,64,256}.
+#
+# PURPOSE (G's reframing): W = inputs-per-step is the UNIFYING gradient-richness knob across
+# online (window) / batch (data_per_batch) / Perceiver (attended-count). Batch was already a
+# 256/4096 (6%) subset committed PER-ROLLOUT; online commits PER-STEP with predict-before-adapt.
+# So W up to 256 is STILL a 6% subset → still online/few-shot, NOT batch. The test: does the
+# reverse canary RECOVER ~0.92 at W=256 (batch-equivalent richness)? If yes → per-step gradient
+# richness was the 0.60 cap (continuum validated, online preserved). If reverse STILL caps ~0.60
+# at W=256 → genuine structural diff vs batch OR feedback-channel bottleneck. Also: does single_add
+# improve with W (the prize)?
+#
+# DIMENSIONED: VRAM-probed W=256 = 16.4 GiB (V100-safe; W doesn't grow peak — batched forward +
+# gradient_checkpointing); ~2.2 it/s → 2^17 ≈ 16h (~1 V100 chunk). eval.batch_size_out=16.
+#
+# LAUNCH (same group as the W=1/8/32 run → unified continuum in wandb):
+#   hsm sweep run -c sweeps/sweep_online_window_hi.yaml --mode array --remote uzh-v100 \
+#       --resumable --chunk-walltime 19:00:00 --group online_window_v1
+# READ: eval_online_out_reverse vs W (1..256) — does it climb to ~0.92? + eval_online_out_add vs W.
+# =============================================================================
+defaults:
+  - override hydra/launcher: basic
+
+sweep:
+  grid:
+    tasks: [single_reverse, single_add]
+    circuit: [twelve]
+    model: [gathered_attention]
+    model.max_neighbors: [10]
+    model.attention_dim: [128]
+    circuit.circuit_hidden_dim: [64]
+    training.wiring_mode: [random]
+    training.meta_batch_size: [128]
+    training.gradient_checkpointing: [true]
+    training.epochs_power_of_2: [17]
+    training.learning_rate: [2e-4]
+    training.inner_loop_regime: [online]
+    training.stream_length: [8]
+    training.nca_steps_per_example: [1]
+    training.online_loss_reduction: [mean]
+    graph.use_dist_pe: [true]
+    graph.use_layer_PE: [false]
+    graph.use_rwse: [false]
+    loss: [bce]
+    shuffle.enabled: [false]
+    damage.enabled: [false]
+    demo_probe.enabled: [false]
+    eval.enabled: [true]
+    eval.interval: [2048]
+    eval.inner_steps: [256]
+    eval.batch_size_out: [16]
+    seed: [0]
+
+  paired:
+    - run:
+        # high-W arm of the continuum (joins W=1,8,32 in group online_window_v1)
+        training.online_window_size: [64, 256]

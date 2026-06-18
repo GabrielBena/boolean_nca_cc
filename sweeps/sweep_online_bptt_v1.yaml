@@ -1,0 +1,70 @@
+# =============================================================================
+# ONLINE BPTT-DEPTH × k ABLATION, reverse-anchored, single-task isolation.
+#
+# WHY (the design conversation): the batch regime was UNSTABLE at long BPTT horizons
+# (T16/T32 peeled back; T8+pool was the sweet spot, long-horizon carried by the POOL not
+# by deep BPTT). The online inner loop's BPTT depth = S * k, which can be FAR deeper — so
+# either (a) online shares that instability, or (b) online's deep BPTT is benign/beneficial
+# (it's learning-from-many-examples, structurally unlike batch's repeated refinement). This
+# ablation tests it directly, on SINGLE tasks (no diversity confound):
+#   - REVERSE = the CANARY (only task known to train in batch, ~0.92). If online-reverse
+#     can't reach ~0.92, the online regime is handicapped (likely BPTT-depth) — fix that first.
+#   - ADD = the target (does few-shot online streaming cross the 0.73 plateau?).
+#
+# AXES (per subject): BPTT depth via (stream_length S, nca_steps_per_example k):
+#   (S=8,  k=1) -> depth 8   : the proven-stable depth (mirrors batch T=8 + pool amortization).
+#   (S=64, k=1) -> depth 64  : LONG stream, shallow per-example (pure-online long horizon).
+#   (S=8,  k=8) -> depth 64  : SHORT stream, DEEP per-example propagation (k=8 ~ graph diameter;
+#                              each example's residual fully traverses the carry chain).
+# (S=64,k=1) vs (S=8,k=8) isolates "more examples" vs "more propagation/example" at matched depth.
+# No curriculum here (fixed S per cell) so the depth axis is clean.
+#
+# EVAL: every fresh OOD circuit gets a FIXED 256-NCA-step adapt budget (eval.inner_steps=256,
+# split S_eval*k=256), then full-table hard-acc — standardized regardless of training S/k.
+# Read eval_online_out_{reverse(canary), add(target), sub, binary_multiply}/final_hard_accuracy
+# (padding-corrected). VRAM: depth<=64 (< v2's 128, ~16GiB) -> V100-safe; gradient_checkpointing on.
+#
+# LAUNCH (V100, resumable; plenty of V100s so runs alongside online_v2):
+#   hsm sweep run -c sweeps/sweep_online_bptt_v1.yaml --mode array --remote uzh-v100 \
+#       --resumable --chunk-walltime 19:00:00 --group online_bptt_v1
+# =============================================================================
+defaults:
+  - override hydra/launcher: basic
+
+sweep:
+  grid:
+    tasks: [single_reverse, single_add]              # reverse=canary, add=target (crossed with S,k below)
+    circuit: [twelve]
+    model: [gathered_attention]
+    model.max_neighbors: [10]
+    model.attention_dim: [128]
+    circuit.circuit_hidden_dim: [64]
+    training.wiring_mode: [random]
+    training.meta_batch_size: [128]
+    training.gradient_checkpointing: [true]
+    training.epochs_power_of_2: [17]                 # long (4x the v1 screen); resumable
+    training.learning_rate: [2e-4]
+    training.inner_loop_regime: [online]
+    training.online_loss_reduction: [mean]
+    graph.use_dist_pe: [true]
+    graph.use_layer_PE: [false]
+    graph.use_rwse: [false]
+    loss: [bce]
+    shuffle.enabled: [false]
+    damage.enabled: [false]
+    demo_probe.enabled: [false]
+    eval.enabled: [true]
+    eval.interval: [2048]
+    eval.inner_steps: [256]                          # online eval adapt budget (256 steps from fresh)
+    # OOD eval circuits: 16 not 64 — the 256-step from-fresh online eval OOM'd the 32GB V100
+    # at 64 circuits (evaluate_model_online_batched has no chunking yet; eval mem ~ circuits x S).
+    # TODO(robust): add chunk_size to evaluate_model_online_batched so 64+ circuits fit.
+    eval.batch_size_out: [16]
+    seed: [0]
+
+  paired:
+    - run:
+        # depth (S,k) ablation; grid tasks={single_reverse,single_add} x these 3 = 6 cells.
+        #                               depth8   long64   deep64
+        training.stream_length:         [8,      64,      8]
+        training.nca_steps_per_example: [1,      1,       8]

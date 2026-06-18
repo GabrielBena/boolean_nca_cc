@@ -1,0 +1,81 @@
+# =============================================================================
+# STAGE-1 — ONLINE (VSML) inner loop vs BATCH, on diverse task distributions.
+#
+# THESIS (STRUCTURAL_DIRECTION.md): random-topology `add` is stuck at 0.73 because the
+# BATCH inner loop averages away per-input carry structure (memorisation). The fix is
+# the VSML recipe: a weight-shared rule + diverse tasks (the sampler) + an ONLINE,
+# predict-before-adapt inner loop. SODC had the first two; the online half is now built.
+#
+# THE TEST — "sweep both" train distributions × regime:
+#   tasks                 ∈ {k_junta, arith_family}   (generic vs add-structured diversity)
+#   training.inner_loop_regime ∈ {online, batch}      (the regime under test + control)
+#   => 4 cells, seed 0 (a SCREEN — grok is seed-noisy, reproduce any breakout at seeds 1,2).
+#
+# READOUT (the adjudicator): for the ONLINE cells, the train loop logs a clean PER-SUBJECT
+# OOD readout — eval_online_out_<subject>/final_hard_accuracy for each library subject
+# (add, parity, reverse, binary_multiply): fresh random-wiring circuits are adapted via the
+# online stream, then scored on the FULL truth table. The signal is the **add↔reverse gap**:
+#   PREDICTION: online lifts `add` (value-dependent carry) and leaves `reverse` (routing)
+#   flat. `add` clearing ~0.76 = breakout vs the established 0.73 batch plateau.
+# The BATCH cells are the diverse-task control (standard eval_out_* is mixed-library;
+# the established single-task batch plateau is add≈0.73 / reverse≈0.92 from the capacity plane).
+#
+# DIMENSIONING (VRAM-probed 2026-06-15 on an A6000, forced early pool reset): the heaviest
+# online cell (twelve, mbs=128, stream_length=64, k=1, gradient_checkpointing=true) peaks at
+# ~16.4 GiB through pool resets — V100-safe (32 GB) with margin. ~0.9 it/s on V100 →
+# 2^15 ≈ 10h, fits ONE 20h V100 chunk (non-resumable, fire-and-forget).
+# gradient_checkpointing=true is LOAD-BEARING (keeps the S=64 BPTT at batch-path memory).
+#
+# LAUNCH (V100 lowprio, free pool):
+#   hsm sweep run -c sweeps/sweep_online_v1.yaml --mode array --remote uzh-v100 --group online_v1
+# Drop the uzh-v100 pre_script's XLA_PYTHON_CLIENT_ALLOCATOR=platform for non-tight runs
+# (~1.5x faster on BFC; these ~16GB cells fit BFC easily). Read eval_online_out_*_hard_accuracy.
+# =============================================================================
+defaults:
+  - override hydra/launcher: basic
+
+sweep:
+  grid:
+    circuit: [twelve]
+    model: [gathered_attention]
+    model.max_neighbors: [10]
+    model.attention_dim: [128]
+    circuit.circuit_hidden_dim: [64]
+    training.wiring_mode: [random]
+    training.meta_batch_size: [128]
+    training.gradient_checkpointing: [true]      # LOAD-BEARING for the S=64 online BPTT
+    training.epochs_power_of_2: [15]             # ~10h online on one V100 chunk (screen budget)
+    training.learning_rate: [2e-4]
+    # ── per-regime knobs (each regime ignores the other's) ──
+    # online:
+    training.stream_length: [64]
+    training.nca_steps_per_example: [1]
+    training.online_loss_reduction: [mean]       # keeps meta-loss O(1) so lr 2e-4 transfers
+    # batch (control):
+    training.n_message_steps: [8]
+    training.data_per_batch: [256]
+    training.loss_step_mode: [mean_tail]
+    training.loss_tail_fraction: [0.25]
+    training.consistency_weight: [0.0]
+    # ── shared recipe ──
+    graph.use_dist_pe: [true]
+    graph.use_layer_PE: [false]
+    graph.use_rwse: [false]
+    loss: [bce]
+    shuffle.enabled: [false]
+    damage.enabled: [false]                      # clean structural comparison (online v1 is damage-free)
+    demo_probe.enabled: [false]
+    eval.enabled: [true]                         # → per-subject eval_online_out_<subject> for online cells
+    eval.interval: [1024]
+    eval.inner_steps: [64]                       # standard (secondary) eval; online readout uses stream_length
+    eval.batch_size_out: [64]
+    seed: [0]
+
+  paired:
+    - run:
+        # 4 cells = {online, batch} × {k_junta, arith_family}. Explicit aligned lists
+        # (no grid×paired ambiguity). Online cells → eval_online_out_<subject>; batch
+        # cells = diverse-task control.
+        #                            online    online        batch    batch
+        tasks:                      [k_junta,  arith_family,  k_junta, arith_family]
+        training.inner_loop_regime: [online,   online,        batch,   batch]
