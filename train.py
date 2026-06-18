@@ -30,12 +30,18 @@ if os.access(_user_disk, os.W_OK):
 # os.environ["JAX_PLATFORM_NAME"] = "cpu"
 # os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
 
-# Configure JAX/XLA memory allocation BEFORE importing JAX
-# Use "platform" allocator - slower but actually releases memory after pool resets
-# The default BFC allocator is faster but pools memory aggressively, causing OOM at pool resets
+# Configure JAX/XLA GPU memory allocation BEFORE importing JAX.
+# Default = BFC allocator (fast, but pools/fragments). On a tight card it can fail
+# to find a CONTIGUOUS block for a large buffer requested AFTER a checkpoint load:
+# this is why T32 RESUME OOM'd the 32GB V100 (a 13GiB contiguous request into a heap
+# fragmented by the just-restored pool/optimizer) while the same config ran fine from
+# a fresh start. See HANDOFF (2026-06-10).
+#   Fix for tight-memory resumes: export XLA_PYTHON_CLIENT_ALLOCATOR=platform
+#   (cudaMalloc, no fragmentation, ~1.5x slower) — or "cuda_async" (faster) — via the
+#   env / HSM pre_script. NB: TF_GPU_ALLOCATOR is a TensorFlow var that JAX IGNORES;
+#   the previous setting here was a no-op (the allocator stayed BFC, hence the OOM).
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-# os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
-os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
+os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "default")  # override -> "platform"/"cuda_async" for tight resumes
 
 # GPU VISIBILITY
 # Pin a specific GPU only for LOCAL dev. Under SLURM (or any launcher that sets
@@ -143,6 +149,35 @@ def extract_track_metrics_config(cfg) -> list[str] | None:
         log.info("No metrics to track")
 
     return result if result else None
+
+
+def _parse_n_rounds_schedule(raw):
+    """Normalize the inner-loop n_rounds curriculum config to a list of [frac, N] (or None).
+
+    Robust to how Hydra/hsm pass it: ``None``/empty → None; a string (sweep override, e.g.
+    ``"[[0.0,8],[0.5,32]]"``) → parsed via ast.literal_eval; an OmegaConf list → to_container.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw or raw.lower() == "null":
+            return None
+        import ast
+
+        return ast.literal_eval(raw)
+    return OmegaConf.to_container(raw, resolve=True)
+
+
+def _resolve_inner_loop_regime(training_cfg):
+    """Map the regime config to the current vocabulary.
+
+    Current: "batch" (legacy/demo via run_model_scan_with_loss) | "unified" (the online↔batch
+    continuum via run_inner_loop). The legacy value "online" is folded into "unified" (with
+    data_mode defaulting to "stream" at the call site), preserving its former behavior.
+    """
+    regime = str(training_cfg.get("inner_loop_regime", "batch")).lower()
+    return "unified" if regime == "online" else regime
 
 
 def create_and_save_final_results(
@@ -324,7 +359,23 @@ def process_pool_configuration(cfg):
         ValueError: If configuration is underspecified or invalid
     """
 
-    if cfg.training.random_loss_step:
+    # Per-visit NCA step count feeding the pool curriculum (expected_updates / reset).
+    # For the UNIFIED inner loop a pool visit runs n_rounds × steps_per_round message steps,
+    # NOT the legacy batch n_message_steps — so the 256-expected-updates target (and the
+    # solved reset_interval) stay correct at any (n_rounds, steps_per_round). Using the
+    # legacy n_message_steps here mis-tuned the reset whenever n_rounds·steps_per_round ≠
+    # n_message_steps (e.g. the long-horizon W=1 cells). (2026-06-17)
+    _regime = str(cfg.training.get("inner_loop_regime", "batch")).lower()
+    if _regime in ("unified", "online"):
+        _base_n_rounds = int(cfg.training.get("n_rounds", 64))
+        _sched = cfg.training.get("n_rounds_schedule", None)
+        if _sched:
+            try:
+                _base_n_rounds = max(_base_n_rounds, max(int(s[1]) for s in _sched))
+            except Exception:
+                pass
+        n_message_steps_effective = _base_n_rounds * int(cfg.training.get("steps_per_round", 1))
+    elif cfg.training.random_loss_step:
         n_message_steps_effective = (
             cfg.training.n_message_steps + cfg.training.random_loss_step_min
         ) // 2
@@ -970,6 +1021,7 @@ def main(cfg: DictConfig) -> None:
         # ── Training: optimization ──────────────────────────────────────
         learning_rate=cfg.training.learning_rate,
         weight_decay=cfg.training.weight_decay,
+        grad_clip_norm=cfg.training.grad_clip_norm,
         lr_scheduler=cfg.training.lr_scheduler,
         lr_scheduler_params=cfg.training.lr_scheduler_params,
         # ── Training: loss ──────────────────────────────────────────────
@@ -997,6 +1049,37 @@ def main(cfg: DictConfig) -> None:
         genetic_swaps_per_layer=cfg.pool.n_swaps_per_layer,
         # ── Per-circuit-task meta-learning ──────────────────────────────
         task_sampler_cfg=task_sampler_cfg_train,
+        # ── Unified inner-loop regime (online↔batch continuum) ──────────
+        # Reads the clean unified keys; falls back to the legacy online keys so older
+        # configs keep working. Legacy ``inner_loop_regime: online`` maps to the unified
+        # regime with data_mode="stream" (its exact former behavior).
+        inner_loop_regime=_resolve_inner_loop_regime(cfg.training),
+        data_mode=str(cfg.training.get("data_mode", "stream")),
+        n_rounds=int(
+            cfg.training.get("n_rounds", cfg.training.get("stream_length", 64))
+        ),
+        n_rounds_schedule=_parse_n_rounds_schedule(
+            cfg.training.get("n_rounds_schedule", cfg.training.get("stream_length_schedule", None))
+        ),
+        steps_per_round=int(
+            cfg.training.get("steps_per_round", cfg.training.get("nca_steps_per_example", 1))
+        ),
+        window_size=int(
+            cfg.training.get("window_size", cfg.training.get("online_window_size", 1))
+        ),
+        loss_reduction=str(
+            cfg.training.get("loss_reduction", cfg.training.get("online_loss_reduction", "mean"))
+        ),
+        periodic_eval_online_chunk_size=(
+            int(cfg.eval.get("online_chunk_size"))
+            if cfg.eval.get("online_chunk_size") is not None
+            else None
+        ),
+        eval_ood_task_names=(
+            list(task_sampler_cfg_eval_ood["task_names"])
+            if task_sampler_cfg_eval_ood and task_sampler_cfg_eval_ood.get("task_names")
+            else None
+        ),
         init_logits=cfg.circuit.get("init_logits", "soft_wires"),
         random_init_scale=float(cfg.circuit.get("random_init_scale", 1.0)),
         # ── Damage / resilience ─────────────────────────────────────────

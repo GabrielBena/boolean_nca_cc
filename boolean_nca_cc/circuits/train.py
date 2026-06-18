@@ -176,9 +176,17 @@ def unpack(x, bit_n=8):
 @jax.jit
 def res2loss(res, power=4):
     """
-    Compute loss from residuals using L4 norm.
+    Compute loss from residuals using the (power-`power`) error, MEANED over all
+    elements.
 
-    The L4 norm (squared L2) provides stronger gradients for large errors.
+    The L4 power (squared L2) provides stronger gradients for large errors.
+
+    NOTE (2026-06-17, W-invariance): this is a per-element **mean**, not a sum. The
+    inner loop evaluates the loss on a variable number of inputs W (``window_size``);
+    a sum would make the loss magnitude scale with W, confounding cross-W comparison
+    (loss curves + the grad-clip transient). The mean makes the magnitude W-invariant
+    so the online↔batch continuum is directly comparable. Under adamw (scale-invariant)
+    + global-norm clip this barely shifts the optimization itself — see ``generalized_bce``.
 
     Args:
         res: Residual tensor (difference between predicted and target)
@@ -186,7 +194,7 @@ def res2loss(res, power=4):
     Returns:
         Loss value (scalar)
     """
-    return jp.sum(jp.power(jp.abs(res), power))
+    return jp.mean(jp.power(jp.abs(res), power))
 
 
 @jax.jit
@@ -229,7 +237,14 @@ def generalized_bce(
     pos_loss = -alpha_pos * jp.power(1.0 - p, gamma_pos) * y_true * jp.log(p)
     neg_loss = -alpha_neg * jp.power(p, gamma_neg) * (1.0 - y_true) * jp.log(1.0 - p)
 
-    return jp.sum(pos_loss + neg_loss)
+    # MEAN over all elements (per-bit, per-input), NOT sum. The inner loop evaluates
+    # this on W inputs per round (``window_size``); a sum would scale the loss with W
+    # and confound cross-W comparison of the online↔batch continuum (loss curves +
+    # the W-dependent grad-clip transient). The mean is W-invariant in magnitude.
+    # Optimization impact is minimal: the meta-optimizer is adamw (scale-invariant) with
+    # global-norm clipping (uniform scaling, a near-no-op under Adam) and decoupled
+    # weight decay (∝ lr·param, grad-scale-independent) — so lr=2e-4 transfers. (2026-06-17)
+    return jp.mean(pos_loss + neg_loss)
 
 
 # Convenience aliases for backward compatibility

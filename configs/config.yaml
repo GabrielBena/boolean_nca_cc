@@ -84,6 +84,26 @@ training:
   # re-enter the pool at step T; "random_tail" = at a random tail step (async pool
   # maturities — the intentional side-effect of legacy random_loss_step, isolated).
   pool_return_step: "final"
+  # INNER-LOOP REGIME — one continuum (run_inner_loop), or the legacy demo/damage scan.
+  # "batch" (default) = the legacy batch meta-gradient via run_model_scan_with_loss, which
+  #   carries the demo/damage/shuffle/burst machinery (byte-for-byte unchanged). Use for the
+  #   demo / recovery / repair arc.
+  # "unified" = the UNIFIED online↔batch continuum via run_inner_loop, parameterized by the
+  #   dials below. data_mode="stream" = the VSML online inner loop (predict-before-adapt
+  #   emerges); data_mode="fixed" = the (damage-free) batch inner loop (reproduces the batch
+  #   scan's no-damage core). REQUIRES tasks.type=sampler (per-circuit truth tables; k_junta
+  #   or arith_family) — raises otherwise. (Legacy value "online" is accepted = unified+stream.)
+  inner_loop_regime: batch          # batch (legacy/demo) | unified (continuum)
+  data_mode: stream                 # unified only: stream (online, per-step) | fixed (batch, per-rollout)
+  n_rounds: 64                      # N: inner-loop rounds (online stream positions / batch steps)
+  # Optional n_rounds curriculum: null = constant n_rounds. Else a list of [epoch_fraction, N]
+  # steps, e.g. [[0.0, 8], [0.15, 16], [0.4, 32], [0.7, 64]] — few rounds early (cheap), full
+  # count late. Stepped → only a few jit recompiles. Eval always uses the MAX N.
+  # Sweep override: 'training.n_rounds_schedule=[[0,8],[0.4,32],[0.7,64]]'.
+  n_rounds_schedule: null
+  steps_per_round: 1                # m: NCA message-passing steps per round (k in the VSML form)
+  window_size: 1                    # W: inputs evaluated per round (1 = pure online for stream)
+  loss_reduction: mean              # mean | mean_tail | final  (reduction over the N round losses)
   # TRAIN/TEST SPLIT
   test_num: 256  # Fraction/absolute number of data to use for testing (from all input combinations)
   # BATCH SIZE
@@ -99,6 +119,9 @@ training:
   # OPTIMIZATION
   learning_rate: 2e-4
   weight_decay: 1e-5
+  # optax global-norm gradient clip. 1.0 = existing behavior; lower (0.3-0.5)
+  # to stabilize long horizons (high T soft-collapse). betatest 2026-06-09.
+  grad_clip_norm: 1.0
   # LEARNING RATE SCHEDULER
   # Options: "constant", "exponential", "cosine", "linear_warmup", "adaptive", "reduce_on_plateau"
   lr_scheduler: "linear_warmup"  # Loss-aware scheduler - reduces LR when loss plateaus
@@ -285,6 +308,11 @@ eval:
   batch_size_in: 32  # Batch size for IN-distribution evaluation (None means use initial_diversity)
   # batch_size_out: ${training.meta_batch_size}  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
   batch_size_out: 32  # Batch size for OUT-of-distribution evaluation (None means use meta_batch_size)
+  # Chunk size for the unified per-subject OOD eval (evaluate_model_inner_loop_batched):
+  # process this many OOD circuits at a time to cap peak VRAM for the N-rounds-from-fresh
+  # adaptation. null = vmap all batch_size_out circuits at once. Set (e.g. 16) to allow a
+  # larger batch_size_out without OOM on the high-N continuum eval.
+  online_chunk_size: null
   log_pool_scatter: true
   do_ood_evaluation: null # Whether to do OUT-of-distribution evaluation (None means use True if wiring_mode is random)
   get_all_wirings: true # Whether to get all wirings (True) or a subset (False)

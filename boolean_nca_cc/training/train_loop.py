@@ -39,6 +39,7 @@ from boolean_nca_cc.training.checkpointing import (
 )
 from boolean_nca_cc.training.eval_datasets import UnifiedEvaluationDatasets
 from boolean_nca_cc.training.evaluation import (
+    evaluate_model_inner_loop_batched,
     evaluate_model_stepwise_batched,
     get_fraction_damaged_gates,
 )
@@ -141,6 +142,39 @@ def _log_pool_scatter(pool, epoch, wandb_run):
                 )
             }
         )
+
+
+def _resolve_n_rounds(epoch, total_epochs, base_s, schedule):
+    """Curriculum: the effective ONLINE stream length S at ``epoch``.
+
+    ``schedule`` is None → constant ``base_s`` (no curriculum, default). Otherwise a
+    list of ``[epoch_fraction, S]`` steps; returns the S of the latest step whose
+    fraction <= epoch/total_epochs. STEPPED (a handful of discrete levels) so the
+    jitted train step recompiles only a few times across the run — short streams early
+    (cheap, learn the easy regime), full length late. The VSML stream-length curriculum.
+    """
+    if not schedule:
+        return int(base_s)
+    frac = epoch / max(1, total_epochs - 1)
+    s = int(base_s)
+    for f, sv in sorted(schedule, key=lambda p: float(p[0])):
+        if frac >= float(f):
+            s = int(sv)
+    return s
+
+
+def _native_output_width(subject, input_n, output_n):
+    """Number of MEANINGFUL output bits for a library subject (before the right-zero
+    padding that ``sample_library_batch`` applies to width ``output_n``). Scoring only
+    these bits de-confounds the cross-task OOD metric: tasks with few real output bits
+    (parity=1, add=input_n//2+1, multiply=8) are otherwise inflated by ``output_n``-many
+    free padded-zero bits. ``reverse`` (native width = input_n) is unaffected → the honest
+    anchor. Returns min(native, output_n)."""
+    from boolean_nca_cc.circuits.tasks import get_task_data
+
+    (_x, y), _split, _total = get_task_data(subject, 1 << input_n, input_bits=input_n)
+    native = int(y.shape[1]) if getattr(y, "ndim", 1) == 2 else 1
+    return int(min(native, output_n))
 
 
 def run_unified_periodic_evaluation(
@@ -662,6 +696,7 @@ def train_model(
     # ── Training: optimization ──────────────────────────────────────────
     learning_rate: float = 1e-3,
     weight_decay: float = 1e-4,
+    grad_clip_norm: float = 1.0,  # optax global-norm grad clip; lower = more stable at high T
     lr_scheduler: str = "constant",  # Options: "constant", "exponential", "cosine", "linear_warmup"
     lr_scheduler_params: dict | None = None,
     # ── Training: loss ──────────────────────────────────────────────────
@@ -708,6 +743,32 @@ def train_model(
     # the legacy global-task path is used unchanged. See
     # ``boolean_nca_cc.tasks.sample_task_batch`` for the cfg schema
     # (must have a ``name`` field).
+    # ── Inner-loop regime ───────────────────────────────────────────────
+    # "batch" (default) = the legacy batch meta-gradient via run_model_scan_with_loss —
+    # every NCA step sees the full input batch + a batch-AVERAGED residual, and carries
+    # all the demo/damage/shuffle/burst machinery (byte-for-byte unchanged). Used for the
+    # demo / recovery / repair arc.
+    # "unified" = the UNIFIED online↔batch continuum via run_inner_loop, parameterized by
+    # {data_mode, window_size W, steps_per_round m, n_rounds N, loss_reduction}. data_mode
+    # = "stream" is the VSML online inner loop (predict-before-adapt emerges); "fixed" is
+    # the (damage-free) batch inner loop (reproduces run_model_scan_with_loss's no-damage
+    # core). Requires task_sampler_cfg (per-circuit truth tables); raises otherwise.
+    inner_loop_regime: str = "batch",  # "batch" (legacy/demo) | "unified" (continuum)
+    # data_mode (unified only): "stream" = fresh W-subset per round (online, per-step data
+    # commitment) | "fixed" = one W-subset per rollout (batch, per-rollout commitment).
+    data_mode: str = "stream",
+    n_rounds: int = 64,  # N: inner-loop rounds (online stream positions / batch steps)
+    # Optional n_rounds CURRICULUM: None = constant ``n_rounds``. Else a list of
+    # [epoch_fraction, N] steps (stepped, so the jitted step recompiles only a few times)
+    # — few rounds early (cheap), full count late. Eval uses the max N.
+    n_rounds_schedule: list | None = None,
+    steps_per_round: int = 1,  # m: NCA message steps per round (k in the online VSML form)
+    window_size: int = 1,  # W: inputs evaluated per round (1 = pure online for stream)
+    loss_reduction: str = "mean",  # "mean" | "mean_tail" | "final" over the N round losses
+    # Held-out OOD subjects for the online per-subject readout (e.g. ["add", "reverse"]).
+    # Derived from cfg.tasks.eval_ood.task_names; enables the clean per-subject
+    # eval_online_out_<subject>/final_hard_accuracy logging (the add↔reverse adjudicator).
+    eval_ood_task_names: list | None = None,
     init_logits: str = "soft_wires",  # one of: "soft_wires", "zeros", "random"
     random_init_scale: float = 1.0,  # std-dev for init_logits="random"
     # ── Damage / resilience ─────────────────────────────────────────────
@@ -745,6 +806,10 @@ def train_model(
     # pool. Set True if you want the per-circuit per-step graphs/metrics
     # available for debugging (matches notebook-style direct access).
     periodic_eval_keep_full_graphs: bool = False,
+    # Chunk size for the unified per-subject OOD eval (evaluate_model_inner_loop_batched):
+    # process this many OOD circuits at a time (vmap within a chunk) to cap peak VRAM for
+    # the N-rounds-from-fresh adaptation. None = vmap all OOD circuits at once.
+    periodic_eval_online_chunk_size: int | None = None,
     # ── Early stopping ──────────────────────────────────────────────────
     early_stopping: EarlyStopping | None = None,
     # ── Checkpointing & best model tracking ─────────────────────────────
@@ -927,6 +992,16 @@ def train_model(
         x_task_global = None
         initial_y_task = None
 
+    # The unified inner loop draws each round's W-subset from each circuit's own truth
+    # table, so it requires the per-circuit-task path (a sampler). Running it over a
+    # single global task would just be overfitting one function.
+    if inner_loop_regime == "unified" and not use_task_sampler:
+        raise ValueError(
+            "inner_loop_regime='unified' requires a task sampler (tasks.type=sampler / "
+            "task_sampler_cfg) so each circuit has a full per-circuit truth table to draw "
+            "rounds from; got a global fixed task. Use tasks=k_junta or tasks=arith_family."
+        )
+
     # Initialize metrics storage
     if initial_metrics is None:
         # Start with empty lists
@@ -970,7 +1045,7 @@ def train_model(
             )
             # Wrap with gradient clipping
             opt_fn = optax.chain(
-                optax.clip_by_global_norm(1.0),
+                optax.clip_by_global_norm(grad_clip_norm),
                 optax.zero_nans(),
                 opt_fn,
             )
@@ -978,7 +1053,7 @@ def train_model(
             schedule = schedule_result
             # Create a new optimizer with the static schedule
             opt_fn = optax.chain(
-                optax.clip_by_global_norm(1.0),
+                optax.clip_by_global_norm(grad_clip_norm),
                 optax.zero_nans(),
                 optax.adamw(learning_rate=schedule, weight_decay=weight_decay),
             )
@@ -1141,6 +1216,9 @@ def train_model(
         y_target: jp.ndarray,
         layer_sizes: tuple[tuple[int, int], ...],
         n_message_steps: int,
+        # Per-epoch ONLINE stream length (curriculum). Static → recompiles only when
+        # the curriculum steps. ``loss_fn_online`` reads THIS (shadows the outer base).
+        n_rounds: int,
         loss_cfg,
         loss_key: jax.random.PRNGKey,
         epoch: int,
@@ -1282,69 +1360,64 @@ def train_model(
 
             return final_loss, (final_aux, final_graph, final_logits, loss_step)
 
-        def loss_fn_no_scan(model, graph, logits, wires, loss_key, permanent_damage, y_local):
-            # ``y_local``: see comment in ``loss_fn_scan``.
-            # Store original shapes for reconstruction
-            from boolean_nca_cc.training.evaluation import (
-                _prepare_model_fn,
-                apply_model_and_compute_loss,
-            )
+        def loss_fn_unified(model, graph, logits, wires, loss_key, permanent_damage, y_local):
+            # UNIFIED inner loop (run_inner_loop): the online↔batch continuum. In the
+            # sampler path ``x`` (a free var) is the full input enumeration and ``y_local``
+            # is this circuit's full truth table — exactly (x_task, y_task). The dials
+            # {data_mode, window_size, steps_per_round, n_rounds} select the regime:
+            # data_mode="stream" = online (predict-before-adapt emerges), "fixed" = batch.
+            # ``permanent_damage`` is ignored (the unified loop is damage-free; damage lives
+            # in run_model_scan_with_loss / the "batch" regime).
+            from boolean_nca_cc.training.evaluation import run_inner_loop
 
             logits_original_shapes = [logit.shape for logit in logits]
-            loss_step = get_loss_step(loss_key)
+            loss_key, scan_key = jax.random.split(loss_key)
 
-            # Prepare model function with precomputed masks (same as scan version)
-            model_fn, _ = _prepare_model_fn(
-                model, graph, gradient_checkpointing=gradient_checkpointing
+            final_graph, round_losses, final_logits, round_aux = run_inner_loop(
+                model=model,
+                graph=graph,
+                logits_original_shapes=logits_original_shapes,
+                wires=wires,
+                x_task=x,
+                y_task=y_local,
+                loss_cfg=loss_cfg,
+                layer_sizes=layer_sizes,
+                n_rounds=n_rounds,
+                steps_per_round=steps_per_round,
+                window_size=window_size,
+                data_mode=data_mode,
+                scan_key=scan_key,
+                gradient_checkpointing=gradient_checkpointing,
             )
 
-            all_results = []
+            # Reduction over the N per-round losses. Losses are per-bit MEAN (W-invariant,
+            # see generalized_bce), so magnitudes are comparable across the continuum.
+            #   "mean"      = mean over all rounds (the VSML online objective).
+            #   "mean_tail" = mean over the last ``loss_tail_fraction`` rounds (the batch
+            #                 objective: reach AND hold the solution; anti-limit-cycle).
+            #   "final"     = the last round only.
+            if loss_reduction == "mean_tail":
+                tail_len = max(1, int(round(loss_tail_fraction * n_rounds)))
+                final_loss = round_losses[-tail_len:].mean()
+            elif loss_reduction == "final":
+                final_loss = round_losses[-1]
+            else:  # "mean"
+                final_loss = round_losses.mean()
 
-            for _i in range(n_message_steps):
-                # Use unified step function for consistency
-                graph, loss, current_logits, aux = apply_model_and_compute_loss(
-                    model_fn=model_fn,
-                    graph=graph,
-                    logits_original_shapes=logits_original_shapes,
-                    wires=wires,
-                    x_data=x,
-                    y_data=y_local,
-                    loss_cfg=loss_cfg,
-                    layer_sizes=layer_sizes,
-                )
-                all_results.append((loss, aux, graph, current_logits))
-
-            # Stack all results using jax.tree_map
-            stacked_results = jax.tree.map(lambda *args: jp.stack(args), *all_results)
-
-            if loss_step_mode == "mean_tail":
-                # Same tail-mean semantics as loss_fn_scan (see comment there).
-                tail_len = max(1, int(round(loss_tail_fraction * n_message_steps)))
-                final_loss = stacked_results[0][-tail_len:].mean()
-                if consistency_weight > 0.0 and tail_len > 1:
-                    tail_preds = stacked_results[1]["predictions"][-tail_len:]
-                    final_loss = final_loss + consistency_weight * jp.mean(
-                        (tail_preds[1:] - tail_preds[:-1]) ** 2
-                    )
-                if pool_return_step == "random_tail":
-                    loss_step = jax.random.randint(
-                        loss_key, (), n_message_steps - tail_len, n_message_steps
-                    )
-                else:
-                    loss_step = n_message_steps - 1
-                _, final_aux, final_graph, final_logits = jax.tree.map(
-                    lambda arr: arr[loss_step], stacked_results
-                )
-            else:
-                # Index at n_loss_step
-                final_loss, final_aux, final_graph, final_logits = jax.tree.map(
-                    lambda arr: arr[loss_step], stacked_results
-                )
-
+            # Metrics/pool state come from the last round: the fully-adapted circuit
+            # re-enters the pool; aux is that round's aux dict.
+            final_aux = jax.tree.map(lambda a: a[-1], round_aux)
+            loss_step = n_rounds - 1
             return final_loss, (final_aux, final_graph, final_logits, loss_step)
 
         def batch_loss_fn(model, graphs, logits, wires, loss_key, permanent_damage):
-            loss_fn = loss_fn_scan if use_scan else loss_fn_no_scan
+            if inner_loop_regime == "unified":
+                loss_fn = loss_fn_unified
+            else:
+                # batch / demo / damage regime → run_model_scan_with_loss.
+                # (use_scan retired: the scan path is canonical; the old python-loop
+                #  loss_fn_no_scan was a redundant duplicate and has been removed.)
+                loss_fn = loss_fn_scan
 
             # Resolve permanent_damage to a float probability per batch element:
             # "random" -> 0.5, True -> 1.0, False -> 0.0, float -> as-is
@@ -1404,6 +1477,7 @@ def train_model(
         y_target: jp.ndarray,
         layer_sizes: tuple[tuple[int, int], ...],
         n_message_steps: int,
+        n_rounds: int,  # per-epoch online stream length (curriculum); static
         loss_cfg,
         loss_key: jax.random.PRNGKey,
         epoch: int,
@@ -1460,6 +1534,7 @@ def train_model(
             y_target=y_target,
             layer_sizes=layer_sizes,
             n_message_steps=n_message_steps,
+            n_rounds=n_rounds,
             loss_cfg=loss_cfg,
             loss_key=loss_key,
             epoch=epoch,
@@ -1497,6 +1572,7 @@ def train_model(
         static_argnames=(
             "layer_sizes",
             "n_message_steps",
+            "n_rounds",
             "loss_cfg",
             "data_fraction",
             "p_fault",
@@ -1694,6 +1770,12 @@ def train_model(
                 if use_task_sampler:
                     y_step = sharding_ctx.shard(y_step)
 
+            # Online stream-length curriculum: resolve S for this epoch (constant when
+            # no schedule). Static arg → the jitted step recompiles only when S steps.
+            n_rounds_eff = _resolve_n_rounds(
+                epoch, epochs, n_rounds, n_rounds_schedule
+            )
+
             # Perform pool training step (single batch, possibly sharded across devices)
             (
                 loss,
@@ -1710,6 +1792,7 @@ def train_model(
                 y_target=y_step,
                 layer_sizes=layer_sizes,
                 n_message_steps=n_message_steps,
+                n_rounds=n_rounds_eff,
                 loss_cfg=loss_cfg,
                 loss_key=loss_key,
                 epoch=epoch,
@@ -1996,6 +2079,76 @@ def train_model(
                         current_eval_metrics.update(sub_metrics)
                 if not current_eval_metrics:
                     current_eval_metrics = None
+
+                # ── UNIFIED inner-loop per-subject OOD readout ──────────────
+                # The adjudicating metric for the unified regime: for each held-out OOD
+                # subject (add, reverse, ...), adapt fresh random-wiring circuits via the
+                # unified inner loop (stream or fixed per ``data_mode``), then read full-table
+                # hard accuracy. Logged PER SUBJECT (eval_online_out_<subject>) so the
+                # add↔reverse gap is clean — unlike the mixed-library batch OOD metric.
+                # Additive: leaves the standard eval intact.
+                if (
+                    inner_loop_regime == "unified"
+                    and use_task_sampler
+                    and eval_datasets.x_task is not None
+                    and eval_ood_task_names
+                    and eval_datasets.out_of_distribution_wires is not None
+                ):
+                    from boolean_nca_cc.tasks.samplers import sample_library_batch
+
+                    n_ood = eval_datasets.out_actual_batch_size
+                    # Eval gives every FRESH circuit a FIXED adaptation budget of
+                    # ``periodic_eval_inner_steps`` total NCA steps (matches the batch-eval
+                    # convention of N steps from fresh), split as S_eval x k. So the OOD
+                    # readout is standardized regardless of the TRAINING stream length /
+                    # curriculum / k. e.g. inner_steps=256: k=1 -> stream 256 examples,
+                    # k=8 -> stream 32 (x8 = 256 steps).
+                    eval_n_rounds = max(
+                        1, int(periodic_eval_inner_steps) // max(1, int(steps_per_round))
+                    )
+                    online_eval_metrics = {}
+                    for subject in eval_ood_task_names:
+                        eval_key, subj_key, scan_key_subj = jax.random.split(eval_key, 3)
+                        # All n_ood circuits get the SAME subject (per-circuit 3D y),
+                        # reusing the library truth-table/padding logic for consistency.
+                        y_subject, _ = sample_library_batch(
+                            subj_key, n_ood, input_n, output_n, (subject,)
+                        )
+                        _, subj_metrics = evaluate_model_inner_loop_batched(
+                            model=model,
+                            batch_wires=eval_datasets.out_of_distribution_wires,
+                            batch_logits=eval_datasets.out_of_distribution_logits,
+                            x_task=eval_datasets.x_task,
+                            y_task=y_subject,
+                            input_n=input_n,
+                            arity=arity,
+                            circuit_hidden_dim=circuit_hidden_dim,
+                            loss_cfg=loss_cfg,
+                            layer_sizes=layer_sizes,
+                            n_rounds=eval_n_rounds,
+                            steps_per_round=steps_per_round,
+                            window_size=window_size,
+                            data_mode=data_mode,
+                            scan_key=scan_key_subj,
+                            bidirectional_edges=bidirectional_edges,
+                            score_output_bits=_native_output_width(subject, input_n, output_n),
+                            chunk_size=periodic_eval_online_chunk_size,
+                        )
+                        ha = subj_metrics["hard_accuracy"][-1]
+                        acc = subj_metrics["accuracy"][-1]
+                        online_eval_metrics[
+                            f"eval_online_out_{subject}/final_hard_accuracy"
+                        ] = ha
+                        online_eval_metrics[
+                            f"eval_online_out_{subject}/final_accuracy"
+                        ] = acc
+                        log.info(
+                            f"[online OOD] {subject}: full-table hard-acc={ha:.4f} "
+                            f"(adapted over {eval_n_rounds} examples x {steps_per_round} = "
+                            f"{eval_n_rounds * steps_per_round}-step budget, fresh)"
+                        )
+                    if wandb_run is not None:
+                        wandb_run.log({**online_eval_metrics, "epoch": epoch})
 
             # Step 3: Save periodic checkpoints (best models are now handled by unified system)
             # The resume_state snapshots the pool / carried train_key / trackers at

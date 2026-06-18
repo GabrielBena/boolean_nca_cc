@@ -1244,6 +1244,301 @@ def run_model_scan_with_loss(
     return final_graph, step_outputs
 
 
+def run_inner_loop(
+    model: CircuitGatheredAttention | CircuitGNN | CircuitSelfAttention | PerceiverCircuitAttention,
+    graph,
+    logits_original_shapes: list[tuple],
+    wires: list[jp.ndarray],
+    x_task: jp.ndarray,
+    y_task: jp.ndarray,
+    loss_cfg: LossConfig,
+    layer_sizes: tuple[tuple[int, int], ...],
+    n_rounds: int,
+    steps_per_round: int = 1,
+    window_size: int = 1,
+    data_mode: str = "stream",
+    scan_key: jax.random.PRNGKey = None,
+    gradient_checkpointing: bool = False,
+):
+    """
+    UNIFIED inner loop spanning the online↔batch continuum (one body, four dials).
+
+    Replaces the separate batch (``run_model_scan_with_loss``) and online
+    (``run_model_online_scan_with_loss``) inner loops for the meta-learning continuum.
+    Each ROUND r runs the SAME body (batch order):
+
+      1. run ``steps_per_round`` (m) NCA message steps — the model adapts on the PRIOR
+         round's fed residual / accumulated state.
+      2. run the circuit on this round's W-input subset, compute the round loss L_r.
+      3. feed the mean-over-W residual to the output nodes + stash the W-subset in globals.
+
+    Steps 2+3 are exactly ``get_loss_and_update_graph`` (whose
+    ``jp.abs(residuals).mean(axis=0)`` IS the mean-over-W: W=1 → the single residual,
+    W=full → the original batch mean). So the residual feed is unified — there is no
+    per-example-vs-batch-mean branch.
+
+    DIALS
+      window_size (W): inputs evaluated per round. Unifies batch ``data_per_batch`` /
+        online window / Perceiver attended-count. (static)
+      data_mode:
+        - "fixed":  ONE W-subset drawn per rollout, reused every round  → BATCH.
+                    W ≥ case_n ⇒ the FULL truth table (deterministic; == data_fraction=1.0).
+        - "stream": a FRESH W-subset every round                        → ONLINE.
+      steps_per_round (m): NCA message steps per round. (static)
+      n_rounds (N): number of rounds. (static)
+
+    predict-before-adapt EMERGES from ``data_mode="stream"`` — no flag. Round r's m
+    message steps ran on round r-1's residual, and L_r is evaluated on round r's FRESH
+    inputs *before* round r's residual is fed, so the rule must predict unseen inputs
+    from prior feedback (the VSML generalization signal). In "fixed" mode every round
+    sees the same inputs → iterative batch refinement. ``feedback_mode`` (scalar residual
+    vs. value-aware cross-attention) is the MODEL's concern, NOT this loop's.
+
+    At ``data_mode="fixed", window_size>=case_n, steps_per_round=1`` this is byte-identical
+    (up to the loss-normalization) to ``run_model_scan_with_loss``'s no-damage path —
+    see the batch-preset regression test. Damage / wire-shuffle / no-repair live ONLY in
+    ``run_model_scan_with_loss`` (the demo/recovery regime), not here.
+
+    Args:
+        x_task: Full input enumeration [2^input_n, input_n] (shared across circuits).
+        y_task: This circuit's full truth table [2^input_n, output_n].
+        n_rounds: N — number of rounds (static).
+        steps_per_round: m — NCA message steps per round (static).
+        window_size: W — inputs per round (1 = pure online for stream; static).
+        data_mode: "fixed" (batch) | "stream" (online).
+        scan_key: per-circuit key; draws the index rows (and Perceiver subsample key).
+
+    Returns:
+        (final_graph, round_losses, final_logits, round_aux) where ``round_losses`` is
+        [n_rounds], ``final_logits`` are the fully-adapted circuit's logits, and
+        ``round_aux`` stacks the per-round aux dict (loss / hard_loss / accuracy /
+        hard_accuracy / predictions / residuals ...) along a leading [n_rounds] axis.
+    """
+    from boolean_nca_cc.utils.graph_builder import GraphGlobals
+
+    if scan_key is None:
+        scan_key = jax.random.PRNGKey(42)
+    stream_key, subsample_key = jax.random.split(scan_key)
+
+    case_n = x_task.shape[0]
+    # Per-round index rows [N, W], uniform with replacement (the circuit must generalize
+    # to inputs it never saw — for 12-bit add, 2^12 >> N·W, so stream rounds are almost
+    # all novel: the hard online-generalization regime the diagnosis wants).
+    if data_mode == "fixed":
+        # One subset committed per rollout, reused every round (= batch / per-rollout
+        # data commitment). W >= case_n → the full deterministic truth table.
+        if window_size >= case_n:
+            fixed_idx = jp.arange(case_n)
+        else:
+            fixed_idx = jax.random.randint(stream_key, (window_size,), 0, case_n)
+        idx_stream = jp.broadcast_to(fixed_idx, (n_rounds, fixed_idx.shape[0]))
+    elif data_mode == "stream":
+        # Fresh subset per round (= per-step data commitment / online).
+        idx_stream = jax.random.randint(stream_key, (n_rounds, window_size), 0, case_n)
+    else:
+        raise ValueError(f"data_mode must be 'fixed' or 'stream', got {data_mode!r}")
+
+    # Precompute the model fn (attention masks etc.) once; topology is fixed.
+    model_fn, _ = _prepare_model_fn(model, graph, gradient_checkpointing)
+
+    # ── init globals (the "prior" the round-0 message steps operate on) ──────────────
+    # fixed (batch): pre-compute round-0's residual via get_loss_and_update_graph so
+    #   round-0's message steps SEE it — reproduces run_model_scan_with_loss's pre-scan
+    #   initialization (batch-faithful).
+    # stream (online): NO pre-fed residual (residuals=0) → round-0 is the pure 0-shot
+    #   prediction (predict-before-adapt purity).
+    x0 = x_task[idx_stream[0]]
+    y0 = y_task[idx_stream[0]]
+    if data_mode == "fixed":
+        graph, _, _, _ = get_loss_and_update_graph(
+            graph=graph,
+            logits_original_shapes=logits_original_shapes,
+            wires=wires,
+            x_data=x0,
+            y_data=y0,
+            loss_cfg=loss_cfg,
+            layer_sizes=layer_sizes,
+        )
+        graph = graph._replace(globals=graph.globals._replace(subsample_key=subsample_key))
+    else:
+        graph = graph._replace(
+            globals=GraphGlobals(
+                loss=jp.float32(0.0),
+                update_steps=0,
+                x_data=x0,
+                y_data=y0,
+                residuals=jp.zeros_like(y0),
+                subsample_key=subsample_key,
+            )
+        )
+
+    def round_step(carry_graph, idx_row):
+        x_r = x_task[idx_row]  # [W, input_n]
+        y_r = y_task[idx_row]  # [W, output_n]
+
+        # 1. m NCA message steps on the prior round's fed residual / accumulated state.
+        def body(gg, _):
+            return model_fn(gg), None
+
+        g, _ = jax.lax.scan(body, carry_graph, xs=None, length=steps_per_round)
+
+        # 2+3. loss on this round's W-subset + feed mean-over-W residual + stash the
+        #      subset in globals (get_loss_and_update_graph does both, identically to
+        #      the batch regime's per-step update).
+        g, loss_r, _logits_r, aux_r = get_loss_and_update_graph(
+            graph=g,
+            logits_original_shapes=logits_original_shapes,
+            wires=wires,
+            x_data=x_r,
+            y_data=y_r,
+            loss_cfg=loss_cfg,
+            layer_sizes=layer_sizes,
+        )
+        return g, (loss_r, aux_r)
+
+    final_graph, (round_losses, round_aux) = jax.lax.scan(
+        round_step, graph, xs=idx_stream, length=n_rounds
+    )
+    final_logits = extract_logits_from_graph(final_graph, logits_original_shapes)
+    return final_graph, round_losses, final_logits, round_aux
+
+
+def evaluate_model_inner_loop_batched(
+    model: CircuitGatheredAttention | CircuitGNN | CircuitSelfAttention | PerceiverCircuitAttention,
+    batch_wires: list[jp.ndarray],
+    batch_logits: list[jp.ndarray],
+    x_task: jp.ndarray,
+    y_task: jp.ndarray,
+    input_n: int,
+    arity: int = 2,
+    circuit_hidden_dim: int = 16,
+    loss_cfg=None,
+    layer_sizes: list[tuple[int, int]] | None = None,
+    n_rounds: int = 64,
+    steps_per_round: int = 1,
+    window_size: int = 1,
+    data_mode: str = "stream",
+    scan_key: jax.random.PRNGKey = jax.random.PRNGKey(42),
+    bidirectional_edges: bool = True,
+    score_output_bits: int | None = None,
+    chunk_size: int | None = None,
+) -> tuple[jp.ndarray, dict]:
+    """
+    Inner-loop OOD evaluation (the meta-learning readout), spanning the online↔batch
+    continuum via ``data_mode`` / ``window_size`` — the eval sibling of ``run_inner_loop``.
+
+    For each circuit in the batch: run the unified inner loop (``run_inner_loop``) to ADAPT
+    a FRESH circuit to its task — from a fixed batch when ``data_mode="fixed"`` or a stream
+    when ``"stream"`` — then read the **hard accuracy on the FULL input enumeration**: the
+    generalization readout that adjudicates (e.g.) the add↔reverse gap, directly comparable
+    across the continuum and to the batch regime's ``final_hard_accuracy``.
+
+    ``score_output_bits`` (padding-corrected metric): if set, accuracy is computed over only
+    the first that-many output bits — the MEANINGFUL bits of a library subject, excluding the
+    right-zero padding to ``output_n`` (de-confounds the cross-task OOD readout: parity/add/
+    multiply are otherwise inflated by free padded bits). None = score all ``output_n`` bits.
+
+    ``chunk_size``: process the batch of circuits in groups of this many (vmap within a chunk,
+    Python loop across chunks) to cap peak VRAM — the 256-round-from-fresh eval over the OOD
+    circuits OOMs a 32 GB V100 if vmapped all at once. None = vmap all circuits together.
+
+    ``y_task`` may be 2D ``[2^input_n, output_n]`` (one task shared across the batch — the
+    per-subject readout) or 3D ``[batch, 2^input_n, output_n]`` (per-circuit).
+
+    Returns:
+        (batch_graphs, step_metrics) where ``step_metrics["hard_accuracy"][-1]`` is the
+        batch-mean full-table hard accuracy AFTER adaptation (the adjudicator). Also includes
+        the per-round adaptation-loss / accuracy curves for diagnostics.
+    """
+    if loss_cfg is None:
+        loss_cfg = LOSS_L4
+
+    batch_size = batch_logits[0].shape[0]
+    y_is_per_circuit = y_task.ndim == 3
+
+    vmap_build_graph = jax.vmap(
+        lambda logits, wires: build_graph(
+            logits,
+            wires,
+            input_n,
+            arity,
+            circuit_hidden_dim,
+            loss_value=0.0,
+            bidirectional_edges=bidirectional_edges,
+        )
+    )
+    batch_graphs = vmap_build_graph(batch_logits, batch_wires)
+    scan_keys = jax.random.split(scan_key, batch_size)
+
+    def run_single(graph, wires, logits, key, y_local):
+        _final_graph, round_losses, final_logits, round_aux = run_inner_loop(
+            model=model,
+            graph=graph,
+            logits_original_shapes=[logit.shape for logit in logits],
+            wires=wires,
+            x_task=x_task,
+            y_task=y_local,
+            loss_cfg=loss_cfg,
+            layer_sizes=layer_sizes,
+            n_rounds=n_rounds,
+            steps_per_round=steps_per_round,
+            window_size=window_size,
+            data_mode=data_mode,
+            scan_key=key,
+            gradient_checkpointing=True,
+        )
+        # Full-table readout after adapting (the generalization metric).
+        _full_loss, full_aux = get_loss_from_wires_logits(
+            logits=final_logits, wires=wires, x=x_task, y_target=y_local, loss_cfg=loss_cfg
+        )
+        if score_output_bits is None:
+            acc, hard_acc = full_aux["accuracy"], full_aux["hard_accuracy"]
+        else:
+            # Padding-corrected: score only the first ``score_output_bits`` (meaningful)
+            # output bits. ``score_output_bits == output_n`` reproduces the full metric.
+            yy = y_local[:, :score_output_bits]
+            acc = jp.mean(jp.round(full_aux["predictions"][:, :score_output_bits]) == yy)
+            hard_acc = jp.mean(jp.round(full_aux["hard_predictions"][:, :score_output_bits]) == yy)
+        return round_losses, round_aux["hard_accuracy"], acc, hard_acc
+
+    y_in_axes = 0 if y_is_per_circuit else None
+    vmapped = nnx.vmap(run_single, in_axes=(0, 0, 0, 0, y_in_axes))
+
+    if chunk_size is None or chunk_size >= batch_size:
+        round_losses, round_hard_acc, full_acc, full_hard_acc = vmapped(
+            batch_graphs, batch_wires, batch_logits, scan_keys, y_task
+        )
+    else:
+        # Chunk over circuits to cap peak VRAM (256-round-from-fresh OOMs the V100 if all
+        # circuits are vmapped together). vmap within a chunk; Python loop + concat across.
+        parts = []
+        for start in range(0, batch_size, chunk_size):
+            end = min(start + chunk_size, batch_size)
+            g_c = jax.tree.map(lambda a, s=start, e=end: a[s:e], batch_graphs)
+            w_c = [w[start:end] for w in batch_wires]
+            l_c = [lg[start:end] for lg in batch_logits]
+            k_c = scan_keys[start:end]
+            y_c = y_task[start:end] if y_is_per_circuit else y_task
+            parts.append(vmapped(g_c, w_c, l_c, k_c, y_c))
+        round_losses = jp.concatenate([p[0] for p in parts], axis=0)
+        round_hard_acc = jp.concatenate([p[1] for p in parts], axis=0)
+        full_acc = jp.concatenate([p[2] for p in parts], axis=0)
+        full_hard_acc = jp.concatenate([p[3] for p in parts], axis=0)
+
+    step_metrics = {
+        "step": list(range(1, n_rounds + 1)),
+        # Per-round adaptation loss / single-round accuracy curves (diagnostics).
+        "round_loss": jp.mean(round_losses, axis=0).tolist(),
+        "round_hard_accuracy": jp.mean(round_hard_acc, axis=0).tolist(),
+        # The adjudicator: full-table accuracy AFTER adaptation, exposed as a 1-element
+        # list so callers can read ``[-1]`` exactly like the batch eval.
+        "accuracy": [float(jp.mean(full_acc))],
+        "hard_accuracy": [float(jp.mean(full_hard_acc))],
+        "final_full_table_hard_accuracy": float(jp.mean(full_hard_acc)),
+    }
+    return batch_graphs, step_metrics
+
+
 def create_damage_steps(
     n_damage_steps: int = 0,
     max_steps: int | None = None,
