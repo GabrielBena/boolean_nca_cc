@@ -24,6 +24,7 @@ from boolean_nca_cc.circuits.model import (
 from boolean_nca_cc.tasks import (
     TASK_SAMPLERS,
     build_task_x,
+    sample_arith_family_y,
     sample_k_junta_y,
     sample_library_batch,
     sample_task_batch,
@@ -207,7 +208,122 @@ def test_registry_requires_name():
 
 def test_registry_contains_expected_samplers():
     assert "k_junta" in TASK_SAMPLERS
+    assert "arith_family" in TASK_SAMPLERS
     assert "library" in TASK_SAMPLERS
+
+
+# ---------------------------------------------------------------------------
+# Arithmetic-family sampler (the "structured diversity" arm of "sweep both")
+# ---------------------------------------------------------------------------
+
+
+def _library_add_padded(input_n: int, output_n: int) -> jp.ndarray:
+    """The canonical library ``add`` truth table, padded to output_n (the target
+    the π-identity member of the arith family must reproduce bit-for-bit)."""
+    from boolean_nca_cc.circuits.tasks import get_task_data
+
+    (_x, y), _split, _total = get_task_data("add", 1 << input_n, input_bits=input_n)
+    y = jp.asarray(y, dtype=jp.float32)
+    if y.ndim == 1:
+        y = y[:, None]
+    if y.shape[1] < output_n:
+        y = jp.concatenate(
+            [y, jp.zeros((y.shape[0], output_n - y.shape[1]), dtype=jp.float32)], axis=1
+        )
+    elif y.shape[1] > output_n:
+        y = y[:, :output_n]
+    return y
+
+
+@pytest.mark.parametrize("input_n,output_n", [(8, 8), (10, 12), (12, 12)])
+def test_arith_family_pi_identity_equals_library_add(input_n, output_n):
+    """π=identity + offset=0 must be BIT-IDENTICAL to the library ``add`` task —
+    so OOD-``add`` is exactly the identity member of this family."""
+    y_id = sample_arith_family_y(
+        jax.random.PRNGKey(0), input_n, output_n, permute_inputs=False, max_offset=0
+    )
+    y_add = _library_add_padded(input_n, output_n)
+    assert y_id.shape == (1 << input_n, output_n)
+    assert jp.array_equal(y_id, y_add), "π-identity arith_family != library add"
+
+
+def test_arith_family_permutation_is_diverse_and_boolean():
+    input_n, output_n = 10, 12
+    y_add = _library_add_padded(input_n, output_n)
+    ys = [
+        sample_arith_family_y(jax.random.PRNGKey(s), input_n, output_n, permute_inputs=True)
+        for s in range(4)
+    ]
+    for y in ys:
+        assert jp.all((y == 0.0) | (y == 1.0)), "arith_family output not boolean"
+        # A random permutation almost surely differs from canonical add.
+        assert jp.any(y != y_add), "permuted member coincidentally equals add"
+    # Distinct seeds give distinct tasks.
+    assert not jp.array_equal(ys[0], ys[1])
+
+
+def test_arith_family_offset_shifts_function():
+    input_n, output_n = 8, 8
+    y0 = sample_arith_family_y(
+        jax.random.PRNGKey(3), input_n, output_n, permute_inputs=False, max_offset=0
+    )
+    # With identity perm, a non-zero offset must change at least one entry for
+    # SOME key (sum != sum + c). Scan a few keys to avoid a fluke draw of c=0.
+    changed = any(
+        jp.any(
+            sample_arith_family_y(
+                jax.random.PRNGKey(s), input_n, output_n, permute_inputs=False, max_offset=7
+            )
+            != y0
+        )
+        for s in range(5)
+    )
+    assert changed, "max_offset>0 never changed the function across 5 keys"
+
+
+def test_registry_dispatch_arith_family():
+    y = sample_task_batch(
+        jax.random.PRNGKey(0), pool_size=4, input_n=8, output_n=8,
+        cfg={"name": "arith_family", "permute_inputs": True, "max_offset": 0},
+    )
+    assert y.shape == (4, 1 << 8, 8)
+    assert jp.all((y == 0.0) | (y == 1.0))
+
+
+def _library_padded(subject, input_n, output_n):
+    from boolean_nca_cc.circuits.tasks import get_task_data
+
+    (_x, y), _split, _total = get_task_data(subject, 1 << input_n, input_bits=input_n)
+    y = jp.asarray(y, dtype=jp.float32)
+    if y.ndim == 1:
+        y = y[:, None]
+    if y.shape[1] < output_n:
+        y = jp.concatenate([y, jp.zeros((y.shape[0], output_n - y.shape[1]), dtype=jp.float32)], 1)
+    return y[:, :output_n]
+
+
+@pytest.mark.parametrize("op", ["add", "sub"])
+def test_arith_family_op_pi_identity_matches_library(op):
+    """π=identity arith_family member is bit-identical to the corresponding library
+    op (add or sub) — so OOD-add is within-family and sub is a genuine held-out op."""
+    input_n, output_n = 12, 12
+    y_id = sample_arith_family_y(
+        jax.random.PRNGKey(0), input_n, output_n, op=op, permute_inputs=False, max_offset=0
+    )
+    assert jp.array_equal(y_id, _library_padded(op, input_n, output_n))
+
+
+def test_arith_family_ops_differ():
+    input_n, output_n = 12, 12
+    y_add = sample_arith_family_y(jax.random.PRNGKey(0), input_n, output_n, op="add", permute_inputs=False)
+    y_sub = sample_arith_family_y(jax.random.PRNGKey(0), input_n, output_n, op="sub", permute_inputs=False)
+    assert jp.any(y_add != y_sub), "add and sub families coincide"
+
+
+def test_sub_in_task_library():
+    from boolean_nca_cc.circuits.tasks import TASKS
+
+    assert "sub" in TASKS  # genuine held-out arithmetic OOD relative to add training
 
 
 # ---------------------------------------------------------------------------
@@ -361,3 +477,264 @@ def test_pool_reset_fraction_replaces_y_task_only_for_reset_slots():
     changed = jp.any(reset_pool.y_task != original_y, axis=(1, 2))
     n_changed = int(changed.sum())
     assert n_changed == 8, f"expected 8 changed slots, got {n_changed}"
+
+
+# ---------------------------------------------------------------------------
+# Unified inner loop (online↔batch continuum) — run_inner_loop / eval
+# ---------------------------------------------------------------------------
+
+
+def _tiny_circuit_model_graph(input_n=4, output_n=4, hidden_dim=16, seed=0):
+    """Build a tiny (wires, logits, graph, model, layer_sizes) for online-scan tests."""
+    from flax import nnx
+
+    from boolean_nca_cc.circuits.model import gen_circuit, generate_layer_sizes
+    from boolean_nca_cc.models import CircuitGNN
+    from boolean_nca_cc.utils.graph_builder import build_graph
+
+    arity = 2
+    layer_sizes = generate_layer_sizes(input_n, output_n, arity, layer_n=2)
+    out_n = layer_sizes[-1][0]
+    k1, k2, k3 = jax.random.split(jax.random.PRNGKey(seed), 3)
+    wires, logits = gen_circuit(k1, k2, layer_sizes, arity=arity, init_logits="random")
+    graph = build_graph(logits, wires, input_n, arity, hidden_dim)
+    model = CircuitGNN(
+        circuit_hidden_dim=hidden_dim,
+        attention_dim=32,
+        arity=arity,
+        message_passing=True,
+        use_attention=False,
+        rngs=nnx.Rngs(params=k3),
+        use_node_loss=False,
+        use_layer_PE=False,
+        use_intra_layer_PE=False,
+    )
+    return wires, logits, graph, model, layer_sizes, input_n, out_n
+
+
+def test_inner_loop_scan_shapes_and_state_preserved():
+    from boolean_nca_cc.circuits.train import LOSS_L4
+    from boolean_nca_cc.training.evaluation import run_inner_loop
+
+    wires, logits, graph, model, layer_sizes, input_n, out_n = _tiny_circuit_model_graph()
+    x_task = build_task_x(input_n)
+    y_task = sample_k_junta_y(jax.random.PRNGKey(1), input_n, out_n, k=2)
+
+    N = 8
+    final_graph, round_losses, final_logits, round_aux = run_inner_loop(
+        model=model,
+        graph=graph,
+        logits_original_shapes=[lg.shape for lg in logits],
+        wires=wires,
+        x_task=x_task,
+        y_task=y_task,
+        loss_cfg=LOSS_L4,
+        layer_sizes=layer_sizes,
+        n_rounds=N,
+        steps_per_round=2,
+        window_size=1,
+        data_mode="stream",
+        scan_key=jax.random.PRNGKey(2),
+    )
+    # Round-loss curve has one entry per round.
+    assert round_losses.shape == (N,)
+    assert round_aux["hard_accuracy"].shape == (N,)
+    assert round_aux["predictions"].shape[0] == N  # [N, W, output_n]
+    # State shape is preserved across rounds (circuit identity intact).
+    assert final_graph.nodes["logits"].shape == graph.nodes["logits"].shape
+    assert len(final_logits) == len(logits)
+    assert bool(jp.all(jp.isfinite(round_losses)))
+
+
+def test_inner_loop_scan_grad_flows():
+    """BPTT through the unified inner loop yields finite, non-trivial grads w.r.t. params."""
+    from flax import nnx
+
+    from boolean_nca_cc.circuits.train import LOSS_L4
+    from boolean_nca_cc.training.evaluation import run_inner_loop
+
+    wires, logits, graph, model, layer_sizes, input_n, out_n = _tiny_circuit_model_graph()
+    x_task = build_task_x(input_n)
+    y_task = sample_k_junta_y(jax.random.PRNGKey(1), input_n, out_n, k=2)
+
+    def loss_fn(m):
+        _g, round_losses, _l, _aux = run_inner_loop(
+            model=m,
+            graph=graph,
+            logits_original_shapes=[lg.shape for lg in logits],
+            wires=wires,
+            x_task=x_task,
+            y_task=y_task,
+            loss_cfg=LOSS_L4,
+            layer_sizes=layer_sizes,
+            n_rounds=6,
+            steps_per_round=1,
+            window_size=1,
+            data_mode="stream",
+            scan_key=jax.random.PRNGKey(0),
+        )
+        return round_losses.mean()
+
+    grads = nnx.grad(loss_fn)(model)
+    leaves = jax.tree.leaves(grads)
+    assert leaves, "no gradient leaves"
+    assert all(bool(jp.all(jp.isfinite(g))) for g in leaves), "non-finite gradients"
+    assert any(float(jp.sum(jp.abs(g))) > 0.0 for g in leaves), "all gradients zero"
+
+
+def test_batch_preset_matches_scan():
+    """REGRESSION: run_inner_loop in the BATCH preset (data_mode='fixed', full-table window,
+    steps_per_round=1) reproduces run_model_scan_with_loss's no-damage path — identical final
+    logits and equal per-round/per-step losses. The guarantee that folding batch into the
+    unified continuum changed nothing for the batch regime (both paths share the documented
+    sum→mean loss normalization)."""
+    from boolean_nca_cc.circuits.train import LOSS_BCE
+    from boolean_nca_cc.training.evaluation import (
+        run_inner_loop,
+        run_model_scan_with_loss,
+    )
+
+    wires, logits, graph, model, layer_sizes, input_n, out_n = _tiny_circuit_model_graph()
+    x_task = build_task_x(input_n)
+    case_n = x_task.shape[0]
+    y_task = sample_k_junta_y(jax.random.PRNGKey(3), input_n, out_n, k=2)
+    T = 5
+    shapes = [lg.shape for lg in logits]
+
+    # Legacy batch scan (no damage, full table).
+    _fg_b, step_outputs = run_model_scan_with_loss(
+        model=model,
+        graph=graph,
+        num_steps=T,
+        logits_original_shapes=shapes,
+        wires=wires,
+        x_data=x_task,
+        y_data=y_task,
+        loss_cfg=LOSS_BCE,
+        layer_sizes=layer_sizes,
+        data_fraction=1.0,
+        scan_key=jax.random.PRNGKey(9),
+    )
+    batch_losses = step_outputs[1]  # [T]
+    batch_final_logits = jax.tree.map(lambda a: a[-1], step_outputs[2])
+
+    # Unified loop, BATCH preset: fixed full-table window, 1 step/round, T rounds.
+    _fg_u, round_losses, uni_final_logits, _aux = run_inner_loop(
+        model=model,
+        graph=graph,
+        logits_original_shapes=shapes,
+        wires=wires,
+        x_task=x_task,
+        y_task=y_task,
+        loss_cfg=LOSS_BCE,
+        layer_sizes=layer_sizes,
+        n_rounds=T,
+        steps_per_round=1,
+        window_size=case_n,  # full table => deterministic arange => == data_fraction=1.0
+        data_mode="fixed",
+        scan_key=jax.random.PRNGKey(9),
+    )
+    # Per-step losses match (the scan records loss AFTER each model step; so does the loop).
+    assert jp.allclose(batch_losses, round_losses, atol=1e-5), (
+        f"batch vs unified losses differ: {batch_losses} vs {round_losses}"
+    )
+    # Final adapted logits match (same trajectory).
+    for lb, lu in zip(batch_final_logits, uni_final_logits, strict=True):
+        assert jp.allclose(lb, lu, atol=1e-5), "batch vs unified final logits differ"
+
+
+def test_inner_loop_eval_full_table_readout():
+    """evaluate_model_inner_loop_batched returns a full-table hard-acc adjudicator
+    (a 1-element ``hard_accuracy`` list) plus per-round adaptation curves."""
+    from boolean_nca_cc.circuits.train import LOSS_L4
+    from boolean_nca_cc.training.evaluation import evaluate_model_inner_loop_batched
+
+    wires, logits, graph, model, layer_sizes, input_n, out_n = _tiny_circuit_model_graph()
+    x_task = build_task_x(input_n)
+    y_task = sample_k_junta_y(jax.random.PRNGKey(5), input_n, out_n, k=2)  # 2D shared
+
+    B = 4
+    batch_wires = [jp.broadcast_to(w, (B,) + w.shape) for w in wires]
+    batch_logits = [jp.broadcast_to(lg, (B,) + lg.shape) for lg in logits]
+
+    N = 6
+    # chunk_size=2 exercises the OOM-safe chunked path (vmap-within-chunk + concat).
+    _graphs, metrics = evaluate_model_inner_loop_batched(
+        model=model,
+        batch_wires=batch_wires,
+        batch_logits=batch_logits,
+        x_task=x_task,
+        y_task=y_task,
+        input_n=input_n,
+        arity=2,
+        circuit_hidden_dim=16,
+        loss_cfg=LOSS_L4,
+        layer_sizes=layer_sizes,
+        n_rounds=N,
+        steps_per_round=1,
+        window_size=1,
+        data_mode="stream",
+        scan_key=jax.random.PRNGKey(7),
+        chunk_size=2,
+    )
+    assert len(metrics["hard_accuracy"]) == 1
+    ha = metrics["hard_accuracy"][-1]
+    assert 0.0 <= ha <= 1.0, f"full-table hard-acc out of range: {ha}"
+    assert len(metrics["round_loss"]) == N
+    assert "final_full_table_hard_accuracy" in metrics
+
+
+def test_resolve_n_rounds_curriculum():
+    from boolean_nca_cc.training.train_loop import _resolve_n_rounds
+
+    # No schedule → constant base.
+    assert _resolve_n_rounds(7, 100, 64, None) == 64
+    # Stepped schedule: latest step whose fraction <= epoch/total.
+    sched = [[0.0, 8], [0.5, 32], [0.8, 64]]
+    assert _resolve_n_rounds(0, 100, 64, sched) == 8
+    assert _resolve_n_rounds(49, 100, 64, sched) == 8
+    assert _resolve_n_rounds(60, 100, 64, sched) == 32
+    assert _resolve_n_rounds(95, 100, 64, sched) == 64
+    # Unsorted schedule still resolves correctly.
+    assert _resolve_n_rounds(60, 100, 64, [[0.8, 64], [0.0, 8], [0.5, 32]]) == 32
+
+
+def test_native_output_width():
+    from boolean_nca_cc.training.train_loop import _native_output_width
+
+    # input_n=12: add/sub = 12//2+1 = 7, reverse = input_n = 12 (honest anchor),
+    # parity = 1, binary_multiply = 8 (library default). All clamped to output_n.
+    assert _native_output_width("add", 12, 12) == 7
+    assert _native_output_width("sub", 12, 12) == 7
+    assert _native_output_width("reverse", 12, 12) == 12
+    assert _native_output_width("parity", 12, 12) == 1
+    assert _native_output_width("add", 12, 5) == 5  # clamped to output_n
+
+
+def test_inner_loop_eval_padding_corrected_metric():
+    """score_output_bits=output_n reproduces the full metric; a smaller value scores
+    only the leading (meaningful) bits — the padding correction."""
+    from boolean_nca_cc.circuits.train import LOSS_L4
+    from boolean_nca_cc.training.evaluation import evaluate_model_inner_loop_batched
+
+    wires, logits, graph, model, layer_sizes, input_n, out_n = _tiny_circuit_model_graph()
+    x_task = build_task_x(input_n)
+    # A padded target: only the first bit is "meaningful", rest are 0 (parity-like padding).
+    y_task = sample_k_junta_y(jax.random.PRNGKey(5), input_n, out_n, k=2).at[:, 1:].set(0.0)
+
+    B = 4
+    bw = [jp.broadcast_to(w, (B,) + w.shape) for w in wires]
+    bl = [jp.broadcast_to(lg, (B,) + lg.shape) for lg in logits]
+    common = dict(
+        model=model, batch_wires=bw, batch_logits=bl, x_task=x_task, y_task=y_task,
+        input_n=input_n, arity=2, circuit_hidden_dim=16, loss_cfg=LOSS_L4,
+        layer_sizes=layer_sizes, n_rounds=5, data_mode="stream", scan_key=jax.random.PRNGKey(7),
+    )
+    _, m_full = evaluate_model_inner_loop_batched(**common, score_output_bits=None)
+    _, m_outn = evaluate_model_inner_loop_batched(**common, score_output_bits=out_n)
+    _, m_bit0 = evaluate_model_inner_loop_batched(**common, score_output_bits=1)
+    # score_output_bits == output_n must reproduce the full (None) metric.
+    assert abs(m_full["hard_accuracy"][-1] - m_outn["hard_accuracy"][-1]) < 1e-5
+    # All in range; the 1-bit score is a valid (generally different) number.
+    for m in (m_full, m_bit0):
+        assert 0.0 <= m["hard_accuracy"][-1] <= 1.0
