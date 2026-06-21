@@ -64,7 +64,7 @@ def _bar(ax, x, vals, color):
 
 
 def make_figure(tmt: pd.DataFrame, bp: pd.DataFrame | None):
-    style.set_rc()
+    style.set_rc(base=7)
     tmt = tmt[(tmt["ood"] == "in") & (tmt["split"] == "test")].copy()
     train_levels = ["OFF", "ON"]
     tasks = style.TASK_ORDER
@@ -73,7 +73,7 @@ def make_figure(tmt: pd.DataFrame, bp: pd.DataFrame | None):
     xpos = {("OFF", "TMT"): 0 - dx, ("OFF", "BP"): 0 + dx,
             ("ON", "TMT"): 1 - dx, ("ON", "BP"): 1 + dx}
 
-    fig, axes = plt.subplots(2, 3, figsize=(7.0, 3.6), sharey=True)
+    fig, axes = plt.subplots(2, 3, figsize=(style.COL_WIDTH, 1.95), sharey=True)
     stat_rows = []
     for r, tr in enumerate(train_levels):
         for c, task in enumerate(tasks):
@@ -91,15 +91,16 @@ def make_figure(tmt: pd.DataFrame, bp: pd.DataFrame | None):
                 stat_rows.append({"Task": task, "train_damage": tr, "eval_damage": ev,
                                   "comparison": "TMT_vs_BP", **cmp})
             ax.set_xticks([0, 1])
-            ax.set_xticklabels(["eval\nundamaged", "eval\ndamaged"])
+            ax.set_xticklabels(["undam.", "dam."] if r == 1 else ["", ""])
             ax.set_xlim(-0.6, 1.6)
             ax.set_ylim(0.6, 1.03)
             ax.axhline(1.0, color="grey", lw=0.5, ls=":", zorder=0)
             if r == 0:
-                ax.set_title(task, fontweight="bold")
+                ax.set_title(style.TASK_SHORT.get(task, task), fontweight="bold")
             if c == 0:
-                ax.set_ylabel(f"Damage-train {tr}\nfinal hard accuracy")
+                ax.set_ylabel(f"Train {tr}")
 
+    fig.supylabel("Final hard accuracy", fontsize=7)
     handles = [Patch(facecolor=METHOD_COLORS["TMT"], alpha=0.65, label="TMT (local policy)"),
                Patch(facecolor=METHOD_COLORS["BP"], alpha=0.8, label="BP (global ceiling, mean ± std)")]
     fig.legend(handles=handles, loc="upper center", ncol=2, bbox_to_anchor=(0.5, 1.02))

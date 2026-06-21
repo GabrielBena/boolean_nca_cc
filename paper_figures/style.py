@@ -35,24 +35,39 @@ TASK_MAP = {
     "add": "Binary Addition",
     "binary_multiply": "Binary Multiplication",
 }
+# Short titles for narrow single-column panels (full names live in the caption)
+TASK_SHORT = {
+    "Bit Reversal": "Reversal",
+    "Binary Addition": "Addition",
+    "Binary Multiplication": "Multiplication",
+}
+
 DAMAGE_MAP = {
     "true": "ON", "false": "OFF", "True": "ON", "False": "OFF",
     True: "ON", False: "OFF", "random": "ON", "none": "OFF",
 }
 
 
-def set_rc() -> None:
-    """Apply consistent, publication-ready matplotlib defaults (vector-safe fonts)."""
+# Page geometry (measured from the build): columnwidth = 239.4pt, textwidth = 505.9pt
+COL_WIDTH = 3.31   # inches -- single-column figure width
+TEXT_WIDTH = 7.0   # inches -- full (two-column) figure width
+
+
+def set_rc(base: int = 9) -> None:
+    """Apply consistent, publication-ready matplotlib defaults (vector-safe fonts).
+
+    base: base font size (pt). Use ~7 for single-column (~3.3in) figures so text
+    stays legible at single-column width (no LaTeX downscaling)."""
     mpl.rcParams.update({
         "figure.dpi": 150,
         "savefig.dpi": 300,
         "savefig.bbox": "tight",
-        "font.size": 9,
-        "axes.titlesize": 9,
-        "axes.labelsize": 9,
-        "xtick.labelsize": 8,
-        "ytick.labelsize": 8,
-        "legend.fontsize": 8,
+        "font.size": base,
+        "axes.titlesize": base,
+        "axes.labelsize": base,
+        "xtick.labelsize": base - 1,
+        "ytick.labelsize": base - 1,
+        "legend.fontsize": base - 1,
         "axes.spines.top": False,
         "axes.spines.right": False,
         "legend.frameon": False,

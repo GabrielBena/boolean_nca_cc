@@ -73,8 +73,8 @@ def pull():
 
 
 def make_figure(df):
-    style.set_rc()
-    fig, axes = plt.subplots(1, 3, figsize=(7.0, 2.3), sharey=True)
+    style.set_rc(base=7)
+    fig, axes = plt.subplots(1, 3, figsize=(style.COL_WIDTH, 1.35), sharey=True)
     for ax, task in zip(axes, TASK_ORDER):
         sub = df[df["Task"] == task]
         for i, ev in enumerate(("OFF", "ON")):
@@ -83,11 +83,11 @@ def make_figure(df):
                 ax.bar(i, float(np.mean(vals)), width=0.6, color=EVAL_DAMAGE_COLORS[ev],
                        alpha=0.85, edgecolor="black", linewidth=0.6)
         ax.set_xticks([0, 1])
-        ax.set_xticklabels(["eval\nundamaged", "eval\ndamaged"])
+        ax.set_xticklabels(["undam.", "dam."])
         ax.set_xlim(-0.7, 1.7)
         ax.set_ylim(0.5, 1.05)
         ax.axhline(1.0, color="grey", lw=0.5, ls=":", zorder=0)
-        ax.set_title(task, fontweight="bold")
+        ax.set_title(style.TASK_SHORT.get(task, task), fontweight="bold")
     axes[0].set_ylabel("Final hard accuracy")
     handles = [Patch(facecolor=EVAL_DAMAGE_COLORS["OFF"], alpha=0.85, label="Undamaged eval"),
                Patch(facecolor=EVAL_DAMAGE_COLORS["ON"], alpha=0.85, label="Damaged eval")]
