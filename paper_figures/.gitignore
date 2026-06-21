@@ -1,0 +1,4 @@
+# Generated artefacts — regenerate with the scripts, don't commit
+data/
+out/
+__pycache__/
