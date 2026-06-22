@@ -26,11 +26,11 @@ from matplotlib.patches import Patch
 from . import stats, style, wandb_data
 
 _HERE = os.path.dirname(__file__)
-OUT_PDF = os.path.join(_HERE, "out", "fig2_fixed_wiring.pdf")
+OUT_PDF = os.path.join(_HERE, "out", f"fig2_fixed_wiring{style.OUT_SUFFIX}.pdf")
 OUT_STATS = os.path.join(_HERE, "out", "fig2_stats.csv")
 BP_CACHE = os.path.join(_HERE, "data", "fixed_wiring_bp.csv")
 
-METHOD_COLORS = {"TMT": style.OKABE_ITO["blue"], "BP": style.OKABE_ITO["orange"]}
+METHOD_COLORS = style.METHOD
 
 
 def _box(ax, x, vals, color):

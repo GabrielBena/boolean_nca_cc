@@ -21,10 +21,10 @@ from paper_figures.style import OKABE_ITO
 
 _HERE = os.path.dirname(__file__)
 CSV = os.path.join(_HERE, "data", "fig4_stepwise.csv")
-OUT = os.path.join(_HERE, "out", "fig_resilience.pdf")
+OUT = os.path.join(_HERE, "out", f"fig_resilience{style.OUT_SUFFIX}.pdf")
 
 SERIES = ["no_repair", "BP", "TMT"]  # draw order: TMT last (on top)
-COLOR = {"TMT": OKABE_ITO["blue"], "BP": OKABE_ITO["orange"], "no_repair": "0.55"}
+COLOR = {"TMT": style.METHOD["TMT"], "BP": style.METHOD["BP"], "no_repair": "0.55"}
 LS = {"TMT": "-", "BP": "-", "no_repair": "--"}
 LABEL = {"TMT": "TMT", "BP": "BP", "no_repair": "No-repair"}
 KIND_TITLE = {"shotgun": 'Permanent "shotgun"', "stochastic": "Stochastic failures"}

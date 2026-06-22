@@ -21,7 +21,7 @@ from paper_figures.style import EVAL_DAMAGE_COLORS
 
 _HERE = os.path.dirname(__file__)
 CSV = os.path.join(_HERE, "data", "fig10_scalefree.csv")
-OUT = os.path.join(_HERE, "out", "fig_scale_free.pdf")
+OUT = os.path.join(_HERE, "out", f"fig_scale_free{style.OUT_SUFFIX}.pdf")
 TRAIN_NODES = 264
 DCOLOR = {False: EVAL_DAMAGE_COLORS["OFF"], True: EVAL_DAMAGE_COLORS["ON"]}
 DLABEL = {False: "Damage-OFF", True: "Damage-ON"}

@@ -24,7 +24,7 @@ from paper_figures.style import EVAL_DAMAGE_COLORS, TASK_MAP, TASK_ORDER
 from paper_figures.wandb_data import DEFAULT_ENTITY, DEFAULT_PROJECT, _args, _cfg, _flat
 
 _HERE = os.path.dirname(__file__)
-OUT_PDF = os.path.join(_HERE, "out", "fig_random_wiring.pdf")
+OUT_PDF = os.path.join(_HERE, "out", f"fig_random_wiring{style.OUT_SUFFIX}.pdf")
 GROUP = "random_wiring_sweep"
 FILTERS = {
     "group": GROUP,

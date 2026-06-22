@@ -22,8 +22,23 @@ OKABE_ITO = {
 
 # Eval-time damage encoding: blue (undamaged) vs vermillion (damaged).
 # This pair is the most reliably distinguishable across all CVD types.
-EVAL_DAMAGE_COLORS = {"OFF": OKABE_ITO["blue"], "ON": OKABE_ITO["vermillion"]}
 BP_COLOR = OKABE_ITO["black"]  # BP shown as a neutral reference ceiling
+
+# --- Palette switch -------------------------------------------------------------
+# Co-author's uniform 2-colour scheme, matching the un-rerunnable Fig 6 (Hamming):
+# green = TMT / undamaged (favourable), indigo = BP / damaged (baseline).
+# Enable with UNIFORM_PALETTE=1; figures are then written with a `_uniform` suffix,
+# leaving the default Okabe-Ito versions intact.
+import os as _os
+UNIFORM = {"green": "#3AB97B", "indigo": "#454A89"}
+USE_UNIFORM = _os.environ.get("UNIFORM_PALETTE", "").lower() not in ("", "0", "false", "no")
+OUT_SUFFIX = "_uniform" if USE_UNIFORM else ""
+if USE_UNIFORM:
+    METHOD = {"TMT": UNIFORM["green"], "BP": UNIFORM["indigo"]}
+    EVAL_DAMAGE_COLORS = {"OFF": UNIFORM["green"], "ON": UNIFORM["indigo"]}
+else:
+    METHOD = {"TMT": OKABE_ITO["blue"], "BP": OKABE_ITO["orange"]}
+    EVAL_DAMAGE_COLORS = {"OFF": OKABE_ITO["blue"], "ON": OKABE_ITO["vermillion"]}
 
 # Canonical task naming (fixes the "Binary_" underscore; TMT not NCA).
 TASK_ORDER = ["Bit Reversal", "Binary Addition", "Binary Multiplication"]
