@@ -1,42 +1,147 @@
-# paper_figures — reproducible Fig 2 for the SODC ALIFE paper
+# paper_figures — reproducing the SODC ALIFE figures
 
-A config-driven replacement for the ad-hoc plotting cells in the (uncommitted)
-`boolean_nca_exploration.ipynb`. Everything for Fig 2 comes from the **logged
-W&B history** of the sweep of record — no model re-evaluation.
+Config-driven, no ad-hoc plotting cells. Everything here either pulls **logged W&B
+history/summary** (no model re-evaluation) or re-runs a specific checkpoint's
+evaluation (documented per-figure below). Two figures are a documented, honest gap —
+see **Known Gaps** at the bottom.
 
-## Sweep of record
-`gbena/boolean-nca-cc`, group **`sweep_20260212_141940`** (Feb-12) — 30 runs =
-3 tasks × damage-train{on,off} × 5 seeds (`[0,1,2,4,5]`), `model=gathered_attention`,
-fixed wiring, `test_num=256`. This is the sweep the published `_both` figure used.
-Being *after* the Feb-11 "always eval damaged" change, it logs the damaged-eval
-("green") branch as a real scalar (`eval_damaged_in_test/final_hard_accuracy`) plus a
-config-matched BP baseline (`BP_results/{none,probabilistic}/*`). The earlier
-`sweep_20260209_231530` predates damaged logging (NaN green) — do not use it.
+Install with `pip install -e .` from the repo root first — this declares
+`paper_figures` itself as an importable package, so `python -m paper_figures.<name>`
+works from any working directory (including a neutral one like `/tmp`, which avoids
+the repo's local `wandb/` dir shadowing things during a pull).
 
-## Rebuild Fig 2 (run with the `nca` conda env + W&B creds, from a neutral cwd)
+All scripts write into `data/` (cached CSVs, wandb-pulled or eval-generated) and
+`out/` (rendered figures) — both git-ignored, regenerate them locally.
+
+## Palette
+
+Every `fig_*.py` script respects the `UNIFORM_PALETTE` env var: unset/`0`/`false`
+uses the default Okabe-Ito colour-blind-safe palette (`style.py`); set to any other
+value switches to the co-author's uniform 2-colour scheme (green/indigo) and appends
+a `_uniform` suffix to the output filename, leaving the default version intact. The
+actual submitted figures (`figures/*_uniform.pdf` in the manuscript) used this
+toggle enabled.
+
 ```bash
-python -m paper_figures.wandb_data --no-cache   # TMT undamaged + green -> data/fixed_wiring_sweep.csv
-python -m paper_figures.bp_from_history         # BP ceiling (logged)   -> data/fixed_wiring_bp.csv
-python -m paper_figures.fig2_fixed_wiring       # plot + stats -> out/fig2_fixed_wiring.pdf, out/fig2_stats.csv
+UNIFORM_PALETTE=1 python -m paper_figures.fig2_fixed_wiring
 ```
-Steps 1–2 hit W&B and cache to `data/`; step 3 reads the caches (no W&B), so
-re-styling never needs W&B again. Run from e.g. `/tmp` so the repo's local `wandb/`
-dir doesn't shadow the package. `data/` and `out/` are git-ignored.
+
+## Figures
+
+### Fig 2 / Regime I — Fixed-Topology TMT vs. BP
+`fig2_fixed_wiring.py`. **Ready.** Sweep of record: `gbena/boolean-nca-cc`, group
+**`sweep_20260212_141940`** — 30 runs = 3 tasks × damage-train{on,off} × 5 seeds
+(`[0,1,2,4,5]`), `model=gathered_attention`, fixed wiring, `test_num=256`. This is
+the sweep the published figure used. Being *after* the Feb-11 "always eval damaged"
+change, it logs the damaged-eval ("green") branch as a real scalar plus a
+config-matched BP baseline. (The earlier `sweep_20260209_231530` predates damaged
+logging — do not use it.)
+
+```bash
+python -m paper_figures.wandb_data --no-cache   # -> data/fixed_wiring_sweep.csv
+python -m paper_figures.bp_from_history         # -> data/fixed_wiring_bp.csv
+python -m paper_figures.fig2_fixed_wiring       # -> out/fig2_fixed_wiring.pdf
+```
+- `test_num = 256` → 256/4096 held out. Damage mode = **probabilistic** (matches
+  the published figure); the sweep also logs a discrete-damage variant
+  (`eval_discrete_damaged_in_test/*`) if ever needed.
+- `bp_baseline.py` *recomputes* BP via `run_bp_scan` (needs JAX) — kept only as a
+  cross-check.
+- `reeval_fig2.py` (full live re-eval) is **deprecated for Fig 2**: HEAD's model
+  code has drifted from the Feb checkpoints, so it loads them to chance accuracy.
+
+### Fig 4 / Regime I — Resilience to Permanent Damage
+`eval_fig4_resilience_isn1.py` → `fig_resilience.py`. Needs a live checkpoint:
+wandb run **`gbena/boolean-nca-cc/yu6kojmx`** (fixed wires, damage-trained,
+reverse task).
+
+```bash
+python -m paper_figures.eval_fig4_resilience_isn1   # -> data/fig4_stepwise.csv (JAX, ~minutes)
+python -m paper_figures.fig_resilience               # -> out/fig_resilience.pdf
+```
+`eval_fig4_resilience_isn1.py` re-runs both the TMT and BP stepwise scans against
+that checkpoint (full JAX eval, not just logged scalars) — run it on a machine with
+the same JAX/checkpoint compatibility as training (originally run on the "isn1"
+host against Feb-13 checkpoint-matched code; if HEAD's model code has since
+drifted from that checkpoint the way it has for Fig 2, expect the same chance-level
+failure mode noted above).
+
+### Fig 3 / Regime I — PCA Trajectories of Circuit Optimisation
+`eval_pca_trajectories.py` → `fig_pca_trajectories.py`. Gabriel's own run —
+`gbena/boolean-nca-cc/6mo8q61y` (random wiring, reverse task, `gathered_attention`).
+
+```bash
+python -m paper_figures.eval_pca_trajectories   # -> data/pca_trajectories.csv (JAX, ~minutes)
+python -m paper_figures.fig_pca_trajectories    # -> out/fig_pca_trajectories.pdf
+```
+Ported from an exploratory notebook (`trained_models.ipynb`, no longer in the
+repo — its logic now lives entirely in these two scripts). **Honesty note**: the
+original notebook exploration used placeholder knobs that don't match the
+submitted figure (it coloured by accuracy, and used a `permanent=0.5` value that
+doesn't correspond to a real "permanent vs recoverable" split). `eval_pca_trajectories.py`
+reconstructs the *published caption* instead — three conditions (no damage /
+recoverable shotgun / permanent shotgun), trajectories coloured by step — as a
+faithful best-effort reconstruction, not a byte-identical replay of whatever
+produced the exact submitted PDF.
+
+### Random-Topology / Regime III
+`fig_random_wiring.py`. **Ready** (wandb-only, no checkpoint download). Group
+`random_wiring_sweep`, filtered on `model.type=gathered_attention`,
+`width_factor=2`, `circuit_hidden_dim=64`, `damage.target_damage_fraction=0.1`.
+Single seed, damage-trained only — bars are point values, no per-seed error.
+
+```bash
+python -m paper_figures.fig_random_wiring   # -> out/fig_random_wiring.pdf
+```
+
+### Fig 10 / Regime IV — Scale-Free Generalisation
+`eval_fig10_scalefree_isn1.py` → `fig_scale_free.py`. Needs two live checkpoints
+— one per wiring mode, run **twice**:
+
+```bash
+FIG10_RUN_ID=cdjkgrod FIG10_MODE=w python -m paper_figures.eval_fig10_scalefree_isn1   # fixed-wiring-trained, writes header
+FIG10_RUN_ID=1u5ssulx FIG10_MODE=a python -m paper_figures.eval_fig10_scalefree_isn1   # random-wiring-trained, appends
+python -m paper_figures.fig_scale_free   # -> out/fig_scale_free.pdf
+```
+Both write to `data/fig10_scalefree.csv` directly (no manual copy step). Compute is
+heavy: 7 width factors × batch 64, damage on/off, per run id — expect several
+minutes to an hour depending on hardware; `SMOKE_WIDTHS`/`SMOKE_BATCH` env vars
+shrink it for a quick smoke test. **The fixed-vs-random mapping above
+(`cdjkgrod`=fixed, `1u5ssulx`=random) is a high-confidence reconstruction**
+(cross-referenced against `web_demo/configs/demo_models.yaml`'s
+`random_damage`/Regime III recipe, which pins the same `1u5ssulx` run id), not a
+direct read of the wandb config — if you have wandb access, it's worth confirming
+against `run.config.training.wiring_mode` before treating it as fact.
+
+## Known Gaps
+
+Two Regime II figures — the combined Soft-Error-Recovery/Hamming panel and the
+UMAP degenerate-solution-space embedding — have **no reproducible script in this
+branch's history**. They're Marcello Barylli's original work (per the manuscript's
+Author Contributions), built and only ever committed on `origin/mergello`, a branch
+that diverged before this codebase's refactor and was never merged. Porting them to
+the current API is real, non-trivial work (old `boolean_nca_cc.models.self_attention`
+/ `boolean_nca_cc.training.preconfigure` / `.training.backprop` module paths that
+no longer exist) — not done here.
+
+The original, unmodified source is archived at
+[`paper_figures/archive/mergello_regime2/`](archive/mergello_regime2/) (with its own
+README) so the pointer survives without needing git archaeology, and the `mergello`
+branch itself is being kept alive on `origin` specifically to preserve this. If you
+want these two figures, that archive folder is the starting point.
 
 ## Modules
+
 | module | role |
 |---|---|
-| `style.py` | Okabe–Ito CVD-safe palette, rcParams, task/label maps (TMT not NCA; "Binary Addition") — R1f, R2 |
-| `stats.py` | Mann–Whitney U + Cliff's delta — R1g |
-| `wandb_data.py` | pull TMT final-eval metrics (undamaged + damaged "green") from history; reads `training.test_num` per run — R1c |
-| `bp_from_history.py` | BP ceiling from each run's logged `BP_results/*` summary (exact, no JAX) — **canonical** |
-| `fig2_fixed_wiring.py` | the figure: TMT and BP as side-by-side mean±std bars, eval-damage on x, train-regime rows, task cols, per-panel stats |
-
-## Notes
-- `test_num = 256` → 256/4096 held out (R1c); printed by `wandb_data`.
-- Damage mode = **probabilistic** (matches the published figure); the sweep also logs a
-  discrete-damage variant (`eval_discrete_damaged_in_test/*`) if ever needed.
-- `bp_baseline.py` *recomputes* BP via `run_bp_scan` (needs JAX) — kept only as a cross-check.
-- `reeval_fig2.py` (full live re-eval) is **deprecated for Fig 2**: HEAD's model code drifted
-  ~1085 lines from the Feb checkpoints, so it loads them to chance (TMT ≈ 0.5).
-- Variance bands for Figs 3/8 are not pulled here yet.
+| `style.py` | Okabe-Ito CVD-safe palette (+ `UNIFORM_PALETTE` toggle), rcParams, task/label maps |
+| `stats.py` | Mann-Whitney U + Cliff's delta significance tests |
+| `wandb_data.py` | pull TMT final-eval metrics (undamaged + damaged) from Fig 2's sweep history |
+| `bp_from_history.py` | BP ceiling from each Fig 2 run's logged `BP_results/*` summary (exact, no JAX) — **canonical** for Fig 2 |
+| `bp_baseline.py` | recomputes BP via live `run_bp_scan` — cross-check only |
+| `fig2_fixed_wiring.py` | Fig 2: TMT vs BP bars, eval-damage × train-regime × task |
+| `eval_fig4_resilience_isn1.py` / `fig_resilience.py` | Fig 4: resilience stepwise loss/accuracy under permanent damage |
+| `eval_pca_trajectories.py` / `fig_pca_trajectories.py` | PCA trajectories of LUT-logit configs under damage |
+| `fig_random_wiring.py` | Random-topology TMT accuracy, undamaged vs damaged |
+| `eval_fig10_scalefree_isn1.py` / `fig_scale_free.py` | Fig 10: accuracy vs circuit width, fixed vs random wiring |
+| `reeval_fig2.py` | deprecated full live re-eval of Fig 2 (drifted from Feb checkpoints) |
