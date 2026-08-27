@@ -1,4 +1,9 @@
 # Define parameter sweeps
+#
+# SUPERSEDED: this sweep predates the gathered_attention (TMT) campaign — it targets
+# model=perceiver_attention, which is not the architecture used for any reported
+# paper result. Kept for provenance; see sweeps/sweep_demo_12*.yaml and
+# sweeps/sweep_random.yaml for the sweeps behind Fig 2 / the random-wiring figures.
 defaults:
   - override hydra/launcher: basic
 

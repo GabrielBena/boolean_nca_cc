@@ -1,338 +1,232 @@
-# Boolean Neural Cellular Automata with Circuit Communication
+# Self-Organising Digital Circuits (SODC)
 
-This package provides a framework for optimizing boolean circuits using Graph Neural Networks (GNNs), Self-Attention, and Perceiver-style architectures. By representing circuits as graphs and applying message passing neural networks, we can optimize circuit parameters without requiring gradient access to the underlying circuits.
+**Barylli\*, Béna\*, Mordvintsev, Nisioti, Risi — ALIFE 2026** — [Paper](https://direct.mit.edu/isal/proceedings/isal2026/38/41/138130) · [Blog post + live demo](https://gabrielbena.github.io/blog/2026/sodc/) · [PhD thesis context](https://gabrielbena.github.io/phd/)
 
-![Circuit Visualisation](assets/reverse_wire_shuffle.gif)
+We extend the Neural Cellular Automata paradigm from pattern formation on grids to
+functional logic generation and self-repair on arbitrary graphs. A **Topology-Masked
+Transformer (TMT)** — a single shared-weight attention block, applied recurrently
+under a binary wiring mask — configures the Look-Up Tables (LUTs) of a Boolean
+circuit's gates. It self-assembles functional circuits from unconfigured "soft
+wires," and re-routes logic around previously-unseen hardware faults by exploiting
+degeneracies of the Boolean solution space, without any global backpropagation at
+deployment time.
 
-This GIF shows the adaptive reconfiguration capacity of our Graph Transformer as it updates the circuit Lookup Tables (green cells) to perform a target computation using message passing through the graph's functional edges. This can be seen by the alignment of 'Current Output' to 'Expected Output' in the output bit visualisation. Precise wiring of the circuit is shuffled multiple times, and we can see that the model is able to adapt to the new wiring, recovering overall functionality of the boolean circuit.
+This repository is the training/evaluation code, the exact configs behind every
+reported number, and the source of the paper's figures.
 
-## Overview
+## See it run
 
-See 'Manuscript.pdf' for model details.
+The clearest way to understand what this repo trains is to watch it: the trained
+policy runs live in your browser, settling a circuit from scratch and re-healing it
+after damage.
 
-The `boolean_nca_cc` package provides:
-
-1. **Graph Representation** - Convert boolean circuits to graph structures with configurable topology
-2. **Multiple Model Architectures** - GNN, Self-Attention, and Perceiver-style models for circuit optimization
-3. **Unified Training Framework** - Meta-learning approach with pool-based training and consistent evaluation
-4. **Multiple Boolean Tasks** - Various boolean circuit tasks for training and evaluation
-5. **Configuration Management** - Hydra-based configuration system
-6. **Experiment Tracking** - Weights & Biases integration
-7. **Interactive Demo** - Live circuit optimization visualization
-
-The package uses JAX and Flax for efficient, differentiable computations.
+- **[Live demo, in the blog post](https://gabrielbena.github.io/blog/2026/sodc/#interactive-demo)**
+  — no install required.
+- **Run it locally** (same demo, driven by the pretrained weights checked into this
+  repo):
+  ```bash
+  cd web_demo
+  npm install
+  npm run dev        # http://localhost:5173/
+  ```
+  See [`web_demo/README.md`](web_demo/README.md) for the export pipeline that
+  produces the weight bundles it loads, and for how to add your own trained runs to
+  the gallery.
 
 ## Installation
 
 ```bash
-# Clone the repository
-git clone <repository-url>
+git clone https://github.com/GabrielBena/boolean_nca_cc.git
 cd boolean_nca_cc
 
-# Install the package and its dependencies
-pip install -e .
-
-# For development
-pip install -e ".[dev]"
-
-# For notebooks and visualization
-pip install -e ".[notebooks]"
-
-# Install everything
-pip install -e ".[all]"
+pip install -e .            # core (JAX/Flax training + eval)
+pip install -e ".[notebooks]"  # + Jupyter/seaborn for exploratory analysis
+pip install -e ".[dev]"        # + pytest/ruff/mypy
+pip install -e ".[all]"        # everything
 ```
 
-## Dependencies
-
-### Core Dependencies
-- **JAX ecosystem**: JAX, JAXlib, Flax (nnx modules), Jraph, Optax
-- **Scientific computing**: NumPy
-- **Configuration**: Hydra-core, OmegaConf
-- **Experiment tracking**: Weights & Biases
-- **Utilities**: tqdm, IPython
-
-### Optional Dependencies
-- **Visualization**: matplotlib, seaborn, Pillow, imgui-bundle
-- **Development**: pytest, black, isort, mypy
-- **Notebooks**: Jupyter
+Requires Python ≥3.11. The package uses JAX/Flax (`nnx`) for training, Hydra for
+configuration, and Weights & Biases for experiment tracking (the paper's exact runs
+are public under the `gbena/boolean-nca-cc` W&B project, referenced by run ID
+throughout `paper_figures/`).
 
 ## Quick Start
 
-### Training with Configuration Files
-
-The easiest way to train models is using the Hydra configuration system:
-
 ```bash
-# Train with default configuration (Self-Attention model)
+# Train the paper's model (TMT / gathered_attention, the Hydra default) on the
+# default task (bit reversal) with random wiring
 python train.py
 
-# Train a GNN model
-python train.py model=gnn
+# Fixed-topology training (Regime I/II)
+python train.py training.wiring_mode=fixed
 
-# Train a Perceiver model
-python train.py model=perceiver_attention
+# Switch task (paper's three: reverse, add, binary_multiply)
+python train.py circuit.task=add
 
-# Train on a specific task
-python train.py circuit.task=binary_multiply
-
-# Override specific parameters
-python train.py training.learning_rate=1e-4 training.epochs=1000
+# Ablation models, kept for comparison/testing — not what the paper reports
+python train.py model=self_attention   # dense O(N^2) masked attention, no gathering
+python train.py model=gnn              # sparse message-passing GNN
+python train.py model=perceiver_attention  # + cross-attention to task data (superseded design)
 ```
 
-### Programmatic Usage
+### Programmatic usage
 
 ```python
-import jax
 from flax import nnx
 from boolean_nca_cc import generate_layer_sizes
 from boolean_nca_cc.circuits.tasks import get_task_data
+from boolean_nca_cc.models import CircuitGatheredAttention
 from boolean_nca_cc.training import train_model
-from boolean_nca_cc.models import CircuitSelfAttention
 
-# Setup task data
-x_data, y_data = get_task_data("binary_multiply", case_n=256, input_bits=8, output_bits=8)
-
-# Generate circuit architecture
-layer_sizes = generate_layer_sizes(input_n=8, output_n=8, arity=4, layer_n=3)
+x_data, y_data = get_task_data("reverse", case_n=4096, input_bits=12, output_bits=12)
+layer_sizes = generate_layer_sizes(input_n=12, output_n=12, arity=4, layer_n=3)
 n_node = sum(size[0] for size in layer_sizes)
 
-# Initialize model
-model = CircuitSelfAttention(
-    n_node=n_node,
-    circuit_hidden_dim=16,
-    attention_dim=128,
-    arity=4,
-    rngs=nnx.Rngs(0)
+model = CircuitGatheredAttention(
+    circuit_hidden_dim=64, attention_dim=128, arity=4, rngs=nnx.Rngs(0)
 )
 
-# Train the model
 results = train_model(
-    key=42,
-    init_model=model,
-    x_data=x_data,
-    y_data=y_data,
-    layer_sizes=layer_sizes,
-    hidden_dim=16,
-    arity=4,
-    learning_rate=1e-3,
-    epochs=1000,
-    n_message_steps=8,
-    wiring_mode="random",
-    meta_batch_size=256,
+    key=42, init_model=model, x_data=x_data, y_data=y_data,
+    layer_sizes=layer_sizes, hidden_dim=64, arity=4,
+    learning_rate=2e-4, n_message_steps=5, wiring_mode="random",
 )
 ```
 
-### Evaluation
+Full config reference: `configs/config.yaml` (the single source of truth — every
+Hydra group interpolates from it).
 
-The package provides a unified evaluation API:
+## The Model — Topology-Masked Transformer (TMT)
 
-```python
-from boolean_nca_cc.training import (
-    evaluate_model_stepwise_batched,
-    evaluate_model_stepwise_generator,
-    run_model_scan_with_loss,
-)
+Code: [`boolean_nca_cc/models/attention/gathered_attention.py`](boolean_nca_cc/models/attention/gathered_attention.py)
+(`CircuitGatheredAttention`), config [`configs/model/gathered_attention.yaml`](configs/model/gathered_attention.yaml)
+— this is the Hydra default (`model=gathered_attention`) and the only architecture
+trained for every reported result and shipped in the live demo.
 
-# Batched evaluation with automatic chunking for memory efficiency
-final_graphs, step_metrics = evaluate_model_stepwise_batched(
-    model=model,
-    batch_wires=wires,
-    batch_logits=logits,
-    x_data=x_data,
-    y_data=y_data,
-    input_n=8,
-    arity=4,
-    circuit_hidden_dim=16,
-    n_message_steps=100,
-    layer_sizes=layer_sizes,
-    chunk_size=32,  # Process in chunks for large batches
-)
+A single-block Transformer, applied recurrently for `T` steps, whose attention is
+restricted to each gate's wired neighbours via a binary topology mask:
 
-# For live demos and streaming results
-generator = evaluate_model_stepwise_generator(
-    model=model,
-    wires=single_wires,
-    logits=single_logits,
-    x_data=x_data,
-    y_data=y_data,
-    input_n=8,
-    max_steps=None,  # Run indefinitely
-    layer_sizes=layer_sizes,
-)
-for step_result in generator:
-    print(f"Step {step_result.step}: Accuracy {step_result.accuracy:.4f}")
-```
+- **Node state** — LUT logits (the gate's programmable logic), a recurrent latent
+  memory, a positional encoding (normalised depth; optionally a directional
+  DAG-distance encoding, `graph.use_dist_pe`), and (for random wirings) a per-node
+  scalar error-feedback signal (`graph.use_node_loss`).
+- **Gathered masked attention** — neighbour features are gathered into a fixed-width
+  padded tensor per node (`max_neighbors` in the model config) instead of a dense
+  N×N matrix — sub-quadratic in circuit size while attending only to actual wired
+  neighbours.
+- **Pre-LN + QK-normalisation + ReZero** — stabilises the block across the many
+  recurrent applications training requires (residual gates initialised at zero, so
+  the block starts as an identity).
+- **Weight-tied, size-independent** — the same parameters apply whether the circuit
+  has 20 gates or 500, giving the scale-freedom explored in Regime IV.
 
-### Interactive Demo
+Full derivation and equations: the [manuscript](https://direct.mit.edu/isal/proceedings/isal2026/38/41/138130).
 
-Run the interactive circuit optimization demo:
+### Other architectures in this repo (not the paper's headline model)
 
-```bash
-python training_demo.py
-```
+`boolean_nca_cc/models/` also contains three earlier/alternative designs, kept
+because the test suite exercises them as correctness/ablation baselines — they are
+**not** what any reported figure or the demo uses:
 
-This provides a GUI for real-time circuit optimization visualization.
+| Class | Config | Role |
+|---|---|---|
+| `CircuitSelfAttention` | `model=self_attention` | Dense O(N²) masked attention — the reference implementation `CircuitGatheredAttention` is validated against (`tests/test_gathered_correctness.py`) |
+| `CircuitGNN` | `model=gnn` | Sparse message-passing GNN — an explicit non-attention ablation |
+| `PerceiverCircuitAttention` | `model=perceiver_attention` | Adds cross-attention to input/output data — an earlier, richer design point superseded by the simpler gathered-attention TMT before the final campaign |
 
-## Available Models
+## Experiments and Results — the Four Regimes
 
-### Graph Neural Network (GNN)
-- Message passing between circuit gates
-- Configurable node and edge update functions  
-- Attention-based message aggregation
-- Configuration: `model=gnn`
+Each regime in the paper maps to a training config/sweep and a `paper_figures/`
+script. See [`paper_figures/README.md`](paper_figures/README.md) for exact rebuild
+commands, W&B run IDs, and — for the two figures not yet reproducible from this
+repo — where their original code lives.
 
-### Self-Attention
-- Transformer-style self-attention mechanism
-- Masked attention based on circuit connectivity
-- Multi-head attention with configurable layers
-- ReZero initialization for stable training
-- Configuration: `model=self_attention`
+| Regime | Paper section | What it shows | Config / sweep | Figure script |
+|---|---|---|---|---|
+| I — Growth, Persistence, Repair | Fixed topologies | Self-assembly from soft-wires; recovery from stochastic damage | `training.wiring_mode=fixed`, `sweeps/sweep_demo_12*.yaml` | `paper_figures/fig2_fixed_wiring.py`, `fig_resilience.py` |
+| I — PCA trajectories | Fixed topologies | Degenerate re-routing under damage, visualised via PCA on LUT-logit configs | (eval-only; run `eval_fig4_resilience_isn1.py`-style rollout) | `paper_figures/fig_pca_trajectories.py` |
+| II — Self-Healing & Degenerate Solutions | Reversible soft-errors | Near-perfect OOD recovery at damage scales beyond training; degenerate solution clusters (UMAP) | — | *known gap, see below* |
+| III — Random-Topology Generalisation | Random wiring | Wiring-agnostic policy generalising to unseen graphs | `training.wiring_mode=random`, `sweeps/sweep_random.yaml` | `paper_figures/fig_random_wiring.py` |
+| IV — Scale-Free Optimisation | Circuit-width scaling | Zero-retrain generalisation to circuits 1.7× the training width | (same trained checkpoints as Regime I/III, re-evaluated at other widths) | `paper_figures/fig_scale_free.py` |
 
-### Perceiver-style Attention
-- Cross-attention to input data patterns and output residuals
-- Provides direct access to the information backpropagation uses
-- Layer-restricted attention for structural constraints
-- Configuration: `model=perceiver_attention`
+**Known gap**: the Regime II combined Soft-Error-Recovery/Hamming panel and the UMAP
+solution-space figure were built by a co-author (Marcello Barylli) against a
+pre-refactor API and were never merged into this branch's history. Their original
+source is archived at [`paper_figures/archive/`](paper_figures/archive/) and on the
+`mergello` branch, kept alive specifically for this — see the Known Gaps section of
+`paper_figures/README.md`.
 
-## Boolean Circuit Tasks
+## Boolean Tasks
 
-The package includes several predefined boolean circuit tasks:
+The paper's three 12-bit tasks (all $2^{12}=4{,}096$ input–output pairs, 256 held
+out for testing):
 
-| Task | Description |
-|------|-------------|
-| `binary_multiply` | Multiply two halves of input |
-| `add` | Binary addition of input halves |
-| `and` | Bitwise AND operation |
-| `xor` | Bitwise XOR operation |
-| `parity` | Compute input parity |
-| `reverse` | Reverse bit order |
-| `copy` / `identity` | Identity function |
-| `gray` | Gray code conversion |
-| `popcount` | Count number of 1 bits |
-| `text` | Text rendering to binary pattern |
-| `noise` | Random binary patterns |
+| Task | Config | Description |
+|---|---|---|
+| `reverse` | `configs/tasks/reverse.yaml` | Bit Reversal — pure routing, maps bit `i` to position `11-i` |
+| `add` | `configs/tasks/add.yaml` | Split Addition — two 6-bit integers added |
+| `binary_multiply` | `configs/tasks/binary_multiply.yaml` | Split Multiplication — two 6-bit integers multiplied |
 
-## Configuration System
-
-The training system uses Hydra for configuration management. Configuration files are located in `configs/`:
-
-- `config.yaml`: Main configuration file
-- `model/`: Model-specific configurations
-  - `gnn.yaml`: GNN model settings
-  - `self_attention.yaml`: Self-attention model settings
-  - `perceiver_attention.yaml`: Perceiver model settings
-
-### Key Configuration Sections
-
-```yaml
-# Circuit configuration
-circuit:
-  task: "binary_multiply"
-  input_bits: 8
-  output_bits: 8
-  arity: 4
-  num_layers: 3
-
-# Training parameters
-training:
-  learning_rate: 1e-3
-  epochs: 1000
-  loss_type: "l4"  # or "bce", "l2"
-  wiring_mode: "random"  # or "fixed", "genetic"
-  n_message_steps: 8
-
-# Pool-based meta-learning
-pool:
-  size: 1024
-  reset_fraction: 0.05
-  reset_interval: 32
-
-# Experiment tracking
-wandb:
-  enabled: true
-  project: "boolean-nca-cc"
-  entity: "your-entity"
-```
+`configs/tasks/` also has extras (`identity`, `parity`, `text`) and a later,
+separate research thread on per-circuit sampled tasks (`k_junta`, `arith_family`,
+`single_add`, `single_reverse`, driving the "unified" online/batch inner-loop
+continuum in `training.inner_loop_regime`) — these are exploratory extensions built
+on top of the same framework, not part of the published results.
 
 ## Package Structure
 
 ```
 boolean_nca_cc/
-├── circuits/                      # Circuit generation and tasks
-│   ├── model.py                  # Circuit creation and execution
-│   ├── tasks.py                  # Boolean task definitions
-│   ├── train.py                  # Circuit training utilities
-│   └── viz.py                    # Circuit visualization helpers
-├── models/                        # Neural network models
-│   ├── attention/                # Attention-based models
-│   │   ├── base.py              # Shared attention components
-│   │   ├── self_attention.py    # Self-attention model
-│   │   └── perceiver_attention.py # Perceiver-style model
-│   └── gnn/                      # Graph neural network
-│       ├── model.py             # Main GNN model
-│       ├── node_update.py       # Node update modules
-│       ├── edge_update.py       # Edge update modules
-│       └── aggregation.py       # Message aggregation
-├── training/                      # Training infrastructure
-│   ├── train_loop.py            # Main training loop
-│   ├── evaluation.py            # Unified evaluation functions
-│   ├── eval_datasets.py         # Evaluation dataset creation
-│   ├── checkpointing.py         # Model checkpointing
-│   ├── schedulers.py            # Learning rate schedules
-│   └── pool/                    # Pool-based meta-learning
-│       ├── pool.py              # Circuit pool management
-│       └── structural_perturbation.py  # Gate knockout/damage
-└── utils/                         # Utility functions
-    ├── graph_builder.py         # Graph construction
-    ├── extraction.py            # Parameter extraction
-    └── positional_encoding.py   # Positional encodings
+├── circuits/                      # Circuit generation, tasks, differentiable execution
+│   ├── model.py                   # Circuit creation and (soft/hard) execution
+│   ├── tasks.py                   # Boolean task definitions
+│   └── train.py                   # Direct-BP baseline training utilities
+├── models/
+│   ├── attention/
+│   │   ├── base.py                # Shared building blocks: ReZero, Pre-LN, QK-norm,
+│   │   │                          #  gathered/dense masked attention
+│   │   ├── gathered_attention.py  # CircuitGatheredAttention — the paper's TMT
+│   │   ├── self_attention.py      # CircuitSelfAttention — dense reference impl
+│   │   └── perceiver_attention.py # PerceiverCircuitAttention — superseded design
+│   └── gnn/                       # CircuitGNN — sparse message-passing ablation
+├── training/
+│   ├── train_loop.py              # Main meta-training loop (pool + BPTT)
+│   ├── evaluation.py              # Unified in/out-of-distribution evaluation
+│   ├── demo_probe.py              # Post-training deploy-checkpoint scoring
+│   └── pool/
+│       ├── pool.py                 # Circuit pool (persistent meta-learning population)
+│       ├── structural_perturbation.py  # Gate knockout / damage injection
+│       └── perturbation.py         # Wire-level mutation / shuffle
+└── utils/
+    ├── graph_builder.py            # Circuit → graph construction
+    ├── extraction.py               # LUT logit extraction, per-node error feedback
+    └── positional_encoding.py      # Normalised-depth, DAG-distance, RWSE encodings
 ```
 
-## Key Features
+## Reproducing the Paper's Figures
 
-### Meta-Learning with Circuit Pools
-- Maintains a pool of circuits with varying optimization states
-- Periodic reset strategies to maintain diversity
-- Supports different wiring modes (fixed, random, genetic)
+See [`paper_figures/README.md`](paper_figures/README.md) — every figure's data
+source (logged W&B scalars vs. a specific checkpoint), exact rebuild commands, and
+the one honest "known gap" (above).
 
-### Unified Evaluation System
-- Single `run_model_scan_with_loss` function for all model types
-- Consistent GraphGlobals across all models
-- Support for structural damage/knockout during evaluation
-- Memory-efficient chunked processing for large batches
+## Configuration System
 
-### Advanced Training Features
-- Learning rate scheduling (linear warmup, cosine, exponential)
-- Checkpointing with best model tracking
-- Multiple loss functions (L4, L2, Binary Cross-Entropy)
-- Gradient checkpointing for memory efficiency
-- Random loss step sampling for robust training
-
-### Evaluation and Visualization
-- Stepwise evaluation of inner optimization loops
-- Training curve plotting
-- Comparison with backpropagation baselines
-- Interactive visualization tools
-
-### Experiment Management
-- Weights & Biases integration for experiment tracking
-- Hydra configuration management
-- Automatic hyperparameter logging
-- Model checkpointing and restoration
+Hydra-driven; `configs/config.yaml` is the single source of truth (model configs
+interpolate from its `graph:` block so graph construction and the model's feature
+dimensions always agree). Groups under `configs/`: `model/` (architecture),
+`circuit/` (topology size), `tasks/` (target function), `loss/`.
 
 ## Citation
 
-If you use this code in your research, please cite:
-
 ```bibtex
-@software{boolean_nca,
-  title={Self-Organising Digital Circuits},
-  author={Gabriel Béna, Marcello Barylli, Alexander Mordvintsev},
-  year={2025},
-  url={https://github.com/GabrielBena/boolean_nca_cc}
+@article{barylli2026sodc,
+    title   = {Self-Organising Digital Circuits},
+    author  = {Barylli, Marcello and B\'{e}na, Gabriel and Mordvintsev, Alexander and Nisioti, Eleni and Risi, Sebastian},
+    year    = {2026},
+    journal = {Artificial Life Conference (ALIFE 2026)}
 }
 ```
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+MIT — see [LICENSE](LICENSE).

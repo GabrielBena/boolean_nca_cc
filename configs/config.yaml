@@ -55,6 +55,9 @@ graph:
   # rwse: Random Walk Structural Encoding. Per-node K-vector of return
   # probabilities on the bidirectional graph. Pure topology signature that
   # disambiguates gates with identical graph distances.
+  # NOTE: the web demo's TS runtime has no RWSE support — export/extract_weights.py
+  # raises on any checkpoint trained with use_rwse=True. If you're training a
+  # checkpoint you intend to deploy to web_demo/, override use_rwse=false.
   use_rwse: true
   rwse_k: 8                        # RWSE walk length / feature dim
 
