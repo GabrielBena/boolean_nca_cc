@@ -13,6 +13,36 @@ the repo's local `wandb/` dir shadowing things during a pull).
 All scripts write into `data/` (cached CSVs, wandb-pulled or eval-generated) and
 `out/` (rendered figures) — both git-ignored, regenerate them locally.
 
+## W&B access
+
+`gbena/boolean-nca-cc` (the W&B project every script below pulls from) is
+**private** — you will not be able to run these scripts against live W&B unless
+you have your own credentials for that project. Two figures don't need this at all:
+
+- **Fig 2** and **random-wiring**: pull only *logged summary scalars*, no model
+  weights — still need W&B access, but there's nothing to work around beyond that.
+- **Fig 4, Fig 10, PCA trajectories** additionally need to instantiate a model from
+  a specific checkpoint. For these three, [`paper_figures/checkpoints/`](checkpoints/)
+  archives the small set of checkpoints they target (4 runs, 13MB total, config +
+  weights) directly in this repo. `eval_fig4_resilience_isn1.py`,
+  `eval_fig10_scalefree_isn1.py`, and `eval_pca_trajectories.py` all load through
+  [`local_checkpoints.py`](local_checkpoints.py), which checks this local archive
+  **first** and only falls back to `load_config_from_wandb` (i.e. only needs W&B
+  credentials) for a run_id that isn't archived — e.g. if you point one of these
+  scripts at your own new run. **Confirmed working with zero W&B credentials
+  configured** (fresh `$HOME`, no API key) for all three archived-checkpoint
+  scripts.
+
+**Verification note**: every script below (Fig 2, Fig 4, PCA trajectories,
+random-wiring, Fig 10) has been run end-to-end from a fresh `git clone` + fresh env
++ real W&B checkpoints, confirming the pipeline mechanics genuinely work — not just
+that the code parses. That pass also surfaced and fixed a config-schema trap: some
+checkpoints (e.g. `yu6kojmx`, from before the `tasks` refactor) store the task under
+`circuit.task`/`circuit.text`, while newer ones (e.g. `6mo8q61y`) use
+`tasks.name`/`tasks.text`. The `eval_*_isn1.py` / `eval_pca_trajectories.py` scripts
+now detect and handle both automatically — if you point one at a different run and
+hit a `Missing key` error on `tasks` or `circuit.task`, that's the schema boundary.
+
 ## Palette
 
 Every `fig_*.py` script respects the `UNIFORM_PALETTE` env var: unset/`0`/`false`
@@ -60,11 +90,11 @@ python -m paper_figures.eval_fig4_resilience_isn1   # -> data/fig4_stepwise.csv 
 python -m paper_figures.fig_resilience               # -> out/fig_resilience.pdf
 ```
 `eval_fig4_resilience_isn1.py` re-runs both the TMT and BP stepwise scans against
-that checkpoint (full JAX eval, not just logged scalars) — run it on a machine with
-the same JAX/checkpoint compatibility as training (originally run on the "isn1"
-host against Feb-13 checkpoint-matched code; if HEAD's model code has since
-drifted from that checkpoint the way it has for Fig 2, expect the same chance-level
-failure mode noted above).
+that checkpoint (full JAX eval, not just logged scalars). Confirmed working
+end-to-end against HEAD's model code (unlike Fig 2's `reeval_fig2.py`, this
+checkpoint has *not* drifted to chance accuracy) — a smoke run recovers TMT hard
+accuracy to ~0.95 after both shotgun and stochastic damage, versus a ~1.0 BP
+ceiling and a ~0.92-0.94 no-repair baseline.
 
 ### Fig 3 / Regime I — PCA Trajectories of Circuit Optimisation
 `eval_pca_trajectories.py` → `fig_pca_trajectories.py`. Gabriel's own run —
@@ -106,12 +136,10 @@ python -m paper_figures.fig_scale_free   # -> out/fig_scale_free.pdf
 Both write to `data/fig10_scalefree.csv` directly (no manual copy step). Compute is
 heavy: 7 width factors × batch 64, damage on/off, per run id — expect several
 minutes to an hour depending on hardware; `SMOKE_WIDTHS`/`SMOKE_BATCH` env vars
-shrink it for a quick smoke test. **The fixed-vs-random mapping above
-(`cdjkgrod`=fixed, `1u5ssulx`=random) is a high-confidence reconstruction**
-(cross-referenced against `web_demo/configs/demo_models.yaml`'s
-`random_damage`/Regime III recipe, which pins the same `1u5ssulx` run id), not a
-direct read of the wandb config — if you have wandb access, it's worth confirming
-against `run.config.training.wiring_mode` before treating it as fact.
+shrink it for a quick smoke test. **The fixed-vs-random mapping above is confirmed**
+(directly, via each run's `loaded_config.training.wiring_mode`, not just inferred):
+`cdjkgrod` prints `wiring_mode resolved to: fixed`, `1u5ssulx` prints
+`wiring_mode resolved to: random`.
 
 ## Known Gaps
 

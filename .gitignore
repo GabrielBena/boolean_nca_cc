@@ -1,7 +1,11 @@
 wandb/
 outputs/
 checkpoints/
-saves/ 
+# Exception: the small (13MB) archived checkpoints paper_figures/'s eval_*_isn1.py
+# scripts need to run without live W&B access (gbena/boolean-nca-cc is private).
+!paper_figures/checkpoints/
+!paper_figures/checkpoints/**
+saves/
 *.ini 
 multirun 
 media/
