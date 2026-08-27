@@ -17,8 +17,8 @@ Keeping the oracle separate from JAX lets us:
   dequantised weights and diff against the float reference.
 
 The full inference contract — what tensors flow, in what order, with
-what shapes — is documented in ``web_demo/PROGRESS.md`` under
-"Inference contract". This module implements that contract verbatim.
+what shapes — is what this module implements, mirrored line-for-line by
+``web_demo/src/tmt.ts``; ``test_oracle.py`` is the parity check between them.
 
 The reference Python path we are mirroring is
 

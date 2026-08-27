@@ -18,10 +18,21 @@ export/record_local.py
 export/run_configs/
 
 # Generated demo artifacts (weights / pool / bootstrap / parity trajectory).
-# Regenerable from the export pipeline; deployed to the GitHub-Pages repo via
-# `npm run deploy`, which is their version-control home. gallery.json (the small
+# Regenerable from the export pipeline (needs W&B access to the private project),
+# deployed to the GitHub-Pages repo via `npm run deploy`. gallery.json (the small
 # hand-maintained model registry) stays tracked.
 public/weights/reverse_*.json
+# Exception: the exact files gallery.json references (~1.8 MB total, byte-identical
+# to what the live blog demo serves) are committed so a fresh clone can run the demo
+# locally with no W&B access. Everything else under public/weights/ (parity
+# trajectory for verify.html, superseded/experimental bundles) stays ignored.
+!public/weights/reverse_fixed_no_damage.json
+!public/weights/reverse_fixed_no_damage_demo.json
+!public/weights/reverse_fixed_damage.json
+!public/weights/reverse_fixed_damage_demo.json
+!public/weights/reverse_random_damage_v33.json
+!public/weights/reverse_random_damage_v33_demo.json
+!public/weights/reverse_random_topology_pool_v33.json
 
 __pycache__/
 *.pyc

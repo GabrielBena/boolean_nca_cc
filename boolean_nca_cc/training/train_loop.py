@@ -822,7 +822,8 @@ def train_model(
     # save_periodic_checkpoint / the SIGTERM hook). When set, the model,
     # optimizer, circuit pool, carried train_key, epoch/last_reset_epoch and the
     # best/early-stop trackers are restored bit-faithfully and the loop continues
-    # from ``epoch + 1``. None (default) = fresh run. See CHECKPOINT_AUDIT.md.
+    # from ``epoch + 1``. None (default) = fresh run. See
+    # checkpointing.restore_resume_state for the exact contract.
     resume_from: str | None = None,
     # Full training config (OmegaConf/dict). Saved verbatim into periodic /
     # SIGTERM checkpoints so they are self-sufficient for resume (rebuild the

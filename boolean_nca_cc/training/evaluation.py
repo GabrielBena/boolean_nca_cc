@@ -1958,8 +1958,8 @@ def evaluate_model_stepwise_batched(
     # and ``all_metrics`` (per-circuit per-step arrays) from the returned
     # ``step_metrics``. The cheap ``damaged_fraction_per_step`` is *always*
     # included so stepwise plotting/damage overlays keep working. Default
-    # ``True`` preserves backward compatibility for direct callers (notebooks
-    # at trained_models.ipynb / random_boolean_nets.ipynb index
+    # ``True`` preserves backward compatibility for direct callers (e.g.
+    # paper_figures/eval_pca_trajectories.py indexes
     # ``step_metrics["all_metrics"]`` and ``step_metrics["graphs"]``). The
     # periodic-eval path in train_loop.py flips this to False to keep the
     # JAX BFC pool from being pinned by ``[batch, n_steps, ...graph_shape]``

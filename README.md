@@ -163,7 +163,7 @@ repo — where their original code lives.
 | Regime | Paper section | What it shows | Config / sweep | Figure script |
 |---|---|---|---|---|
 | I — Growth, Persistence, Repair | Fixed topologies | Self-assembly from soft-wires; recovery from stochastic damage | `training.wiring_mode=fixed`, `sweeps/sweep_demo_12*.yaml` | `paper_figures/fig2_fixed_wiring.py`, `fig_resilience.py` |
-| I — PCA trajectories | Fixed topologies | Degenerate re-routing under damage, visualised via PCA on LUT-logit configs | (eval-only; run `eval_fig4_resilience_isn1.py`-style rollout) | `paper_figures/fig_pca_trajectories.py` |
+| I — PCA trajectories | Resilience / degeneracy discussion | Degenerate re-routing under damage, visualised via PCA on LUT-logit configs | (eval-only, on the archived random-wiring checkpoint `6mo8q61y`; `paper_figures/eval_pca_trajectories.py`) | `paper_figures/fig_pca_trajectories.py` |
 | II — Self-Healing & Degenerate Solutions | Reversible soft-errors | Near-perfect OOD recovery at damage scales beyond training; degenerate solution clusters (UMAP) | — | *known gap, see below* |
 | III — Random-Topology Generalisation | Random wiring | Wiring-agnostic policy generalising to unseen graphs | `training.wiring_mode=random`, `sweeps/sweep_random.yaml` | `paper_figures/fig_random_wiring.py` |
 | IV — Scale-Free Optimisation | Circuit-width scaling | Zero-retrain generalisation to circuits 1.7× the training width | (same trained checkpoints as Regime I/III, re-evaluated at other widths) | `paper_figures/fig_scale_free.py` |

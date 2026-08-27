@@ -9,11 +9,12 @@
 #
 # Env knobs:
 #   FIG10_RUN_ID   : wandb run id. REQUIRED. Run twice, once per wiring mode:
-#     1u5ssulx -- random-wiring-trained (cross-referenced against
-#                 web_demo/configs/demo_models.yaml's "random_damage"/Regime III
-#                 recipe entry, which pins this same run id; high confidence but
-#                 not directly confirmed against the wandb config itself)
-#     cdjkgrod -- fixed-wiring-trained (the other candidate; by elimination)
+#     cdjkgrod -- fixed-wiring-trained
+#     1u5ssulx -- random-wiring-trained (also the configs/demo_models.yaml
+#                 "random_damage"/Regime III entry)
+#   Both mappings are CONFIRMED against each run's own config
+#   (`training.wiring_mode` in paper_figures/checkpoints/<run_id>/config.yaml;
+#   the script also prints "wiring_mode resolved to: ..." when it loads one).
 #   FIG10_MODE     : "w" (write+header, use for the FIRST run) or "a" (append,
 #                    use for the SECOND run). default "w".
 #   SMOKE_WIDTHS   : optional comma list to restrict widths (smoke test).

@@ -8,7 +8,7 @@
 #
 # LAUNCH (durable — under tmux so the chain survives the local session):
 #   tmux new-session -d -s hsm_t32h128 \
-#     'cd /home/gbena/code/NCA/boolean_nca_cc && conda activate bool_nca && \
+#     'cd <repo-root> && conda activate bool_nca && \
 #      hsm sweep run -c sweeps/sweep_add_random_phase0_t32h128.yaml --mode array \
 #        --remote uzh-v100 --resumable --chunk-walltime 23:00:00 \
 #        --group add_random_phase0 2>&1 | tee /tmp/hsm_relaunch_t32h128.log'

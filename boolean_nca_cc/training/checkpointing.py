@@ -509,7 +509,7 @@ def restore_resume_state(model, optimizer, loaded_dict):
     built with the identical architecture and the identical optax ``opt_fn`` /
     schedule). It does NOT instantiate anything — the caller owns construction so
     the optimizer's internal ``model`` reference and the rebuilt schedule stay
-    consistent (see CHECKPOINT_AUDIT.md §5.4).
+    consistent.
 
     Restores, in order:
       1. ``model`` params (via the compat-aware migration + ``nnx.update``);

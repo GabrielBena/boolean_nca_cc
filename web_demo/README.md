@@ -161,19 +161,34 @@ replaces the Controller in-place without rebuilding the DOM.
 
 ## What lives in `public/weights/`
 
-| File                                  | Purpose                          | Size     |
-|---------------------------------------|----------------------------------|----------|
-| `gallery.json`                        | Model manifest (read by TS)      | ~1 KB    |
-| `reverse_fixed_no_damage.json`        | fp16 TMT weights                 | ~424 KB  |
-| `reverse_fixed_no_damage_demo.json`   | Live-demo bootstrap + wires      | ~514 KB  |
-| `reverse_fixed_damage.json`           | fp16 TMT weights                 | ~424 KB  |
-| `reverse_fixed_damage_demo.json`      | Live-demo bootstrap + wires      | ~514 KB  |
-| `reverse_random_damage.json`          | fp16 TMT weights                 | ~424 KB  |
-| `reverse_random_damage_demo.json`     | Live-demo bootstrap (no wires)   | ~514 KB  |
-| `reverse_trajectory.json`            | Parity-test reference (32 ticks) | ~4.2 MB  |
+The files below are **committed** (see `web_demo/.gitignore`) and are
+byte-identical to what the live blog demo serves, so `npm run dev` on a fresh
+clone works with no W&B access:
 
-The trajectory file is only used by `verify.html` (TS↔Python parity test)
-and is not needed for the live demo.
+| File                                       | Purpose                                   | Size     |
+|--------------------------------------------|-------------------------------------------|----------|
+| `gallery.json`                             | Model manifest (read by TS)               | ~1.5 KB  |
+| `reverse_fixed_no_damage.json`             | fp16 TMT weights (run `vt9awu7h`)         | ~425 KB  |
+| `reverse_fixed_no_damage_demo.json`        | Live-demo bootstrap + wires               | ~66 KB   |
+| `reverse_fixed_damage.json`                | fp16 TMT weights (run `y2swhhrl`)         | ~425 KB  |
+| `reverse_fixed_damage_demo.json`           | Live-demo bootstrap + wires               | ~66 KB   |
+| `reverse_random_damage_v33.json`           | fp16 TMT weights (run `to6sec2g`, headline) | ~425 KB |
+| `reverse_random_damage_v33_demo.json`      | Live-demo bootstrap (no wires)            | ~66 KB   |
+| `reverse_random_topology_pool_v33.json`    | Ranked random-topology pool for the headline model (`topologyPoolPath`) | ~257 KB |
+
+Anything else the export pipeline drops in this directory (e.g.
+`reverse_trajectory.json`, the ~1 MB parity-test reference used only by
+`verify.html`, or superseded bundles) is git-ignored — regenerate it locally with
+the export scripts if you need it.
+
+**Honesty note on `gallery.json`**: the shipped manifest's third entry (the
+headline `reverse_random_damage_v33` model, recipe
+`random_damage_solar_burst_adaptive`, with its curated topology pool) was
+hand-curated for the blog demo and is *not* an entry in
+`../configs/demo_models.yaml` — re-running `export_gallery.py` regenerates
+`gallery.json` from that YAML (whose `random_damage` entry is run `1u5ssulx`) and
+would replace it. Treat the committed `gallery.json` + weight files as the
+record of what the published demo actually runs.
 
 ---
 
@@ -182,7 +197,6 @@ and is not needed for the live demo.
 ```
 web_demo/
 ├── README.md
-├── PROGRESS.md
 ├── index.html            /  → live interactive demo
 ├── verify.html           /verify.html  → TS↔JAX parity smoke test
 ├── src/
