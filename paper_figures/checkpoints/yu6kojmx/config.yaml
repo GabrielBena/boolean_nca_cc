@@ -1,0 +1,177 @@
+eval:
+  enabled: true
+  interval: 1024
+  inner_steps: 256
+  log_stepwise: true
+  batch_size_in: 32
+  batch_size_out: 32
+  get_all_wirings: true
+  log_pool_scatter: true
+  do_ood_evaluation: null
+loss:
+  name: bce
+  type: bce
+  power: 4
+  alpha_neg: 1
+  alpha_pos: 1
+  gamma_neg: 0
+  gamma_pos: 0
+pool:
+  size: 4096
+  noise_scale: 0.1
+  mutation_rate: 0.001
+  reset_fraction: 0.15
+  reset_interval: 122
+  reset_strategy: uniform
+  combined_weights:
+  - 0.5
+  - 0.5
+  expected_updates: 256
+  initial_diversity: 1
+  n_swaps_per_layer: null
+seed: 0
+graph:
+  bidirectional_edges: true
+  neighboring_connections: false
+model:
+  type: gathered_attention
+  arity: 4
+  mlp_dim: null
+  _target_: boolean_nca_cc.models.CircuitGatheredAttention
+  num_heads: 4
+  warm_start: false
+  re_zero_attn: true
+  use_layer_PE: true
+  attention_dim: 256
+  max_neighbors: 10
+  use_node_loss: true
+  re_zero_updates: true
+  circuit_hidden_dim: 64
+  mlp_dim_multiplier: 2
+  use_attention_mask: true
+  use_intra_layer_PE: false
+  num_self_attn_layers: 1
+wandb:
+  dir: null
+  tags:
+  - boolean-circuit
+  - nca
+  - meta-learning
+  group: sweep_20260210_223054
+  entity: gbena
+  enabled: true
+  project: boolean-nca-cc
+  run_name: null
+damage:
+  enabled: true
+  p_fault: null
+  permanent: random
+  n_damage_steps: 2
+  faulty_logit_value: -10
+  knockouts_per_event: null
+  p_fault_onset_fraction: 0
+  target_damage_fraction: 0.15
+  compute_no_repair_baseline: true
+output:
+  dir: sweeps/outputs/sweep_20260210_223054/tasks/task_1
+circuit:
+  task: reverse
+  text: Hello NCAs!
+  arity: 4
+  input_bits: 12
+  num_layers: 3
+  layer_sizes: null
+  output_bits: 12
+  width_factor: 2
+  circuit_hidden_dim: 64
+logging:
+  level: INFO
+  log_interval: 16
+n_nodes: 264
+backprop:
+  beta1: 0.8
+  beta2: 0.8
+  epochs: 100
+  enabled: false
+  optimizer: adamw
+  weight_decay: 0.1
+  learning_rate: 1
+training:
+  epochs: null
+  test_num: 256
+  use_scan: true
+  multi_gpu:
+    enabled: null
+    num_devices: null
+  wiring_mode: fixed
+  lr_scheduler: linear_warmup
+  weight_decay: 1.0e-05
+  learning_rate: 0.0003
+  data_per_batch: 64
+  check_gradients: false
+  meta_batch_size: 256
+  n_message_steps: 5
+  random_loss_step: false
+  epochs_power_of_2: 17
+  initial_diversity: 1
+  use_beta_loss_step: false
+  lr_scheduler_params:
+    cosine:
+      alpha: 0.1
+      exponent: 1
+      lr_warmup_start: 1.0e-06
+      warmup_steps_factor: 50
+    plateau:
+      factor: 0.5
+      lr_min: 1.0e-08
+      cooldown: 100
+      patience: 200
+      threshold: 0.0001
+      max_reductions: 8
+    adaptive:
+      lr_max: 0.0001
+      lr_min: 1.0e-09
+      lr_start: 1.0e-08
+      patience: 500
+      warmup_rate: 1.005
+      decay_factor: 0.5
+      min_warmup_epochs: 2500
+      rebound_threshold: 0.05
+      variance_threshold: 0.1
+    exponential:
+      decay_rate: 0.9
+  random_loss_step_min: 2
+  gradient_checkpointing: true
+eval_seed: null
+checkpoint:
+  enabled: true
+  interval: 1031
+  save_best: true
+  save_latest: true
+  track_best_metrics:
+    data: []
+    metric:
+    - hard_accuracy
+    wiring: []
+    damaged: []
+    enabled: true
+  save_on_mnt_storage: false
+layer_sizes:
+- - 12
+  - 1
+- - 96
+  - 4
+- - 96
+  - 4
+- - 48
+  - 2
+- - 12
+  - 1
+stop_accuracy:
+  scope: null
+  metric: hard_accuracy
+  source: eval
+  enabled: true
+  patience: 6
+  threshold: 1
+  min_epochs: 1025

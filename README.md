@@ -46,9 +46,12 @@ pip install -e ".[all]"        # everything
 ```
 
 Requires Python ≥3.11. The package uses JAX/Flax (`nnx`) for training, Hydra for
-configuration, and Weights & Biases for experiment tracking (the paper's exact runs
-are public under the `gbena/boolean-nca-cc` W&B project, referenced by run ID
-throughout `paper_figures/`).
+configuration, and Weights & Biases for experiment tracking. The paper's exact runs
+live under the `gbena/boolean-nca-cc` W&B project (**private** — see
+[`paper_figures/README.md`](paper_figures/README.md#wb-access)); the checkpoints
+three of the figure scripts need are archived directly in this repo
+(`paper_figures/checkpoints/`, 13MB) so figure reproduction doesn't require W&B
+access at all for those.
 
 ## Quick Start
 
@@ -61,7 +64,7 @@ python train.py
 python train.py training.wiring_mode=fixed
 
 # Switch task (paper's three: reverse, add, binary_multiply)
-python train.py circuit.task=add
+python train.py tasks=add
 
 # Ablation models, kept for comparison/testing — not what the paper reports
 python train.py model=self_attention   # dense O(N^2) masked attention, no gathering
@@ -72,25 +75,41 @@ python train.py model=perceiver_attention  # + cross-attention to task data (sup
 ### Programmatic usage
 
 ```python
+import jax
 from flax import nnx
 from boolean_nca_cc import generate_layer_sizes
 from boolean_nca_cc.circuits.tasks import get_task_data
 from boolean_nca_cc.models import CircuitGatheredAttention
 from boolean_nca_cc.training import train_model
 
-x_data, y_data = get_task_data("reverse", case_n=4096, input_bits=12, output_bits=12)
+(x_train, y_train), (x_test, y_test), (x_total, y_total) = get_task_data(
+    "reverse", case_n=4096, input_bits=12, train_test_split=True, test_ratio=0.05, seed=0
+)
+data_dict = {
+    "x_train": x_train, "y_train": y_train,
+    "x_test": x_test, "y_test": y_test,
+    "x_total": x_total, "y_total": y_total,
+}
 layer_sizes = generate_layer_sizes(input_n=12, output_n=12, arity=4, layer_n=3)
-n_node = sum(size[0] for size in layer_sizes)
 
 model = CircuitGatheredAttention(
     circuit_hidden_dim=64, attention_dim=128, arity=4, rngs=nnx.Rngs(0)
 )
 
 results = train_model(
-    key=42, init_model=model, x_data=x_data, y_data=y_data,
-    layer_sizes=layer_sizes, hidden_dim=64, arity=4,
-    learning_rate=2e-4, n_message_steps=5, wiring_mode="random",
+    data_dict=data_dict,
+    train_key=jax.random.PRNGKey(42),
+    init_model=model,
+    layer_sizes=layer_sizes,
+    arity=4,
+    circuit_hidden_dim=64,
+    learning_rate=2e-4,
+    epochs=100,
+    n_message_steps=5,
+    wiring_mode="random",
 )
+# results: {"model", "optimizer", "losses", "hard_losses", "accuracies",
+#           "hard_accuracies", "reset_steps", "early_stopped", "pool", ...}
 ```
 
 Full config reference: `configs/config.yaml` (the single source of truth — every
