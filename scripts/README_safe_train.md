@@ -21,29 +21,29 @@ The `safe_train.py` script provides automatic failure recovery for training runs
 
 ```bash
 # Use default config
-python safe_train.py
+python scripts/safe_train.py
 
 # Use specific config
-python safe_train.py --config-name experiment_config
+python scripts/safe_train.py --config-name experiment_config
 
 # Set custom limits
-python safe_train.py --max-retries 10 --min-lr 1e-10 --min-batch-size 1
+python scripts/safe_train.py --max-retries 10 --min-lr 1e-10 --min-batch-size 1
 
 # Disable wandb run deletion
-python safe_train.py --no-delete-wandb-runs
+python scripts/safe_train.py --no-delete-wandb-runs
 ```
 
 ### With Hydra Overrides
 
 ```bash
 # Override training parameters
-python safe_train.py training.learning_rate=1e-3 training.meta_batch_size=32
+python scripts/safe_train.py training.learning_rate=1e-3 training.meta_batch_size=32
 
 # Override model type
-python safe_train.py model=gnn training.epochs_power_of_2=15
+python scripts/safe_train.py model=gnn training.epochs_power_of_2=15
 
 # Multiple overrides
-python safe_train.py \
+python scripts/safe_train.py \
     model=self_attention \
     training.learning_rate=5e-4 \
     training.meta_batch_size=16 \
@@ -149,7 +149,7 @@ The script properly handles termination signals to ensure clean shutdown:
 ### Usage with Job Schedulers
 ```bash
 # SLURM example - the script will properly handle job cancellation
-sbatch --wrap="python safe_train.py training.epochs_power_of_2=20"
+sbatch --wrap="python scripts/safe_train.py training.epochs_power_of_2=20"
 
 # When you cancel the job, all processes will be cleaned up properly
 scancel <job_id>
@@ -158,7 +158,7 @@ scancel <job_id>
 ## Example Session
 
 ```bash
-$ python safe_train.py --max-retries 3
+$ python scripts/safe_train.py --max-retries 3
 
 2024-01-15 10:30:00 - INFO - Safe training started with config: configs/config.yaml
 2024-01-15 10:30:00 - INFO - Max retries: 3

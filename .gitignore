@@ -77,5 +77,8 @@ final_results.csv
 SESSION_*.md
 sweeps/ANALYSIS_*.md
 sweeps/sweep_v3_report_*.md
+sweeps/HSM_ISSUE_*.md
+sweeps/HSM_NOTE_*.md
+sweeps/RESULTS_*.md
 sweeps/*.log
 sweeps/check_sweep_*.sh
