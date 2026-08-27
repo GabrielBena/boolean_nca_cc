@@ -8,8 +8,9 @@ Interactive browser demo of the Topology-Masked Transformer (TMT) policy from
 ## Pipeline overview
 
 ```
-configs/demo_models.yaml          ← single source of truth: which W&B runs to show
-         │
+../configs/demo_models.yaml       ← single source of truth: which W&B runs to show
+         │                          (lives at the repo root, alongside the Hydra
+         │                           training configs -- not inside web_demo/)
          ▼
 export/export_gallery.py          ← batch export: downloads runs, extracts weights,
          │                           records bootstrap files, writes gallery.json
@@ -29,7 +30,7 @@ read-only at runtime — it only fetches the pre-baked JSON files.
 
 ---
 
-## Step 1 — Declare models in `configs/demo_models.yaml`
+## Step 1 — Declare models in `../configs/demo_models.yaml`
 
 This is the only file you edit to change which models appear in the demo.
 
@@ -65,7 +66,10 @@ script picks the checkpoint that maximises this metric.
 
 ## Step 2 — Export everything with `export_gallery.py`
 
-Run from inside `web_demo/` using the `cc_nca` conda environment:
+Run from inside `web_demo/` using the `cc_nca` conda environment (this doc's
+example name for an env with the repo installed — from the repo root:
+`conda create -n cc_nca python=3.11 && conda run -n cc_nca pip install -e ".[all]"`
+— or substitute whatever env you already have the package in):
 
 ```bash
 # Export all tasks declared in demo_models.yaml
@@ -309,7 +313,7 @@ Embed in the article (al-folio distill layout):
 
 ## Adding a new model to the gallery
 
-1. Add an entry to `configs/demo_models.yaml` with the W&B `run_id` and the
+1. Add an entry to `../configs/demo_models.yaml` with the W&B `run_id` and the
    correct `prefer_metric` for that recipe.
 2. Run `export_gallery.py --task <task> --skip-existing`.
 3. Check the bootstrap tick log — a fixed-wires model should reach
