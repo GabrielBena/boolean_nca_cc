@@ -1,6 +1,6 @@
 # Self-Organising Digital Circuits (SODC)
 
-**Barylli\*, Béna\*, Mordvintsev, Nisioti, Risi — ALIFE 2026** — [Paper](https://direct.mit.edu/isal/proceedings/isal2026/38/41/138130) · [Blog post + live demo](https://gabrielbena.github.io/blog/2026/sodc/) · [PhD thesis context](https://gabrielbena.github.io/phd/)
+**Barylli\*, Béna\*, Mordvintsev, Nisioti, Risi — ALIFE 2026** — [Paper](https://direct.mit.edu/isal/proceedings/isal2026/38/41/138130) · [Blog post + live demo](https://self-organising-circuits.github.io/) · [PhD thesis context](https://gabrielbena.github.io/phd/)
 
 We extend the Neural Cellular Automata paradigm from pattern formation on grids to
 functional logic generation and self-repair on arbitrary graphs. A **Topology-Masked
@@ -20,7 +20,7 @@ The clearest way to understand what this repo trains is to watch it: the trained
 policy runs live in your browser, settling a circuit from scratch and re-healing it
 after damage.
 
-- **[Live demo, in the blog post](https://gabrielbena.github.io/blog/2026/sodc/#interactive-demo)**
+- **[Live demo, in the blog post](https://self-organising-circuits.github.io/#interactive-demo)**
   — no install required.
 - **Run it locally** (same demo, driven by the pretrained weights checked into this
   repo):
