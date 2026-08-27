@@ -23,6 +23,7 @@ from paper_figures.wandb_data import DEFAULT_ENTITY, DEFAULT_PROJECT, _args, _cf
 
 _HERE = os.path.dirname(__file__)
 OUT_PDF = os.path.join(_HERE, "out", f"fig_random_wiring{style.OUT_SUFFIX}.pdf")
+CACHE = os.path.join(_HERE, "data", "random_wiring_sweep.csv")
 GROUP = "random_wiring_sweep"
 FILTERS = {
     "group": GROUP,
@@ -66,8 +67,24 @@ def pull():
         rows.append({"Task": TASK_MAP.get(str(task), str(task)),
                      "OFF": _get(r, UNDAM), "ON": _get(r, DAM)})
     df = pd.DataFrame(rows)
+    os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+    df.to_csv(CACHE, index=False)
+    print(f"[cache] wrote {CACHE} ({len(df)} rows)")
     print(df.to_string(index=False))
     return df
+
+
+def load(use_cache: bool = True) -> pd.DataFrame:
+    """Load the random-wiring sweep, pulling + caching to CSV on first call.
+
+    CACHE is committed to the repo (see paper_figures/.gitignore) with a real
+    pull already in it, so this is W&B-free by default -- pass use_cache=False
+    to force a fresh pull.
+    """
+    if use_cache and os.path.exists(CACHE):
+        print(f"[cache] reading {CACHE}")
+        return pd.read_csv(CACHE)
+    return pull()
 
 
 def make_figure(df):
@@ -95,7 +112,11 @@ def make_figure(df):
 
 
 if __name__ == "__main__":
-    df = pull()
+    import argparse
+    ap = argparse.ArgumentParser(description="Build the random-wiring figure.")
+    ap.add_argument("--no-cache", action="store_true", help="re-pull from W&B even if cached")
+    a = ap.parse_args()
+    df = load(use_cache=not a.no_cache)
     fig = make_figure(df)
     os.makedirs(os.path.dirname(OUT_PDF), exist_ok=True)
     fig.savefig(OUT_PDF)

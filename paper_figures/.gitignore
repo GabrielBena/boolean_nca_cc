@@ -1,4 +1,14 @@
-# Generated artefacts — regenerate with the scripts, don't commit
-data/
+# Generated artefacts — regenerate with the scripts, don't commit.
+# data/* (not data/) so the exceptions below can re-include specific files --
+# git can't re-include a file whose parent directory is itself excluded.
+data/*
 out/
 __pycache__/
+
+# Exception: the three CSVs that pull directly from logged W&B scalars (Fig 2 +
+# random-wiring) are committed pre-pulled, so those figures don't need W&B
+# access at all — see the "W&B access" section of README.md. --no-cache still
+# re-pulls and overwrites them locally if you want fresh numbers.
+!data/fixed_wiring_sweep.csv
+!data/fixed_wiring_bp.csv
+!data/random_wiring_sweep.csv

@@ -11,27 +11,35 @@ works from any working directory (including a neutral one like `/tmp`, which avo
 the repo's local `wandb/` dir shadowing things during a pull).
 
 All scripts write into `data/` (cached CSVs, wandb-pulled or eval-generated) and
-`out/` (rendered figures) — both git-ignored, regenerate them locally.
+`out/` (rendered figures). `out/` is entirely git-ignored (always regenerate it
+locally); `data/` is git-ignored *except* the three archived Fig-2/random-wiring
+CSVs described below.
 
 ## W&B access
 
 `gbena/boolean-nca-cc` (the W&B project every script below pulls from) is
-**private** — you will not be able to run these scripts against live W&B unless
-you have your own credentials for that project. Two figures don't need this at all:
+**private** — a stranger with no relationship to that project would otherwise be
+unable to run *any* of these scripts against live W&B. To close that gap, every
+figure's underlying data is archived directly in this repo, and every script checks
+that archive **first**, only falling back to a live W&B pull (i.e. only then needing
+credentials) if you point it at a run that isn't archived — e.g. your own new run.
+**All five figures below are confirmed working with zero W&B credentials configured**
+(fresh `$HOME`, no API key).
 
-- **Fig 2** and **random-wiring**: pull only *logged summary scalars*, no model
-  weights — still need W&B access, but there's nothing to work around beyond that.
-- **Fig 4, Fig 10, PCA trajectories** additionally need to instantiate a model from
-  a specific checkpoint. For these three, [`paper_figures/checkpoints/`](checkpoints/)
-  archives the small set of checkpoints they target (4 runs, 13MB total, config +
-  weights) directly in this repo. `eval_fig4_resilience_isn1.py`,
-  `eval_fig10_scalefree_isn1.py`, and `eval_pca_trajectories.py` all load through
-  [`local_checkpoints.py`](local_checkpoints.py), which checks this local archive
-  **first** and only falls back to `load_config_from_wandb` (i.e. only needs W&B
-  credentials) for a run_id that isn't archived — e.g. if you point one of these
-  scripts at your own new run. **Confirmed working with zero W&B credentials
-  configured** (fresh `$HOME`, no API key) for all three archived-checkpoint
-  scripts.
+- **Fig 2** and **random-wiring** pull only *logged summary scalars*, no model
+  weights, so their archive is just three small CSVs:
+  [`data/fixed_wiring_sweep.csv`](data/fixed_wiring_sweep.csv),
+  [`data/fixed_wiring_bp.csv`](data/fixed_wiring_bp.csv),
+  [`data/random_wiring_sweep.csv`](data/random_wiring_sweep.csv) — committed despite
+  `data/` otherwise being git-ignored (see `paper_figures/.gitignore`). `wandb_data.load()`,
+  `bp_from_history.load()`, and `fig_random_wiring.load()` all read these by default;
+  pass `--no-cache` to force a fresh pull (overwriting the committed file locally).
+- **Fig 4, Fig 10, PCA trajectories** additionally need to instantiate a model from a
+  specific checkpoint. [`paper_figures/checkpoints/`](checkpoints/) archives the small
+  set of checkpoints they target (4 runs, 13MB total, config + weights).
+  `eval_fig4_resilience_isn1.py`, `eval_fig10_scalefree_isn1.py`, and
+  `eval_pca_trajectories.py` all load through [`local_checkpoints.py`](local_checkpoints.py),
+  the same local-first/W&B-fallback pattern.
 
 **Verification note**: every script below (Fig 2, Fig 4, PCA trajectories,
 random-wiring, Fig 10) has been run end-to-end from a fresh `git clone` + fresh env
@@ -68,8 +76,11 @@ config-matched BP baseline. (The earlier `sweep_20260209_231530` predates damage
 logging — do not use it.)
 
 ```bash
+python -m paper_figures.fig2_fixed_wiring       # -> out/fig2_fixed_wiring.pdf (reads the committed CSVs, no W&B needed)
+
+# To force a fresh pull instead of the committed CSVs:
 python -m paper_figures.wandb_data --no-cache   # -> data/fixed_wiring_sweep.csv
-python -m paper_figures.bp_from_history         # -> data/fixed_wiring_bp.csv
+python -m paper_figures.bp_from_history --no-cache   # -> data/fixed_wiring_bp.csv
 python -m paper_figures.fig2_fixed_wiring       # -> out/fig2_fixed_wiring.pdf
 ```
 - `test_num = 256` → 256/4096 held out. Damage mode = **probabilistic** (matches
@@ -121,7 +132,8 @@ produced the exact submitted PDF.
 Single seed, damage-trained only — bars are point values, no per-seed error.
 
 ```bash
-python -m paper_figures.fig_random_wiring   # -> out/fig_random_wiring.pdf
+python -m paper_figures.fig_random_wiring             # -> out/fig_random_wiring.pdf (reads the committed CSV, no W&B needed)
+python -m paper_figures.fig_random_wiring --no-cache   # force a fresh pull instead
 ```
 
 ### Fig 10 / Regime IV — Scale-Free Generalisation

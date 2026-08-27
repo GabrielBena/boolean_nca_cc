@@ -117,7 +117,7 @@ def main():
     bp = pd.read_csv(BP_CACHE) if os.path.exists(BP_CACHE) else None
     if bp is None:
         print("[bp] no BP cache (data/fixed_wiring_bp.csv) -- run `python -m "
-              "paper_figures.bp_baseline` first; plotting TMT only for now.")
+              "paper_figures.bp_from_history` first; plotting TMT only for now.")
 
     fig, stat_df = make_figure(tmt, bp)
     os.makedirs(os.path.dirname(OUT_PDF), exist_ok=True)

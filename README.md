@@ -48,10 +48,10 @@ pip install -e ".[all]"        # everything
 Requires Python ≥3.11. The package uses JAX/Flax (`nnx`) for training, Hydra for
 configuration, and Weights & Biases for experiment tracking. The paper's exact runs
 live under the `gbena/boolean-nca-cc` W&B project (**private** — see
-[`paper_figures/README.md`](paper_figures/README.md#wb-access)); the checkpoints
-three of the figure scripts need are archived directly in this repo
-(`paper_figures/checkpoints/`, 13MB) so figure reproduction doesn't require W&B
-access at all for those.
+[`paper_figures/README.md`](paper_figures/README.md#wb-access)), but every figure's
+underlying data (the small set of checkpoints, plus the CSVs pulled from logged
+scalars) is archived directly in this repo, so **reproducing every paper figure
+requires no W&B access at all** — training your own models still does.
 
 ## Quick Start
 

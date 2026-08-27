@@ -88,11 +88,25 @@ def pull(group=DEFAULT_GROUP, entity=DEFAULT_ENTITY, project=DEFAULT_PROJECT):
     return df
 
 
+def load(use_cache: bool = True, **kw) -> pd.DataFrame:
+    """Load the BP ceiling, pulling + caching to CSV on first call.
+
+    OUT is committed to the repo (see paper_figures/.gitignore) with a real pull
+    already in it, so this is W&B-free by default -- pass use_cache=False to
+    force a fresh pull.
+    """
+    if use_cache and os.path.exists(OUT):
+        print(f"[cache] reading {OUT}")
+        return pd.read_csv(OUT)
+    return pull(**kw)
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Pull the logged BP ceiling for Fig 2.")
+    ap.add_argument("--no-cache", action="store_true", help="re-pull from W&B even if cached")
     ap.add_argument("--group", default=DEFAULT_GROUP)
     a = ap.parse_args()
-    df = pull(group=a.group)
+    df = load(use_cache=not a.no_cache, group=a.group)
     s = df.groupby(["Task", "eval_damage"]).agg(
         mean=("hard_accuracy", "mean"), n=("hard_accuracy", "size"),
         n_nan=("hard_accuracy", lambda x: int(x.isna().sum())),
