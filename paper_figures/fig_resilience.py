@@ -10,12 +10,10 @@ Colours match Fig 3 (TMT blue, BP orange); no-repair is a grey dashed lower boun
 from __future__ import annotations
 
 import os
-import sys
 
 import pandas as pd
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, '/home/gbena/code/active/boolean-circuits/boolean_nca_cc')
 from paper_figures import style
 from paper_figures.style import OKABE_ITO
 

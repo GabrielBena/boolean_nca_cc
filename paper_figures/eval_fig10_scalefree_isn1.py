@@ -8,8 +8,14 @@
 # by env FIG10_MODE = "w" | "a").
 #
 # Env knobs:
-#   FIG10_RUN_ID   : wandb run id (e.g. 1u5ssulx or cdjkgrod). REQUIRED.
-#   FIG10_MODE     : "w" (write+header) or "a" (append). default "w".
+#   FIG10_RUN_ID   : wandb run id. REQUIRED. Run twice, once per wiring mode:
+#     1u5ssulx -- random-wiring-trained (cross-referenced against
+#                 web_demo/configs/demo_models.yaml's "random_damage"/Regime III
+#                 recipe entry, which pins this same run id; high confidence but
+#                 not directly confirmed against the wandb config itself)
+#     cdjkgrod -- fixed-wiring-trained (the other candidate; by elimination)
+#   FIG10_MODE     : "w" (write+header, use for the FIRST run) or "a" (append,
+#                    use for the SECOND run). default "w".
 #   SMOKE_WIDTHS   : optional comma list to restrict widths (smoke test).
 #   SMOKE_BATCH    : optional int to shrink batch_size (smoke test).
 # ============================================================================
@@ -212,7 +218,8 @@ import csv
 wiring = "random" if loaded_config.training.wiring_mode == "random" else "fixed"
 print(f"wiring_mode resolved to: {loaded_config.training.wiring_mode} -> column '{wiring}'")
 
-out_path = "/tmp/fig10_scalefree.csv"
+out_path = os.path.join(os.path.dirname(__file__), "data", "fig10_scalefree.csv")
+os.makedirs(os.path.dirname(out_path), exist_ok=True)
 mode = os.environ.get("FIG10_MODE", "w")
 fieldnames = ["wiring", "width_factor", "n_node", "damage_active", "batch_idx", "hard_accuracy"]
 

@@ -10,12 +10,10 @@ Collapses the two submitted full-width subfigures into one compact single-column
 from __future__ import annotations
 
 import os
-import sys
 
 import pandas as pd
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, '/home/gbena/code/active/boolean-circuits/boolean_nca_cc')
 from paper_figures import style
 from paper_figures.style import EVAL_DAMAGE_COLORS
 

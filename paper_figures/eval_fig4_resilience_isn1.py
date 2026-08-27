@@ -298,7 +298,8 @@ for damage_kind, (tmt, bp) in mapping.items():
             hard_accuracy=float(bp["hard_accuracy"][step]),
         ))
 
-out_path = "/tmp/fig4_stepwise.csv"
+out_path = os.path.join(os.path.dirname(__file__), "data", "fig4_stepwise.csv")
+os.makedirs(os.path.dirname(out_path), exist_ok=True)
 with open(out_path, "w", newline="") as f:
     w = csv.DictWriter(f, fieldnames=["damage_kind", "series", "step", "loss", "hard_loss", "hard_accuracy"])
     w.writeheader()
