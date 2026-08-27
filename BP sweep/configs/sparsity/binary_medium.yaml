@@ -1,7 +1,0 @@
-# @package _global_
-# Medium binary sparsity regularization
-
-sparsity:
-  enabled: true
-  type: "binary"
-  weight: 1e-3
