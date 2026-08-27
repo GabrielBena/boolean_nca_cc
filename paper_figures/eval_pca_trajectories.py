@@ -41,23 +41,32 @@ configure_notebook_logging()
 from boolean_nca_cc.circuits.model import generate_layer_sizes
 from boolean_nca_cc.circuits.tasks import get_task_data
 from boolean_nca_cc.circuits.train import LossConfig
-from boolean_nca_cc.training.checkpointing import (
-    load_config_from_wandb,
-    load_model_from_config_and_checkpoint,
-)
+from boolean_nca_cc.training.checkpointing import load_model_from_config_and_checkpoint
 from boolean_nca_cc.training.evaluation import evaluate_model_stepwise_batched
 from boolean_nca_cc.training.pool.pool import initialize_graph_pool
 from boolean_nca_cc.training.pool.structural_perturbation import (
     count_eligible_gates,
 )
+from boolean_nca_cc.utils.configured_graph_builder import configure_build_graph
+from paper_figures.local_checkpoints import load_config_and_checkpoint
 
 RUN_ID_SHORT = os.environ.get("PCA_RUN_ID", "6mo8q61y")  # random wires 14x14, reverse
 
-loaded_config, checkpoint_path, run_id = load_config_from_wandb(
+loaded_config, checkpoint_path, run_id = load_config_and_checkpoint(
     run_id=RUN_ID_SHORT,
     entity="gbena",
     filename="best_model_eval_damaged_out_test_hard_accuracy",
     use_cache=False,
+)
+
+# Must match the checkpoint's graph feature config exactly (dist_pe/rwse change the
+# model's feature_proj input dim) -- this run trained with use_dist_pe=True.
+configure_build_graph(
+    neighboring_connections=loaded_config.graph.neighboring_connections,
+    bidirectional_edges=loaded_config.graph.bidirectional_edges,
+    use_dist_pe=loaded_config.graph.get("use_dist_pe", False),
+    use_rwse=loaded_config.graph.get("use_rwse", False),
+    rwse_k=loaded_config.graph.get("rwse_k", 8),
 )
 
 case_n = 2**loaded_config.circuit.input_bits
@@ -95,12 +104,19 @@ pool = initialize_graph_pool(
 )
 print(f"Pool of size {batch_size} initialised! Circuits are: {pool.graphs.n_node[0]} nodes")
 
+# Schema migration: task moved from circuit.task/circuit.text to tasks.name/
+# tasks.text partway through the project's history -- handle both eras.
+if "tasks" in loaded_config:
+    task_name, task_text = loaded_config.tasks.name, loaded_config.tasks.get("text", None)
+else:
+    task_name, task_text = loaded_config.circuit.task, loaded_config.circuit.get("text", None)
+
 (x_train, y_train), (x_test, y_test), (x, y0) = get_task_data(
-    loaded_config.circuit.task,
+    task_name,
     case_n,
     input_bits=loaded_config.circuit.input_bits,
     output_bits=loaded_config.circuit.output_bits,
-    text=loaded_config.circuit.text,
+    text=task_text,
     train_test_split=True,
     test_ratio=loaded_config.training.test_num / case_n,
     seed=eval_key,
