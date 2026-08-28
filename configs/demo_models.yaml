@@ -1,21 +1,27 @@
 # =============================================================================
-# Live demo: pre-trained model gallery
+# Live demo: pre-trained model gallery — SINGLE SOURCE OF TRUTH
 # =============================================================================
 #
-# This file curates the pre-trained models that the live demo exposes as a
-# clickable gallery, decoupling the *user-facing* notion of "the X paper
-# figure" from the *back-end* W&B run IDs.
+# This file is the single source of truth for the live demo's manifest,
+# web_demo/public/weights/gallery.json: `python -m export.export_gallery`
+# (run from web_demo/) regenerates that manifest from the `models:` list
+# below. The list therefore contains EXACTLY what the published demo ships —
+# three reverse-task models — and nothing else, so re-running the export
+# cannot silently change what the demo shows. With --skip-existing (and the
+# committed weight files in place) regeneration reproduces the committed
+# gallery.json identically, with no W&B access needed.
 #
-# Each entry maps a (task × recipe) pair to a W&B run. The GUI builds a
-# two-axis dropdown:
+# Each entry maps a (task × recipe) pair to a W&B run. Optional per-entry
+# overrides (all used by the headline v33 entry below):
 #
-#   Task   ∈ {reverse, add, binary_multiply, ...}
-#   Recipe ∈ {fixed_no_damage, fixed_damage, random_no_damage, random_damage}
+#   id:            manifest/file id  (default: "{task}_{recipe}")
+#   label:         GUI pill label    (default: the recipe's label below)
+#   description:   GUI description   (default: the recipe's description below)
+#   topology_pool: filename (relative to public/weights/) of a ranked
+#                  topology-pool JSON, emitted as `topologyPoolPath`
 #
-# Combinations with `run_id: null` are greyed out in the gallery — useful
-# placeholders to mark "models we plan to train" without breaking the UI.
-#
-# Add new entries freely; the demo will pick them up at startup.
+# Entries with `run_id: null` are skipped by the export entirely — they are
+# reserve-a-slot placeholders and do NOT appear in gallery.json.
 # =============================================================================
 
 # Defaults applied to every entry unless overridden inline.
@@ -23,8 +29,8 @@ defaults:
   entity: gbena
   project: boolean-nca-cc
 
-# Display names for the four training recipes (paper terminology).
-# These appear in the GUI; tweak the labels here if the wording shifts.
+# Display names for the training recipes (paper terminology). These are the
+# fallback labels/descriptions; an entry's inline `label`/`description` wins.
 recipes:
   fixed_no_damage:
     label: "Fixed wires · clean"
@@ -35,63 +41,63 @@ recipes:
   random_damage:
     label: "Random wires · damage-trained"
     description: "Regime III, random wiring + damage. §4.3 fig. 4."
+  random_damage_solar_burst_adaptive:
+    label: "Self-healing circuit (random wiring)"
+    description: "Regime III headline: random wiring + bursty 'solar-event' damage (damage.permanent: random), curated topology pool."
 
 # -----------------------------------------------------------------------------
-# Gallery entries. Order matters only insofar as the GUI iterates this list
-# when building dropdown options.
+# Gallery entries — exactly the models the published demo ships, in pill order
+# (main.ts defaults to the LAST entry, so the headline model goes last).
+# Every run_id verified against its own W&B config on 2026-08-28
+# (task, training.wiring_mode, damage.enabled all match the recipe).
 # -----------------------------------------------------------------------------
 models:
 
-  # ---- Task: Bit reversal (reverse) -----------------------------------------
   - task: reverse
     recipe: fixed_no_damage
-    run_id: vt9awu7h  # TODO(gbena): paper run ID for clean fixed-wire reverse
+    run_id: vt9awu7h  # reverse · fixed wiring · damage.enabled=False · gathered_attention
     prefer_metric: eval_in_test_hard_accuracy
 
   - task: reverse
     recipe: fixed_damage
-    run_id: y2swhhrl
+    run_id: y2swhhrl  # reverse · fixed wiring · damage.enabled=True · gathered_attention
     prefer_metric: eval_damaged_in_test_hard_accuracy
     notes: |
       Paper figure 2 bottom row "Learned Resilience".
       Picked from boolean_nca_exploration.ipynb cell 1.
 
   - task: reverse
-    recipe: random_damage
-    run_id: 1u5ssulx
+    recipe: random_damage_solar_burst_adaptive
+    run_id: to6sec2g  # reverse · random wiring · damage.enabled=True, permanent: random
+    id: reverse_random_damage_v33
     prefer_metric: eval_damaged_out_test_hard_accuracy
+    label: "Self-healing circuit (random wiring)"
+    description: "The headline model. Random wiring trained with bursty 'solar-event' gate damage. Settles to the target, recovers when rewired (Shuffle), and re-grows function around permanently destroyed gates (Shotgun) — repeatedly back to ~100%. Deep-probed settled 0.93 / shuffle-carry 0.92; actively heals ~64% of shotgun knockout damage. Curated all-rounder pool (boot + shuffle + shotgun-recovery, robust-averaged)."
+    topology_pool: reverse_random_topology_pool_v33.json
     notes: |
-      Paper figure 4 random-topology reverse.
-      Picked from boolean_nca_exploration.ipynb cell 1 ("Random wires, damages, reverse task").
+      The demo's headline model. IMPORTANT: the committed weight file
+      (reverse_random_damage_v33.json) was produced by a local curation
+      pipeline (robust-averaged over a boot/shuffle/shotgun-recovery pool),
+      NOT by a plain best-checkpoint export of run to6sec2g — a full
+      re-export of this entry would overwrite it with something different.
+      Always use --skip-existing (or --bootstrap-only) so the committed
+      weights are preserved.
 
-  # ---- Task: Split addition (add) -------------------------------------------
-  - task: add
-    recipe: fixed_no_damage
-    run_id: 84cbqbag  # TODO(gbena)
-    prefer_metric: eval_in_test_hard_accuracy
-
-  - task: add
-    recipe: fixed_damage
-    run_id: wjk2hfyu  # TODO(gbena)
-    prefer_metric: eval_damaged_in_test_hard_accuracy
-
-  - task: add
-    recipe: random_damage
-    run_id: 91fv6lpm  # TODO(gbena)
-    prefer_metric: eval_damaged_out_test_hard_accuracy
-
-  # ---- Task: Split multiplication (binary_multiply) -------------------------
-  - task: binary_multiply
-    recipe: fixed_no_damage
-    run_id: pvi2s1hw  # TODO(gbena)
-    prefer_metric: eval_in_test_hard_accuracy
-
-  - task: binary_multiply
-    recipe: fixed_damage
-    run_id: ouafszyh  # TODO(gbena)
-    prefer_metric: eval_damaged_in_test_hard_accuracy
-
-  - task: binary_multiply
-    recipe: random_damage
-    run_id: zcfqv5bq  # TODO(gbena)
-    prefer_metric: eval_damaged_out_test_hard_accuracy
+# -----------------------------------------------------------------------------
+# Verified candidates — real, finished runs that were never exported/shipped in
+# the demo (kept out of `models:` so they can't leak into gallery.json).
+# All confirmed against their W&B configs on 2026-08-28: gathered_attention,
+# task/wiring/damage.enabled as stated. To ship one, move it into `models:`
+# and run the export (needs W&B access to gbena/boolean-nca-cc).
+#
+#   reverse         random_damage    1u5ssulx  (random, damage; the paper's
+#                     Regime III / fig. 4 reverse model — superseded in the
+#                     demo by the curated v33 headline above; its exported
+#                     files are deployed but unlisted in gallery.json)
+#   add             fixed_no_damage  84cbqbag  (fixed,  damage.enabled=False)
+#   add             fixed_damage     wjk2hfyu  (fixed,  damage.enabled=True)
+#   add             random_damage    91fv6lpm  (random, damage.enabled=True)
+#   binary_multiply fixed_no_damage  pvi2s1hw  (fixed,  damage.enabled=False)
+#   binary_multiply fixed_damage     ouafszyh  (fixed,  damage.enabled=True)
+#   binary_multiply random_damage    zcfqv5bq  (random, damage.enabled=True)
+# -----------------------------------------------------------------------------

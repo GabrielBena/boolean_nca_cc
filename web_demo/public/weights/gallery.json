@@ -1,35 +1,35 @@
 {
- "models": [
-  {
-   "id": "reverse_fixed_no_damage",
-   "task": "reverse",
-   "recipe": "fixed_no_damage",
-   "label": "Fixed wires · clean",
-   "description": "Regime I, no damage during training. Zero-shot resilience tests OOD damage.",
-   "runId": "vt9awu7h",
-   "weightsPath": "reverse_fixed_no_damage.json",
-   "bootstrapPath": "reverse_fixed_no_damage_demo.json"
-  },
-  {
-   "id": "reverse_fixed_damage",
-   "task": "reverse",
-   "recipe": "fixed_damage",
-   "label": "Fixed wires · damage-trained",
-   "description": "Regime I, stochastic gate failure during training. §4.1 fig. 2 bottom row.",
-   "runId": "y2swhhrl",
-   "weightsPath": "reverse_fixed_damage.json",
-   "bootstrapPath": "reverse_fixed_damage_demo.json"
-  },
-  {
-   "id": "reverse_random_damage_v33",
-   "task": "reverse",
-   "recipe": "random_damage_solar_burst_adaptive",
-   "label": "Self-healing circuit (random wiring)",
-   "description": "The headline model. Random wiring trained with bursty 'solar-event' gate damage. Settles to the target, recovers when rewired (Shuffle), and re-grows function around permanently destroyed gates (Shotgun) — repeatedly back to ~100%. Deep-probed settled 0.93 / shuffle-carry 0.92; actively heals ~64% of shotgun knockout damage. Curated all-rounder pool (boot + shuffle + shotgun-recovery, robust-averaged).",
-   "runId": "to6sec2g",
-   "weightsPath": "reverse_random_damage_v33.json",
-   "bootstrapPath": "reverse_random_damage_v33_demo.json",
-   "topologyPoolPath": "reverse_random_topology_pool_v33.json"
-  }
- ]
+  "models": [
+    {
+      "id": "reverse_fixed_no_damage",
+      "task": "reverse",
+      "recipe": "fixed_no_damage",
+      "label": "Fixed wires \u00b7 clean",
+      "description": "Regime I, no damage during training. Zero-shot resilience tests OOD damage.",
+      "runId": "vt9awu7h",
+      "weightsPath": "reverse_fixed_no_damage.json",
+      "bootstrapPath": "reverse_fixed_no_damage_demo.json"
+    },
+    {
+      "id": "reverse_fixed_damage",
+      "task": "reverse",
+      "recipe": "fixed_damage",
+      "label": "Fixed wires \u00b7 damage-trained",
+      "description": "Regime I, stochastic gate failure during training. \u00a74.1 fig. 2 bottom row.",
+      "runId": "y2swhhrl",
+      "weightsPath": "reverse_fixed_damage.json",
+      "bootstrapPath": "reverse_fixed_damage_demo.json"
+    },
+    {
+      "id": "reverse_random_damage_v33",
+      "task": "reverse",
+      "recipe": "random_damage_solar_burst_adaptive",
+      "label": "Self-healing circuit (random wiring)",
+      "description": "The headline model. Random wiring trained with bursty 'solar-event' gate damage. Settles to the target, recovers when rewired (Shuffle), and re-grows function around permanently destroyed gates (Shotgun) \u2014 repeatedly back to ~100%. Deep-probed settled 0.93 / shuffle-carry 0.92; actively heals ~64% of shotgun knockout damage. Curated all-rounder pool (boot + shuffle + shotgun-recovery, robust-averaged).",
+      "runId": "to6sec2g",
+      "weightsPath": "reverse_random_damage_v33.json",
+      "bootstrapPath": "reverse_random_damage_v33_demo.json",
+      "topologyPoolPath": "reverse_random_topology_pool_v33.json"
+    }
+  ]
 }

@@ -68,7 +68,10 @@ _GALLERY_JSON = _WEIGHTS_DIR / "gallery.json"
 #         "description":   "Regime I …",
 #         "runId":         "vt9awu7h",
 #         "weightsPath":   "reverse_fixed_no_damage.json",
-#         "bootstrapPath": "reverse_fixed_no_damage_demo.json"
+#         "bootstrapPath": "reverse_fixed_no_damage_demo.json",
+#         "topologyPoolPath": "…_topology_pool.json"   (optional — only when the
+#             YAML entry sets `topology_pool:`; main.ts loads it for
+#             random-wires models so Shuffle draws from a curated ranked pool)
 #       },
 #       …
 #     ]
@@ -76,10 +79,17 @@ _GALLERY_JSON = _WEIGHTS_DIR / "gallery.json"
 #
 # weightsPath / bootstrapPath are relative to public/weights/ so the TS side
 # prepends BASE_URL + "weights/".
+#
+# Per-entry YAML overrides honoured here: `id` (default "{task}_{recipe}"),
+# `label` / `description` (default: the recipe's), `topology_pool`.
 
 
 def _model_id(task: str, recipe: str) -> str:
     return f"{task}_{recipe}"
+
+
+def _entry_id(entry: dict) -> str:
+    return entry.get("id") or _model_id(entry["task"], entry["recipe"])
 
 
 def _weights_path(model_id: str) -> str:
@@ -122,7 +132,7 @@ def export_model(
     recipe = entry["recipe"]
     run_id = entry["run_id"]
     prefer_metric = entry.get("prefer_metric", "eval_in_test_hard_accuracy")
-    mid = _model_id(task, recipe)
+    mid = _entry_id(entry)
 
     weights_out = _weights_path(mid)
     bootstrap_out = _bootstrap_path(mid)
@@ -145,7 +155,7 @@ def export_model(
 
     if not need_weights and not need_bootstrap and not need_trajectory:
         print(f"[gallery] {mid}: all files present, skipping (--skip-existing)")
-        return _gallery_fragment(mid, task, recipe, run_id, recipe_meta)
+        return _gallery_fragment(mid, entry, recipe_meta)
 
     print(f"\n[gallery] ── {mid} (run {run_id}) ──────────────────────────────────")
 
@@ -181,22 +191,29 @@ def export_model(
             text=text,
         )
 
-    return _gallery_fragment(mid, task, recipe, run_id, recipe_meta)
+    return _gallery_fragment(mid, entry, recipe_meta)
 
 
-def _gallery_fragment(
-    mid: str, task: str, recipe: str, run_id: str, recipe_meta: dict
-) -> dict:
-    return {
+def _gallery_fragment(mid: str, entry: dict, recipe_meta: dict) -> dict:
+    recipe = entry["recipe"]
+    fragment = {
         "id": mid,
-        "task": task,
+        "task": entry["task"],
         "recipe": recipe,
-        "label": recipe_meta.get("label", recipe),
-        "description": recipe_meta.get("description", ""),
-        "runId": run_id,
+        "label": entry.get("label", recipe_meta.get("label", recipe)),
+        "description": entry.get("description", recipe_meta.get("description", "")),
+        "runId": entry["run_id"],
         "weightsPath": f"{mid}.json",
         "bootstrapPath": f"{mid}_demo.json",
     }
+    if entry.get("topology_pool"):
+        pool = _WEIGHTS_DIR / entry["topology_pool"]
+        if not pool.exists():
+            raise FileNotFoundError(
+                f"{mid}: topology_pool {entry['topology_pool']!r} not found in {_WEIGHTS_DIR}"
+            )
+        fragment["topologyPoolPath"] = entry["topology_pool"]
+    return fragment
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +312,7 @@ def main() -> None:
         f"task-style={args.task_style}{text_str} · "
         f"n-cases={args.n_cases or 'full'} · n-ticks={args.n_ticks}"
     )
-    print(f"[gallery] Models: {[_model_id(e['task'], e['recipe']) for e in selected]}")
+    print(f"[gallery] Models: {[_entry_id(e) for e in selected]}")
 
     os.makedirs(_WEIGHTS_DIR, exist_ok=True)
 

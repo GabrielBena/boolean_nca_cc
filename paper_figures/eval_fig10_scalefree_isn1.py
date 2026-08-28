@@ -10,8 +10,7 @@
 # Env knobs:
 #   FIG10_RUN_ID   : wandb run id. REQUIRED. Run twice, once per wiring mode:
 #     cdjkgrod -- fixed-wiring-trained
-#     1u5ssulx -- random-wiring-trained (also the configs/demo_models.yaml
-#                 "random_damage"/Regime III entry)
+#     1u5ssulx -- random-wiring-trained
 #   Both mappings are CONFIRMED against each run's own config
 #   (`training.wiring_mode` in paper_figures/checkpoints/<run_id>/config.yaml;
 #   the script also prints "wiring_mode resolved to: ..." when it loads one).

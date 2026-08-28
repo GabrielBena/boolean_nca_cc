@@ -32,35 +32,46 @@ read-only at runtime — it only fetches the pre-baked JSON files.
 
 ## Step 1 — Declare models in `../configs/demo_models.yaml`
 
-This is the only file you edit to change which models appear in the demo.
+This is the **single source of truth** for the demo: the `models:` list is
+exactly what the published demo ships (three reverse-task models), and
+`export_gallery.py` regenerates `gallery.json` from it — with `--skip-existing`
+and the committed weight files in place, regeneration reproduces the committed
+manifest byte-for-byte, no W&B access needed.
 
 ```yaml
-recipes:                        # display metadata, keyed by recipe id
+recipes:                        # fallback display metadata, keyed by recipe id
   fixed_no_damage:
     label: "Fixed wires · clean"
     description: "Regime I …"
-  random_damage:
-    label: "Random wires · damage-trained"
-    description: "Regime III …"
 
 models:
   - task: reverse
     recipe: fixed_no_damage
-    run_id: vt9awu7h             # W&B run id (null = greyed-out placeholder)
+    run_id: vt9awu7h             # W&B run id (null = entry skipped by the export)
     prefer_metric: eval_in_test_hard_accuracy
 
   - task: reverse
-    recipe: random_damage
-    run_id: 1u5ssulx
-    prefer_metric: eval_damaged_out_test_hard_accuracy
+    recipe: random_damage_solar_burst_adaptive
+    run_id: to6sec2g
+    id: reverse_random_damage_v33            # override "{task}_{recipe}" naming
+    label: "Self-healing circuit (random wiring)"   # override recipe label
+    description: "The headline model. …"            # override recipe description
+    topology_pool: reverse_random_topology_pool_v33.json  # → topologyPoolPath
 ```
 
 **`run_id`** is the W&B short run ID (the 8-character hex in the run URL).
-Setting it to `null` keeps the entry in the manifest as a greyed-out button
-so you can reserve a slot before the run finishes.
+Setting it to `null` makes the export skip the entry entirely (it does *not*
+appear in `gallery.json`) — a way to reserve a slot in the YAML before the
+run finishes.
 
 **`prefer_metric`** controls which checkpoint is downloaded — the export
 script picks the checkpoint that maximises this metric.
+
+**Optional overrides** (`id`, `label`, `description`, `topology_pool`) are
+documented in the YAML's own header; the headline v33 entry uses all four.
+Its `notes:` block also records that its committed weight file came from a
+local curation pipeline, so never re-export that entry without
+`--skip-existing`/`--bootstrap-only`.
 
 ---
 
@@ -139,7 +150,10 @@ this at startup to build the model picker.
 }
 ```
 
-`weightsPath` and `bootstrapPath` are relative to `public/weights/`.
+`weightsPath` and `bootstrapPath` are relative to `public/weights/`. Entries
+whose YAML declares a `topology_pool` additionally carry `topologyPoolPath`
+(same convention) — a ranked pool of pre-scored random topologies that the TS
+`Controller` draws from on Shuffle instead of sampling blind.
 
 ---
 
@@ -181,14 +195,12 @@ Anything else the export pipeline drops in this directory (e.g.
 `verify.html`, or superseded bundles) is git-ignored — regenerate it locally with
 the export scripts if you need it.
 
-**Honesty note on `gallery.json`**: the shipped manifest's third entry (the
-headline `reverse_random_damage_v33` model, recipe
-`random_damage_solar_burst_adaptive`, with its curated topology pool) was
-hand-curated for the blog demo and is *not* an entry in
-`../configs/demo_models.yaml` — re-running `export_gallery.py` regenerates
-`gallery.json` from that YAML (whose `random_damage` entry is run `1u5ssulx`) and
-would replace it. Treat the committed `gallery.json` + weight files as the
-record of what the published demo actually runs.
+`gallery.json` is generated: `../configs/demo_models.yaml` is the single
+source of truth, and re-running
+`python -m export.export_gallery --task reverse --skip-existing` reproduces
+the committed manifest byte-for-byte from the committed weight files (no W&B
+needed) — so the YAML, the manifest, and the weight files cannot silently
+drift apart.
 
 ---
 
